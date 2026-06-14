@@ -57,7 +57,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.8.2'             // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.8.3'             // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -246,7 +246,8 @@ function clientKind(name) {
   const n = String(name || '')
   if (!n) return null
   if (/code/i.test(n)) return 'code'
-  if (/local-agent|cowork|desktop|claude-ai/i.test(n)) return 'cowork'
+  if (/local-agent|agent-mode/i.test(n)) return 'agent'   // the desktop app's in-app agent mode (poll-based, registers sub-peers)
+  if (/cowork|desktop|claude-ai/i.test(n)) return 'cowork'
   return 'other'
 }
 

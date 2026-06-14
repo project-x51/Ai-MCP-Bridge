@@ -105,7 +105,7 @@
       var groups = {};
       (st.sessions || []).forEach(function (s) {
         var ck = s.client_kind || (s.kind === 'subpeer' ? 'cowork' : 'code');
-        if (ck !== 'code' && ck !== 'cowork') return;            // AI sessions only (exclude page leaves)
+        if (ck !== 'code' && ck !== 'cowork' && ck !== 'agent') return;   // AI sessions only (exclude page leaves)
         var proj = s.project || '(unclassified)';
         (groups[proj] = groups[proj] || []).push(s);
       });
@@ -113,7 +113,7 @@
         var og = document.createElement('optgroup'); og.label = 'Project: ' + proj;
         groups[proj].forEach(function (s) {
           var o = document.createElement('option'); o.value = s.session;
-          o.textContent = s.name + (s.user ? ' · ' + s.user : '') + '  [' + (s.client_kind === 'code' ? 'Coder' : 'Coworker') + ']';
+          o.textContent = s.name + (s.user ? ' · ' + s.user : '') + '  [' + (s.client_kind === 'code' ? 'Coder' : s.client_kind === 'agent' ? 'Agent' : 'Coworker') + ']';
           o.dataset.project = proj;
           og.appendChild(o);
         });

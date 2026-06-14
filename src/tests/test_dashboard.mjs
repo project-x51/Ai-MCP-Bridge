@@ -103,6 +103,12 @@ await call(B,'deregister',{peer_id:regC.peer_id,secret:'dash-sec2'})
 await sleep(600)
 check('deregistered sub-peer removed from map', !doc.getElementById('n-'+regC.peer_id))
 
+// a local-agent client classifies as the new 'agent' kind (not lumped into cowork)
+await call(B,'register_self',{name:'agent-conv',secret:'ag-sec',client:'local-agent-mode'})
+await sleep(400)
+const agSp=(await call(A,'list_sessions')).sessions.flatMap(s=>s.subpeers||[]).find(sp=>sp.name==='agent-conv')
+check('local-agent client classified as agent kind', agSp && agSp.client_kind==='agent', JSON.stringify(agSp))
+
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close(); try{wsPage.close()}catch{}
 await A.t.close(); await B.t.close()

@@ -19,10 +19,10 @@ const roster = {
   type: 'welcome', gateway: 'ROBIN-Z790/aaa', hosts: { 'ROBIN-Z790': 'Lab PC' },
   sessions: [
     { session: 'ROBIN-Z790/aaa', name: 'aaa', host_label: 'ROBIN-Z790', is_gateway: true, client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
-    { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', is_gateway: false, client: 'local-agent', client_kind: 'cowork', realm: 'default', topics: [],
-      subpeers: [{ id: 'ROBIN-Z790/bbb/robin-1', name: 'ROBIN-1', client_kind: 'cowork', project: 'AIMB', user: 'Robin', realm: 'default' }] },
+    { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', is_gateway: false, client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
+      subpeers: [{ id: 'ROBIN-Z790/bbb/robin-1', name: 'ROBIN-1', client_kind: 'agent', project: 'AIMB', user: 'Robin', realm: 'default' }] },
     { session: 'VOLT-001/ccc', name: 'ccc', host_label: 'VOLT-001', is_gateway: true, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
-    { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'cowork', realm: 'default', topics: [],
+    { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
       subpeers: [{ id: 'VOLT-001/ddd/volt-1', name: 'VOLT-1', client_kind: 'code', mode: 'push', project: 'AIMB', user: 'Robin', realm: 'default' }] },
   ],
   pages: [{ instance: 'pg1', page_kind: 'chat', title: 'Chat — Robin', project: 'AIMB', user: 'Robin', host_label: 'ROBIN-Z790' }],
@@ -46,7 +46,8 @@ check('both gateways tagged GATEWAY in list', (sb.textContent.match(/GATEWAY/g) 
 const codeBadge = [...sb.querySelectorAll('.b-code')].find(e => e.textContent.includes('VOLT-1'))
 check('code sub-peer VOLT-1 uses orange b-code badge', !!codeBadge)
 const robinBadge = [...sb.querySelectorAll('.b-subp')].find(e => e.textContent.includes('ROBIN-1'))
-check('non-code sub-peer ROBIN-1 uses yellow b-subp badge', !!robinBadge)
+check('non-code (agent) sub-peer ROBIN-1 uses yellow b-subp badge', !!robinBadge)
+check('agent client-kind surfaced (not lumped as cowork)', sb.textContent.includes('agent') && !sb.textContent.includes('cowork'))
 
 // web session folded into its machine group
 check('web page listed under its machine', [...sb.querySelectorAll('.b-page')].some(e => e.textContent.includes('Chat')))
