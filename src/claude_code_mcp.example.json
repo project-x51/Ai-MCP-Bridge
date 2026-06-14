@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ai-mcp-bridge": {
+      "command": "node",
+      "args": ["/absolute/path/to/Ai-MCP-Bridge/src/bridge.mjs"]
+    }
+  }
+}

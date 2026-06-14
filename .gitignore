@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Local config — contains the shared mesh token (secret). Use config.example.json as the template.
+config.json
+
+# Built tray binaries + compiler scratch (compiled on demand from the .cs source)
+*.exe
+*.pdb
+*.cs.tmp.*
+
+# Runtime / logs
+*.log
+dev-logs/
+.claude/
+
+# Test scratch
+/tmp/
+
+# OS / editor
+Thumbs.db
+.DS_Store
+*.swp

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Ai MCP Bridge — Demo Page</title>
+  <style>
+    body { font: 14px -apple-system, "Segoe UI", Roboto, sans-serif; margin: 24px; color: #222; }
+    header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .card { border: 1px solid #E5E7EB; border-radius: 8px; padding: 10px 12px; margin: 8px 0;
+            display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  </style>
+</head>
+<body>
+  <!--
+    Generic demo leaf for the Ai MCP Bridge. Open in a browser with the mesh token:
+      test_page.html?token=<your config.json token>&ws=ws://127.0.0.1:7001
+    It embeds the reusable page-bridge + UI widget and wires a "Discuss" button to send an
+    app-defined verb + subject to the AI session/topic picked in the dropdown. This is also the
+    default fixture exercised by test_page_e2e.mjs.
+  -->
+  <header>
+    <strong>Demo Page</strong>
+    <span id="aimb-mount"></span>
+  </header>
+
+  <main>
+    <div class="card" data-ref="demo-1">
+      <span>Demo item one</span>
+      <button class="aimb-discuss" data-ref="demo-1">Discuss</button>
+    </div>
+    <div class="card" data-ref="demo-2">
+      <span>Demo item two</span>
+      <button class="aimb-discuss" data-ref="demo-2">Discuss</button>
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      var q = new URLSearchParams(location.search);
+      window.AIMB_BRIDGE_CFG = {
+        wsUrl: q.get('ws') || 'ws://127.0.0.1:7001',
+        token: q.get('token') || '',
+        pageKind: 'demo',
+        title: 'Demo Page',
+        subject: 'demo/page',         // auto-claimed (shared) + auto-subscribed topic for this leaf
+        project: q.get('project') || 'demo',   // classifies this page (mandatory participant fields)
+        user: q.get('user') || 'page'
+      };
+    })();
+  </script>
+  <script src="./tools/aimb-page-bridge.js"></script>
+  <script src="./tools/aimb-bridge-ui.js"></script>
+  <script>
+    aimbBridgeUI.init({
+      mount: '#aimb-mount',
+      buttons: 'button.aimb-discuss',
+      verb: 'demo_action',
+      subject: function (btn) { return 'demo action ' + btn.dataset.ref; },
+      payload: function (btn) { return { ref: btn.dataset.ref }; }
+    });
+  </script>
+</body>
+</html>

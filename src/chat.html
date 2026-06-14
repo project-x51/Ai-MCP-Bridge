@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ai MCP Bridge — Chat</title>
+<!--
+  Interactive chat client for the mesh. token / user / project can be passed in the URL
+  (?token=…&user=…&project=…) OR typed into the bar below (so a newcomer doesn't have to guess).
+  With a token + user it shows every project and its AI sessions; pick one and chat. Open it over
+  http from the gateway (http://127.0.0.1:<wsPort>/chat.html) or as a file with ?token=.
+-->
+<style>
+  body { font: 14px -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; color: #1f2937; height: 100vh; display: flex; flex-direction: column; }
+  #bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #f8fafc; border-bottom: 1px solid #e5e7eb; flex-wrap: wrap; }
+  #bar input { font: 12px inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radius: 6px; }
+  #bar input#token { width: 230px; } #bar input.sm { width: 110px; }
+  #bar .lbl { font-size: 11px; color: #6b7280; }
+  .pip { font-size: 14px; }
+  button { font: 12px inherit; font-weight: 600; padding: 4px 12px; border-radius: 6px; border: 1px solid #93c5fd; background: #eff6ff; color: #1e40af; cursor: pointer; }
+  button:hover { background: #dbeafe; } button:disabled { opacity: .5; cursor: not-allowed; }
+  #main { flex: 1; display: flex; min-height: 0; }
+  #side { width: 250px; border-right: 1px solid #e5e7eb; padding: 12px; overflow: auto; }
+  #side .lbl { font-size: 11px; color: #6b7280; font-weight: 600; }
+  #picker { width: 100%; margin-top: 4px; font: 12px inherit; padding: 4px; }
+  #hint { font-size: 11px; color: #9ca3af; margin-top: 10px; line-height: 1.4; }
+  #chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #log { flex: 1; overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 70%; padding: 7px 11px; border-radius: 12px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  .msg.me { align-self: flex-end; background: #2563eb; color: #fff; }
+  .msg.them { align-self: flex-start; background: #f1f5f9; color: #0f172a; }
+  .msg .who { font-size: 10px; opacity: .7; margin-bottom: 2px; }
+  .msg.sys { align-self: center; background: #fef9c3; color: #854d0e; font-size: 11px; max-width: 90%; }
+  .msg.err { align-self: center; background: #fee2e2; color: #991b1b; font-size: 11px; max-width: 90%; }
+  #inrow { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #e5e7eb; }
+  #msg { flex: 1; font: 13px inherit; padding: 8px; border: 1px solid #d1d5db; border-radius: 8px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span class="pip" id="pip">⚪</span><b>Ai MCP Bridge — Chat</b>
+  <span class="lbl">token</span><input id="token" type="password" placeholder="config token">
+  <span class="lbl">user</span><input id="user" class="sm" placeholder="your name">
+  <span class="lbl">project</span><input id="project" class="sm" placeholder="optional">
+  <button id="connect">Connect</button>
+</div>
+<div id="main">
+  <div id="side">
+    <span class="lbl">Send to (AI sessions)</span>
+    <select id="picker"><option value="">— pick a session —</option></select>
+    <div id="hint"></div>
+  </div>
+  <div id="chat">
+    <div id="log"></div>
+    <div id="inrow"><input id="msg" placeholder="Type a message and press Enter…" disabled><button id="send" disabled>Send</button></div>
+  </div>
+</div>
+
+<script>
+  // read token/user/project from the URL into the bar; Connect reloads with whatever is typed
+  (function () {
+    var q = new URLSearchParams(location.search);
+    var token = q.get('token') || '', user = q.get('user') || '', project = q.get('project') || '';
+    document.getElementById('token').value = token;
+    document.getElementById('user').value = user;
+    document.getElementById('project').value = project;
+    document.getElementById('connect').addEventListener('click', function () {
+      var u = new URL(location.href);
+      u.searchParams.set('token', document.getElementById('token').value.trim());
+      u.searchParams.set('user', document.getElementById('user').value.trim());
+      var p = document.getElementById('project').value.trim();
+      if (p) u.searchParams.set('project', p); else u.searchParams.delete('project');
+      location.href = u.href;
+    });
+    function wsFromLoc() { return (location.protocol.indexOf('http') === 0 && location.host) ? ('ws://' + location.host) : 'ws://127.0.0.1:7001'; }
+    if (token) {
+      window.AIMB_BRIDGE_CFG = {
+        wsUrl: q.get('ws') || wsFromLoc(), token: token, user: user || 'guest',
+        project: project || 'chat', pageKind: 'chat', title: 'Chat — ' + (user || 'guest'), seeAll: true
+      };
+    }
+  })();
+</script>
+<script src="./tools/aimb-page-bridge.js"></script>
+<script>
+  (function () {
+    var ON = '🟢', OFF = '⚪';
+    var pip = document.getElementById('pip'), picker = document.getElementById('picker'),
+        log = document.getElementById('log'), input = document.getElementById('msg'),
+        sendBtn = document.getElementById('send'), hint = document.getElementById('hint');
+    var myProject = (window.AIMB_BRIDGE_CFG && window.AIMB_BRIDGE_CFG.project) || '';
+    var selectedId = '';   // survives reconnects (project adoption re-opens the socket)
+    function esc(s) { var d = document.createElement('span'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+    function add(cls, who, text) {
+      var d = document.createElement('div'); d.className = 'msg ' + cls;
+      d.innerHTML = (who ? '<div class="who">' + esc(who) + '</div>' : '') + esc(text);
+      log.appendChild(d); log.scrollTop = log.scrollHeight;
+    }
+    if (!window.aimbBridge) { add('err', '', 'Bridge client failed to load.'); return; }
+    if (!window.AIMB_BRIDGE_CFG || !window.AIMB_BRIDGE_CFG.token) add('sys', '', 'Enter the config token (and your name) above, then Connect.');
+
+    // roster -> picker grouped by project, AI sessions only
+    window.aimbBridge.onUpdate(function (st) {
+      pip.textContent = (st.status === 'connected') ? ON : OFF;
+      picker.innerHTML = '<option value="">— pick a session —</option>';
+      var groups = {};
+      (st.sessions || []).forEach(function (s) {
+        var ck = s.client_kind || (s.kind === 'subpeer' ? 'cowork' : 'code');
+        if (ck !== 'code' && ck !== 'cowork') return;            // AI sessions only (exclude page leaves)
+        var proj = s.project || '(unclassified)';
+        (groups[proj] = groups[proj] || []).push(s);
+      });
+      Object.keys(groups).sort().forEach(function (proj) {
+        var og = document.createElement('optgroup'); og.label = 'Project: ' + proj;
+        groups[proj].forEach(function (s) {
+          var o = document.createElement('option'); o.value = s.session;
+          o.textContent = s.name + (s.user ? ' · ' + s.user : '') + '  [' + (s.client_kind === 'code' ? 'Coder' : 'Coworker') + ']';
+          o.dataset.project = proj;
+          og.appendChild(o);
+        });
+        picker.appendChild(og);
+      });
+      if (selectedId) picker.value = selectedId;
+      updateInput();
+    });
+
+    function selectedProject() { var o = picker.selectedOptions[0]; return o ? o.dataset.project : ''; }
+    function updateInput() {
+      var live = !!picker.value;
+      input.disabled = !live; sendBtn.disabled = !live;
+      hint.innerHTML = live ? ('You are chatting as project <b>' + esc(myProject || '(none)') + '</b>.') : '';
+    }
+    picker.addEventListener('change', function () {
+      selectedId = picker.value;
+      var tp = selectedProject();
+      // adopt the selected session's project so the conversation is same-project (no consent friction)
+      if (tp && tp !== '(unclassified)' && tp !== myProject) {
+        myProject = tp;
+        if (window.aimbBridge.reconnect) window.aimbBridge.reconnect({ project: tp });
+        add('sys', '', 'Now chatting as project "' + tp + '" — matched to the selected session.');
+      }
+      updateInput();
+    });
+
+    function send() {
+      var text = input.value.trim(); if (!text || !picker.value) return;
+      var to = picker.value, name = picker.selectedOptions[0].textContent.split('  [')[0];
+      input.value = '';
+      add('me', 'to ' + name, text);
+      window.aimbBridge.send({ to: to, verb: 'chat', subject: 'chat message', body: text })
+        .then(function (ack) { if (!ack.ok) add('err', '', 'not delivered: ' + (ack.code || 'failed') + (ack.code === 'project-denied' ? ' — cross-project; set your project to match' : '')); })
+        .catch(function (e) { add('err', '', 'send failed: ' + (e.message || e)); });
+    }
+    sendBtn.addEventListener('click', send);
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+
+    // incoming messages (AI replies routed back to this page)
+    window.aimbBridge.onMessage(function (env) {
+      var who = (env.from && env.from.name) || 'session';
+      add('them', who + (env.from && env.from.project ? ' · ' + env.from.project : ''), env.body);
+    });
+  })();
+</script>
+</body>
+</html>

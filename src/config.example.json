@@ -1,0 +1,8 @@
+{
+  "port": 7000,
+  "wsPort": 7001,
+  "token": "REPLACE-WITH-LONG-RANDOM-STRING",
+  "realm": "default",
+  "defaultName": "",
+  "tray": false
+}

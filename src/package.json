@@ -1,0 +1,21 @@
+{
+  "name": "ai-mcp-bridge",
+  "version": "1.7.3",
+  "description": "Peer-to-peer mesh for AI sessions and web pages over MCP (stdio) — gateway election, sub-peers, hierarchical topics, publish/send, encrypted bodies.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/project-x51/Ai-MCP-Bridge.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.0.0"
+  },
+  "scripts": {
+    "test": "node tests/test_mesh.mjs && node tests/test_subpeers.mjs && node tests/test_topics.mjs && node tests/test_identity.mjs && node tests/test_consent.mjs && node tests/test_dashboard.mjs && node tests/test_page_e2e.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

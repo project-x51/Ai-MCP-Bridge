@@ -1,0 +1,1269 @@
+#!/usr/bin/env node
+// Ai MCP Bridge — peer-to-peer AI session mesh (v1.3: topics, encryption, mandatory subject).
+// One bridge per MCP stdio client. Claude Code: one process per session. Claude
+// Desktop/Cowork: ONE process shared by all conversations — those register as
+// sub-peers (register_self) with their own queues, secrets and roster presence.
+// Port-bind election picks the per-host gateway; followers register over a control
+// connection. Same-host pairs dial each other's loopback ports directly; the gateway
+// is registry + WS ingress for page leaves + trace collector for the dashboard.
+// Cross-host CONNECT splice implemented (untested until a second host joins the tailnet).
+// Design + protocol reference: see README.md.
+//         (supersedes the Responsibilities amendment pre-go-live: topics with subscribe/own,
+//          publish/send patterns, mandatory subject, encrypted bodies, reserved wake/offline surface)
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import os from 'node:os'
+import fs from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+import { spawn } from 'node:child_process'
+import { buildProfile } from './facets/index.js'
+
+// ---------------------------------------------------------------- config / identity
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+let CFG = {}
+try { CFG = JSON.parse(fs.readFileSync(path.join(HERE, 'config.json'), 'utf8')) } catch {}
+const PORT = Number(process.env.AI_BRIDGE_PORT || CFG.port || 7000)
+const WS_PORT = Number(process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 7001)
+const TOKEN = process.env.AI_BRIDGE_TOKEN || CFG.token || ''
+const HOST = '127.0.0.1'
+const VER = 1
+const MODE_OVERRIDE = (process.env.AI_BRIDGE_MODE || CFG.mode || '') || null   // 'push' | 'poll' | null
+const SWEEP_MS = Number(process.env.AI_BRIDGE_SWEEP_MS || 60000)
+const SUB_TTL_MIN = Number(CFG.subpeerTtlMinutes || 720)
+const CHILD_TTL_MIN = Number(CFG.subagentTtlMinutes || 60)
+
+// realm = this bridge's trust domain (one shared config file = one realm); see docs/architecture.md.
+const REALM = process.env.AI_BRIDGE_REALM || CFG.realm || 'default'
+// a Code session may classify its own process via env; absent ⇒ the process is infrastructure
+// (gateway/relay), which carries no project (see "participants vs infrastructure").
+const PROC_PROJECT = process.env.AI_BRIDGE_PROJECT || CFG.project || null
+const PROC_USER = process.env.AI_BRIDGE_USER || CFG.user || null
+
+const ALIASES = CFG.aliases || {}          // hostname -> friendly alias (persisted)
+function persistAliases() {
+  try {
+    const p = path.join(HERE, 'config.json')
+    const cfg = JSON.parse(fs.readFileSync(p, 'utf8'))
+    cfg.aliases = ALIASES
+    fs.writeFileSync(p, JSON.stringify(cfg, null, 2))
+  } catch (e) { log('alias persist failed', e.message) }
+}
+
+const BRIDGE_VERSION = '1.7.3'             // bump on every behavioural change; surfaced in my_identity,
+                                           // roster entries and the page welcome so peers can detect a changed bridge
+const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
+const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
+let NAME = process.env.AI_BRIDGE_NAME || CFG.defaultName || SESSION.split('/')[1]
+// a headless bridge (e.g. launched by the tray) has no MCP client to detect, so it can declare one
+// via AI_BRIDGE_CLIENT (the tray passes "Task Tray"). A real MCP client overrides this at initialize.
+let CLIENT = process.env.AI_BRIDGE_CLIENT
+  ? { name: process.env.AI_BRIDGE_CLIENT, version: null, channel_capable: false, detected_mode: 'poll', mode: 'poll' }
+  : null                                   // { name, version, channel_capable, detected_mode, mode }
+
+const log = (...a) => console.error(`[aimb ${NAME}]`, ...a)
+const sha = s => crypto.createHash('sha256').update(String(s)).digest('hex')
+
+// ---------------------------------------------------------------- realm profile (pluggable facets)
+// docs/architecture.md §9: the core mesh logic is realm-agnostic and reaches security / identity /
+// transport ONLY through `profile`, assembled from swappable facet modules in ./facets/. To change
+// auth/cipher/identity/transport, add a facet impl file and select it (config.profile) — see
+// facets/index.js. The locals below are the names the core uses, sourced from the active facets.
+const ctx = { TOKEN, REALM, CFG, HERE, SESSION, env: process.env, log }
+const profile = buildProfile(ctx)
+const encryptEnvelope = profile.cipher.seal      // BodyCipher
+const plainBody = profile.cipher.open
+const decryptedView = profile.cipher.view
+const capKeyFrom = profile.capSigner.deriveKey   // CapSigner
+const classifyIdentity = profile.identity.classify   // IdentityModel
+const sendFrame = profile.transport.frame.send   // Transport framing
+const onFrames = profile.transport.frame.onFrames
+// the process's own classification (null ⇒ infrastructure, not a participant)
+const PROC_IDENT = (PROC_PROJECT && PROC_USER) ? profile.identity.classify({ project: PROC_PROJECT, user: PROC_USER, realm: REALM }) : null
+
+// ---------------------------------------------------------------- project consent + reply-cap (§4-§5)
+// Receiver-controlled inbound consent: a project may reach another only if same-project, the realm is
+// `open`, a static config edge allows it, or a runtime grant does. Enforced receiver-side at delivery.
+// The reply exception (firewall return-traffic) is gated by the signed reply-cap, not policy.
+let POLICY = (CFG.projects && typeof CFG.projects === 'object') ? CFG.projects : { default: 'strict', allow: [] }
+let POLICY_OPEN = process.env.AI_BRIDGE_OPEN === '1' || String(POLICY.default || 'strict') === 'open'
+// live-reload the project policy when the shared config file changes (ConfigSource facet); the bridge
+// only READS config, so a Dropbox/SMB-synced edit propagates to the realm without a restart. Realm/
+// token changes still need a restart. fs.watchFile polls — cross-platform safe, idempotent re-read.
+// live-reload via the ConfigSource facet: a synced edit to the policy propagates without a restart.
+profile.config.watch(c => {
+  if (c && c.projects && typeof c.projects === 'object') {
+    POLICY = c.projects
+    POLICY_OPEN = process.env.AI_BRIDGE_OPEN === '1' || String(POLICY.default || 'strict') === 'open'
+    log('project policy reloaded from config')
+  }
+})
+const runtimeAllow = new Map()             // `${from}>${to}` -> mode   (in-memory grants; keys are projKey'd)
+const CAP_TTL_MS = Number(process.env.AI_BRIDGE_CAP_TTL_MS) || 30 * 60000   // reply_exp stamp horizon (informational since Decision B; no longer gates delivery — see verifyReplyCap). Env-overridable for tests.
+const PROC_CAPKEY = capKeyFrom(SESSION)    // process reply-cap key (rotates per process = correct for Code)
+
+// project names are matched case-INSENSITIVELY everywhere (display keeps the declared case); this is
+// the canonical comparison key. (Mixed-case names like "CamelCo"/"AIMB" tripped a half-lowercased
+// path before — fixed 2026-06-14.)
+const projKey = p => (String(p == null ? '' : p).trim().toLowerCase() || 'unclassified')
+
+function edgeAllows(fromRaw, toRaw) {
+  const from = projKey(fromRaw), to = projKey(toRaw)
+  for (const e of (POLICY.allow || [])) {
+    const f = projKey(e.from), t = projKey(e.to), m = e.mode || 'send'
+    if (f === from && t === to) return true
+    if (m === 'bidirectional' && f === to && t === from) return true
+  }
+  for (const [k, m] of runtimeAllow) { const [f, t] = k.split('>'); if ((f === from && t === to) || (m === 'bidirectional' && f === to && t === from)) return true }
+  return false
+}
+function mayInitiate(fromProject, toProject) {     // may project `from` initiate to project `to`?
+  const fp = projKey(fromProject), tp = projKey(toProject)
+  if (fp === tp) return true                       // same project always open
+  if (POLICY_OPEN) return true                     // realm-wide open
+  return edgeAllows(fp, tp)
+}
+function localCapKey(sessionId) {                  // reply-cap signing key for a LOCAL participant
+  if (sessionId === SESSION) return PROC_CAPKEY
+  const sp = subpeers.get(sessionId); if (sp) return sp.capKey
+  if (String(sessionId).startsWith('page:')) { const p = pages.get(String(sessionId).slice(5)); return p ? p.capKey : null }
+  return null
+}
+function projectOfTarget(to) {                     // resolve a target id's project from local state + roster
+  if (to === SESSION) return PROC_IDENT?.project || 'unclassified'
+  if (subpeers.has(to)) return subpeers.get(to).identity?.project || 'unclassified'
+  if (String(to).startsWith('page:')) { const p = pages.get(String(to).slice(5)); return p?.identity?.project || 'unclassified' }
+  if (roster.has(to)) return roster.get(to).project || 'unclassified'
+  const owner = roster.get(String(to).split('/').slice(0, 2).join('/'))
+  if (owner) { const sp = (owner.subpeers || []).find(x => x.id === to); if (sp) return sp.project || 'unclassified' }
+  return null
+}
+function findStoredEnvelope(f, id) {               // the sender's copy of a message it received (to echo its cap)
+  if (!f || !id) return null
+  if (f.session === SESSION) return inbox.find(e => e.id === id)
+  const q = subQueues.get(f.session); if (q) return q.items.find(e => e.id === id)
+  return null
+}
+function verifyReplyCap(env, toProject, targetCapKey) {
+  if (!env.reply_cap || !env.reply_to || !targetCapKey) return false
+  const exp = Number(env.reply_exp || 0)
+  if (!exp) return false                             // exp is part of the signed payload; must be present
+  // Decision B (2026-06-14): replies ALWAYS get through. A genuine reply-cap (signed by the recipient's
+  // capKey, bound to this exact thread) is honoured for the life of the minting process — it is NOT
+  // time-expired here and (being an independent OR in deliveryAllowed) is NOT cancelled by a later
+  // revoke. Once you invite a reply, the reply is not blocked by consent state or a clock. The cap dies
+  // naturally when either process restarts (capKey rotates per process). reply_exp is retained only as a
+  // stable, signed stamp — it no longer gates delivery. Trade-off: a party you revoke can still answer
+  // messages you already sent it (per-thread, no new traffic), until one side restarts.
+  const fromProject = env.from?.project || 'unclassified'
+  return profile.capSigner.verify(targetCapKey, env.reply_cap, `${toProject}|${fromProject}|${env.reply_to}|${exp}`)
+}
+function deliveryAllowed(env, toProject, toRealm, targetCapKey) {
+  if (env.system) return true                      // system control messages (e.g. project_access_request)
+  const sameRealm = (env.from?.realm || REALM) === (toRealm || REALM)
+  if (sameRealm && mayInitiate(env.from?.project, toProject)) return true
+  return verifyReplyCap(env, toProject, targetCapKey)   // signed reply exception
+}
+
+// ---------------------------------------------------------------- topic matching (T1/T4)
+// Topics are /-separated paths, matched case-insensitively per level. Wildcards (subscriptions and
+// claims only): '+' one level, '#' the rest of the subtree.
+function splitTopic(t) { return String(t || '').trim().toLowerCase().split('/').filter(Boolean) }
+function isWildcard(t) { const p = splitTopic(t); return p.includes('+') || p.includes('#') }
+function topicMatch(pattern, topic) {      // does a concrete topic fall under a pattern?
+  const p = splitTopic(pattern), t = splitTopic(topic)
+  if (!p.length || !t.length) return false
+  for (let i = 0; i < p.length; i++) {
+    if (p[i] === '#') return true
+    if (i >= t.length) return false
+    if (p[i] === '+') continue
+    if (p[i] !== t[i]) return false
+  }
+  return p.length === t.length
+}
+function patternsOverlap(a, b) {           // could ANY concrete topic match both? (T6 exclusive-claim conflicts)
+  const A = splitTopic(a), B = splitTopic(b)
+  if (!A.length || !B.length) return false
+  for (let i = 0; i < Math.max(A.length, B.length); i++) {
+    const x = A[i], y = B[i]
+    if (x === '#' || y === '#') return true
+    if (x == null || y == null) return false
+    if (x === '+' || y === '+') continue
+    if (x !== y) return false
+  }
+  return true
+}
+
+// framing (sendFrame / onFrames) is provided by the transport facet — aliased above.
+
+// ---------------------------------------------------------------- mesh state
+let role = 'binding'              // binding | gateway | follower | stopping
+let pairPort = 0                  // this bridge's own listener for inbound pair conns
+let gwSock = null                 // follower: control connection to gateway
+let gwServer = null               // gateway: the :PORT server
+let wss = null                    // gateway: WS leaf server
+let roster = new Map()            // session -> {session, name, port, kind:'session', subpeers:[], client}
+let pages = new Map()             // instance -> {instance, page_kind, title, kind:'page'}  (gateway only)
+let backoff = 200
+let gatewayId = null             // session id of the current gateway (both roles)
+
+const inbox = []                  // process inbox: delivered envelopes (cursor = index)
+const seen = new Set()            // envelope dedupe (LRU-ish)
+const traceRing = []              // gateway: recent traces for late dashboards
+const followers = new Map()       // gateway: session -> control socket
+const leaves = new Set()          // gateway: ws clients
+
+// sub-peers (conversations sharing this stdio: Cowork sessions, subagents)
+const subpeers = new Map()        // id -> {id, name, secretHash, parent, kind:'subpeer', created, last_seen, ttl_ms, mode}
+const subQueues = new Map()       // id -> {epoch, base, items:[], served}
+const SUBQ_CAP = 300
+
+// topics (Topics amendment 2026-06-12, T1-T15) — claims (role:owner) and subscriptions
+// (role:subscriber) held by THIS process or its sub-peers; gossiped via the roster like
+// sub-peers; vanish with their holder. Owners are auto-subscribed (T2).
+const myTopics = new Map()        // `${holder}|${role}|${patternKey}` -> {pattern, role, description, exclusive, icon, holder, holder_name, claimed_at}
+const patternKey = t => splitTopic(t).join('/')
+
+function envelopeId(env) {                 // computed over PLAINTEXT body, before encryption (T8/T9)
+  return 'env_' + crypto.createHash('sha1')
+    .update(`${env.from?.session}|${env.to}|${env.verb}|${env.subject}|${env.pattern}|${env.topic}|${env.body}|${env.ts}`).digest('hex').slice(0, 12)
+}
+function remember(id) {
+  seen.add(id)
+  if (seen.size > 500) { const it = seen.values(); seen.delete(it.next().value) }
+}
+
+// ---------------------------------------------------------------- client classification
+function clientKind(name) {
+  const n = String(name || '')
+  if (!n) return null
+  if (/code/i.test(n)) return 'code'
+  if (/local-agent|cowork|desktop|claude-ai/i.test(n)) return 'cowork'
+  return 'other'
+}
+
+// ---------------------------------------------------------------- traces (observation plane)
+const pendingTraces = []
+function emitTraceRaw(trace) {
+  const tr = { t: 'TRACE', trace: { ts: new Date().toISOString(), session: SESSION, ...trace } }
+  if (role === 'gateway') collectTrace(tr.trace)
+  else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, tr)
+  else { pendingTraces.push(tr); if (pendingTraces.length > 20) pendingTraces.shift() }
+}
+function flushPendingTraces() {
+  while (pendingTraces.length) {
+    const tr = pendingTraces.shift()
+    if (role === 'gateway') collectTrace(tr.trace)
+    else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, tr)
+    else { pendingTraces.unshift(tr); break }
+  }
+}
+function nameOf(id) {                       // best-effort display name for a mesh id (trace plane)
+  const s = String(id || '')
+  if (!s) return null
+  if (s.startsWith('page:')) { const p = pages.get(s.slice(5)); return p ? (p.title || p.page_kind) : s }
+  if (roster.has(s)) return roster.get(s).name
+  if (subpeers.has(s)) return subpeers.get(s).name
+  const owner = roster.get(s.split('/').slice(0, 2).join('/'))
+  if (owner) { const sp = (owner.subpeers || []).find(x => x.id === s); if (sp) return sp.name }
+  return s.split('/').pop()
+}
+function kindOf(id) { const s = String(id || ''); return s.startsWith('page:') ? 'page' : (s.split('/').length >= 3 ? 'subpeer' : 'session') }
+function emitTrace(dir, env, note) {
+  emitTraceRaw({ envelope_id: env.id, from: env.from?.session, from_name: env.from?.name,
+    to: env.to, to_name: nameOf(env.to), to_kind: kindOf(env.to),
+    subject: env.subject || null, pattern: env.pattern || 'send', topic: env.topic || null,
+    topic_icon: env.topic ? iconOf(env.topic, env.from?.project || 'unclassified') : null,
+    verb: env.verb || null, dir, size: (env.body || '').length, note: note || null })
+}
+function collectTrace(trace) {
+  traceRing.push(trace); if (traceRing.length > 200) traceRing.shift()
+  const msg = JSON.stringify({ type: 'trace', trace })
+  for (const ws of leaves) if (ws.kind === 'dashboard' && ws.readyState === 1) { try { ws.send(msg) } catch {} }
+}
+
+// ---------------------------------------------------------------- sub-peer machinery
+function isLocalSubId(id) { return typeof id === 'string' && id.startsWith(SESSION + '/') }
+function resolveLocalSub(ref) {
+  if (!ref) return null
+  if (subpeers.has(ref)) return subpeers.get(ref)
+  const full = `${SESSION}/${ref}`
+  if (subpeers.has(full)) return subpeers.get(full)
+  const byName = [...subpeers.values()].filter(s => s.name === ref)
+  return byName.length === 1 ? byName[0] : null
+}
+function newQueue() { return { epoch: crypto.randomBytes(4).toString('hex'), base: 0, items: [], served: 0 } }
+function announceSubpeers() {
+  const list = [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, kind: 'subpeer', client: s.client || null, client_kind: s.client_kind || null, mode: s.mode || null, project: s.identity?.project || null, user: s.identity?.user || null, realm: s.identity?.realm || REALM }))
+  if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.subpeers = list }; broadcastRoster() }
+  else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'SUBPEERS', session: SESSION, subpeers: list })
+}
+function topicList() { return [...myTopics.values()] }
+function announceTopics() {
+  if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.topics = topicList() }; broadcastRoster() }
+  else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'TOPICS', session: SESSION, topics: topicList() })
+}
+// every topic relationship visible from this bridge: roster (all sessions) + page leaves + local
+// not-yet-round-tripped entries. Page subject = shared claim + subscription (T12).
+function allTopicEntries() {
+  const out = []
+  const seenKeys = new Set()
+  const add = e => { const k = `${e.holder}|${e.role}|${patternKey(e.pattern)}`; if (!seenKeys.has(k)) { seenKeys.add(k); out.push(e) } }
+  for (const s of roster.values()) for (const e of (s.topics || [])) add(e)
+  for (const p of pages.values()) {
+    const pp = p.identity?.project || 'unclassified', pr = p.identity?.realm || REALM
+    if (p.subject) {
+      add({ pattern: p.subject, role: 'owner', description: `Page: ${p.title || p.page_kind}`, exclusive: false,
+        icon: p.icon || null, holder: 'page:' + p.instance, holder_name: p.title || p.page_kind, project: pp, realm: pr })
+    }
+    for (const sub of (p.subscriptions || [])) add({ pattern: sub, role: 'subscriber',
+      holder: 'page:' + p.instance, holder_name: p.title || p.page_kind, project: pp, realm: pr })
+  }
+  for (const e of myTopics.values()) add(e)
+  return out
+}
+// topics are project-scoped (§6). A bare ref resolves in the asker's project; "@project/path" or
+// "@realm:project/path" targets another project's topic (cross-project send is then consent-gated).
+function parseTopicRef(ref, askerProject, askerRealm) {
+  let s = String(ref || '').trim()
+  let project = askerProject || 'unclassified', realm = askerRealm || REALM
+  if (s.startsWith('@')) {
+    s = s.slice(1)
+    const slash = s.indexOf('/')
+    const head = slash >= 0 ? s.slice(0, slash) : s
+    s = slash >= 0 ? s.slice(slash + 1) : ''
+    if (head.includes(':')) { const [r, p] = head.split(':'); realm = r || realm; project = p || project }
+    else project = head || project
+  }
+  return { project, realm, path: s }
+}
+function ownersOf(path, targetProject) {   // send topic:<t> -> owners in the target project only (T3/§6)
+  const tp = projKey(targetProject), out = new Map()
+  for (const e of allTopicEntries()) if (e.role === 'owner' && projKey(e.project) === tp && topicMatch(e.pattern, path)) if (!out.has(e.holder)) out.set(e.holder, e)
+  return [...out.values()]
+}
+function subscribersOf(path, targetProject) {   // publish -> subscribers in the target project (T2/§6)
+  const tp = projKey(targetProject), out = new Map()
+  for (const e of allTopicEntries()) if (projKey(e.project) === tp && topicMatch(e.pattern, path)) if (!out.has(e.holder)) out.set(e.holder, e)
+  return [...out.values()]
+}
+function iconOf(path, targetProject) {     // claim icon for a concrete topic (display affordance)
+  const tp = projKey(targetProject)
+  for (const e of allTopicEntries()) if (e.role === 'owner' && e.icon && projKey(e.project) === tp && topicMatch(e.pattern, path)) return e.icon
+  return null
+}
+function deliverSub(id, env) {
+  if (seen.has(env.id)) return { ok: true, dedup: true }
+  remember(env.id)
+  if ((env.hops || []).includes(SESSION)) { emitTrace('recv', env, 'loop-rejected'); return { ok: false, code: 'loop' } }
+  if (!subpeers.has(id)) {     // unknown/expired handle: dead-letter straight to process inbox
+    inbox.push({ ...env, dead_letter_for: id }); if (inbox.length > 500) inbox.shift()
+    emitTrace('recv', env, `dead-letter:${id.split('/').pop()}`)
+    return { ok: true, dead_lettered: true }
+  }
+  const sp = subpeers.get(id)
+  if (!deliveryAllowed(env, sp.identity?.project || 'unclassified', sp.identity?.realm, sp.capKey)) { emitTrace('recv', env, 'project-denied'); return { ok: false, code: 'project-denied' } }
+  const q = subQueues.get(id)
+  q.items.push(env)
+  if (q.items.length > SUBQ_CAP) { q.items.shift(); q.base++ }
+  emitTrace('recv', env, `subpeer:${id.split('/').pop()}`)
+  if (MODE_OVERRIDE !== 'poll' && sp && sp.mode === 'push') {      // streaming sub-peer (e.g. code session sharing this bridge)
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: { content: plainBody(env),
+        meta: { from: String(env.from?.session || ''), from_name: String(env.from?.name || ''),
+                from_kind: String(env.from?.kind || 'session'), verb: String(env.verb || ''), envelope_id: env.id,
+                subject: String(env.subject || ''), pattern: String(env.pattern || 'send'), topic: env.topic || null,
+                for: sp.id, for_name: sp.name } },
+    }).catch(() => {})
+  }
+  return { ok: true }
+}
+function deadLetterStrays(sp) {
+  const q = subQueues.get(sp.id); if (!q) return 0
+  const start = Math.min(Math.max((q.served || 0) - q.base, 0), q.items.length)
+  const strays = q.items.slice(start)
+  if (strays.length) {
+    const parent = sp.parent && subpeers.has(sp.parent) ? sp.parent : null
+    for (const env of strays) {
+      const tagged = { ...env, dead_letter_for: sp.id }
+      if (parent) { const pq = subQueues.get(parent); pq.items.push(tagged); if (pq.items.length > SUBQ_CAP) { pq.items.shift(); pq.base++ } }
+      else { inbox.push(tagged); if (inbox.length > 500) inbox.shift() }
+    }
+    emitTraceRaw({ dir: 'info', verb: 'dead-letter', from: sp.id, from_name: sp.name,
+      to: parent || SESSION, size: strays.length, note: `${strays.length} unread -> ${parent ? 'parent' : 'process inbox'}`, envelope_id: null })
+  }
+  return strays.length
+}
+function removeSubpeer(id, reason) {
+  const sp = subpeers.get(id); if (!sp) return
+  for (const child of [...subpeers.values()].filter(s => s.parent === id)) removeSubpeer(child.id, reason)
+  deadLetterStrays(sp)
+  subQueues.delete(id)
+  subpeers.delete(id)
+  let topicsDropped = false
+  for (const [k, r] of [...myTopics]) if (r.holder === id) { myTopics.delete(k); topicsDropped = true }   // topics vanish with their holder (T2/R6)
+  if (topicsDropped) announceTopics()
+  emitTraceRaw({ dir: 'con', verb: 'offline', from: id, from_name: sp.name, to: SESSION, size: 0,
+    note: `sub-peer removed (${reason})`, envelope_id: null })
+  log(`subpeer removed (${reason}): ${id}`)
+}
+setInterval(() => {
+  const now = Date.now(); let changed = false
+  for (const sp of [...subpeers.values()].sort((a, b) => (b.parent ? 1 : 0) - (a.parent ? 1 : 0))) {
+    if (subpeers.has(sp.id) && now - sp.last_seen > sp.ttl_ms) { removeSubpeer(sp.id, 'ttl'); changed = true }
+  }
+  if (changed) announceSubpeers()
+}, SWEEP_MS).unref()
+
+// ---------------------------------------------------------------- delivery (inbound to THIS process)
+async function deliver(env) {
+  if (seen.has(env.id)) return { ok: true, dedup: true }
+  remember(env.id)
+  if ((env.hops || []).includes(SESSION)) { emitTrace('recv', env, 'loop-rejected'); return { ok: false, code: 'loop' } }
+  if (!deliveryAllowed(env, PROC_IDENT?.project || 'unclassified', REALM, PROC_CAPKEY)) { emitTrace('recv', env, 'project-denied'); return { ok: false, code: 'project-denied' } }
+  inbox.push(env)
+  if (inbox.length > 500) inbox.shift()
+  emitTrace('recv', env)
+  if (MODE_OVERRIDE !== 'poll') {                       // queue is the truth; push is always attempted unless explicitly overridden (A9)
+    try {
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: plainBody(env),
+          meta: { from: String(env.from?.session || ''), from_name: String(env.from?.name || ''),
+                  from_kind: String(env.from?.kind || 'session'), verb: String(env.verb || ''), envelope_id: env.id,
+                  subject: String(env.subject || ''), pattern: String(env.pattern || 'send'), topic: env.topic || null },
+        },
+      })
+    } catch {}
+  }
+  return { ok: true }
+}
+
+// ---------------------------------------------------------------- pair listener (every bridge)
+const pairServer = profile.transport.createServer(sock => {
+  let hello = null
+  onFrames(sock, async f => {
+    if (f.t === 'HELLO') {
+      if (!profile.auth.verify(f.auth)) { sendFrame(sock, { t: 'REJECT', code: 'unauthorized' }); sock.end(); return }
+      hello = f
+    } else if (f.t === 'CONNECT') {
+      if (!hello) { sendFrame(sock, { t: 'REJECT', code: 'no-hello' }); sock.end(); return }
+      if (f.target !== SESSION && !isLocalSubId(f.target)) { sendFrame(sock, { t: 'REJECT', code: 'unknown-target' }); sock.end(); return }
+      sendFrame(sock, { t: 'ACCEPT', connId: crypto.randomBytes(4).toString('hex') })
+    } else if (f.t === 'MSG') {
+      const env = f.body
+      if (env && env.id) {
+        if (env.to === SESSION) await deliver(env)
+        else if (isLocalSubId(env.to)) deliverSub(env.to, env)
+        else await deliver(env)            // pre-1.1 senders: target match already enforced at CONNECT
+      }
+      sendFrame(sock, { t: 'CLOSE', code: 'ok' })
+    } else if (f.t === 'PING') sendFrame(sock, { t: 'PONG', seq: f.seq })
+  })
+  sock.on('error', () => {})
+})
+pairServer.listen(0, HOST, () => { pairPort = pairServer.address().port; election() })
+
+// ---------------------------------------------------------------- page delivery (gateway)
+function pageSockOf(instance) {
+  for (const ws of leaves) if (ws.kind === 'page' && ws.instance === instance && ws.readyState === 1) return ws
+  return null
+}
+function deliverPage(env) {
+  const inst = String(env.to).slice(5)
+  const sock = pageSockOf(inst)
+  if (!sock) { emitTrace('send', env, 'page-gone'); return { ok: false, code: 'page-gone' } }
+  const pg = pages.get(inst)
+  if (!deliveryAllowed(env, pg?.identity?.project || 'unclassified', pg?.identity?.realm, pg?.capKey)) { emitTrace('send', env, 'project-denied'); return { ok: false, code: 'project-denied' } }
+  // pages get the decrypted view: the leaf WS is loopback-only + token-gated (same trust domain)
+  try { sock.send(JSON.stringify({ type: 'envelope', envelope: decryptedView(env) })) } catch (e) { return { ok: false, code: 'page-send-failed' } }
+  emitTrace('send', env, 'to-page')
+  return { ok: true }
+}
+function resolvePageTarget(target) {
+  // 'page:<instance>' | bare instance | unique title | unique page_kind -> 'page:<instance>' or null
+  const t = String(target)
+  const inst = t.startsWith('page:') ? t.slice(5) : t
+  if (pages.has(inst)) return 'page:' + inst
+  const cand = [...pages.values()].filter(p => p.title === t || p.page_kind === t)
+  return cand.length === 1 ? 'page:' + cand[0].instance : null
+}
+
+// ---------------------------------------------------------------- outbound routing
+function ownerOf(target) {
+  if (roster.has(target)) return roster.get(target)
+  const parts = String(target).split('/')
+  if (parts.length >= 3) return roster.get(parts.slice(0, 2).join('/')) || null
+  return null
+}
+function knownIds() {
+  const ids = [...roster.keys()]
+  for (const s of roster.values()) for (const sp of (s.subpeers || [])) ids.push(sp.id)
+  return ids
+}
+function dialAndSend(port, host, target, env) {
+  return new Promise(resolve => {
+    const sock = profile.transport.connect(port, host)
+    let done = false
+    const finish = r => { if (!done) { done = true; try { sock.destroy() } catch {}; resolve(r) } }
+    const timer = setTimeout(() => finish({ ok: false, code: 'timeout' }), 5000)
+    sock.on('connect', () => {
+      sendFrame(sock, { t: 'HELLO', ver: VER, fromBridge: SESSION, fromSession: SESSION, name: NAME, auth: TOKEN })
+      sendFrame(sock, { t: 'CONNECT', target })
+    })
+    onFrames(sock, f => {
+      if (f.t === 'ACCEPT') sendFrame(sock, { t: 'MSG', seq: 1, body: env })
+      else if (f.t === 'REJECT') { clearTimeout(timer); finish({ ok: false, code: f.code }) }
+      else if (f.t === 'CLOSE') { clearTimeout(timer); finish({ ok: true }) }
+    })
+    sock.on('error', e => { clearTimeout(timer); finish({ ok: false, code: e.code || 'dial-failed' }) })
+  })
+}
+
+async function routeEnvelope(env) {
+  if (String(env.to).startsWith('page:')) {
+    if (role === 'gateway') return deliverPage(env)
+    if (gwSock && !gwSock.destroyed && pages.has(String(env.to).slice(5))) {
+      sendFrame(gwSock, { t: 'PAGE_MSG', env })
+      emitTrace('send', env, 'to-page via gateway')
+      return { ok: true, forwarded: 'gateway' }
+    }
+    return { ok: false, code: 'page-unknown-or-gateway-down' }
+  }
+  if (env.to === SESSION) { emitTrace('send', env, 'self'); return deliver(env) }
+  if (isLocalSubId(env.to)) { emitTrace('send', env, 'self-sub'); return deliverSub(env.to, env) }
+  const peer = ownerOf(env.to)
+  if (!peer) return { ok: false, code: 'unknown-target', known: knownIds() }
+  emitTrace('send', env)
+  return dialAndSend(peer.port, peer.host || HOST, env.to, env)   // same-host direct; cross-host via gateway later
+}
+
+// deliver a SYSTEM control message (bypasses project consent) to every participant in a project —
+// used by request_project_access to reach a project the requester cannot otherwise see.
+async function deliverSystemToProject(toProject, verb, body) {
+  const want = projKey(toProject)
+  const targets = []
+  for (const sp of subpeers.values()) if (projKey(sp.identity?.project) === want) targets.push(sp.id)   // sub-peer tier
+  for (const s of roster.values()) {
+    if (projKey(s.project) === want) targets.push(s.session)
+    for (const sp of (s.subpeers || [])) if (projKey(sp.project) === want) targets.push(sp.id)
+  }
+  for (const p of pages.values()) if (projKey(p.identity?.project) === want) targets.push('page:' + p.instance)
+  let n = 0
+  for (const to of [...new Set(targets)]) {
+    const env = makeEnvelope({ to, verb, body, subject: `project access request: ${verb}`, from: { session: SESSION, name: NAME, kind: 'session' } })
+    env.system = true
+    const r = await routeEnvelope(env)
+    if (r && r.ok) n++
+  }
+  return n
+}
+
+// the first bridge to become gateway can launch the Windows tray (in --ephemeral mode, so it exits
+// when the mesh does). Opt-in only — `tray: true` in config or AI_BRIDGE_TRAY=1 — so dev/test never
+// spawns a window. The tray's single-instance mutex makes a repeat launch a no-op.
+let trayLaunched = false
+function maybeLaunchTray() {
+  if (trayLaunched || process.platform !== 'win32') return
+  if (!(process.env.AI_BRIDGE_TRAY === '1' || CFG.tray === true)) return
+  trayLaunched = true
+  try {
+    const trayDir = path.join(HERE, '..', 'tray', 'windows')
+    spawn(process.env.ComSpec || 'cmd.exe', ['/c', 'run.cmd', '--ephemeral', '--root', HERE],
+      { cwd: trayDir, detached: true, stdio: 'ignore', windowsHide: true }).unref()
+    log('tray launch requested')
+  } catch (e) { log('tray launch failed', e.message) }
+}
+
+// sender classification for the envelope metadata plane (cleartext; read by receiver-side enforcement)
+function senderIdent(f) {
+  if (!f) return { realm: REALM }
+  if (f.session === SESSION) return PROC_IDENT ? { project: PROC_IDENT.project, user: PROC_IDENT.user, realm: PROC_IDENT.realm } : { realm: REALM }
+  const sp = subpeers.get(f.session); if (sp && sp.identity) return { project: sp.identity.project, user: sp.identity.user, realm: sp.identity.realm }
+  if (String(f.session).startsWith('page:')) { const p = pages.get(String(f.session).slice(5)); if (p && p.identity) return { project: p.identity.project, user: p.identity.user, realm: p.identity.realm } }
+  return { realm: REALM }
+}
+function makeEnvelope({ to, verb, body, reply_to, from, subject, pattern, topic }) {
+  const base = from || { session: SESSION, name: NAME, kind: 'session' }
+  const f = base.project ? base : { ...base, ...senderIdent(base) }
+  const hops = [...(from?.hops || [])]
+  // sender joins the chain unless delivering within its own process (itself, or its own sub-peer —
+  // otherwise the loop guard in deliverSub would reject a process publishing to its own conversations)
+  if (f.session !== to && !String(to).startsWith(`${f.session}/`)) hops.push(f.session)
+  const env = { ts: new Date().toISOString(), from: f,
+    to, verb: verb || 'message', subject: String(subject || ''),
+    pattern: pattern || 'send', topic: topic || null,
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+    reply_to: reply_to || null, hops }
+  env.id = envelopeId(env)
+  // reply capability (§5): a reply ECHOES the cap of the message it answers; otherwise mint a fresh
+  // cap bound to (senderProject | targetProject | envId | expiry), keyed by the sender's capKey.
+  if (reply_to) {
+    const orig = findStoredEnvelope(base, reply_to)
+    if (orig && orig.reply_cap) { env.reply_cap = orig.reply_cap; env.reply_exp = orig.reply_exp }
+  }
+  if (!env.reply_cap) {
+    const ck = localCapKey(f.session), tp = projectOfTarget(to)
+    if (ck && tp) {
+      const exp = Date.now() + CAP_TTL_MS
+      env.reply_cap = profile.capSigner.mint(ck, `${f.project || 'unclassified'}|${tp}|${env.id}|${exp}`)
+      env.reply_exp = exp
+    }
+  }
+  encryptEnvelope(env)                          // body ciphered from here; decryptedView at consumption
+  return env
+}
+
+// topic:<topic> send targeting (T3/T5): explicit prefix only. Delivered to the topic's OWNERS —
+// exclusive topic = exactly one; shared = every co-owner (one envelope each; dedupe is free).
+function askerProjectOf(from) { return (senderIdent(from && from.session ? from : { session: SESSION }).project) || 'unclassified' }
+async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, askerProject) {
+  const { project, path } = parseTopicRef(ref, askerProject)
+  if (isWildcard(path)) return { ok: false, code: 'wildcard-target', topic: ref }
+  const owners = ownersOf(path, project)
+  if (!owners.length) return { ok: false, code: 'no-owner', topic: ref }
+  const fanout = []
+  for (const h of owners) {
+    const env = makeEnvelope({ to: h.holder, verb, body, reply_to, from, subject, pattern: 'send', topic: path })
+    const r = await routeEnvelope(env)
+    fanout.push({ to: h.holder, holder_name: h.holder_name || null, ok: !!r.ok, code: r.code || null, envelope_id: env.id })
+  }
+  return { ok: fanout.some(f => f.ok), topic: path, project, fanout,
+    ...(fanout.length === 1 ? { envelope_id: fanout[0].envelope_id, to: fanout[0].to } : {}) }
+}
+// publish (T3/T5): event to every subscriber in the target project (wildcards + owners included).
+// Zero subscribers is fine — events are fire-and-forget.
+async function publishToTopic(from, ref, verb, body, subject, askerProject) {
+  const { project, path } = parseTopicRef(ref, askerProject)
+  if (isWildcard(path)) return { ok: false, code: 'wildcard-target', topic: ref }
+  const subs = subscribersOf(path, project)
+  const fanout = []
+  for (const h of subs) {
+    const env = makeEnvelope({ to: h.holder, verb, body, from, subject, pattern: 'publish', topic: path })
+    const r = await routeEnvelope(env)
+    fanout.push({ to: h.holder, holder_name: h.holder_name || null, ok: !!r.ok, code: r.code || null, envelope_id: env.id })
+  }
+  if (!subs.length) emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
+    to: `topic:${path}`, to_name: path, to_kind: 'topic', subject: subject || null, pattern: 'publish', topic: path,
+    size: String(body || '').length, note: 'no subscribers', envelope_id: null })
+  return { ok: true, topic: path, project, subscribers: subs.length, fanout }
+}
+
+// ---------------------------------------------------------------- roster sync
+function rosterPayload() {
+  return { sessions: [...roster.values()].map(s => ({ ...s, is_gateway: s.session === gatewayId, host_label: String(s.session).split('/')[0] })),
+    pages: [...pages.values()], hosts: ALIASES, gateway: gatewayId || (role === 'gateway' ? SESSION : null) }
+}
+// VISIBILITY (§4): a page sees only the projects it may reach (same project / open / static edge),
+// so "can't see → can't address" matches the delivery gate. Enforced by default; a page opts out with
+// hello { seeAll:true }. Honors the shared-config policy; remote runtime grants don't widen a view
+// (delivery still enforces them). The raw list_sessions tool stays full (observability).
+function rosterPayloadFor(viewerProject, viewerRealm) {
+  const vp = viewerProject || 'unclassified'
+  const reach = p => mayInitiate(vp, p || 'unclassified')
+  const base = rosterPayload()
+  const sessions = []
+  for (const s of base.sessions) {
+    const subs = (s.subpeers || []).filter(sp => reach(sp.project))
+    if (!reach(s.project) && subs.length === 0) continue
+    sessions.push({ ...s, subpeers: subs, topics: (s.topics || []).filter(t => reach(t.project)) })
+  }
+  return { ...base, sessions, pages: base.pages.filter(p => reach(p.project)) }
+}
+function rosterFor(ws) {
+  return (ws.kind === 'dashboard' || ws.seeAll || !ws.project || ws.project === 'unclassified')
+    ? rosterPayload() : rosterPayloadFor(ws.project, ws.realm)
+}
+function broadcastRoster() {
+  const frame = { type: 'ROSTER', ...rosterPayload() }
+  for (const sock of followers.values()) sendFrame(sock, frame)   // bridges get full; each filters its own leaves
+  for (const ws of leaves) if (ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'roster', ...rosterFor(ws) })) } catch {} }
+}
+
+// ---------------------------------------------------------------- gateway role
+function becomeGateway(server) {
+  role = 'gateway'; gwServer = server; backoff = 200; gatewayId = SESSION
+  log(`gateway on :${PORT} (session ${SESSION})`)
+  emitTraceRaw({ dir: 'con', verb: 'gateway', from: SESSION, from_name: NAME, to: SESSION, size: 0,
+    note: 'promoted to gateway', envelope_id: null })
+  roster = new Map([[SESSION, { session: SESSION, name: NAME, port: pairPort, kind: 'session',
+    subpeers: [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, kind: 'subpeer', client: s.client || null, client_kind: s.client_kind || null, project: s.identity?.project || null, user: s.identity?.user || null, realm: s.identity?.realm || REALM })),
+    topics: topicList(), bridge_version: BRIDGE_VERSION, capabilities: CAPS, connected_at: new Date().toISOString(),
+    realm: REALM, project: PROC_IDENT?.project || null, user: PROC_IDENT?.user || null,
+    client: CLIENT ? CLIENT.name : null, client_kind: CLIENT ? clientKind(CLIENT.name) : null }]])
+  flushPendingTraces()
+  server.on('connection', sock => {
+    let who = null
+    onFrames(sock, async f => {
+      if (f.t === 'HELLO') {
+        if (!profile.auth.verify(f.auth)) { sendFrame(sock, { t: 'REJECT', code: 'unauthorized' }); sock.end(); return }
+        who = f
+      } else if (f.t === 'REGISTER') {                       // follower control connection
+        if (!who) { sendFrame(sock, { t: 'REJECT', code: 'no-hello' }); sock.end(); return }
+        roster.set(f.session, { session: f.session, name: f.name, port: f.port, kind: 'session', subpeers: f.subpeers || [], topics: f.topics || [], bridge_version: f.bridge_version || null, capabilities: f.capabilities || null, connected_at: new Date().toISOString(), realm: f.realm || REALM, project: f.project || null, user: f.user || null, client: f.client || null, client_kind: clientKind(f.client) })
+        followers.set(f.session, sock)
+        emitTraceRaw({ dir: 'con', verb: 'connect', from: f.session, from_name: f.name, to: SESSION, size: 0,
+          note: `session joined${f.client ? ' (' + f.client + ')' : ''}`, envelope_id: null })
+        sock.on('close', () => {
+          followers.delete(f.session); const gone = roster.get(f.session); roster.delete(f.session)
+          emitTraceRaw({ dir: 'con', verb: 'offline', from: f.session, from_name: gone ? gone.name : f.name, to: SESSION, size: 0,
+            note: 'session offline', envelope_id: null })
+          broadcastRoster()
+        })
+        sendFrame(sock, { t: 'REGISTERED', session: f.session })
+        broadcastRoster()
+      } else if (f.t === 'SET_NAME') {
+        const r = roster.get(f.session); if (r) { r.name = f.name; broadcastRoster() }
+      } else if (f.t === 'SUBPEERS') {
+        const r = roster.get(f.session); if (r) { r.subpeers = f.subpeers || []; broadcastRoster() }
+      } else if (f.t === 'TOPICS') {
+        const r = roster.get(f.session); if (r) { r.topics = f.topics || []; broadcastRoster() }
+      } else if (f.t === 'SET_CLIENT') {
+        const r = roster.get(f.session); if (r) { r.client = f.client || null; r.client_kind = clientKind(f.client); broadcastRoster() }
+      } else if (f.t === 'TRACE') {
+        collectTrace(f.trace)
+      } else if (f.t === 'PAGE_MSG') {                       // follower forwarding an envelope to a page leaf
+        if (f.env && String(f.env.to || '').startsWith('page:')) deliverPage(f.env)
+      } else if (f.t === 'CONNECT') {                        // cross-host ingress: splice to local target
+        if (!who) { sendFrame(sock, { t: 'REJECT', code: 'no-hello' }); sock.end(); return }
+        const peer = ownerOf(f.target)
+        if (!peer) { sendFrame(sock, { t: 'REJECT', code: 'unknown-target' }); sock.end(); return }
+        const out = profile.transport.connect(peer.port, peer.host || HOST)
+        out.on('connect', () => {
+          sendFrame(out, { t: 'HELLO', ver: VER, fromBridge: who.fromBridge, fromSession: who.fromSession, name: who.name, auth: profile.auth.credential() })
+          sendFrame(out, { t: 'CONNECT', target: f.target })
+          sock.removeAllListeners('data'); out.pipe(sock); sock.pipe(out)   // splice-opaque from here
+        })
+        out.on('error', () => { sendFrame(sock, { t: 'REJECT', code: 'target-unreachable' }); sock.end() })
+      } else if (f.t === 'PING') sendFrame(sock, { t: 'PONG', seq: f.seq })
+    })
+    sock.on('error', () => {})
+  })
+  // WS leaf ingress — served on an HTTP server so the dashboard loads from http://127.0.0.1:WS_PORT
+  // (same origin as the WS). file:// pages are blocked from ws://127.0.0.1 by Chrome PNA; http isn't.
+  try {
+    const httpd = profile.transport.createHttpServer((req, res) => {
+      let u = decodeURIComponent(String(req.url || '/').split('?')[0])
+      if (u === '/') u = '/dashboard.html'
+      // serve the bundled client pages + the page-client tools over http (same origin as the WS, so
+      // they aren't subject to the file:// restrictions). Allowlisted paths only — no traversal.
+      const okHtml = /^\/(dashboard|chat|test_page)\.html$/.test(u)
+      const okTool = /^\/tools\/[a-z0-9_.-]+\.js$/i.test(u)
+      if (okHtml || okTool) {
+        try { res.writeHead(200, { 'Content-Type': okTool ? 'application/javascript; charset=utf-8' : 'text/html; charset=utf-8' }); res.end(fs.readFileSync(path.join(HERE, u.slice(1)))); return } catch {}
+      }
+      res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('not found')
+    })
+    httpd.on('error', e => log('http server error', e.code))
+    httpd.listen(WS_PORT, HOST)
+    wss = profile.transport.createWsServer({ server: httpd })
+    wss.on('connection', ws => {
+      ws.on('message', async raw => {
+        let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
+        if (m.type === 'hello') {
+          if (!profile.auth.verify(m.token)) { ws.close(); return }
+          if (m.kind === 'listener') {     // T14 wake attach point — reserved, not implemented
+            try { ws.send(JSON.stringify({ type: 'error', code: 'unsupported', what: 'listener' })) } catch {}
+            ws.close(); return
+          }
+          ws.kind = m.kind === 'dashboard' ? 'dashboard' : 'page'
+          ws.instance = m.instance || crypto.randomBytes(4).toString('hex')
+          if (ws.kind === 'page') {
+            // subject = the page's topic path: auto-claimed (shared) + auto-subscribed (T12)
+            const pident = profile.identity.classify({ project: m.project, user: m.user, realm: REALM })
+            pages.set(ws.instance, { instance: ws.instance, page_kind: m.page_kind || 'page', title: m.title || '',
+              subject: m.subject || null, subscriptions: Array.isArray(m.subscribe) ? m.subscribe.slice(0, 32) : [],
+              icon: m.icon || null, kind: 'page', capKey: capKeyFrom(ws.instance),
+              identity: pident, project: pident.project, user: pident.user })
+            ws.project = pident.project; ws.realm = pident.realm; ws.seeAll = !!m.seeAll   // visibility scope (§4)
+          }
+          leaves.add(ws)
+          log(`${ws.kind} connected: ${m.page_kind || ws.kind} "${m.title || ''}" (${ws.instance})`)
+          if (ws.kind === 'page') emitTraceRaw({ dir: 'con', verb: 'connect', from: `page:${ws.instance}`, from_name: m.title || m.page_kind || 'page', to: SESSION, size: 0, note: `page joined (${m.page_kind || 'page'})`, envelope_id: null })
+          ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, ...rosterFor(ws) }))
+          if (ws.kind === 'dashboard') ws.send(JSON.stringify({ type: 'trace_history', traces: traceRing }))
+          broadcastRoster()
+        } else if (m.type === 'set_alias' && ws.kind === 'dashboard') {
+          if (m.scope === 'host') { ALIASES[m.target] = m.alias; persistAliases() }
+          else if (m.scope === 'session') {
+            const r = roster.get(m.target); if (r) r.name = m.alias
+            if (m.target === SESSION) NAME = m.alias                       // gateway renamed itself
+            else { const fs2 = followers.get(m.target); if (fs2) sendFrame(fs2, { t: 'RENAME', name: m.alias }) }
+          }
+          else if (m.scope === 'page') { const p = pages.get(m.target); if (p) p.title = m.alias }
+          log(`alias set (${m.scope}): ${m.target} -> "${m.alias}"`)
+          broadcastRoster()
+        } else if (m.type === 'send' || m.type === 'publish') {
+          const from = { session: `page:${ws.instance}`, name: m.page_kind || pages.get(ws.instance)?.page_kind || 'page', kind: 'page' }
+          if (!String(m.subject || '').trim()) {                         // T7: no lazy callers
+            ws.send(JSON.stringify({ type: 'sent', ref: m.ref || null, ok: false, code: 'subject-required' }))
+            return
+          }
+          if (m.type === 'publish') {                                    // page event -> subscribers
+            const r = await publishToTopic(from, String(m.topic || '').trim(), m.verb, m.body, String(m.subject).trim(), askerProjectOf(from))
+            ws.send(JSON.stringify({ type: 'sent', ref: m.ref || null, ok: !!r.ok, code: r.code || null,
+              subscribers: r.subscribers ?? null, fanout: r.fanout || null }))
+            return
+          }
+          if (String(m.to || '').startsWith('topic:')) {                 // page -> topic owners (T3)
+            const r = await routeToTopicOwners(from, String(m.to).slice(6).trim(), m.verb, m.body, null, String(m.subject).trim(), askerProjectOf(from))
+            ws.send(JSON.stringify({ type: 'sent', ref: m.ref || null, ok: !!r.ok, code: r.code || null,
+              envelope_id: r.envelope_id || null, fanout: r.fanout || null }))
+            return
+          }
+          const env = makeEnvelope({ to: m.to, verb: m.verb, body: m.body, from, subject: String(m.subject).trim() })
+          let r
+          if (m.to === SESSION) { r = await deliver(env); emitTrace('send', env, 'leaf->gateway') }
+          else if (isLocalSubId(m.to)) { r = deliverSub(m.to, env); emitTrace('send', env, 'leaf->subpeer') }
+          else if (String(m.to || '').startsWith('page:')) { r = deliverPage(env) }   // page -> page (gateway-side)
+          else {
+            const peer = ownerOf(m.to)
+            if (!peer) r = { ok: false, code: 'unknown-target' }
+            else { emitTrace('send', env, 'leaf'); r = await dialAndSend(peer.port, peer.host || HOST, m.to, env) }
+          }
+          ws.send(JSON.stringify({ type: 'sent', ref: m.ref || null, ok: !!r.ok, code: r.code || null, envelope_id: env.id }))
+        }
+      })
+      ws.on('close', () => {
+        if (ws.kind) log(`${ws.kind} disconnected (${ws.instance})`)
+        if (ws.kind === 'page') {
+          const p = pages.get(ws.instance)
+          emitTraceRaw({ dir: 'con', verb: 'offline', from: `page:${ws.instance}`, from_name: p ? (p.title || p.page_kind) : 'page', to: SESSION, size: 0, note: 'page offline', envelope_id: null })
+        }
+        leaves.delete(ws); if (ws.kind === 'page') pages.delete(ws.instance); broadcastRoster()
+      })
+      ws.on('error', () => {})
+    })
+    wss.on('error', e => log('ws server error', e.code))
+  } catch (e) { log('ws listener failed', e.code) }
+  broadcastRoster()
+  maybeLaunchTray()
+}
+
+// ---------------------------------------------------------------- follower role
+function becomeFollower() {
+  role = 'follower'
+  const sock = profile.transport.connect(PORT, HOST)
+  gwSock = sock
+  sock.on('connect', () => {
+    backoff = 200
+    sendFrame(sock, { t: 'HELLO', ver: VER, fromBridge: SESSION, fromSession: SESSION, name: NAME, auth: TOKEN })
+    sendFrame(sock, { t: 'REGISTER', session: SESSION, name: NAME, port: pairPort,
+      subpeers: [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, kind: 'subpeer', project: s.identity?.project || null, user: s.identity?.user || null, realm: s.identity?.realm || REALM })),
+      topics: topicList(), bridge_version: BRIDGE_VERSION, capabilities: CAPS,
+      realm: REALM, project: PROC_IDENT?.project || null, user: PROC_IDENT?.user || null,
+      client: CLIENT ? CLIENT.name : null })
+    log(`follower registered with gateway on :${PORT}`)
+  })
+  onFrames(sock, f => {
+    if (f.t === 'RENAME') { NAME = f.name }
+    else if (f.t === 'REGISTERED') { flushPendingTraces() }
+    else if (f.type === 'ROSTER') {
+      roster = new Map(f.sessions.map(s => [s.session, s]))
+      pages = new Map((f.pages || []).map(p => [p.instance, p]))
+      if (f.gateway) gatewayId = f.gateway
+    }
+  })
+  const reelect = () => { if (role !== 'stopping') { gwSock = null; setTimeout(election, backoff + Math.random() * 100); backoff = Math.min(backoff * 2, 3000) } }
+  sock.on('close', reelect)
+  sock.on('error', () => {})
+}
+
+// ---------------------------------------------------------------- election (the single retry edge)
+function election() {
+  if (role === 'stopping') return
+  role = 'binding'
+  const server = profile.transport.createServer()
+  server.once('error', e => {
+    if (e.code === 'EADDRINUSE') becomeFollower()
+    else { log('bind error', e.code); setTimeout(election, backoff); backoff = Math.min(backoff * 2, 3000) }
+  })
+  server.listen(PORT, HOST, () => becomeGateway(server))
+}
+
+// ---------------------------------------------------------------- MCP server (the session side)
+const mcp = new Server(
+  { name: 'ai-mcp-bridge', version: BRIDGE_VERSION },
+  {
+    capabilities: { experimental: { 'claude/channel': {} }, tools: {} },
+    instructions:
+      'Ai MCP Bridge: peer messages from other AI sessions and web pages arrive as ' +
+      '<channel source="ai-mcp-bridge" from="..." from_name="..." verb="..." subject="...">body</channel>. ' +
+      'Act on the verb (advisory: the verb and payload are defined by your application). ' +
+      'Reply with the send_to_peer tool, passing the from session id as target. ' +
+      'In clients without channel support, poll the inbox tool instead. Use list_sessions for the roster. ' +
+      'IMPORTANT for Cowork/Desktop conversations and for subagents: this bridge process may be SHARED — ' +
+      'call register_self with a name, a self-invented secret, and your project + user (the project the ' +
+      'conversation is for, and the human supervising it) to get your own peer id and private inbox ' +
+      '(then always pass for/secret to inbox and as/secret to send_to_peer). Subagents expecting replies ' +
+      'should register their own identity with parent=<your handle> and deregister before returning. ' +
+      'SUBJECT (required on every send/publish): a short PUBLIC one-line description of the action — it is ' +
+      'NOT encrypted (bodies are); never put private information in it. ' +
+      'TOPICS: /-separated paths (e.g. "team/reviews"). Two relationships: subscribe {pattern} ' +
+      '(interest — open to all, wildcards + and #) and claim_topic {topic, description, exclusive, icon} ' +
+      '(accountability; owners are auto-subscribed; release_topic to give up). Two message patterns: ' +
+      'publish {topic, subject, message} = event to ALL subscribers, nobody obliged to act; ' +
+      'send_to_peer {target:"topic:<topic>"} = directed work to the topic OWNER(S) only (prefix required). ' +
+      'If claim_topic returns code "held", do not seize: send the holder verb request_responsibility ' +
+      '{topic, reason}; the holder answers grant_responsibility (after releasing), refuse_responsibility, ' +
+      'or asks its human operator.',
+  },
+)
+
+const TOOLS = [
+  { name: 'my_identity', description: 'This bridge identity: session id, friendly name, mesh role, client info, local sub-peers.',
+    inputSchema: { type: 'object', properties: {} } },
+  { name: 'set_name', description: 'Set this session\'s friendly name on the mesh roster (e.g. "Scout"). NOTE: in a shared (Cowork) bridge this renames the PROCESS node — conversations should use register_self instead.',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+  { name: 'register_self', description: 'Register THIS conversation (or subagent) as a sub-peer with its own identity and private inbox on a shared bridge. Invent a secret and keep it; same (name, secret) re-attaches after idle/expiry. Returns peer_id + queue_epoch (epoch change means the queue was rebuilt: reset your cursor).',
+    inputSchema: { type: 'object', properties: {
+      name: { type: 'string', description: 'friendly name, e.g. "Scout" or "scout/worker-1"' },
+      secret: { type: 'string', description: 'self-invented bearer secret; only its hash is stored' },
+      parent: { type: 'string', description: 'parent sub-peer handle (for subagents): full id, handle suffix, or unique name' },
+      client: { type: 'string', description: 'your client kind, e.g. "claude-code" or "cowork" — code clients default to push (streaming) delivery' },
+      project: { type: 'string', description: 'the project this conversation is for (classifies the session; inherited from parent if omitted)' },
+      user: { type: 'string', description: 'the human supervising this session (audit identity; inherited from parent if omitted)' },
+      mode: { type: 'string', description: 'optional override: push | poll' },
+      ttl_minutes: { type: 'number', description: 'idle liveness TTL; default 720, or 60 when parent is set' } }, required: ['name', 'secret'] } },
+  { name: 'deregister', description: 'Remove a sub-peer (subagents: call before returning). Children are removed too; unread messages dead-letter to the parent (or the process inbox).',
+    inputSchema: { type: 'object', properties: {
+      peer_id: { type: 'string' }, secret: { type: 'string' } }, required: ['peer_id', 'secret'] } },
+  { name: 'list_sessions', description: 'List AI sessions (with their sub-peers) and page leaves currently on the mesh.',
+    inputSchema: { type: 'object', properties: {} } },
+  { name: 'claim_topic', description: 'Claim ownership of (responsibility for) a topic. Topics are /-separated paths (e.g. "bridge/admin", "retail/contact-energy"); claims may cover a subtree ("retail/#"). exclusive:true = ONE owner mesh-wide; a claim overlapping a held exclusive topic returns code "held" — then negotiate with the holder via verb request_responsibility (grant/refuse/ask-operator), never seize. Re-claiming your own topic updates it. Owners are auto-subscribed. Sub-peers pass as + secret.',
+    inputSchema: { type: 'object', properties: {
+      topic: { type: 'string', description: 'topic path, wildcards allowed for subtree claims (retail/#)' },
+      description: { type: 'string', description: 'one line on what the responsibility covers' },
+      exclusive: { type: 'boolean', description: 'true = single owner mesh-wide (default false)' },
+      icon: { type: 'string', description: 'optional short markdown icon (e.g. an emoji) shown wherever the topic renders' },
+      persistent: { type: 'boolean', description: 'RESERVED (offline delivery): survive holder restarts — returns unsupported for now' },
+      force: { type: 'boolean', description: 'RESERVED (offline delivery): operator-authorised takeover of an offline holder — returns unsupported for now' },
+      as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
+      secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['topic'] } },
+  { name: 'release_topic', description: 'Give up ownership of a topic you hold. Sub-peers pass as + secret.',
+    inputSchema: { type: 'object', properties: {
+      topic: { type: 'string' },
+      as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
+      secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['topic'] } },
+  { name: 'subscribe', description: 'Subscribe to a topic pattern — open to everyone on any topic (exclusivity is about accountability, never watching). Wildcards: "+" one level, "#" subtree (e.g. "retail/#"). Publishes to matching topics land in your inbox. Sub-peers pass as + secret.',
+    inputSchema: { type: 'object', properties: {
+      pattern: { type: 'string', description: 'topic path or wildcard pattern' },
+      as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
+      secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['pattern'] } },
+  { name: 'unsubscribe', description: 'Remove a subscription. Sub-peers pass as + secret.',
+    inputSchema: { type: 'object', properties: {
+      pattern: { type: 'string' },
+      as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
+      secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['pattern'] } },
+  { name: 'publish', description: 'Publish an event to a concrete topic: delivered to ALL subscribers (wildcard matches included; owners are auto-subscribed). Nobody is obliged to act — for directed work send to "topic:<topic>" instead. Zero subscribers is ok. subject is REQUIRED: short public one-line description (NOT encrypted — no private info).',
+    inputSchema: { type: 'object', properties: {
+      topic: { type: 'string', description: 'concrete topic path (no wildcards)' },
+      subject: { type: 'string', description: 'short PUBLIC one-line description of the event' },
+      message: { type: 'string', description: 'the message body (encrypted in transit)' },
+      verb: { type: 'string', description: 'advisory verb, default "message"' },
+      retain: { type: 'boolean', description: 'RESERVED (offline delivery): retained last message per topic — returns unsupported for now' },
+      as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
+      secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['topic', 'subject', 'message'] } },
+  { name: 'send_to_peer', description: 'Send a directed message: target = id from list_sessions, a unique friendly name, or "topic:<topic>" to message the topic\'s OWNER(S) only (the prefix is required; subscribers do not see sends). subject is REQUIRED: short public one-line description (NOT encrypted — no private info; the body is encrypted). Registered sub-peers must pass as + secret.',
+    inputSchema: { type: 'object', properties: {
+      target: { type: 'string', description: 'session/sub-peer id, unique friendly name, or topic:<topic>' },
+      subject: { type: 'string', description: 'short PUBLIC one-line description of the action' },
+      message: { type: 'string', description: 'the message body (encrypted in transit)' },
+      verb: { type: 'string', description: 'advisory verb, default "message"' },
+      reply_to: { type: 'string', description: 'envelope_id being replied to' },
+      park: { type: 'boolean', description: 'RESERVED (offline delivery): park for a known-but-offline agent — returns unsupported for now' },
+      as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
+      secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['target', 'subject', 'message'] } },
+  { name: 'allow_project', description: 'Open YOUR project to inbound messages from another project (receiver-controlled consent). The caller\'s project grants `project` permission to initiate to it. mode "send" (one-way) or "bidirectional". In-memory until restart; for permanent access add an edge to config.json projects.allow. Sub-peers pass as + secret.',
+    inputSchema: { type: 'object', properties: {
+      project: { type: 'string', description: 'the foreign project being granted access to yours' },
+      mode: { type: 'string', description: 'send (default) | bidirectional' },
+      as: { type: 'string' }, secret: { type: 'string' } }, required: ['project'] } },
+  { name: 'revoke_project', description: 'Revoke a runtime grant created with allow_project (does not affect static config edges).',
+    inputSchema: { type: 'object', properties: {
+      project: { type: 'string' }, as: { type: 'string' }, secret: { type: 'string' } }, required: ['project'] } },
+  { name: 'request_project_access', description: 'Ask another project for permission to reach it. The bridge delivers a project_access_request to that project\'s sessions (by name, even though you cannot see them); an operator there approves by calling allow_project. Returns a request_id.',
+    inputSchema: { type: 'object', properties: {
+      to: { type: 'string', description: 'the project you want to reach' },
+      reason: { type: 'string', description: 'why (shown to the target operator)' },
+      as: { type: 'string' }, secret: { type: 'string' } }, required: ['to'] } },
+  { name: 'set_wake', description: 'RESERVED (wake feature): arm a wake listener for an idle session, with filters (sends always; publishes per pattern). Returns unsupported for now.',
+    inputSchema: { type: 'object', properties: {
+      for: { type: 'string' }, secret: { type: 'string' },
+      mode: { type: 'string', description: 'off | exit-on-message' },
+      filter: { type: 'object', description: '{sends?: bool, publishes?: pattern[] | false}' } } } },
+  { name: 'inbox', description: 'Poll received messages. Registered sub-peers pass for + secret (+ cursor from the previous call); response carries queue_epoch — if it changed, reset cursor to 0. Without for: the shared process inbox.',
+    inputSchema: { type: 'object', properties: {
+      cursor: { type: 'number' },
+      for: { type: 'string', description: 'your registered sub-peer handle' },
+      secret: { type: 'string' } } } },
+]
+
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
+mcp.setRequestHandler(CallToolRequestSchema, async req => {
+  const a = req.params.arguments || {}
+  const ok = o => ({ content: [{ type: 'text', text: JSON.stringify(o, null, 1) }] })
+  const authSub = (ref, secret) => {
+    const sp = resolveLocalSub(ref)
+    if (!sp) return { err: { ok: false, code: 'unknown-subpeer', ref } }
+    if (sp.secretHash !== sha(secret || '')) return { err: { ok: false, code: 'bad-secret', ref: sp.id } }
+    sp.last_seen = Date.now()
+    return { sp }
+  }
+  switch (req.params.name) {
+    case 'my_identity': return ok({ session: SESSION, name: NAME, role, host: SESSION.split('/')[0], gateway: gatewayId, pair_port: pairPort, gateway_port: PORT,
+      bridge_version: BRIDGE_VERSION, capabilities: CAPS, realm: REALM, profile: profile.names, identity: PROC_IDENT,
+      client: CLIENT, mode_override: MODE_OVERRIDE, subpeers: [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, project: s.identity?.project, user: s.identity?.user })),
+      topics: topicList() })
+    case 'set_name': {
+      NAME = String(a.name || NAME)
+      if (role === 'gateway') { const r = roster.get(SESSION); if (r) r.name = NAME; broadcastRoster() }
+      else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'SET_NAME', session: SESSION, name: NAME })
+      return ok({ session: SESSION, name: NAME })
+    }
+    case 'register_self': {
+      const name = String(a.name || '').trim(), secret = String(a.secret || '')
+      if (!name || !secret) return ok({ ok: false, code: 'name-and-secret-required' })
+      const existing = [...subpeers.values()].find(s => s.name === name)
+      if (existing) {
+        if (existing.secretHash !== sha(secret)) return ok({ ok: false, code: 'name-taken', name })
+        existing.last_seen = Date.now()
+        const q = subQueues.get(existing.id)
+        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity })
+      }
+      let parent = null
+      if (a.parent) {
+        const p = resolveLocalSub(String(a.parent))
+        if (!p) return ok({ ok: false, code: 'unknown-parent', parent: a.parent })
+        parent = p.id
+      }
+      const slug = name.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'peer'
+      const id = `${SESSION}/${slug}-${crypto.randomBytes(2).toString('hex')}`
+      const ttl = Math.max(Number(a.ttl_minutes) > 0 ? Number(a.ttl_minutes) : (parent ? CHILD_TTL_MIN : SUB_TTL_MIN), 0.01)
+      const declaredClient = String(a.client || '').trim() || (CLIENT ? CLIENT.name : null)
+      const ckind = clientKind(declaredClient)
+      const mode = (a.mode === 'push' || a.mode === 'poll') ? a.mode : (ckind === 'code' ? 'push' : null)
+      // mandatory classification (project, user) — a child inherits its parent's project/user unless given.
+      const parentSp = parent ? subpeers.get(parent) : null
+      const ident = profile.identity.classify({
+        project: a.project || (parentSp && parentSp.identity.project) || PROC_PROJECT,
+        user: a.user || (parentSp && parentSp.identity.user) || PROC_USER, realm: REALM })
+      subpeers.set(id, { id, name, secretHash: sha(secret), parent, kind: 'subpeer',
+        created: Date.now(), last_seen: Date.now(), ttl_ms: ttl * 60000, mode,
+        client: declaredClient, client_kind: ckind,
+        identity: ident, capKey: capKeyFrom(secret) })   // capKey: RAM-only reply-cap signing key (§5)
+      subQueues.set(id, newQueue())
+      announceSubpeers()
+      emitTraceRaw({ dir: 'con', verb: 'connect', from: id, from_name: name, to: SESSION, size: 0,
+        note: (parent ? `child of ${parent.split('/').pop()}` : 'sub-peer registered') + (ckind ? ` [${ckind}]` : '') + ` {${ident.project}/${ident.user}}`, envelope_id: null })
+      const q = subQueues.get(id)
+      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident })
+    }
+    case 'deregister': {
+      const { sp, err } = authSub(String(a.peer_id || ''), a.secret)
+      if (err) return ok(err)
+      const children = [...subpeers.values()].filter(s => s.parent === sp.id).length
+      removeSubpeer(sp.id, 'deregister')
+      announceSubpeers()
+      return ok({ ok: true, removed: sp.id, children_removed: children })
+    }
+    case 'list_sessions': return ok({ role, host: SESSION.split('/')[0], ...rosterPayload() })
+    case 'claim_topic': {
+      const topic = String(a.topic || '').trim()
+      if (!topic) return ok({ ok: false, code: 'topic-required' })
+      if (a.persistent) return ok({ ok: false, code: 'unsupported', what: 'persistent claims (offline delivery, T14)' })
+      if (a.force) return ok({ ok: false, code: 'unsupported', what: 'forced takeover (offline delivery, T14)' })
+      const description = String(a.description || '')
+      const exclusive = !!a.exclusive
+      const icon = String(a.icon || '').trim().slice(0, 16) || null
+      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM
+      if (a.as) {
+        const { sp, err } = authSub(String(a.as), a.secret)
+        if (err) return ok(err)
+        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderRealm = sp.identity?.realm || REALM
+      }
+      // T6/§6: an exclusive claim conflicts with overlapping claims IN THE SAME PROJECT only
+      const others = allTopicEntries().filter(e => e.role === 'owner' && e.holder !== holder && projKey(e.project) === projKey(holderProject) && patternsOverlap(e.pattern, topic))
+      const blocker = others.find(e => e.exclusive) || (exclusive && others.length ? others[0] : null)
+      if (blocker) return ok({ ok: false, code: 'held', topic,
+        holder: blocker.holder, holder_name: blocker.holder_name || null, holder_pattern: blocker.pattern, holder_exclusive: !!blocker.exclusive,
+        holders: others.map(o => o.holder),
+        hint: 'negotiate: send the holder verb request_responsibility {topic, reason}' })
+      const k = `${holder}|owner|${patternKey(topic)}`
+      const reclaim = myTopics.has(k)
+      myTopics.set(k, { pattern: topic, role: 'owner', description, exclusive, icon, holder, holder_name: holderName, project: holderProject, realm: holderRealm,
+        claimed_at: reclaim ? myTopics.get(k).claimed_at : new Date().toISOString() })
+      announceTopics()
+      emitTraceRaw({ dir: 'con', verb: 'claim', from: holder, from_name: holderName, to: SESSION, size: 0,
+        note: `${reclaim ? 're-claimed' : 'claimed'} "${topic}"${exclusive ? ' (exclusive)' : ''}${icon ? ' ' + icon : ''}`, envelope_id: null })
+      return ok({ ok: true, topic, holder, exclusive, icon, reclaimed: reclaim || undefined })
+    }
+    case 'release_topic': {
+      const topic = String(a.topic || '').trim()
+      let holder = SESSION, holderName = NAME
+      if (a.as) {
+        const { sp, err } = authSub(String(a.as), a.secret)
+        if (err) return ok(err)
+        holder = sp.id; holderName = sp.name
+      }
+      const k = `${holder}|owner|${patternKey(topic)}`
+      if (!myTopics.has(k)) return ok({ ok: false, code: 'not-held', topic, holder })
+      myTopics.delete(k)
+      announceTopics()
+      emitTraceRaw({ dir: 'con', verb: 'release', from: holder, from_name: holderName, to: SESSION, size: 0,
+        note: `released "${topic}"`, envelope_id: null })
+      return ok({ ok: true, topic, holder })
+    }
+    case 'subscribe': {
+      const pattern = String(a.pattern || '').trim()
+      if (!pattern) return ok({ ok: false, code: 'pattern-required' })
+      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM
+      if (a.as) {
+        const { sp, err } = authSub(String(a.as), a.secret)
+        if (err) return ok(err)
+        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderRealm = sp.identity?.realm || REALM
+      }
+      const k = `${holder}|subscriber|${patternKey(pattern)}`
+      const existed = myTopics.has(k)
+      myTopics.set(k, { pattern, role: 'subscriber', holder, holder_name: holderName, project: holderProject, realm: holderRealm,
+        claimed_at: existed ? myTopics.get(k).claimed_at : new Date().toISOString() })
+      announceTopics()
+      if (!existed) emitTraceRaw({ dir: 'con', verb: 'subscribe', from: holder, from_name: holderName, to: SESSION, size: 0,
+        note: `subscribed "${pattern}"`, envelope_id: null })
+      return ok({ ok: true, pattern, holder, resubscribed: existed || undefined })
+    }
+    case 'unsubscribe': {
+      const pattern = String(a.pattern || '').trim()
+      let holder = SESSION
+      if (a.as) {
+        const { sp, err } = authSub(String(a.as), a.secret)
+        if (err) return ok(err)
+        holder = sp.id
+      }
+      const k = `${holder}|subscriber|${patternKey(pattern)}`
+      if (!myTopics.has(k)) return ok({ ok: false, code: 'not-subscribed', pattern, holder })
+      myTopics.delete(k)
+      announceTopics()
+      return ok({ ok: true, pattern, holder })
+    }
+    case 'publish': {
+      if (!String(a.subject || '').trim()) return ok({ ok: false, code: 'subject-required' })
+      if (a.retain) return ok({ ok: false, code: 'unsupported', what: 'retained messages (offline delivery, T14)' })
+      let from
+      if (a.as) {
+        const { sp, err } = authSub(String(a.as), a.secret)
+        if (err) return ok(err)
+        from = { session: sp.id, name: sp.name, kind: 'subpeer' }
+      }
+      const r = await publishToTopic(from, String(a.topic || '').trim(), a.verb, a.message, String(a.subject).trim(), askerProjectOf(from))
+      return ok({ ...r, as: from ? from.session : SESSION })
+    }
+    case 'allow_project': {
+      let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user } }
+      if (!me0.project || me0.project === 'unclassified') return ok({ ok: false, code: 'caller-unclassified' })
+      const from = projKey(a.project)
+      if (!a.project) return ok({ ok: false, code: 'project-required' })
+      const mode = a.mode === 'bidirectional' ? 'bidirectional' : 'send'
+      runtimeAllow.set(`${from}>${projKey(me0.project)}`, mode)   // keys are canonical (case-insensitive)
+      broadcastRoster()                          // visibility may widen
+      emitTraceRaw({ dir: 'con', verb: 'allow', from: me0.project, from_name: me0.user || NAME, to: from, size: 0,
+        note: `allow ${from} -> ${me0.project} (${mode})`, envelope_id: null })
+      return ok({ ok: true, allow: { from, to: me0.project, mode } })
+    }
+    case 'revoke_project': {
+      let myProj = PROC_IDENT?.project
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); myProj = sp.identity?.project }
+      const from = projKey(a.project)
+      const had = runtimeAllow.delete(`${from}>${projKey(myProj)}`)
+      if (had) broadcastRoster()
+      return ok({ ok: true, revoked: had, from, to: myProj })
+    }
+    case 'request_project_access': {
+      let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user } }
+      const to = String(a.to || '').trim().toLowerCase()
+      if (!to) return ok({ ok: false, code: 'project-required' })
+      const reqId = 'req_' + crypto.randomBytes(5).toString('hex')
+      const payload = JSON.stringify({ from_project: me0.project || 'unclassified', from_user: me0.user || 'unknown', reason: String(a.reason || ''), request_id: reqId })
+      const reached = await deliverSystemToProject(to, 'project_access_request', payload)
+      return ok({ ok: true, request_id: reqId, to, delivered_to: reached })
+    }
+    case 'set_wake': return ok({ ok: false, code: 'unsupported', what: 'wake (T14 — reserved for the watcher/doorbell feature)' })
+    case 'send_to_peer': {
+      if (!String(a.subject || '').trim()) return ok({ ok: false, code: 'subject-required' })   // T7: no lazy callers
+      if (a.park) return ok({ ok: false, code: 'unsupported', what: 'park (offline delivery, T14)' })
+      const subject = String(a.subject).trim()
+      let from
+      if (a.as) {
+        const { sp, err } = authSub(String(a.as), a.secret)
+        if (err) return ok(err)
+        from = { session: sp.id, name: sp.name, kind: 'subpeer' }
+      }
+      let target = String(a.target || '')
+      if (target.startsWith('topic:')) {                 // topic targeting (T3): explicit prefix only -> owners
+        const r = await routeToTopicOwners(from, target.slice(6).trim(), a.verb, a.message, a.reply_to, subject, askerProjectOf(from))
+        return ok({ ...r, as: from ? from.session : SESSION })
+      }
+      if (!roster.has(target) && !ownerOf(target)) {
+        const pt = resolvePageTarget(target)
+        if (pt) target = pt
+      }
+      if (!target.startsWith('page:') && !roster.has(target) && !ownerOf(target)) {
+        const cand = []
+        for (const s of roster.values()) {
+          if (s.name === target) cand.push(s.session)
+          for (const sp of (s.subpeers || [])) if (sp.name === target) cand.push(sp.id)
+        }
+        for (const sp of subpeers.values()) if (sp.name === target && !cand.includes(sp.id)) cand.push(sp.id)
+        const uniq = [...new Set(cand)]
+        if (uniq.length === 1) target = uniq[0]
+        else if (uniq.length > 1) return ok({ ok: false, code: 'ambiguous-name', candidates: uniq })
+      }
+      const env = makeEnvelope({ to: target, verb: a.verb, body: a.message, reply_to: a.reply_to, from, subject })
+      const r = await routeEnvelope(env)
+      return ok({ ...r, envelope_id: env.id, to: target, as: from ? from.session : SESSION })
+    }
+    case 'inbox': {
+      if (a.for) {
+        const { sp, err } = authSub(String(a.for), a.secret)
+        if (err) return ok(err)
+        const q = subQueues.get(sp.id)
+        const cur = Number(a.cursor || 0)
+        const start = Math.min(Math.max(cur - q.base, 0), q.items.length)
+        const next = q.base + q.items.length
+        q.served = Math.max(q.served || 0, next)
+        return ok({ peer_id: sp.id, queue_epoch: q.epoch, messages: q.items.slice(start).map(decryptedView), next_cursor: next })
+      }
+      const cur = Number(a.cursor || 0)
+      return ok({ messages: inbox.slice(cur).map(decryptedView), next_cursor: inbox.length })
+    }
+    default: throw new Error(`unknown tool: ${req.params.name}`)
+  }
+})
+
+mcp.oninitialized = () => {
+  try {
+    const ci = mcp.getClientVersion ? mcp.getClientVersion() : null
+    const caps = mcp.getClientCapabilities ? mcp.getClientCapabilities() : null
+    const channelCapable = !!(caps && caps.experimental && Object.prototype.hasOwnProperty.call(caps.experimental, 'claude/channel'))
+    const looksLikeCode = /code/i.test(String(ci?.name || ''))
+    const detected = channelCapable || looksLikeCode ? 'push' : 'poll'
+    CLIENT = { name: ci?.name || null, version: ci?.version || null,
+      channel_capable: channelCapable, detected_mode: detected, mode: MODE_OVERRIDE || detected }
+    log(`client connected: ${CLIENT.name}@${CLIENT.version} mode=${CLIENT.mode}${MODE_OVERRIDE ? ' (override)' : ''}`)
+    emitTraceRaw({ dir: 'info', verb: 'client-connect', from: SESSION, from_name: NAME, to: SESSION, size: 0, envelope_id: null,
+      note: `client=${CLIENT.name || '?'}@${CLIENT.version || '?'} channel=${channelCapable} mode=${CLIENT.mode}${MODE_OVERRIDE ? ' (override)' : ''}` })
+    if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.client = CLIENT.name; r.client_kind = clientKind(CLIENT.name); broadcastRoster() } }
+    else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'SET_CLIENT', session: SESSION, client: CLIENT.name })
+  } catch (e) { log('client-detect failed', e.message) }
+}
+
+await mcp.connect(new StdioServerTransport())
+process.on('SIGTERM', () => { role = 'stopping'; process.exit(0) })
+process.on('SIGINT', () => { role = 'stopping'; process.exit(0) })
