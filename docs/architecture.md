@@ -246,7 +246,10 @@ message hot path: `tailscale status` latency affects join/leave detection, not m
 
 **Addressing & bind.** A hub binds + advertises a **reachable** address (tailnet IP / MagicDNS name),
 not loopback — `HOST` splits into a *bind* address and an *advertise* address. Same-machine peers keep
-using loopback; cross-machine peers use the tailnet address carried in the roster.
+using loopback; cross-machine peers use the tailnet address carried in the roster. The advertise
+address — the one per-machine value that cannot live in a Dropbox-shared config — **auto-derives** from
+the discovery backend (`tailscale status` Self) when left unset, so a single shared config
+(`bind: 0.0.0.0`, `discovery: tailscale`) suffices verbatim on every machine.
 
 **Security posture.** The tailnet (WireGuard) encrypts every host-to-host link and the realm token
 gates membership — sufficient for a trusted tailnet. Bodies are already AES-GCM encrypted (§3); frame

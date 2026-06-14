@@ -6,7 +6,7 @@
   "defaultName": "",
   "tray": false,
 
-  "_comment_crosshost": "Single host: leave the three keys below as-is. Cross-host (one realm across machines, §7): set bind to a reachable interface (your tailnet IP, or 0.0.0.0), advertiseHost to the address peers dial you at (your tailnet IP — required if bind is 0.0.0.0), and profile.discovery to tailscale. Same token on every machine = same realm.",
+  "_comment_crosshost": "Single host: leave the keys below as-is. Cross-host (one realm across machines, §7): set bind to 0.0.0.0 and profile.discovery to tailscale — then this whole file can be Dropbox-shared verbatim across machines, because advertiseHost auto-derives from `tailscale status` per machine. Set advertiseHost only to override the auto-derived address. Same token on every machine = same realm. (Windows firewall must allow inbound TCP on the control port over the Tailscale interface.)",
   "bind": "127.0.0.1",
   "advertiseHost": "",
   "profile": { "discovery": "none" }

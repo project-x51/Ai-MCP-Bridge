@@ -31,7 +31,8 @@ const WS_PORT = Number(process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 7001)
 const TOKEN = process.env.AI_BRIDGE_TOKEN || CFG.token || ''
 const HOST = '127.0.0.1'                                                  // loopback: same-machine pair-dial + local-gateway connect
 const BIND = process.env.AI_BRIDGE_BIND || CFG.bind || HOST               // interface to LISTEN on (0.0.0.0 / tailnet IP enables cross-host, §7)
-const ADVERTISE = process.env.AI_BRIDGE_ADVERTISE_HOST || CFG.advertiseHost || (BIND && BIND !== '0.0.0.0' ? BIND : HOST)   // address peers DIAL me at
+let ADVERTISE = process.env.AI_BRIDGE_ADVERTISE_HOST || CFG.advertiseHost || (BIND && BIND !== '0.0.0.0' ? BIND : HOST)   // address peers DIAL me at (auto-derived from the discovery facet if left as loopback — §7)
+const ADVERTISE_AUTO = !(process.env.AI_BRIDGE_ADVERTISE_HOST || (CFG && CFG.advertiseHost))   // no explicit advertise ⇒ may fill it from discovery.selfHost()
 const DISCOVERY_MS = Number(process.env.AI_BRIDGE_DISCOVERY_MS || 5000)   // cross-host peer-hub discovery cadence (§7)
 const VER = 1
 const MODE_OVERRIDE = (process.env.AI_BRIDGE_MODE || CFG.mode || '') || null   // 'push' | 'poll' | null
@@ -767,7 +768,14 @@ async function discoveryTick() {
   }
 }
 let discoveryTimer = null
-function startDiscovery() {
+async function startDiscovery() {
+  // auto-derive the advertise host (the one per-machine value that can't live in a shared config): if it
+  // was left as loopback and the backend knows this machine's address (tailscale Self), adopt it.
+  if (ADVERTISE_AUTO && ADVERTISE === HOST && discovery.selfHost) {
+    try { const h = await discovery.selfHost(); if (h) { ADVERTISE = h; log(`advertise host auto-derived: ${h}`) } } catch {}
+  }
+  if (discovery.selfHost && BIND === HOST && ADVERTISE === HOST)
+    log('cross-host discovery is on but bind+advertise are loopback — peers cannot reach this hub; set "bind":"0.0.0.0" (or a tailnet IP)')
   try { discovery.advertise && discovery.advertise() } catch {}
   discoveryTick()
   if (!discoveryTimer) discoveryTimer = setInterval(discoveryTick, DISCOVERY_MS).unref()

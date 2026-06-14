@@ -14,5 +14,9 @@ export function create(ctx) {
     // Make THIS hub findable by peers (e.g. register a service). No-op when reachability alone suffices
     // (a peer just connects to the well-known port). Called once when the hub is elected.
     advertise() {},
+    // OPTIONAL. This machine's own reachable address, used to auto-derive the advertise host (the one
+    // per-machine value that cannot live in a shared config). Return null/omit if the backend can't know
+    // it — the bridge then falls back to AI_BRIDGE_ADVERTISE_HOST / config / loopback.
+    async selfHost() { return null },
   }
 }

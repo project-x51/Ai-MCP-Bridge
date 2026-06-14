@@ -213,9 +213,12 @@ payload to the session picked in its dropdown. Pages appear on the roster and th
   CONNECT-splice delivers cross-host with no special routing. Discovery: `none` (default, single-host),
   `tailscale` (enumerate `tailscale status` — no tags, token-gated membership, free join/leave), or
   `seeds` (static list / tests). Opt in with `profile.discovery` or env `AI_BRIDGE_DISCOVERY`; set
-  `bind` to a reachable interface and `advertiseHost` to the address peers dial. WireGuard encrypts
-  the link; the realm token gates membership. Direct session-to-session pair-dial (vs the gateway
-  splice) and cross-host HA re-election are follow-ups.
+  `bind` to `0.0.0.0` (or a tailnet IP). With `tailscale`, **`advertiseHost` auto-derives** from
+  `tailscale status` per machine, so a single `config.json` (`{ "bind": "0.0.0.0", "profile": {
+  "discovery": "tailscale" } }`) can be Dropbox-shared verbatim across machines — no per-machine env.
+  WireGuard encrypts the link; the realm token gates membership (allow the control port inbound on the
+  Tailscale interface). Direct session-to-session pair-dial (vs the gateway splice) and cross-host HA
+  re-election are follow-ups.
 - Lifecycle events are first-class trace rows (2026-06-11): gateway promotion, session/page/sub-peer
   connect + offline all appear in the dashboard trace feed as **dir `con`** (purple badge) instead of info.
 - Verbs are advisory: the receiving session decides what to do. Loop guard: hop-chain in envelopes.
