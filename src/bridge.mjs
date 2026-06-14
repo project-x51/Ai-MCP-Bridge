@@ -57,7 +57,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.8.0'             // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.8.1'             // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -661,8 +661,12 @@ async function publishToTopic(from, ref, verb, body, subject, askerProject) {
 
 // ---------------------------------------------------------------- roster sync
 function rosterPayload() {
-  return { sessions: [...roster.values()].map(s => ({ ...s, is_gateway: s.session === gatewayId, host_label: String(s.session).split('/')[0] })),
-    pages: [...pages.values()], hosts: ALIASES, gateway: gatewayId || (role === 'gateway' ? SESSION : null) }
+  const HOSTNAME = String(SESSION).split('/')[0]
+  const localPages = [...pages.values()].map(p => ({ ...p, host_label: HOSTNAME }))
+  // is_gateway is true for THIS host's gateway AND for each remote host's gateway (a gossiped entry whose
+  // session id equals its origin) — so the dashboard can mark and structure every machine, not just ours.
+  return { sessions: [...roster.values()].map(s => ({ ...s, is_gateway: s.session === gatewayId || (!!s.origin && s.session === s.origin), host_label: String(s.session).split('/')[0] })),
+    pages: [...localPages, ...remotePages.values()], hosts: ALIASES, gateway: gatewayId || (role === 'gateway' ? SESSION : null) }
 }
 // VISIBILITY (§4): a page sees only the projects it may reach (same project / open / static edge),
 // so "can't see → can't address" matches the delivery gate. Enforced by default; a page opts out with
@@ -698,25 +702,31 @@ function broadcastRoster() {
 // node; the smaller ADVERTISE:PORT initiates each link, so there is exactly one connection per pair.
 const peerGw = new Map()        // peerGatewaySession -> { sock, host, port, name }
 const peerByAddr = new Set()    // "host:port" we hold an OUTBOUND link to (dedupe re-dials)
+const remotePages = new Map()   // instance -> page (display fields only) gossiped from a peer hub, tagged with origin + host
 let lastGossip = ''
 const selfAddr = () => `${ADVERTISE}:${PORT}`
 const localRosterSlice = () => [...roster.values()].filter(s => !s.origin)   // my own session + my followers (never relayed entries)
-const gossipFrame = () => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: localRosterSlice() })
+// pages live only on a gateway; gossip DISPLAY fields only (never capKey or other secrets) so remote dashboards can show web sessions
+const localPagesSlice = () => [...pages.values()].map(p => ({ instance: p.instance, page_kind: p.page_kind, title: p.title || '', subject: p.subject || null, icon: p.icon || null, project: p.project || null, user: p.user || null }))
+const gossipFrame = () => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: localRosterSlice(), pages: localPagesSlice() })
 function gossipToPeers(force) {
   if (role !== 'gateway' || !peerGw.size) return
-  const slice = localRosterSlice(), sig = JSON.stringify(slice)
+  const slice = localRosterSlice(), pg = localPagesSlice(), sig = JSON.stringify([slice, pg])
   if (!force && sig === lastGossip) return                         // only send when MY locals changed (breaks the merge→broadcast→gossip loop)
   lastGossip = sig
-  const frame = { t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice }
+  const frame = { t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg }
   for (const p of peerGw.values()) if (p.sock && !p.sock.destroyed) sendFrame(p.sock, frame)
 }
-function mergeRemoteRoster(fromGw, host, port, sessions) {
+function mergeRemoteRoster(fromGw, host, port, sessions, pages) {
   if (!fromGw || fromGw === SESSION) return
   for (const [k, v] of [...roster]) if (v.origin === fromGw) roster.delete(k)   // replace this gateway's slice wholesale
   for (const s of (sessions || [])) {
     if (!s || s.session === SESSION || s.origin) continue          // never let a peer override my own / never re-host a relayed entry
     roster.set(s.session, { ...s, origin: fromGw, host: host || HOST, port: port || PORT })   // dial via the owning gateway
   }
+  for (const [k, v] of [...remotePages]) if (v.origin === fromGw) remotePages.delete(k)
+  const rhost = String(fromGw).split('/')[0]
+  for (const p of (pages || [])) if (p && p.instance) remotePages.set(p.instance, { ...p, origin: fromGw, host_label: rhost })
   broadcastRoster()
 }
 function adoptPeer(peerSession, sock, host, port, name) {
@@ -732,6 +742,7 @@ function dropPeer(peerSession) {
   peerGw.delete(peerSession)
   let changed = false
   for (const [k, v] of [...roster]) if (v.origin === peerSession) { roster.delete(k); changed = true }
+  for (const [k, v] of [...remotePages]) if (v.origin === peerSession) { remotePages.delete(k); changed = true }
   emitTraceRaw({ dir: 'con', verb: 'offline', from: peerSession, from_name: peerSession, to: SESSION, size: 0,
     note: 'peer hub offline', envelope_id: null })
   if (changed) broadcastRoster()
@@ -749,7 +760,7 @@ function connectToPeer(host, port) {
   })
   onFrames(sock, f => {
     if (f.t === 'PEER_HELLO') { peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || port, f.name) }
-    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions)
+    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages)
     else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
   })
   sock.on('close', () => { peerByAddr.delete(addr); if (peerSession && peerGw.get(peerSession)?.sock === sock) dropPeer(peerSession) })
@@ -848,7 +859,7 @@ function becomeGateway(server) {
         sendFrame(sock, gossipFrame())
         sock.on('close', () => { if (peerGw.get(f.session)?.sock === sock) dropPeer(f.session) })
       } else if (f.t === 'PEER_ROSTER') {
-        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions)
+        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages)
       } else if (f.t === 'PING') sendFrame(sock, { t: 'PONG', seq: f.seq })
     })
     sock.on('error', () => {})

@@ -38,6 +38,10 @@
   .b-pu { background:#E0E7FF; color:#3730A3; }
   .b-gw { background:#DCFCE7; color:#14532D; }
   .b-pub { background:#FEF3C7; color:#92400E; }
+  .b-code { background:#FFEDD5; color:#9A3412; }      /* code session/sub-peer = orange */
+  .b-subp { background:#FEF9C3; color:#854D0E; }      /* non-code sub-peer = yellow */
+  tr.mach-row td { background:#F1F5F9; border-top:2px solid #E2E8F0; padding-top:7px; padding-bottom:7px; }
+  .b-mach { font-weight:700; font-size:12.5px; color:#0F172A; }
   tr.x-row { cursor: pointer; }
   tr.x-row:hover td { background:#F8FAFC; }
   tr.x-det td { background:#FAFAFA; font-size:11.5px; padding:7px 12px 9px 28px; }
@@ -47,8 +51,8 @@
   .subj { color:#1F2937; }
   .subj.none { color:#9CA3AF; font-style:italic; }
   .n-subp circle { fill: #FEF9C3; stroke: #EAB308; stroke-width: 1.5; }
-  .n-sess.code circle { fill: #EDE9FE; stroke: #8B5CF6; }
-  .n-subp.code circle { fill: #EDE9FE; stroke: #8B5CF6; }
+  .n-sess.code circle { fill: #FFEDD5; stroke: #F97316; }   /* code sessions = orange */
+  .n-subp.code circle { fill: #FFEDD5; stroke: #F97316; }
   .n-client { font-size: 9px; fill: #94A3B8; text-anchor: middle; pointer-events: none; }
   .edge.subp { stroke-dasharray: 3 3; stroke: #EAB308; }
   .pulse circle, .pulse rect { stroke: #F59E0B !important; stroke-width: 3.5 !important; }
@@ -111,40 +115,76 @@
   // project · user badge (the mandatory classification); blank for unclassified infrastructure
   function pu(proj,user){ if(!proj || proj==='unclassified') return '<span class="kv" style="color:#9CA3AF">infra</span>';
     return '<span class="bub b-pu">'+esc(proj)+(user?' · '+esc(user):'')+'</span>'; }
+  function machineOf(s){ return s.host_label || String(s.session).split('/')[0]; }
+  // badge colour by role: gateway green, code orange, everything else blue
+  function sessClass(s){ return s.is_gateway ? 'b-gw' : (s.client_kind==='code' ? 'b-code' : 'b-sess'); }
+  function sessDetail(s,tops){
+    return '<span class="kv"><b>realm</b> '+esc(s.realm||'?')+'</span>'+
+      '<span class="kv"><b>project</b> '+esc(s.project||'(infra)')+'</span>'+
+      '<span class="kv"><b>user</b> '+esc(s.user||'—')+'</span>'+
+      '<span class="kv"><b>bridge</b> v'+esc(s.bridge_version||'?')+'</span>'+
+      '<span class="kv"><b>pair port</b> '+esc(s.port)+'</span>'+
+      '<span class="kv"><b>kind</b> '+esc(s.client_kind||'?')+'</span>'+
+      '<span class="kv"><b>capabilities</b> '+esc(caps(s.capabilities))+'</span>'+
+      (s.connected_at?'<span class="kv"><b>connected</b> '+esc(String(s.connected_at).replace('T',' ').slice(0,19))+'</span>':'')+
+      '<div style="margin-top:5px">'+topicDetail(tops,s.session)+'</div>';
+  }
   function setTables(m){
     var rt=document.getElementById('realmtag'); if(rt) rt.textContent=(m.sessions&&m.sessions[0]&&m.sessions[0].realm)?('realm: '+m.sessions[0].realm):'';
     var sb=document.getElementById('sessions'); sb.innerHTML='';
-    (m.sessions||[]).forEach(function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
-      expandable(sb,[
-        '<span class="bub '+(isGw?'b-gw':'b-sess')+'">'+esc(s.name)+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
-        '<span class="mono">'+esc(s.session)+'</span>',
-        '<span class="mono">'+esc(s.client||'')+'</span>',
-        pu(s.project,s.user),
-        topicNames(tops,s.session)],
-        '<span class="kv"><b>realm</b> '+esc(s.realm||'?')+'</span>'+
-        '<span class="kv"><b>project</b> '+esc(s.project||'(infra)')+'</span>'+
-        '<span class="kv"><b>user</b> '+esc(s.user||'—')+'</span>'+
-        '<span class="kv"><b>bridge</b> v'+esc(s.bridge_version||'?')+'</span>'+
-        '<span class="kv"><b>pair port</b> '+esc(s.port)+'</span>'+
-        '<span class="kv"><b>kind</b> '+esc(s.client_kind||'?')+'</span>'+
-        '<span class="kv"><b>capabilities</b> '+esc(caps(s.capabilities))+'</span>'+
-        (s.connected_at?'<span class="kv"><b>connected</b> '+esc(String(s.connected_at).replace('T',' ').slice(0,19))+'</span>':'')+
-        '<div style="margin-top:5px">'+topicDetail(tops,s.session)+'</div>');
-      (s.subpeers||[]).forEach(function(sp){
+    // group sessions + pages (web sessions) by MACHINE; gateway-first within each; local machine first
+    var mach={}, order=[];
+    function ensure(h){ if(!mach[h]){ mach[h]={sessions:[],pages:[]}; order.push(h); } return mach[h]; }
+    (m.sessions||[]).forEach(function(s){ ensure(machineOf(s)).sessions.push(s); });
+    var gwHost=(m.gateway||'').split('/')[0];
+    (m.pages||[]).forEach(function(p){ ensure(p.host_label||gwHost||order[0]||'?').pages.push(p); });
+    order.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });   // this machine (the local gateway's host) first
+    order.forEach(function(h){
+      var box=mach[h];
+      var label=(m.hosts&&m.hosts[h])?(m.hosts[h]+' ('+h+')'):h;
+      var hdr=document.createElement('tr'); hdr.className='mach-row';
+      hdr.innerHTML='<td colspan="6"><span class="b-mach">🖥 '+esc(label)+'</span></td>';
+      sb.appendChild(hdr);
+      var sess=box.sessions.slice().sort(function(a,b){ return (b.is_gateway?1:0)-(a.is_gateway?1:0); });   // gateway first
+      sess.forEach(function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
         expandable(sb,[
-          '<span style="padding-left:14px">↳</span> <span class="bub" style="background:#FEF9C3;color:#854D0E">'+esc(sp.name)+'</span>',
-          '<span class="mono">'+esc(sp.id)+'</span>',
-          '<span class="mono">'+esc((sp.client_kind||sp.client||'')+(sp.mode==='push'?' · streaming':''))+'</span>',
-          pu(sp.project,sp.user),
-          topicNames(tops,sp.id)],
-          '<span class="kv"><b>realm</b> '+esc(sp.realm||'?')+'</span>'+
-          '<span class="kv"><b>project</b> '+esc(sp.project||'(infra)')+'</span>'+
-          '<span class="kv"><b>user</b> '+esc(sp.user||'—')+'</span>'+
-          '<span class="kv"><b>parent</b> '+(sp.parent?esc(sp.parent.split('/').pop()):'—')+'</span>'+
-          '<span class="kv"><b>client</b> '+esc(sp.client||'?')+'</span>'+
-          '<span class="kv"><b>mode</b> '+esc(sp.mode||'poll')+'</span>'+
-          '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>');
-      }); });
+          '<span style="padding-left:12px">↳</span> <span class="bub '+sessClass(s)+'">'+esc(s.name)+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
+          '<span class="mono">'+esc(s.session)+'</span>',
+          '<span class="mono">'+esc(s.client||'')+'</span>',
+          pu(s.project,s.user),
+          topicNames(tops,s.session)],
+          sessDetail(s,tops));
+        (s.subpeers||[]).forEach(function(sp){
+          expandable(sb,[
+            '<span style="padding-left:30px">↳</span> <span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(sp.name)+'</span>',
+            '<span class="mono">'+esc(sp.id)+'</span>',
+            '<span class="mono">'+esc((sp.client_kind||sp.client||'')+(sp.mode==='push'?' · streaming':''))+'</span>',
+            pu(sp.project,sp.user),
+            topicNames(tops,sp.id)],
+            '<span class="kv"><b>realm</b> '+esc(sp.realm||'?')+'</span>'+
+            '<span class="kv"><b>project</b> '+esc(sp.project||'(infra)')+'</span>'+
+            '<span class="kv"><b>user</b> '+esc(sp.user||'—')+'</span>'+
+            '<span class="kv"><b>parent</b> '+(sp.parent?esc(sp.parent.split('/').pop()):'—')+'</span>'+
+            '<span class="kv"><b>client</b> '+esc(sp.client||'?')+'</span>'+
+            '<span class="kv"><b>mode</b> '+esc(sp.mode||'poll')+'</span>'+
+            '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>');
+        });
+      });
+      box.pages.forEach(function(p){
+        expandable(sb,[
+          '<span style="padding-left:12px">↳</span> <span class="bub b-page">'+esc(p.title||p.page_kind)+'</span>',
+          '<span class="mono">page:'+esc(p.instance)+'</span>',
+          '<span class="mono">'+esc(p.page_kind)+' (web)</span>',
+          pu(p.project,p.user),
+          (p.subject?'<span class="bub b-resp">'+(p.icon?esc(p.icon)+' ':'')+esc(p.subject)+'</span>':'')],
+          '<span class="kv"><b>kind</b> web page</span>'+
+          '<span class="kv"><b>instance</b> <span class="mono">'+esc(p.instance)+'</span></span>'+
+          (p.subject?'<span class="kv"><b>subject</b> '+esc(p.subject)+'</span>':'')+
+          '<span class="kv"><b>project</b> '+esc(p.project||'(infra)')+'</span>'+
+          '<span class="kv"><b>user</b> '+esc(p.user||'—')+'</span>');
+      });
+    });
+    // separate Pages detail table (unchanged)
     var pb=document.getElementById('pages'); pb.innerHTML='';
     (m.pages||[]).forEach(function(p){ var tr=document.createElement('tr');
       tr.innerHTML='<td><span class="bub b-page">'+esc(p.page_kind)+'</span></td><td>'+esc(p.title)+'</td><td>'+(p.subject?'<span class="bub b-resp">'+(p.icon?esc(p.icon)+' ':'')+esc(p.subject)+'</span>':'')+'</td><td>'+pu(p.project,p.user)+'</td><td class="mono">'+esc(p.instance)+'</td>'; pb.appendChild(tr); });
@@ -162,7 +202,7 @@
     var hosts={};
     (m.sessions||[]).forEach(function(s){ var h=s.session.split('/')[0]; (hosts[h]=hosts[h]||{sessions:[],pages:[]}).sessions.push(s); });
     var gwHost=(m.gateway||'').split('/')[0];
-    (m.pages||[]).forEach(function(p){ var h=gwHost||Object.keys(hosts)[0]; if(!hosts[h]) hosts[h]={sessions:[],pages:[]}; hosts[h].pages.push(p); });
+    (m.pages||[]).forEach(function(p){ var h=p.host_label||gwHost||Object.keys(hosts)[0]; if(!hosts[h]) hosts[h]={sessions:[],pages:[]}; hosts[h].pages.push(p); });
     var names=Object.keys(hosts);
     if(!names.length){ svg.setAttribute('height',40); el('text',{x:20,y:25,'class':'n-sub','text-anchor':'start'},svg).textContent='no nodes connected'; return; }
     var X=14, boxTops=60, maxBottom=0, gwCenters=[];
@@ -173,14 +213,14 @@
       var hgt=70 + (nSess?80:0) + (nSub?72:0) + (nPage?70:0);
       // gateway in the middle, followers either side
       var gwS=null, fol=[];
-      hh.sessions.forEach(function(s){ if(s.session===m.gateway) gwS=s; else fol.push(s); });
+      hh.sessions.forEach(function(s){ if(s.is_gateway) gwS=s; else fol.push(s); });
       var sess=gwS?fol.slice(0,Math.floor(fol.length/2)).concat([gwS],fol.slice(Math.floor(fol.length/2))):fol;
       // ---- layout pass (local x coords; box then sized to fit every node incl. leaves)
       var lx={}, minL=0, maxR=0;
       function ext(x,half){ if(x-half<minL)minL=x-half; if(x+half>maxR)maxR=x+half; }
       sess.forEach(function(s,i){ lx[s.session]=i*150; ext(i*150,75); });
       var gwLx=null;
-      sess.forEach(function(s){ if(s.session===m.gateway) gwLx=lx[s.session]; });
+      sess.forEach(function(s){ if(s.is_gateway) gwLx=lx[s.session]; });
       if(nSub){
         var subTot={}, subCnt={};
         sess.forEach(function(s){ (s.subpeers||[]).forEach(function(sp){ var k=(sp.parent&&lx[sp.parent]!=null)?sp.parent:s.session; subTot[k]=(subTot[k]||0)+1; }); });
@@ -202,7 +242,7 @@
       hl.addEventListener('click',function(){ alias('host',h,m.hosts&&m.hosts[h]); });
       var y1=boxTops+70;
       sess.forEach(function(s,i){
-        var x=off+lx[s.session], isGw=s.session===m.gateway;
+        var x=off+lx[s.session], isGw=s.is_gateway;
         var g=el('g',{'class':'n-sess'+(isGw?' gw':'')+(s.client_kind==='code'?' code':''),id:'n-'+s.session},svg);
         el('circle',{cx:x,cy:y1,r:22},g);
         var lbl=el('text',{x:x,y:y1+40,'class':'n-label'},g); lbl.textContent=s.name;
@@ -216,7 +256,7 @@
       // edges follower -> gateway
       var gwc=gwCenters.filter(function(c){return c.host===h;})[0];
       sess.forEach(function(s){
-        if(gwc && s.session!==m.gateway){
+        if(gwc && !s.is_gateway){
           var p=nodePos[s.session], e;
           if(Math.abs(p.x-gwc.x)>160){
             // non-adjacent follower: arc over the row so it doesn't read as a relay chain

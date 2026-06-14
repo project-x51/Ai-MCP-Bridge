@@ -237,7 +237,10 @@ no equivalent of the OS port table, so discovery uses the tailnet as a passive, 
 **Roster gossip — a conflict-free union.** Once hubs connect, they exchange roster deltas peer-to-peer.
 Each **session id is owned by exactly one machine**, so the global roster is the *union* of per-host
 slices — merges never conflict; departures are tombstone + TTL. Eventually consistent, no authority.
-Each machine's dashboard renders the merged roster, so any machine sees the whole mesh.
+The gossip also carries each host's **web sessions** (pages — display fields only, never capKey) and
+marks each host's **gateway** (the gossiped entry whose session id equals its origin), so any machine's
+dashboard renders the *full structure* of every machine — gateway, its followers, their sub-peers, and
+pages — grouped by machine, not just a flat list of remote names.
 
 **Delivery stays direct.** Envelopes go **host-to-host over the tailnet** by pair-dial to the
 gossip-learned address — the `peer.host` roster field + the existing CONNECT handshake, the splice
