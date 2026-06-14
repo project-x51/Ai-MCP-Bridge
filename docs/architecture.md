@@ -3,7 +3,7 @@
 **Status:** living design note. Captures the agreed model for identity, realms, cross-project
 consent, reply authentication, topics, federation, and the pluggable security/transport profile
 architecture. Sections marked **(built)**, **(designed — pending)**, or **(reserved — later)**
-reflect implementation state; see [§11 Implementation status](#11-implementation-status).
+reflect implementation state; see [§12 Implementation status](#12-implementation-status).
 
 The operational reference (tools, setup, daily flow) lives in [`../src/README.md`](../src/README.md).
 This document is the *why* and the *shape*.
@@ -24,7 +24,7 @@ This document is the *why* and the *shape*.
   a hop-chain of ids in each envelope.
 
 Everything below builds on this substrate. The substrate itself is **realm-agnostic** — it routes
-abstract identities and defers auth/crypto/transport/config to the realm profile (§9).
+abstract identities and defers auth/crypto/transport/config to the realm profile (§10).
 
 ---
 
@@ -55,7 +55,7 @@ A **realm** is the highest-level boundary: a trust-and-policy domain. It typical
 organization, though one organization may run several (e.g. a locked-down enterprise realm plus a
 looser lab realm).
 
-A realm is defined by a **security profile** — a binding of implementations for five swappable facets:
+A realm is defined by a **security profile** — a binding of implementations for its swappable facets:
 
 | Facet | Default profile (built/near-term) | Alternate profiles (later) |
 |---|---|---|
@@ -64,13 +64,16 @@ A realm is defined by a **security profile** — a binding of implementations fo
 | **Identity / users** | declared labels | directory- or SSO-resolved, mapped |
 | **Config distribution** | shared JSON file (Dropbox / SMB) | URL, config service/API |
 | **Transport** | length-prefixed JSON over TCP (+ WS leaves) | TLS-public, message queue, … |
+| **Discovery** | enumerate reachable hubs via `tailscale status` | mDNS (LAN), presence-folder (Dropbox/SMB), static seeds |
 
 "Internet realm / private-LAN realm / enterprise realm" are simply three profiles.
 
 **Realm is orthogonal to transport.** The realm is the unit of *trust* (who shares keys + policy);
 the transport network (LAN, tailnet) is the unit of *reachability*. A realm can span a tailnet; two
 realms can share one tailnet (same wire, different trust); two realms can live on different tailnets.
-You only enter multi-network territory by **federating** realms (§7) — never by adding a machine.
+A realm can **span many machines** on a tailnet with no central node and no static peer list (§7);
+adding a machine is free. You only enter multi-*realm* territory — different keys and trust — by
+**federating** through a translator (§8).
 
 **Addressing.** Within a realm, projects and topics are bare (`topic:bridge/admin`). Across realms,
 they qualify: `realm:project` and `@realm:project/topic`. The `realm` field and realm-qualified
@@ -182,10 +185,10 @@ encryption-as-authentication foot-gun: a "1-in-a-million valid" structure is ~2�
 ~a million tries), and block ciphers are malleable. HMAC gives ~2¹²⁸ forgery resistance with one
 primitive, no padding scheme — the standard tool for stateless signed tokens.
 
-**Durability note (forward-reference):** when offline delivery (§10) introduces a persistent agent
+**Durability note (forward-reference):** when offline delivery (§11) introduces a persistent agent
 registry, the `capKey` derivation rides with it for free; cap durability and the reply's landing spot
 then arrive together. Third-party verification (a relay checking on someone's behalf) would use an
-asymmetric variant (sign private / verify public), landing with the federation key work (§7).
+asymmetric variant (sign private / verify public), landing with the federation key work (§8).
 
 ---
 
@@ -203,7 +206,68 @@ the flat-topic model already built — projects add the scoping dimension.
 
 ---
 
-## 7. Federation & translator bridges (reserved — later)
+## 7. Cross-host mesh — one realm across machines (designed — pending)
+
+A realm is the unit of *trust*; a tailnet is the unit of *reachability* (§3). A single realm can span
+many machines on a tailnet **with no central node and no static peer list** — machines join and leave
+freely. This is distinct from §8 (federation): there every machine shares one realm's keys, token, and
+config; §8 bridges *different* realms.
+
+**One hub per machine — co-equal, none central.** The per-host **port-bind election** is unchanged:
+the first bridge process on a machine to bind `:PORT` becomes that machine's **hub** (its roster
+holder + WS/page server); later local processes are followers. The hub is a *local representative*,
+not an organiser — if it dies, the next local process re-binds and takes over. Across machines, hubs
+are **peers of equal standing**: a flat mesh, never a star. No machine is "the" gateway.
+
+**Discovery — the tailnet says who *could* be on the mesh; the token decides who *is*.** Cross-host has
+no equivalent of the OS port table, so discovery uses the tailnet as a passive, symmetric directory:
+
+1. **Candidates** — a hub enumerates online tailnet peers via `tailscale status --json` (local, no
+   auth, already on every machine): "which of my machines are reachable right now." No **tags** —
+   tagging a device transfers its ownership from the user to the tag, and these are user-logged-in
+   workstations; no shared list; no privileged entry.
+2. **Membership** — the hub attempts a connection to each candidate on the well-known bridge port and
+   runs the **HELLO + realm-token handshake**. Whoever completes it is a member; a refused connection
+   or a bad token is not. **The token is the membership filter**, so discovery needs no other shared
+   state.
+3. **Join / leave are implicit** — a machine appears in `tailscale status` when it comes online and
+   disappears when it goes; stale peers fall out of the roster by the same TTL/heartbeat model as
+   sub-peers. Nothing to configure, nothing to clean up.
+
+**Roster gossip — a conflict-free union.** Once hubs connect, they exchange roster deltas peer-to-peer.
+Each **session id is owned by exactly one machine**, so the global roster is the *union* of per-host
+slices — merges never conflict; departures are tombstone + TTL. Eventually consistent, no authority.
+Each machine's dashboard renders the merged roster, so any machine sees the whole mesh.
+
+**Delivery stays direct.** Envelopes go **host-to-host over the tailnet** by pair-dial to the
+gossip-learned address — the `peer.host` roster field + the existing CONNECT handshake, the splice
+already on the wire — with gossip-relay only as a fallback. The discovery directory is *never* in the
+message hot path: `tailscale status` latency affects join/leave detection, not message latency.
+
+**Addressing & bind.** A hub binds + advertises a **reachable** address (tailnet IP / MagicDNS name),
+not loopback — `HOST` splits into a *bind* address and an *advertise* address. Same-machine peers keep
+using loopback; cross-machine peers use the tailnet address carried in the roster.
+
+**Security posture.** The tailnet (WireGuard) encrypts every host-to-host link and the realm token
+gates membership — sufficient for a trusted tailnet. Bodies are already AES-GCM encrypted (§3); frame
+metadata (subjects, roster) rides the WireGuard tunnel in clear, acceptable inside the tailnet. For
+hostile networks, swap the **transport facet** for a TLS profile; for network-layer access control
+*without* tags, restrict the bridge port with **user-based** Tailscale ACL grants (by account /
+`autogroup:member`), preserving user ownership of every machine.
+
+**Discovery is a pluggable facet** — like transport and cipher. `tailscale` (enumerate `status`) is the
+default; alternates are `mdns` (single LAN, zero shared state), `presence-folder` (Dropbox / SMB
+bulletin board where each node writes its own uniquely-named heartbeat file), and `seeds` (explicit
+addresses for hostile networks). Swapping the rendezvous mechanism never touches the mesh core.
+
+**Deliberately out of scope here.** Cross-*realm* bridging stays in §8 (a translator, because keys
+differ). And cross-machine hub **high-availability**: if a machine's hub dies its local mesh re-elects
+locally, but a machine going fully offline simply *leaves* the mesh — its participants leave with it;
+no other machine adopts them. That is the correct semantic for "machines join and leave freely."
+
+---
+
+## 8. Federation across realms — translator bridges (reserved — later)
 
 Two realms have **different keys and different config**, so within-realm token auth and the
 splice-opaque gateway cannot reach across. Bridging them requires a **translator**: a node that holds
@@ -217,7 +281,7 @@ A translator:
   project consent.
 - **Translates addressing** (`realm:project`) and **identity** — mapping, e.g., an enterprise
   SSO user to a label the LAN realm understands. (This is where **users** gain a structural role —
-  see §8.)
+  see §9.)
 - **Re-encrypts** — `open` with realm A's cipher, `seal` with realm B's cipher.
 
 **Inherent tradeoff:** the translator sees plaintext crossing the border (it must, to bridge two key
@@ -232,12 +296,12 @@ realm *profiles* a translator can speak.
 
 ---
 
-## 8. Users — a realm-selectable identity model (designed — `label` pending)
+## 9. Users — a realm-selectable identity model (designed — `label` pending)
 
 `user` is a **mandatory identity field** on every participant: the human supervising the session.
 But *how* a user is established differs wildly — a bare LAN label, a Tailscale account, an enterprise
 SSO subject, a SPIFFE id — so **user resolution is a realm-profile facet (`IdentityModel`)**, exactly
-like auth and transport (§9). The bridge **never owns a user database**: it carries a normalized
+like auth and transport (§10). The bridge **never owns a user database**: it carries a normalized
 identity and delegates "who is this, and how sure are we" to the realm's profile.
 
 ### Normalized identity + assurance
@@ -254,7 +318,7 @@ The unifying axis is **assurance** — how the identity was established:
 |---|---|---|---|
 | **declared** | self-asserted label | the realm token already gated entry, so the label is trust-domain-trusted | bare LAN — zero infrastructure |
 | **verified** | cryptographically proven | the realm's auth: Tailscale identity, OIDC/SSO, mTLS, SPIFFE | internet (Tailscale) / enterprise (SSO) |
-| **mapped** | a *foreign* realm vouched, accepted via federation | translator mapping table (§7), assurance attenuated | across realms |
+| **mapped** | a *foreign* realm vouched, accepted via federation | translator mapping table (§8), assurance attenuated | across realms |
 
 ### Concrete `IdentityModel` implementations (each a pluggable facet)
 
@@ -289,7 +353,7 @@ the policy once it's real).
 
 ---
 
-## 9. Pluggable profile architecture (the implementation principle)
+## 10. Pluggable profile architecture (the implementation principle)
 
 **The core mesh logic must be realm-agnostic, with each swappable facet behind a clean seam**, so that
 plugging in a different kind of security or transport is obvious and local — not a rewrite. This is a
@@ -352,9 +416,15 @@ implement it, register one line in `facets/index.js`** (or select via `config.pr
 profiles (tailnet, mtls, spiffe, mapped) and the federation translator slot in here with no core
 changes.
 
+**Planned facet — `discovery/`** (the seventh facet, lands with cross-host federation, §7): how a hub
+finds peer hubs. Default `tailscale.js` enumerates online tailnet peers (`tailscale status --json`);
+alternates `mdns.js`, `presence-folder.js`, `seeds.js`. Interface: `candidates()` → reachable hub
+addresses; `advertise()` → make this hub findable. Same copy-a-template pattern, no core changes — the
+mesh consumes a peer list and is blind to how it was obtained.
+
 ---
 
-## 10. Reserved surface & capability detection (partly built)
+## 11. Reserved surface & capability detection (partly built)
 
 Forward-compatibility features exist in the protocol so they land without churn. Each returns
 `{ok:false, code:"unsupported"}` until built, and is advertised via the `capabilities{}` object on
@@ -364,26 +434,31 @@ Forward-compatibility features exist in the protocol so they land without churn.
 - **park** (offline send) + **retain** (offline publish) + **persistent claims** + **force** (operator
   takeover of an offline holder) — the offline-delivery feature (persistent agent registry + parked
   queues); also the home for durable reply-caps (§5).
-- **federation** — the `federation` config block + translator (§7).
+- **federation** — the `federation` config block + translator (§8).
 
 ---
 
-## 11. Implementation status
+## 12. Implementation status
 
 - **Built (v1.3):** within-realm mesh — gateway election, followers, sub-peers (register/secret/
   cursor/epoch/TTL/dead-letter), page leaves, roster gossip, dashboard; **flat** topics with
   subscribe/own + publish/send, exclusive-overlap, icons; mandatory message `subject`; AES-GCM body
   encryption; reserved wake/offline surface; capability object; cross-host CONNECT splice (untested).
 - **Built (v1.6):** the profile-facet seam fully extracted into `src/facets/` (all six facets in
-  their own modules with templates — §9); mandatory `(realm, project, user)` normalized identity via
-  the `label` `IdentityModel` (§8); receiver-controlled project consent — strict default + `open`,
+  their own modules with templates — §10); mandatory `(realm, project, user)` normalized identity via
+  the `label` `IdentityModel` (§9); receiver-controlled project consent — strict default + `open`,
   static config edges + runtime `allow_project` / `revoke_project` / `request_project_access`, enforced
   receiver-side at delivery (§4); the signed reply-capability (§5); project-scoped topics +
   `@project` / `@realm:project` addressing (§6); config policy live-reload; per-recipient roster
   **visibility** filtering (a page sees only reachable projects; opt out with hello `seeAll`); the
   dashboard surfaces realm/project/user.
-- **Reserved — later:** federation + translator bridges (§7); alternate realm profiles (`tailnet`,
-  `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§8); offline delivery
+- **Designed — pending (next):** cross-host mesh — one realm across machines (§7): co-equal per-host
+  hubs (port-bind elected) federated over the tailnet; `tailscale status` discovery with token-gated
+  membership (no tags, no central node, free join/leave); conflict-free roster gossip; direct
+  host-to-host delivery via the `peer.host` splice; the `discovery` facet + a bind/advertise address
+  split. (Also live: reply-cap **Decision B** — replies always get through, §5.)
+- **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,
+  `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§9); offline delivery
   (park/retain/persistent/force) + durable reply-caps; the wake doorbell.
 
 ---
