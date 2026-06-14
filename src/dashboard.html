@@ -67,8 +67,6 @@
 <div class="hint">Click a node to set its alias (sessions/pages rename live; host aliases persist in config.json). Amber flash = message activity.</div>
 <h2>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span></h2>
 <table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
-<h2>Pages</h2>
-<table><thead><tr><th>Kind</th><th>Title</th><th>Subject</th><th>Project · User</th><th>Instance</th></tr></thead><tbody id="pages"></tbody></table>
 <h2>Traces (newest first — click a row for details)</h2>
 <table><thead><tr><th></th><th>Time</th><th>Dir</th><th>From → To</th><th>Subject</th></tr></thead><tbody id="traces"></tbody></table>
 <script>
@@ -145,10 +143,25 @@
       var hdr=document.createElement('tr'); hdr.className='mach-row';
       hdr.innerHTML='<td colspan="6"><span class="b-mach">🖥 '+esc(label)+'</span></td>';
       sb.appendChild(hdr);
+      // web sessions hang off the gateway (they connect to its ws), so list them indented under it
+      var renderPage=function(p){
+        expandable(sb,[
+          '<span style="padding-left:18px">↳</span> <span class="bub b-page">'+esc(p.title||p.page_kind)+'</span>',
+          '<span class="mono">page:'+esc(p.instance)+'</span>',
+          '<span class="mono">'+esc(p.page_kind)+' (web)</span>',
+          pu(p.project,p.user),
+          (p.subject?'<span class="bub b-resp">'+(p.icon?esc(p.icon)+' ':'')+esc(p.subject)+'</span>':'')],
+          '<span class="kv"><b>kind</b> web page</span>'+
+          '<span class="kv"><b>instance</b> <span class="mono">'+esc(p.instance)+'</span></span>'+
+          (p.subject?'<span class="kv"><b>subject</b> '+esc(p.subject)+'</span>':'')+
+          '<span class="kv"><b>project</b> '+esc(p.project||'(infra)')+'</span>'+
+          '<span class="kv"><b>user</b> '+esc(p.user||'—')+'</span>');
+      };
       var sess=box.sessions.slice().sort(function(a,b){ return (b.is_gateway?1:0)-(a.is_gateway?1:0); });   // gateway first
+      var hasGw=sess.some(function(s){ return s.is_gateway; });
       sess.forEach(function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
         expandable(sb,[
-          '<span style="padding-left:12px">↳</span> <span class="bub '+sessClass(s)+'">'+esc(s.name)+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
+          '<span class="bub '+sessClass(s)+'">'+esc(s.name)+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
           '<span class="mono">'+esc(s.session)+'</span>',
           '<span class="mono">'+esc(s.client||'')+'</span>',
           pu(s.project,s.user),
@@ -156,7 +169,7 @@
           sessDetail(s,tops));
         (s.subpeers||[]).forEach(function(sp){
           expandable(sb,[
-            '<span style="padding-left:30px">↳</span> <span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(sp.name)+'</span>',
+            '<span style="padding-left:18px">↳</span> <span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(sp.name)+'</span>',
             '<span class="mono">'+esc(sp.id)+'</span>',
             '<span class="mono">'+esc((sp.client_kind||sp.client||'')+(sp.mode==='push'?' · streaming':''))+'</span>',
             pu(sp.project,sp.user),
@@ -169,25 +182,10 @@
             '<span class="kv"><b>mode</b> '+esc(sp.mode||'poll')+'</span>'+
             '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>');
         });
+        if(isGw) box.pages.forEach(renderPage);   // pages belong to the gateway
       });
-      box.pages.forEach(function(p){
-        expandable(sb,[
-          '<span style="padding-left:12px">↳</span> <span class="bub b-page">'+esc(p.title||p.page_kind)+'</span>',
-          '<span class="mono">page:'+esc(p.instance)+'</span>',
-          '<span class="mono">'+esc(p.page_kind)+' (web)</span>',
-          pu(p.project,p.user),
-          (p.subject?'<span class="bub b-resp">'+(p.icon?esc(p.icon)+' ':'')+esc(p.subject)+'</span>':'')],
-          '<span class="kv"><b>kind</b> web page</span>'+
-          '<span class="kv"><b>instance</b> <span class="mono">'+esc(p.instance)+'</span></span>'+
-          (p.subject?'<span class="kv"><b>subject</b> '+esc(p.subject)+'</span>':'')+
-          '<span class="kv"><b>project</b> '+esc(p.project||'(infra)')+'</span>'+
-          '<span class="kv"><b>user</b> '+esc(p.user||'—')+'</span>');
-      });
+      if(!hasGw) box.pages.forEach(renderPage);   // fallback: machine with pages but no visible gateway
     });
-    // separate Pages detail table (unchanged)
-    var pb=document.getElementById('pages'); pb.innerHTML='';
-    (m.pages||[]).forEach(function(p){ var tr=document.createElement('tr');
-      tr.innerHTML='<td><span class="bub b-page">'+esc(p.page_kind)+'</span></td><td>'+esc(p.title)+'</td><td>'+(p.subject?'<span class="bub b-resp">'+(p.icon?esc(p.icon)+' ':'')+esc(p.subject)+'</span>':'')+'</td><td>'+pu(p.project,p.user)+'</td><td class="mono">'+esc(p.instance)+'</td>'; pb.appendChild(tr); });
   }
 
   // ------------------------------------------------ map
@@ -199,6 +197,9 @@
   }
   function drawMap(m){
     var svg=document.getElementById('map'); svg.innerHTML=''; nodePos={};
+    // three z-layers: boxes (bottom) < edges (middle) < nodes (top). Opaque host boxes must never cover
+    // another host's edges, so ALL edges live in one layer beneath ALL nodes regardless of draw order.
+    var gBox=el('g',{},svg), gEdge=el('g',{},svg), gNode=el('g',{},svg);
     var hosts={};
     (m.sessions||[]).forEach(function(s){ var h=s.session.split('/')[0]; (hosts[h]=hosts[h]||{sessions:[],pages:[]}).sessions.push(s); });
     var gwHost=(m.gateway||'').split('/')[0];
@@ -236,14 +237,14 @@
       var w=Math.max(maxR-minL+2*pad, 240);
       var off=X+pad-minL+(w-(maxR-minL+2*pad))/2;  // centre content when min-width applies
       // ---- draw
-      var box=el('rect',{x:X,y:boxTops,width:w,height:hgt,'class':'n-host',rx:12},svg);
-      var hl=el('text',{x:X+14,y:boxTops+22,'class':'n-host-label'},svg);
+      var box=el('rect',{x:X,y:boxTops,width:w,height:hgt,'class':'n-host',rx:12},gBox);
+      var hl=el('text',{x:X+14,y:boxTops+22,'class':'n-host-label'},gNode);
       hl.textContent=(m.hosts&&m.hosts[h])?m.hosts[h]+'  ('+h+')':h;
       hl.addEventListener('click',function(){ alias('host',h,m.hosts&&m.hosts[h]); });
       var y1=boxTops+70;
       sess.forEach(function(s,i){
         var x=off+lx[s.session], isGw=s.is_gateway;
-        var g=el('g',{'class':'n-sess'+(isGw?' gw':'')+(s.client_kind==='code'?' code':''),id:'n-'+s.session},svg);
+        var g=el('g',{'class':'n-sess'+(isGw?' gw':'')+(s.client_kind==='code'?' code':''),id:'n-'+s.session},gNode);
         el('circle',{cx:x,cy:y1,r:22},g);
         var lbl=el('text',{x:x,y:y1+40,'class':'n-label'},g); lbl.textContent=s.name;
         var sub=el('text',{x:x,y:y1+52,'class':'n-sub'},g); sub.textContent=s.session.split('/')[1];
@@ -261,11 +262,10 @@
           if(Math.abs(p.x-gwc.x)>160){
             // non-adjacent follower: arc over the row so it doesn't read as a relay chain
             var mx=(p.x+gwc.x)/2, my=y1-54;
-            e=el('path',{d:'M '+p.x+' '+(p.y-18)+' Q '+mx+' '+my+' '+gwc.x+' '+(gwc.y-18),'class':'edge',fill:'none',id:'e-'+s.session},svg);
+            e=el('path',{d:'M '+p.x+' '+(p.y-18)+' Q '+mx+' '+my+' '+gwc.x+' '+(gwc.y-18),'class':'edge',fill:'none',id:'e-'+s.session},gEdge);
           } else {
-            e=el('line',{x1:p.x,y1:p.y,x2:gwc.x,y2:gwc.y,'class':'edge',id:'e-'+s.session},svg);
+            e=el('line',{x1:p.x,y1:p.y,x2:gwc.x,y2:gwc.y,'class':'edge',id:'e-'+s.session},gEdge);
           }
-          svg.insertBefore(e,svg.firstChild.nextSibling);
         }
       });
       // sub-peer row (registered conversations / subagents hanging off their session)
@@ -278,13 +278,13 @@
             var k=(sp.parent&&nodePos[sp.parent])?sp.parent:s.session;
             var anchor=nodePos[k]||sp0;
             var x=off+lx[sp.id];
-            var g=el('g',{'class':'n-subp'+(sp.client_kind==='code'?' code':''),id:'n-'+sp.id},svg);
+            var g=el('g',{'class':'n-subp'+(sp.client_kind==='code'?' code':''),id:'n-'+sp.id},gNode);
             el('circle',{cx:x,cy:ySub,r:14},g);
             var lbl=el('text',{x:x,y:ySub+30,'class':'n-label'},g); lbl.textContent=sp.name;
             var hsub=el('text',{x:x,y:ySub+42,'class':'n-sub'},g); hsub.textContent=sp.id.split('/').pop();
             var sptag=(sp.project&&sp.project!=='unclassified')?(sp.project+(sp.user?' · '+sp.user:'')):(sp.client_kind+(sp.mode==='push'?' · streaming':''));
             if(sptag){ var ck=el('text',{x:x,y:ySub+53,'class':'n-client'},g); ck.textContent=sptag; }
-            var e=el('line',{x1:x,y1:ySub-14,x2:anchor.x,y2:anchor.y+(anchor===sp0?22:14),'class':'edge subp',id:'e-'+sp.id},svg); svg.insertBefore(e,svg.firstChild.nextSibling);
+            el('line',{x1:x,y1:ySub-14,x2:anchor.x,y2:anchor.y+(anchor===sp0?22:14),'class':'edge subp',id:'e-'+sp.id},gEdge);
             nodePos[sp.id]={x:x,y:ySub,el:g};
           });
         });
@@ -293,11 +293,11 @@
       var y2=y1+85+(nSub?72:0);
       hh.pages.forEach(function(p,i){
         var x=off+lx['page:'+p.instance];
-        var g=el('g',{'class':'n-page',id:'n-page:'+p.instance},svg);
+        var g=el('g',{'class':'n-page',id:'n-page:'+p.instance},gNode);
         el('rect',{x:x-58,y:y2-16,width:116,height:32,rx:8},g);
         var lbl=el('text',{x:x,y:y2+4,'class':'n-label'},g); lbl.textContent=p.title||p.page_kind;
         var sub=el('text',{x:x,y:y2+30,'class':'n-sub'},g); sub.textContent=p.page_kind+' · '+p.instance;
-        if(gwc){ var e=el('line',{x1:x,y1:y2-16,x2:gwc.x,y2:gwc.y+22,'class':'edge page',id:'e-page:'+p.instance},svg); svg.insertBefore(e,svg.firstChild.nextSibling); }
+        if(gwc){ el('line',{x1:x,y1:y2-16,x2:gwc.x,y2:gwc.y+22,'class':'edge page',id:'e-page:'+p.instance},gEdge); }
         g.addEventListener('click',function(){ alias('page',p.instance,p.title); });
         nodePos['page:'+p.instance]={x:x,y:y2,el:g};
       });
@@ -306,7 +306,7 @@
     });
     // cross-host gateway<->gateway (lights up when remote rosters gossip in)
     for(var i=1;i<gwCenters.length;i++){
-      el('line',{x1:gwCenters[i-1].x,y1:gwCenters[i-1].y-30,x2:gwCenters[i].x,y2:gwCenters[i].y-30,'class':'edge xhost'},svg);
+      el('line',{x1:gwCenters[i-1].x,y1:gwCenters[i-1].y-30,x2:gwCenters[i].x,y2:gwCenters[i].y-30,'class':'edge xhost'},gEdge);
     }
     svg.setAttribute('viewBox','0 0 '+Math.max(X,600)+' '+(maxBottom+20));
     svg.setAttribute('height',Math.min(maxBottom+20, 420));

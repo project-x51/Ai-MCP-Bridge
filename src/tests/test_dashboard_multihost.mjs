@@ -61,6 +61,15 @@ check('two host boxes drawn', map.querySelectorAll('.n-host-label').length === 2
 // remote followers connect to THEIR gateway, not ours
 check('remote follower edge to remote gateway drawn', !!doc.getElementById('e-VOLT-001/ddd'))
 
+// z-order fix: boxes < edges < nodes, so a second host's opaque box can't paint over its own edges
+const groups = [...map.children].filter(c => c.tagName === 'g')
+check('map uses 3 z-layers (box/edge/node)', groups.length === 3, 'groups=' + groups.length)
+const edgeLayer = doc.getElementById('e-VOLT-001/ddd')?.parentNode
+const nodeLayer = doc.getElementById('n-VOLT-001/ccc')?.parentNode
+check('edges layered beneath nodes (the second-box-hides-edges fix)',
+  groups.indexOf(edgeLayer) >= 0 && groups.indexOf(edgeLayer) < groups.indexOf(nodeLayer),
+  'edge@' + groups.indexOf(edgeLayer) + ' node@' + groups.indexOf(nodeLayer))
+
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close()
 process.exit(fail ? 1 : 0)
