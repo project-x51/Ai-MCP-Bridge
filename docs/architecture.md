@@ -206,7 +206,7 @@ the flat-topic model already built — projects add the scoping dimension.
 
 ---
 
-## 7. Cross-host mesh — one realm across machines (designed — pending)
+## 7. Cross-host mesh — one realm across machines (built — MVP)
 
 A realm is the unit of *trust*; a tailnet is the unit of *reachability* (§3). A single realm can span
 many machines on a tailnet **with no central node and no static peer list** — machines join and leave
@@ -416,11 +416,12 @@ implement it, register one line in `facets/index.js`** (or select via `config.pr
 profiles (tailnet, mtls, spiffe, mapped) and the federation translator slot in here with no core
 changes.
 
-**Planned facet — `discovery/`** (the seventh facet, lands with cross-host federation, §7): how a hub
-finds peer hubs. Default `tailscale.js` enumerates online tailnet peers (`tailscale status --json`);
-alternates `mdns.js`, `presence-folder.js`, `seeds.js`. Interface: `candidates()` → reachable hub
-addresses; `advertise()` → make this hub findable. Same copy-a-template pattern, no core changes — the
-mesh consumes a peer list and is blind to how it was obtained.
+**Discovery facet — `discovery/`** (the seventh facet, §7, built): how a hub finds peer hubs.
+`tailscale.js` enumerates online tailnet peers (`tailscale status --json`); `seeds.js` reads a static
+list (tests / hostile networks); `none.js` is the single-host default. (`mdns.js`, `presence-folder.js`
+are documented alternates, not yet written.) Interface: `candidates()` → reachable hub addresses;
+`advertise()` → make this hub findable. Same copy-a-template pattern, no core changes — the mesh
+consumes a peer list and is blind to how it was obtained.
 
 ---
 
@@ -452,11 +453,13 @@ Forward-compatibility features exist in the protocol so they land without churn.
   `@project` / `@realm:project` addressing (§6); config policy live-reload; per-recipient roster
   **visibility** filtering (a page sees only reachable projects; opt out with hello `seeAll`); the
   dashboard surfaces realm/project/user.
-- **Designed — pending (next):** cross-host mesh — one realm across machines (§7): co-equal per-host
-  hubs (port-bind elected) federated over the tailnet; `tailscale status` discovery with token-gated
-  membership (no tags, no central node, free join/leave); conflict-free roster gossip; direct
-  host-to-host delivery via the `peer.host` splice; the `discovery` facet + a bind/advertise address
-  split. (Also live: reply-cap **Decision B** — replies always get through, §5.)
+- **Built (v1.8):** cross-host mesh — one realm across machines (§7): co-equal per-host hubs (port-bind
+  elected) federated over the tailnet; `discovery` facet (`tailscale` / `seeds` / `none`) with
+  token-gated membership (no tags, no central node, free join/leave); the smaller ADVERTISE:PORT
+  initiates each link; conflict-free roster gossip (per-host slices, tagged by origin); host-to-host
+  delivery via the gateway CONNECT-splice; bind/advertise address split. (Also live: reply-cap
+  **Decision B** — replies always get through, §5.) *Follow-ups:* direct session pair-dial (vs the
+  gateway splice) and cross-host HA re-election.
 - **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,
   `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§9); offline delivery
   (park/retain/persistent/force) + durable reply-caps; the wake doorbell.

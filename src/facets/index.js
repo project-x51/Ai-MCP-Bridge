@@ -16,6 +16,9 @@ import * as capHmac from './capsigner/hmac.js'
 import * as identityLabel from './identity/label.js'
 import * as configFile from './config/file.js'
 import * as transportTcp from './transport/tcp.js'
+import * as discoveryNone from './discovery/none.js'
+import * as discoverySeeds from './discovery/seeds.js'
+import * as discoveryTailscale from './discovery/tailscale.js'
 
 const IMPLS = {
   auth:      { token: authToken },
@@ -24,12 +27,16 @@ const IMPLS = {
   identity:  { label: identityLabel },
   config:    { file: configFile },
   transport: { tcp: transportTcp },
+  discovery: { none: discoveryNone, seeds: discoverySeeds, tailscale: discoveryTailscale },
 }
-const DEFAULTS = { auth: 'token', cipher: 'aesgcm', capsigner: 'hmac', identity: 'label', config: 'file', transport: 'tcp' }
-const PROP = { auth: 'auth', cipher: 'cipher', capsigner: 'capSigner', identity: 'identity', config: 'config', transport: 'transport' }
+// discovery defaults to 'none' (single-host, unchanged behaviour); opt in to cross-host federation
+// with config profile.discovery or env AI_BRIDGE_DISCOVERY = tailscale | seeds.
+const DEFAULTS = { auth: 'token', cipher: 'aesgcm', capsigner: 'hmac', identity: 'label', config: 'file', transport: 'tcp', discovery: 'none' }
+const PROP = { auth: 'auth', cipher: 'cipher', capsigner: 'capSigner', identity: 'identity', config: 'config', transport: 'transport', discovery: 'discovery' }
 
 export function buildProfile(ctx) {
   const spec = { ...DEFAULTS, ...((ctx.CFG && ctx.CFG.profile) || {}) }
+  if (ctx.env && ctx.env.AI_BRIDGE_DISCOVERY) spec.discovery = ctx.env.AI_BRIDGE_DISCOVERY
   const profile = { realm: ctx.REALM, names: {} }
   for (const facet of Object.keys(DEFAULTS)) {
     const name = spec[facet]

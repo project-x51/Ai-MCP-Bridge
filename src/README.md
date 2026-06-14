@@ -50,8 +50,10 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   lifecycle (30); `test_identity.mjs` — realm + project/user classification, child inheritance, gossip
   (13); `test_consent.mjs` — strict/grant/revoke, reply-cap return-traffic (incl. replies that survive
   an expired cap and a later revoke — Decision B), case-insensitive projects, bidirectional,
-  request_project_access, project-scoped topics, open mode (36). Tests run in place (or from any scratch
-  copy with `node_modules` present); the spawn
+  request_project_access, project-scoped topics, open mode (36); `test_federation.mjs` — cross-host
+  mesh (§7): two bridges discover each other via the `seeds` backend, gossip rosters, deliver
+  envelopes both directions through the gateway splice, and drop a departed host (10). Tests run in
+  place (or from any scratch copy with `node_modules` present); the spawn
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -204,9 +206,16 @@ A typical page wires action buttons (e.g. per-row "Discuss") to send an app-defi
 payload to the session picked in its dropdown. Pages appear on the roster and the dashboard.
 
 ## Notes / current limits
-- Single-host proven (195 checks across 7 suites, 2026-06-14). Cross-host CONNECT splice is
-  implemented but untested until the second PC joins the tailnet (D2); gateway then also binds
-  the tailnet address.
+- 205 checks across 8 suites (2026-06-14).
+- **Cross-host mesh (§7) — one realm across machines, no central node.** Co-equal per-host hubs
+  (port-bind elected) find each other through the **discovery facet** and gossip rosters peer-to-peer;
+  remote sessions land in the roster tagged with their owning gateway's address, so the existing
+  CONNECT-splice delivers cross-host with no special routing. Discovery: `none` (default, single-host),
+  `tailscale` (enumerate `tailscale status` — no tags, token-gated membership, free join/leave), or
+  `seeds` (static list / tests). Opt in with `profile.discovery` or env `AI_BRIDGE_DISCOVERY`; set
+  `bind` to a reachable interface and `advertiseHost` to the address peers dial. WireGuard encrypts
+  the link; the realm token gates membership. Direct session-to-session pair-dial (vs the gateway
+  splice) and cross-host HA re-election are follow-ups.
 - Lifecycle events are first-class trace rows (2026-06-11): gateway promotion, session/page/sub-peer
   connect + offline all appear in the dashboard trace feed as **dir `con`** (purple badge) instead of info.
 - Verbs are advisory: the receiving session decides what to do. Loop guard: hop-chain in envelopes.

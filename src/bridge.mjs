@@ -29,7 +29,10 @@ try { CFG = JSON.parse(fs.readFileSync(path.join(HERE, 'config.json'), 'utf8')) 
 const PORT = Number(process.env.AI_BRIDGE_PORT || CFG.port || 7000)
 const WS_PORT = Number(process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 7001)
 const TOKEN = process.env.AI_BRIDGE_TOKEN || CFG.token || ''
-const HOST = '127.0.0.1'
+const HOST = '127.0.0.1'                                                  // loopback: same-machine pair-dial + local-gateway connect
+const BIND = process.env.AI_BRIDGE_BIND || CFG.bind || HOST               // interface to LISTEN on (0.0.0.0 / tailnet IP enables cross-host, §7)
+const ADVERTISE = process.env.AI_BRIDGE_ADVERTISE_HOST || CFG.advertiseHost || (BIND && BIND !== '0.0.0.0' ? BIND : HOST)   // address peers DIAL me at
+const DISCOVERY_MS = Number(process.env.AI_BRIDGE_DISCOVERY_MS || 5000)   // cross-host peer-hub discovery cadence (§7)
 const VER = 1
 const MODE_OVERRIDE = (process.env.AI_BRIDGE_MODE || CFG.mode || '') || null   // 'push' | 'poll' | null
 const SWEEP_MS = Number(process.env.AI_BRIDGE_SWEEP_MS || 60000)
@@ -53,7 +56,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.7.3'             // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.8.0'             // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -72,7 +75,7 @@ const sha = s => crypto.createHash('sha256').update(String(s)).digest('hex')
 // transport ONLY through `profile`, assembled from swappable facet modules in ./facets/. To change
 // auth/cipher/identity/transport, add a facet impl file and select it (config.profile) — see
 // facets/index.js. The locals below are the names the core uses, sourced from the active facets.
-const ctx = { TOKEN, REALM, CFG, HERE, SESSION, env: process.env, log }
+const ctx = { TOKEN, REALM, CFG, HERE, SESSION, PORT, ADVERTISE, env: process.env, log }
 const profile = buildProfile(ctx)
 const encryptEnvelope = profile.cipher.seal      // BodyCipher
 const plainBody = profile.cipher.open
@@ -81,6 +84,7 @@ const capKeyFrom = profile.capSigner.deriveKey   // CapSigner
 const classifyIdentity = profile.identity.classify   // IdentityModel
 const sendFrame = profile.transport.frame.send   // Transport framing
 const onFrames = profile.transport.frame.onFrames
+const discovery = profile.discovery              // Discovery facet (§7): cross-host peer-hub enumeration
 // the process's own classification (null ⇒ infrastructure, not a participant)
 const PROC_IDENT = (PROC_PROJECT && PROC_USER) ? profile.identity.classify({ project: PROC_PROJECT, user: PROC_USER, realm: REALM }) : null
 
@@ -467,7 +471,7 @@ const pairServer = profile.transport.createServer(sock => {
   })
   sock.on('error', () => {})
 })
-pairServer.listen(0, HOST, () => { pairPort = pairServer.address().port; election() })
+pairServer.listen(0, BIND, () => { pairPort = pairServer.address().port; election() })
 
 // ---------------------------------------------------------------- page delivery (gateway)
 function pageSockOf(instance) {
@@ -540,7 +544,7 @@ async function routeEnvelope(env) {
   const peer = ownerOf(env.to)
   if (!peer) return { ok: false, code: 'unknown-target', known: knownIds() }
   emitTrace('send', env)
-  return dialAndSend(peer.port, peer.host || HOST, env.to, env)   // same-host direct; cross-host via gateway later
+  return dialAndSend(peer.port, peer.host || HOST, env.to, env)   // local pair-dial; cross-host: peer.host/port point at the owning gateway, which splices (§7)
 }
 
 // deliver a SYSTEM control message (bypasses project consent) to every participant in a project —
@@ -683,6 +687,94 @@ function broadcastRoster() {
   const frame = { type: 'ROSTER', ...rosterPayload() }
   for (const sock of followers.values()) sendFrame(sock, frame)   // bridges get full; each filters its own leaves
   for (const ws of leaves) if (ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'roster', ...rosterFor(ws) })) } catch {} }
+  gossipToPeers()   // §7: push my local slice to peer hubs (no-op unless it actually changed)
+}
+
+// ---------------------------------------------------------------- cross-host federation (§7)
+// Co-equal per-host hubs find each other through the discovery facet and gossip their LOCAL roster slice
+// peer-to-peer. Remote sessions are merged in tagged with `origin` + their owning gateway's address, so
+// the existing CONNECT-splice (gateway ingress) delivers to them with no special routing. No central
+// node; the smaller ADVERTISE:PORT initiates each link, so there is exactly one connection per pair.
+const peerGw = new Map()        // peerGatewaySession -> { sock, host, port, name }
+const peerByAddr = new Set()    // "host:port" we hold an OUTBOUND link to (dedupe re-dials)
+let lastGossip = ''
+const selfAddr = () => `${ADVERTISE}:${PORT}`
+const localRosterSlice = () => [...roster.values()].filter(s => !s.origin)   // my own session + my followers (never relayed entries)
+const gossipFrame = () => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: localRosterSlice() })
+function gossipToPeers(force) {
+  if (role !== 'gateway' || !peerGw.size) return
+  const slice = localRosterSlice(), sig = JSON.stringify(slice)
+  if (!force && sig === lastGossip) return                         // only send when MY locals changed (breaks the merge→broadcast→gossip loop)
+  lastGossip = sig
+  const frame = { t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice }
+  for (const p of peerGw.values()) if (p.sock && !p.sock.destroyed) sendFrame(p.sock, frame)
+}
+function mergeRemoteRoster(fromGw, host, port, sessions) {
+  if (!fromGw || fromGw === SESSION) return
+  for (const [k, v] of [...roster]) if (v.origin === fromGw) roster.delete(k)   // replace this gateway's slice wholesale
+  for (const s of (sessions || [])) {
+    if (!s || s.session === SESSION || s.origin) continue          // never let a peer override my own / never re-host a relayed entry
+    roster.set(s.session, { ...s, origin: fromGw, host: host || HOST, port: port || PORT })   // dial via the owning gateway
+  }
+  broadcastRoster()
+}
+function adoptPeer(peerSession, sock, host, port, name) {
+  if (!peerSession || peerSession === SESSION) return
+  const existing = peerGw.get(peerSession)
+  if (existing && existing.sock && existing.sock !== sock) { try { existing.sock.destroy() } catch {} }
+  peerGw.set(peerSession, { sock, host, port, name: name || peerSession })
+  emitTraceRaw({ dir: 'con', verb: 'peer', from: peerSession, from_name: name || peerSession, to: SESSION, size: 0,
+    note: `peer hub linked (${host}:${port})`, envelope_id: null })
+}
+function dropPeer(peerSession) {
+  if (!peerGw.has(peerSession)) return
+  peerGw.delete(peerSession)
+  let changed = false
+  for (const [k, v] of [...roster]) if (v.origin === peerSession) { roster.delete(k); changed = true }
+  emitTraceRaw({ dir: 'con', verb: 'offline', from: peerSession, from_name: peerSession, to: SESSION, size: 0,
+    note: 'peer hub offline', envelope_id: null })
+  if (changed) broadcastRoster()
+}
+function connectToPeer(host, port) {
+  const addr = `${host}:${port}`
+  if (peerByAddr.has(addr)) return
+  peerByAddr.add(addr)
+  let peerSession = null
+  const sock = profile.transport.connect(port, host)
+  sock.on('connect', () => {
+    sendFrame(sock, { t: 'HELLO', ver: VER, fromBridge: SESSION, fromSession: SESSION, name: NAME, auth: TOKEN })
+    sendFrame(sock, { t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM })
+    sendFrame(sock, gossipFrame())
+  })
+  onFrames(sock, f => {
+    if (f.t === 'PEER_HELLO') { peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || port, f.name) }
+    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions)
+    else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
+  })
+  sock.on('close', () => { peerByAddr.delete(addr); if (peerSession && peerGw.get(peerSession)?.sock === sock) dropPeer(peerSession) })
+  sock.on('error', () => {})
+}
+async function discoveryTick() {
+  if (role !== 'gateway') return
+  let cands = []
+  try { cands = await discovery.candidates() } catch {}
+  const me = selfAddr()
+  for (const c of (cands || [])) {
+    if (!c || !c.host || !c.port) continue
+    const addr = `${c.host}:${c.port}`
+    if (addr === me || peerByAddr.has(addr)) continue
+    if (me < addr) connectToPeer(c.host, c.port)   // deterministic: the smaller ADVERTISE:PORT dials → exactly one link per pair
+  }
+}
+let discoveryTimer = null
+function startDiscovery() {
+  try { discovery.advertise && discovery.advertise() } catch {}
+  discoveryTick()
+  if (!discoveryTimer) discoveryTimer = setInterval(discoveryTick, DISCOVERY_MS).unref()
+}
+function teardownPeers() {
+  for (const p of peerGw.values()) { try { p.sock && p.sock.destroy() } catch {} }
+  peerGw.clear(); peerByAddr.clear(); lastGossip = ''
 }
 
 // ---------------------------------------------------------------- gateway role
@@ -740,6 +832,15 @@ function becomeGateway(server) {
           sock.removeAllListeners('data'); out.pipe(sock); sock.pipe(out)   // splice-opaque from here
         })
         out.on('error', () => { sendFrame(sock, { t: 'REJECT', code: 'target-unreachable' }); sock.end() })
+      } else if (f.t === 'PEER_HELLO') {                     // inbound cross-host hub link (§7)
+        if (!who) { sendFrame(sock, { t: 'REJECT', code: 'no-hello' }); sock.end(); return }
+        if (f.realm && f.realm !== REALM) { sendFrame(sock, { t: 'REJECT', code: 'realm-mismatch' }); sock.end(); return }
+        adoptPeer(f.session, sock, f.host, f.port, f.name)
+        sendFrame(sock, { t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM })
+        sendFrame(sock, gossipFrame())
+        sock.on('close', () => { if (peerGw.get(f.session)?.sock === sock) dropPeer(f.session) })
+      } else if (f.t === 'PEER_ROSTER') {
+        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions)
       } else if (f.t === 'PING') sendFrame(sock, { t: 'PONG', seq: f.seq })
     })
     sock.on('error', () => {})
@@ -760,7 +861,7 @@ function becomeGateway(server) {
       res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('not found')
     })
     httpd.on('error', e => log('http server error', e.code))
-    httpd.listen(WS_PORT, HOST)
+    httpd.listen(WS_PORT, BIND)
     wss = profile.transport.createWsServer({ server: httpd })
     wss.on('connection', ws => {
       ws.on('message', async raw => {
@@ -843,11 +944,13 @@ function becomeGateway(server) {
   } catch (e) { log('ws listener failed', e.code) }
   broadcastRoster()
   maybeLaunchTray()
+  startDiscovery()   // §7: begin enumerating + linking peer hubs across machines (no-op for discovery=none)
 }
 
 // ---------------------------------------------------------------- follower role
 function becomeFollower() {
   role = 'follower'
+  teardownPeers()   // §7: a follower reaches remote hubs via its gateway's merged roster, not its own peer links
   const sock = profile.transport.connect(PORT, HOST)
   gwSock = sock
   sock.on('connect', () => {
@@ -883,7 +986,7 @@ function election() {
     if (e.code === 'EADDRINUSE') becomeFollower()
     else { log('bind error', e.code); setTimeout(election, backoff); backoff = Math.min(backoff * 2, 3000) }
   })
-  server.listen(PORT, HOST, () => becomeGateway(server))
+  server.listen(PORT, BIND, () => becomeGateway(server))
 }
 
 // ---------------------------------------------------------------- MCP server (the session side)
