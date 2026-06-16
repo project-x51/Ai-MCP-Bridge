@@ -57,7 +57,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.8.3'             // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.8.4'             // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -895,10 +895,14 @@ function becomeGateway(server) {
           ws.kind = m.kind === 'dashboard' ? 'dashboard' : 'page'
           ws.instance = m.instance || crypto.randomBytes(4).toString('hex')
           if (ws.kind === 'page') {
-            // subject = the page's topic path: auto-claimed (shared) + auto-subscribed (T12)
+            // subject = the page's topic path: auto-claimed (shared) + auto-subscribed (T12). A wildcard
+            // subject is NOT a valid responsibility (unaddressable, §6) — drop it from the auto-claim so a
+            // page can't sneak a wildcard claim in via the leaf path; its subscribe list stays wildcard-OK.
             const pident = profile.identity.classify({ project: m.project, user: m.user, realm: REALM })
+            const pSubject = (m.subject && !isWildcard(m.subject)) ? m.subject : null
+            if (m.subject && !pSubject) log(`page ${ws.instance}: wildcard subject "${m.subject}" not auto-claimed (responsibilities are concrete); subscribe patterns stay wildcard-OK`)
             pages.set(ws.instance, { instance: ws.instance, page_kind: m.page_kind || 'page', title: m.title || '',
-              subject: m.subject || null, subscriptions: Array.isArray(m.subscribe) ? m.subscribe.slice(0, 32) : [],
+              subject: pSubject, subscriptions: Array.isArray(m.subscribe) ? m.subscribe.slice(0, 32) : [],
               icon: m.icon || null, kind: 'page', capKey: capKeyFrom(ws.instance),
               identity: pident, project: pident.project, user: pident.user })
             ws.project = pident.project; ws.realm = pident.realm; ws.seeAll = !!m.seeAll   // visibility scope (§4)
@@ -1199,6 +1203,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     case 'claim_topic': {
       const topic = String(a.topic || '').trim()
       if (!topic) return ok({ ok: false, code: 'topic-required' })
+      // §6: a responsibility (claim) must be CONCRETE and addressable. A wildcard claim ('+'/'#') is
+      // unsendable — routeToTopicOwners refuses a wildcard target — so it silently breaks any UI that
+      // offers it as a target. Banned for BOTH exclusive and shared claims. (subscribe stays wildcard-capable:
+      // watching a subtree is fine; owning one is not.) Decision 2026-06-16 (design review).
+      if (isWildcard(topic)) return ok({ ok: false, code: 'wildcard-claim', hint: "claim the concrete base instead, e.g. 'retail' not 'retail/#'" })
       if (a.persistent) return ok({ ok: false, code: 'unsupported', what: 'persistent claims (offline delivery, T14)' })
       if (a.force) return ok({ ok: false, code: 'unsupported', what: 'forced takeover (offline delivery, T14)' })
       const description = String(a.description || '')

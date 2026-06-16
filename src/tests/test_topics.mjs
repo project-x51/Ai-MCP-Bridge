@@ -40,13 +40,17 @@ check('B claims exclusive with icon', c1.ok === true && c1.icon === '*B*', JSON.
 await sleep(400)
 const c2 = await call(A, 'claim_topic', { topic: 'Bridge/Admin', exclusive: true })
 check('case-insensitive conflict -> held', c2.ok === false && c2.code === 'held' && c2.holder === idB.session, JSON.stringify(c2))
+// §6: wildcard CLAIMS are banned — responsibilities must be concrete + addressable — for shared AND exclusive
 const c3 = await call(A, 'claim_topic', { topic: 'bridge/#' })
-check('subtree overlapping exclusive -> held', c3.ok === false && c3.code === 'held', JSON.stringify(c3))
-const c4 = await call(A, 'claim_topic', { topic: 'retail/#', description: 'all retail', exclusive: true })
-check('A claims exclusive subtree', c4.ok === true, JSON.stringify(c4))
+check('wildcard claim rejected (shared)', c3.ok === false && c3.code === 'wildcard-claim', JSON.stringify(c3))
+const c3b = await call(A, 'claim_topic', { topic: 'retail/+', exclusive: true })
+check('wildcard claim rejected (exclusive)', c3b.ok === false && c3b.code === 'wildcard-claim', JSON.stringify(c3b))
+const c4 = await call(A, 'claim_topic', { topic: 'retail', description: 'all retail', exclusive: true })
+check('A claims concrete exclusive topic', c4.ok === true, JSON.stringify(c4))
 await sleep(400)
+// with no subtree ownership (you can't claim retail/#), a concrete sub-path is independently claimable
 const c5 = await call(B, 'claim_topic', { topic: 'retail/contact-energy' })
-check('claim under exclusive subtree -> held', c5.ok === false && c5.code === 'held' && c5.holder === idA.session, JSON.stringify(c5))
+check('concrete sub-path independently claimable (no subtree ownership)', c5.ok === true, JSON.stringify(c5))
 const c6 = await call(B, 'claim_topic', { topic: 'bridge/admin', description: 'updated', exclusive: true, icon: '*B*' })
 check('re-claim idempotent', c6.ok === true && c6.reclaimed === true, JSON.stringify(c6))
 

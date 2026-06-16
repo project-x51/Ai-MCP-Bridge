@@ -103,6 +103,16 @@ await call(B,'deregister',{peer_id:regC.peer_id,secret:'dash-sec2'})
 await sleep(600)
 check('deregistered sub-peer removed from map', !doc.getElementById('n-'+regC.peer_id))
 
+// page auto-claim guard (§6): a wildcard subject is NOT auto-claimed; a wildcard subscribe IS kept
+const wsWild=new WebSocket(`ws://127.0.0.1:${WSPORT}`)
+await new Promise(r=>wsWild.on('open',r))
+wsWild.send(JSON.stringify({type:'hello',kind:'page',page_kind:'demo',title:'Wild Page',instance:'pgWild',subject:'retail/#',subscribe:['news/#'],project:'alpha',user:'u',token:TOKEN}))
+await sleep(300)
+const wp=((await call(A,'list_sessions')).pages||[]).find(p=>p.instance==='pgWild')
+check('page wildcard subject not auto-claimed', !!wp && !wp.subject, JSON.stringify(wp&&wp.subject))
+check('page wildcard subscribe kept', !!wp && (wp.subscriptions||[]).includes('news/#'), JSON.stringify(wp&&wp.subscriptions))
+try{wsWild.close()}catch{}
+
 // a local-agent client classifies as the new 'agent' kind (not lumped into cowork)
 await call(B,'register_self',{name:'agent-conv',secret:'ag-sec',client:'local-agent-mode'})
 await sleep(400)

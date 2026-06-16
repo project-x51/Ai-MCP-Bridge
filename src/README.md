@@ -42,14 +42,14 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 - The gateway serves the bundled pages (`dashboard.html`, `chat.html`, `test_page.html`) and the
   `tools/*.js` client over HTTP on the ws port — so the whole client toolkit loads same-origin.
 - `test_mesh.mjs` — harness: 3 bridges, election, routing, push, leaves, traces, failover (22 checks).
-- `test_dashboard.mjs` — dashboard map/alias/sub-peer suite + agent-kind classification (25); `test_dashboard_multihost.mjs` —
+- `test_dashboard.mjs` — dashboard map/alias/sub-peer suite + agent-kind classification + page wildcard-subject guard (27); `test_dashboard_multihost.mjs` —
   by-machine grouping, remote-gateway marking, code=orange, cross-host edge, gossiped web sessions,
   plus box/edge/node z-layering and the agent client-kind, via a synthetic two-machine roster in jsdom (15); `test_page_e2e.mjs` — generic
   widget-contract E2E (dropdown/selection/send/sub-peers/topics/offline) against the `test_page.html`
   fixture, real clicks via jsdom (44); `test_subpeers.mjs` — registration, secrets, cursors/epochs,
   hierarchy, dead-letter, TTL, cross-process (26); `test_topics.mjs` — claims/icons/exclusive overlap,
   subscribe/publish/send patterns, mandatory subject, encryption roundtrip, reserved-surface codes,
-  lifecycle (30); `test_identity.mjs` — realm + project/user classification, child inheritance, gossip
+  wildcard-claim ban (responsibilities are concrete), lifecycle (31); `test_identity.mjs` — realm + project/user classification, child inheritance, gossip
   (13); `test_consent.mjs` — strict/grant/revoke, reply-cap return-traffic (incl. replies that survive
   an expired cap and a later revoke — Decision B), case-insensitive projects, bidirectional,
   request_project_access, project-scoped topics, open mode (36); `test_federation.mjs` — cross-host
@@ -208,7 +208,7 @@ A typical page wires action buttons (e.g. per-row "Discuss") to send an app-defi
 payload to the session picked in its dropdown. Pages appear on the roster and the dashboard.
 
 ## Notes / current limits
-- 221 checks across 9 suites (2026-06-14).
+- 224 checks across 9 suites (2026-06-14).
 - **Cross-host mesh (§7) — one realm across machines, no central node.** Co-equal per-host hubs
   (port-bind elected) find each other through the **discovery facet** and gossip rosters peer-to-peer;
   remote sessions land in the roster tagged with their owning gateway's address, so the existing

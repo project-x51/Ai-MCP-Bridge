@@ -204,6 +204,15 @@ The two relationships (subscribe = open interest; own/claim = accountability) an
 (publish = event to all subscribers; send to `topic:` = directed work to owners) are unchanged from
 the flat-topic model already built — projects add the scoping dimension.
 
+**A claim (responsibility) must be CONCRETE — no wildcards** (built, 2026-06-16). `claim_topic` rejects
+any pattern containing `+`/`#` with code `wildcard-claim`, for both exclusive and shared claims; the page
+auto-claim of a leaf's `subject` applies the same guard. Rationale: a wildcard claim is **unaddressable**
+— `send_to_peer {topic:...}` refuses a wildcard target (`wildcard-target`) — so an owned wildcard silently
+breaks any UI that offers it as a send target. `subscribe` stays wildcard-capable: *watching* a subtree is
+fine, *owning* one is not. A consequence: there is **no subtree ownership** — owning `retail` does not
+block `retail/contact-energy` (concrete paths of different depth don't overlap), so sub-paths are claimed
+independently. Convention: one concrete word per responsibility (Retail, Research, Bills, Bridge, …).
+
 ---
 
 ## 7. Cross-host mesh — one realm across machines (built — MVP)
