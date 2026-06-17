@@ -90,6 +90,13 @@ const classifyIdentity = profile.identity.classify   // IdentityModel
 const sendFrame = profile.transport.frame.send   // Transport framing
 const onFrames = profile.transport.frame.onFrames
 const discovery = profile.discovery              // Discovery facet (§7): cross-host peer-hub enumeration
+const persistence = profile.persistence          // Persistence facet (§12): durable mailboxes / claims / retained
+const PERSIST = profile.names.persistence !== 'none'
+if (PERSIST) {                                   // park/retain/persistent-claims become real once persistence is on
+  CAPS.park = true; CAPS.retain = true; CAPS.persistent_claims = true
+  setInterval(() => { persistence.mailbox.gcAll({ ttlMs: persistence.limits.messageTtlMs }).catch(() => {}) },
+    Number(process.env.AI_BRIDGE_PERSIST_GC_MS) || 1800000).unref()   // age out parked mail whose owner never returns
+}
 // the process's own classification (null ⇒ infrastructure, not a participant)
 const PROC_IDENT = (PROC_PROJECT && PROC_USER) ? profile.identity.classify({ project: PROC_PROJECT, user: PROC_USER, realm: REALM }) : null
 
@@ -378,6 +385,7 @@ function deliverSub(id, env) {
   if (!deliveryAllowed(env, sp.identity?.project || 'unclassified', sp.identity?.realm, sp.capKey)) { emitTrace('recv', env, 'project-denied'); return { ok: false, code: 'project-denied' } }
   const q = subQueues.get(id)
   q.items.push(env)
+  if (PERSIST && sp.identity) persistence.mailbox.put(sp.identity, env.id, env).catch(() => {})   // §12: durable copy, redelivered on re-register after a restart
   if (q.items.length > SUBQ_CAP) { q.items.shift(); q.base++ }
   emitTrace('recv', env, `subpeer:${id.split('/').pop()}`)
   if (MODE_OVERRIDE !== 'poll' && sp && sp.mode === 'push') {      // streaming sub-peer (e.g. code session sharing this bridge)
@@ -1190,6 +1198,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         client: declaredClient, client_kind: ckind,
         identity: ident, capKey: capKeyFrom(secret) })   // capKey: RAM-only reply-cap signing key (§5)
       subQueues.set(id, newQueue())
+      if (PERSIST && ident.project) {                  // §12: re-hydrate parked mail for this identity (survives restart/TTL)
+        try {
+          const L = persistence.limits
+          await persistence.mailbox.gc(ident, { ttlMs: L.messageTtlMs, maxCount: L.mailboxMaxCount, maxBytes: L.mailboxMaxBytes })
+          const parked = await persistence.mailbox.drain(ident)
+          const q0 = subQueues.get(id)
+          for (const p of parked) if (p && p.record && p.record.id) q0.items.push(p.record)
+          if (parked.length) emitTraceRaw({ dir: 'recv', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: parked.length, note: `${parked.length} parked message(s) restored`, envelope_id: null })
+        } catch { }
+      }
       announceSubpeers()
       emitTraceRaw({ dir: 'con', verb: 'connect', from: id, from_name: name, to: SESSION, size: 0,
         note: (parent ? `child of ${parent.split('/').pop()}` : 'sub-peer registered') + (ckind ? ` [${ckind}]` : '') + ` {${ident.project}/${ident.user}}`, envelope_id: null })
@@ -1375,6 +1393,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const start = Math.min(Math.max(cur - q.base, 0), q.items.length)
         const next = q.base + q.items.length
         q.served = Math.max(q.served || 0, next)
+        if (PERSIST && sp.identity) for (const m of q.items.slice(0, start)) persistence.mailbox.ack(sp.identity, m.id).catch(() => {})   // §12: consumed (cursor moved past) -> drop the durable copy
         return ok({ peer_id: sp.id, queue_epoch: q.epoch, messages: q.items.slice(start).map(decryptedView), next_cursor: next })
       }
       const cur = Number(a.cursor || 0)

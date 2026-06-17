@@ -38,7 +38,7 @@ export function identityKeys(identity, readable) {
 
 export function create(ctx) {
   const cfg = (ctx.CFG && ctx.CFG.persistence) || {}
-  const root = path.resolve(ctx.HERE || '.', cfg.dir || '../persistence')
+  const root = path.resolve(ctx.HERE || '.', (ctx.env && ctx.env.AI_BRIDGE_PERSIST_DIR) || cfg.dir || '../persistence')
   const readable = cfg.devReadableKeys === true
   const dir = (...p) => path.join(root, ...p)
 
@@ -88,6 +88,23 @@ export function create(ctx) {
       for (const it of items) (ttlMs && now - Date.parse(it.ts) > ttlMs) ? drop(it, 'ttl') : live.push(it)
       while (maxCount && live.length > maxCount) drop(live.shift(), 'count')      // oldest first
       if (maxBytes) { let total = live.reduce((s, it) => s + it._size, 0); while (live.length && total > maxBytes) { const it = live.shift(); total -= it._size; drop(it, 'size') } }
+      return dropped
+    },
+    // sweep EVERY mailbox for TTL-expired messages (owners who never returned). Per-mailbox caps are
+    // enforced on drain; this only handles age. Returns the count dropped.
+    async gcAll({ now = Date.now(), ttlMs = 0 } = {}) {
+      if (!ttlMs) return 0
+      let dropped = 0
+      const base = dir('mailboxes')
+      for (const keyDir of await readDirSafe(base)) {
+        const mdir = path.join(base, keyDir)
+        for (const f of await readDirSafe(mdir)) {
+          if (!f.endsWith('.msg')) continue
+          const file = path.join(mdir, f)
+          const j = await readJson(file)
+          if (j && now - Date.parse(j.ts) > ttlMs) { try { await fsp.unlink(file) } catch { } dropped++ }
+        }
+      }
       return dropped
     },
   }
