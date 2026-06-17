@@ -9,5 +9,18 @@
   "_comment_crosshost": "Single host: leave the keys below as-is. Cross-host (one realm across machines, §7): set bind to 0.0.0.0 and profile.discovery to tailscale — then this whole file can be Dropbox-shared verbatim across machines, because advertiseHost auto-derives from `tailscale status` per machine. Set advertiseHost only to override the auto-derived address. Same token on every machine = same realm. (Windows firewall must allow inbound TCP on the control port over the Tailscale interface.)",
   "bind": "127.0.0.1",
   "advertiseHost": "",
-  "profile": { "discovery": "none" }
+  "profile": { "discovery": "none" },
+
+  "_comment_persistence": "DESIGN SPEC — not yet enforced by the bridge (§13, pending implementation). Durable messages (park/retain) + durable responsibilities. `dir` is the shared folder (Dropbox here, or an SMB/NFS path) and may differ from where this config lives. Timers shown with defaults so they're visible/tunable; messageTtlDays can be overridden per message. devReadableKeys uses human-readable mailbox/claim folder names instead of sha256 hashes — DEV ONLY, default false.",
+  "persistence": {
+    "dir": "../persistence",
+    "messageTtlDays": 14,
+    "retainedTtlDays": 14,
+    "claimGraceMinutes": 60,
+    "claimHardExpiryDays": 14,
+    "persistSubscriptions": false,
+    "mailboxMaxCount": 1000,
+    "mailboxMaxBytes": 16777216,
+    "devReadableKeys": false
+  }
 }

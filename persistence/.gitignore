@@ -1,0 +1,9 @@
+# Persistence store (docs/architecture.md §13) — the shared offline-message + durable-claim folder,
+# synced between a realm's machines by whatever `persistence.dir` points at (Dropbox here).
+#
+# Track ONLY the skeleton: the immediate category folders, via their .gitkeep. Ignore EVERYTHING one
+# level deeper — it is machine-generated runtime data that holds encrypted message bodies AND cleartext
+# subjects/identities, and must never reach the public repo. (Dropbox still syncs it between machines;
+# git just versions the structure.)
+*/*
+!*/.gitkeep
