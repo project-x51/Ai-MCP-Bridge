@@ -11,7 +11,7 @@
   "advertiseHost": "",
   "profile": { "discovery": "none" },
 
-  "_comment_persistence": "DESIGN SPEC — not yet enforced by the bridge (§13, pending implementation). Durable messages (park/retain) + durable responsibilities. `dir` is the shared folder (Dropbox here, or an SMB/NFS path) and may differ from where this config lives. Timers shown with defaults so they're visible/tunable; messageTtlDays can be overridden per message. devReadableKeys uses human-readable mailbox/claim folder names instead of sha256 hashes — DEV ONLY, default false.",
+  "_comment_persistence": "DESIGN SPEC — not yet enforced by the bridge (§13, pending implementation). Durable messages (park/retain) + durable responsibilities. `dir` is the shared folder (Dropbox here, or an SMB/NFS path) and may differ from where this config lives. Timers shown with defaults so they're visible/tunable; messageTtlDays can be overridden per message. mailboxMaxCount + mailboxMaxSize are PER MAILBOX (per recipient) — over cap, drop oldest and log. mailboxMaxSize is a size string: plain bytes or KB/MB/GB, space optional, decimals OK ('16MB', '12.5 MB', '1 GB', '1048576'). devReadableKeys uses human-readable mailbox/claim folder names (slug + 4-char hash) instead of sha256 — DEV ONLY, default false; keys are format-prefixed (r-/h-) and lookups check both forms, so flipping it never strands existing mailboxes.",
   "persistence": {
     "dir": "../persistence",
     "messageTtlDays": 14,
@@ -20,7 +20,7 @@
     "claimHardExpiryDays": 14,
     "persistSubscriptions": false,
     "mailboxMaxCount": 1000,
-    "mailboxMaxBytes": 16777216,
+    "mailboxMaxSize": "16MB",
     "devReadableKeys": false
   }
 }

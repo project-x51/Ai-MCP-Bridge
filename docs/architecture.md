@@ -3,7 +3,7 @@
 **Status:** living design note. Captures the agreed model for identity, realms, cross-project
 consent, reply authentication, topics, federation, and the pluggable security/transport profile
 architecture. Sections marked **(built)**, **(designed — pending)**, or **(reserved — later)**
-reflect implementation state; see [§12 Implementation status](#12-implementation-status).
+reflect implementation state; see [§13 Implementation status](#13-implementation-status).
 
 The operational reference (tools, setup, daily flow) lives in [`../src/README.md`](../src/README.md).
 This document is the *why* and the *shape*.
@@ -448,13 +448,121 @@ Forward-compatibility features exist in the protocol so they land without churn.
 
 - **wake** — `set_wake` + a WS `listener` attach point (doorbell for idle Code sessions).
 - **park** (offline send) + **retain** (offline publish) + **persistent claims** + **force** (operator
-  takeover of an offline holder) — the offline-delivery feature (persistent agent registry + parked
-  queues); also the home for durable reply-caps (§5).
+  takeover of an offline holder) — the durable-delivery feature, now **designed in §12 (Persistence)**;
+  also the home for durable reply-caps (§5).
 - **federation** — the `federation` config block + translator (§8).
 
 ---
 
-## 12. Implementation status
+## 12. Persistence — durable messages & responsibilities (designed — pending)
+
+Two features over one substrate: **durable messages** (a message to an offline peer survives and is
+delivered when it returns) and **durable responsibilities** (a topic claim survives a restart). Both
+light up the reserved `park` / `retain` / `persistent_claims` surface (§11). The substrate is a
+**shared folder** every machine in the realm can see, behind a pluggable **`persistence` facet** — the
+same decentralised, no-central-node shape as discovery (§7).
+
+### Stable identity — the keying problem
+
+Session ids (`host/hex`) and sub-peer ids are **volatile** — they change on every restart. The only
+thing stable across a restart is `(name, secret)`, which already derives a stable `capKey =
+HKDF(secret)` (§5). So durable state is keyed by a **stable identity** — `realm:project:user:name` —
+never the session id.
+
+The on-disk key is **format-prefixed**, so the store is self-describing and switching formats never
+strands data:
+- **`h-<sha256(realm|project|user|name)>`** — production: fixed-length, fs-safe, leaks no identity
+  taxonomy in a directory listing.
+- **`r-<slug>-<first-4-of-that-sha>`** — dev (`devReadableKeys:true`): a sanitised slug
+  (`default__AIMB__Robin__Bridget`) plus a 4-char hash for uniqueness. Legible when eyeballing the
+  folder mid-test.
+
+On lookup the bridge computes **both** forms for an identity and drains whichever exists — so flipping
+`devReadableKeys` with mailboxes already on disk does no damage; mail under the other prefix is still
+found. A `secretHash` verifier is stored per identity so only the right secret drains a mailbox, and
+**bodies stay AES-GCM ciphertext** (sealed to the `capKey`) so the folder — and anyone who can read it
+— can't read message contents. Only routing metadata (subject, from/to, ts, expiry, reply-cap) is
+cleartext.
+
+### Durable messages — park + retain
+
+- **park** — directed messages are **persistent by default** (`persist:false` opts out, for ephemeral
+  pings). A message to an *offline* recipient is written to its mailbox and delivered on re-register,
+  deduped by envelope id (at-least-once + idempotent). Live delivery when both are online never touches
+  the store — persistence is only the offline fallback, so the shared folder's sync latency is never on
+  the hot path. Consent is checked **twice** — at park-time (you can only park what you could send live)
+  and again at delivery (consent may have changed; a parked cross-project message obeys the Decision-B
+  reply-cap rules, §5). Per-mailbox caps (`mailboxMaxCount`, `mailboxMaxSize`) bound *each recipient*;
+  over cap → **drop oldest and log** (no silent truncation). TTL `messageTtlDays` (default 14,
+  per-message override) expires undelivered mail.
+- **retain** — a `publish` with `retain:true` keeps the **last event per topic**; a new or returning
+  subscriber gets it immediately on subscribe — catch-up without durable per-subscriber queues. TTL
+  `retainedTtlDays` (default 14) or until overwritten; last-writer-wins.
+
+### Durable responsibilities — the claim lifecycle
+
+Claims are **persistent by default** (opt out per claim) and re-hydrated (auto-reclaimed) on
+re-register. While the owner is away a claim follows a **lease + conflict-on-return** lifecycle:
+
+- **ACTIVE** — owner present, *or* offline within the **grace window** (`claimGraceMinutes`, default
+  60). Holds exclusively; others get `held`; topic traffic parks for the owner. The grace makes a normal
+  restart a no-op — nobody can grab "Bridge" during a reboot.
+- **DORMANT** — offline past grace. The reservation goes **soft**: it still exists (shows "[away]",
+  reclaimable) but no longer blocks a new claimant; traffic keeps parking for the absent owner *until*
+  someone takes it.
+- **DISPLACED** — another peer claimed the topic while it was dormant. They are now ACTIVE and receive
+  its traffic; the original claim is displaced, not deleted.
+- **EXPIRED** — offline past `claimHardExpiryDays` (default 14) → the record is GC'd. (Or explicit
+  `release_topic` any time.)
+
+**Conflict-on-return is a mediated handoff, never a seizure:** return-while-DORMANT → re-hydrate
+cleanly; return-while-DISPLACED → the owner is notified and may `request_responsibility`; the new
+holder keeps it until they `grant_responsibility` it back. Claims must be **concrete** (the wildcard
+ban, §6) and are **HMAC-signed by the holder's `capKey`** so a realm member can't forge another's claim
+by dropping a file. Ownership is **computed** from the claim-file set + these timers — every gateway
+agrees with no central arbiter.
+
+### Subscriptions
+
+Persisting subscriptions is **optional, default off** (`persistSubscriptions`). They're interest, cheap
+to re-establish on reconnect, and `retain` covers "catch up on what I missed". Durable per-subscriber
+event history is a heavier feature left for later.
+
+### The substrate — a `persistence` facet over a shared folder
+
+Pluggable like transport / discovery / cipher. `persistence.dir` is a **path**: the bridge neither
+knows nor cares whether it's Dropbox (least setup, decentralised, roams), an SMB/NFS share (real-time,
+no sync churn, needs an always-on host), or anything else. It works on all of them because the **file
+layout is conflict-free even under the weakest backend** (Dropbox: no locks, eventual consistency,
+"conflicted copy" on concurrent edits):
+
+```
+<persistence.dir>/
+  mailboxes/  <identityKey>/env_<envId>.msg            one IMMUTABLE file per parked message
+  claims/     <project>/<topicKey>/<holderKey>.claim   one file per holder (lease-renewed by that holder)
+  retained/   <project>/<topicKey>/<publisherKey>.val  one file per publisher (effective value = newest)
+```
+
+The invariants that make it lock-free and conflict-free:
+1. **No two processes ever write the same file** — names are content-addressed (envelope id) or
+   per-writer (holder/publisher identity), so a shared backend never sees a concurrent edit to one file.
+2. **Write-once or single-writer** — a `.msg` is immutable; a `.claim` is only ever rewritten by its own
+   holder (to renew the lease).
+3. **State is computed, not stored** — a topic's owner, its retained value, a mailbox's contents are
+   pure functions of the file set + the timers; every gateway computes the same answer.
+4. **Atomic writes + idempotent deletes** — write `*.tmp` then rename (readers skip `.tmp`); the only
+   drainer of a mailbox is the recipient's *current* host (no cross-machine delete race); a file that
+   reappears from sync lag is a redelivery, deduped; TTL/expiry GC is any-gateway and idempotent.
+
+Default impl is host-local for a single machine; `dropbox` / `share` / `gossip` are drop-in. Git tracks
+only the skeleton (`persistence/.gitignore` keeps the category folders, ignores all runtime data — it
+holds cleartext subjects/identities). Config sizes accept a **string** — plain bytes or `KB`/`MB`/`GB`,
+space optional, decimals OK (`16MB`, `12.5 MB`, `1 GB`, `1048576`). A future `storeMaxSize` could bound
+the whole store; per-mailbox caps are the primary defence.
+
+---
+
+## 13. Implementation status
 
 - **Built (v1.3):** within-realm mesh — gateway election, followers, sub-peers (register/secret/
   cursor/epoch/TTL/dead-letter), page leaves, roster gossip, dashboard; **flat** topics with
@@ -475,9 +583,13 @@ Forward-compatibility features exist in the protocol so they land without churn.
   delivery via the gateway CONNECT-splice; bind/advertise address split. (Also live: reply-cap
   **Decision B** — replies always get through, §5.) *Follow-ups:* direct session pair-dial (vs the
   gateway splice) and cross-host HA re-election.
+- **Designed — pending:** persistence (§12) — durable messages (park + retain) and durable
+  responsibilities (persistent claims with the lease → dormant → displaced lifecycle + conflict-on-return),
+  over a shared-folder `persistence` facet, encrypted at rest; config knobs + the store skeleton
+  scaffolded (`config.example.json`, `persistence/`).
 - **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,
-  `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§9); offline delivery
-  (park/retain/persistent/force) + durable reply-caps; the wake doorbell.
+  `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§9); `force` operator-takeover of
+  an offline holder; durable reply-caps; the wake doorbell.
 
 ---
 
