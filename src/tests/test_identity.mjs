@@ -35,12 +35,13 @@ check('default realm when unset', idB.realm === 'default', idB.realm)
 const r1 = await call(A, 'register_self', { name: 'conv1', secret: 's1', project: 'alpha', user: 'robin', client: 'cowork' })
 check('register_self returns identity', r1.ok && r1.identity && r1.identity.project === 'alpha' && r1.identity.realm === 'lan-home', JSON.stringify(r1.identity))
 // a different project on the same shared process (Desktop multiplexes projects)
-const r2 = await call(A, 'register_self', { name: 'conv2', secret: 's2', project: 'research', user: 'alice' })
-check('second conversation can be a different project', r2.identity.project === 'research' && r2.identity.user === 'alice', JSON.stringify(r2.identity))
+const r2 = await call(A, 'register_self', { name: 'conv2', secret: 's2', project: 'research', user: 'alice' })   // user 'alice' is IGNORED
+check('second conversation can be a different project', r2.identity.project === 'research', JSON.stringify(r2.identity))
+check('session-declared user is ignored — user comes from the OS login', r2.identity.user === 'robin', JSON.stringify(r2.identity))
 
-// child inherits parent's project/user unless given
+// child inherits parent's project; user is always the OS login
 const sc = await call(A, 'register_self', { name: 'scout1', secret: 'sc1', parent: 'conv2' })
-check('child inherits parent project/user', sc.identity.project === 'research' && sc.identity.user === 'alice', JSON.stringify(sc.identity))
+check('child inherits parent project; user is the OS login', sc.identity.project === 'research' && sc.identity.user === 'robin', JSON.stringify(sc.identity))
 
 // gossip: B sees A's sub-peers with project/user
 await sleep(500)

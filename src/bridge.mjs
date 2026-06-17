@@ -45,7 +45,11 @@ const REALM = process.env.AI_BRIDGE_REALM || CFG.realm || 'default'
 // a Code session may classify its own process via env; absent ⇒ the process is infrastructure
 // (gateway/relay), which carries no project (see "participants vs infrastructure").
 const PROC_PROJECT = process.env.AI_BRIDGE_PROJECT || CFG.project || null
-const PROC_USER = process.env.AI_BRIDGE_USER || CFG.user || null
+// `user` is the human running this machine, derived from the OS-authenticated login — NOT
+// session-declarable, so it can't be fabricated or misaligned. AI_BRIDGE_USER overrides it (tests +
+// headless deployments). On a local Windows account this is the account name (e.g. "robin").
+const OS_USER = (() => { try { return os.userInfo().username || null } catch { return process.env.USERNAME || process.env.USER || null } })()
+const PROC_USER = process.env.AI_BRIDGE_USER || OS_USER
 
 const ALIASES = CFG.aliases || {}          // hostname -> friendly alias (persisted)
 function persistAliases() {
@@ -1054,7 +1058,7 @@ const TOOLS = [
       parent: { type: 'string', description: 'parent sub-peer handle (for subagents): full id, handle suffix, or unique name' },
       client: { type: 'string', description: 'your client kind, e.g. "claude-code" or "cowork" — code clients default to push (streaming) delivery' },
       project: { type: 'string', description: 'the project this conversation is for (classifies the session; inherited from parent if omitted)' },
-      user: { type: 'string', description: 'the human supervising this session (audit identity; inherited from parent if omitted)' },
+      user: { type: 'string', description: 'IGNORED — the human is taken from the OS-authenticated login, not session-declared (prevents fabrication/misalignment).' },
       mode: { type: 'string', description: 'optional override: push | poll' },
       ttl_minutes: { type: 'number', description: 'idle liveness TTL; default 720, or 60 when parent is set' } }, required: ['name', 'secret'] } },
   { name: 'deregister', description: 'Remove a sub-peer (subagents: call before returning). Children are removed too; unread messages dead-letter to the parent (or the process inbox).',
@@ -1175,11 +1179,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const declaredClient = String(a.client || '').trim() || (CLIENT ? CLIENT.name : null)
       const ckind = clientKind(declaredClient)
       const mode = (a.mode === 'push' || a.mode === 'poll') ? a.mode : (ckind === 'code' ? 'push' : null)
-      // mandatory classification (project, user) — a child inherits its parent's project/user unless given.
+      // mandatory classification: project is session-declared (it's about the work); user is the
+      // OS-authenticated login (a.user is IGNORED — can't be fabricated). A child inherits its parent's.
       const parentSp = parent ? subpeers.get(parent) : null
       const ident = profile.identity.classify({
         project: a.project || (parentSp && parentSp.identity.project) || PROC_PROJECT,
-        user: a.user || (parentSp && parentSp.identity.user) || PROC_USER, realm: REALM })
+        user: (parentSp && parentSp.identity.user) || PROC_USER, realm: REALM })
       subpeers.set(id, { id, name, secretHash: sha(secret), parent, kind: 'subpeer',
         created: Date.now(), last_seen: Date.now(), ttl_ms: ttl * 60000, mode,
         client: declaredClient, client_kind: ckind,
