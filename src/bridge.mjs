@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.8.4'             // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.9.0'             // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -92,10 +92,13 @@ const onFrames = profile.transport.frame.onFrames
 const discovery = profile.discovery              // Discovery facet (§7): cross-host peer-hub enumeration
 const persistence = profile.persistence          // Persistence facet (§12): durable mailboxes / claims / retained
 const PERSIST = profile.names.persistence !== 'none'
+let procClaimsRehydrated = false                 // §12: restore THIS session's own (non-sub-peer) claims once, on connect
 if (PERSIST) {                                   // park/retain/persistent-claims become real once persistence is on
   CAPS.park = true; CAPS.retain = true; CAPS.persistent_claims = true
-  setInterval(() => { persistence.mailbox.gcAll({ ttlMs: persistence.limits.messageTtlMs }).catch(() => {}) },
-    Number(process.env.AI_BRIDGE_PERSIST_GC_MS) || 1800000).unref()   // age out parked mail whose owner never returns
+  setInterval(() => {                            // age out parked mail + abandoned claims whose owner never returned
+    persistence.mailbox.gcAll({ ttlMs: persistence.limits.messageTtlMs }).catch(() => {})
+    persistence.claims.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
+  }, Number(process.env.AI_BRIDGE_PERSIST_GC_MS) || 1800000).unref()
 }
 // the process's own classification (null ⇒ infrastructure, not a participant)
 const PROC_IDENT = (PROC_PROJECT && PROC_USER) ? profile.identity.classify({ project: PROC_PROJECT, user: PROC_USER, realm: REALM }) : null
@@ -341,6 +344,32 @@ function allTopicEntries() {
   }
   for (const e of myTopics.values()) add(e)
   return out
+}
+// §12 durable claims: write/refresh a claim's durable record under its holder identity (volatile holder id
+// is NOT stored — it's re-bound on rehydrate). The refreshed_at acts as the lease the hard-expiry GC reads.
+function persistClaim(identity, project, topic, rec) {
+  if (!(PERSIST && identity)) return
+  persistence.claims.put(project, topic, identity, {
+    pattern: topic, role: 'owner', description: rec.description || '', exclusive: !!rec.exclusive, icon: rec.icon || null,
+    holder_name: rec.holder_name || null, project, realm: rec.realm || REALM,
+    claimed_at: rec.claimed_at || new Date().toISOString(), persistent: true, refreshed_at: new Date().toISOString(),
+  }).catch(() => {})
+}
+// Re-assert a durable claim under a (new) holder id when its identity returns. Won't clobber a live
+// exclusive owner that took the topic while this holder was away — that's left for explicit negotiation.
+function rehydrateClaim(rec, holderId, holderName, identity) {
+  const topic = rec.pattern
+  if (!topic || isWildcard(topic)) return false
+  const proj = rec.project || identity.project || 'unclassified'
+  const conflict = allTopicEntries().find(e => e.role === 'owner' && e.holder !== holderId &&
+    projKey(e.project) === projKey(proj) && patternsOverlap(e.pattern, topic) && (e.exclusive || rec.exclusive))
+  if (conflict) return false
+  const k = `${holderId}|owner|${patternKey(topic)}`
+  myTopics.set(k, { pattern: topic, role: 'owner', description: rec.description || '', exclusive: !!rec.exclusive,
+    icon: rec.icon || null, holder: holderId, holder_name: holderName, project: proj,
+    realm: rec.realm || identity.realm || REALM, claimed_at: rec.claimed_at || new Date().toISOString() })
+  persistClaim(identity, proj, topic, myTopics.get(k))   // refresh the lease + re-anchor to the live holder
+  return true
 }
 // topics are project-scoped (§6). A bare ref resolves in the asker's project; "@project/path" or
 // "@realm:project/path" targets another project's topic (cross-project send is then consent-gated).
@@ -1207,6 +1236,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           for (const p of parked) if (p && p.record && p.record.id) q0.items.push(p.record)
           if (parked.length) emitTraceRaw({ dir: 'recv', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: parked.length, note: `${parked.length} parked message(s) restored`, envelope_id: null })
         } catch { }
+        try {                                          // §12: re-assert this identity's durable claims (responsibilities)
+          const dc = await persistence.claims.byHolder(ident)
+          let n = 0; for (const rec of dc) if (rehydrateClaim(rec, id, name, ident)) n++
+          if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: n, note: `${n} responsibility(ies) restored`, envelope_id: null }) }
+        } catch { }
       }
       announceSubpeers()
       emitTraceRaw({ dir: 'con', verb: 'connect', from: id, from_name: name, to: SESSION, size: 0,
@@ -1231,16 +1265,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // offers it as a target. Banned for BOTH exclusive and shared claims. (subscribe stays wildcard-capable:
       // watching a subtree is fine; owning one is not.) Decision 2026-06-16 (design review).
       if (isWildcard(topic)) return ok({ ok: false, code: 'wildcard-claim', hint: "claim the concrete base instead, e.g. 'retail' not 'retail/#'" })
-      if (a.persistent) return ok({ ok: false, code: 'unsupported', what: 'persistent claims (offline delivery, T14)' })
       if (a.force) return ok({ ok: false, code: 'unsupported', what: 'forced takeover (offline delivery, T14)' })
+      // §12: when persistence is on a claim is durable BY DEFAULT (responsibilities survive a restart);
+      // opt out with persistent:false. Without persistence the flag is a no-op (nothing to write).
+      const persistent = PERSIST && a.persistent !== false
       const description = String(a.description || '')
       const exclusive = !!a.exclusive
       const icon = String(a.icon || '').trim().slice(0, 16) || null
-      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM
+      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM, holderIdentity = PROC_IDENT
       if (a.as) {
         const { sp, err } = authSub(String(a.as), a.secret)
         if (err) return ok(err)
-        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderRealm = sp.identity?.realm || REALM
+        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderRealm = sp.identity?.realm || REALM; holderIdentity = sp.identity
       }
       // T6/§6: an exclusive claim conflicts with overlapping claims IN THE SAME PROJECT only
       const others = allTopicEntries().filter(e => e.role === 'owner' && e.holder !== holder && projKey(e.project) === projKey(holderProject) && patternsOverlap(e.pattern, topic))
@@ -1253,22 +1289,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const reclaim = myTopics.has(k)
       myTopics.set(k, { pattern: topic, role: 'owner', description, exclusive, icon, holder, holder_name: holderName, project: holderProject, realm: holderRealm,
         claimed_at: reclaim ? myTopics.get(k).claimed_at : new Date().toISOString() })
+      if (persistent) persistClaim(holderIdentity, holderProject, topic, myTopics.get(k))   // §12: durable responsibility
       announceTopics()
       emitTraceRaw({ dir: 'con', verb: 'claim', from: holder, from_name: holderName, to: SESSION, size: 0,
-        note: `${reclaim ? 're-claimed' : 'claimed'} "${topic}"${exclusive ? ' (exclusive)' : ''}${icon ? ' ' + icon : ''}`, envelope_id: null })
-      return ok({ ok: true, topic, holder, exclusive, icon, reclaimed: reclaim || undefined })
+        note: `${reclaim ? 're-claimed' : 'claimed'} "${topic}"${exclusive ? ' (exclusive)' : ''}${persistent ? ' [durable]' : ''}${icon ? ' ' + icon : ''}`, envelope_id: null })
+      return ok({ ok: true, topic, holder, exclusive, icon, persistent: persistent || undefined, reclaimed: reclaim || undefined })
     }
     case 'release_topic': {
       const topic = String(a.topic || '').trim()
-      let holder = SESSION, holderName = NAME
+      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderIdentity = PROC_IDENT
       if (a.as) {
         const { sp, err } = authSub(String(a.as), a.secret)
         if (err) return ok(err)
-        holder = sp.id; holderName = sp.name
+        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderIdentity = sp.identity
       }
       const k = `${holder}|owner|${patternKey(topic)}`
       if (!myTopics.has(k)) return ok({ ok: false, code: 'not-held', topic, holder })
       myTopics.delete(k)
+      if (PERSIST && holderIdentity) persistence.claims.remove(holderProject, topic, holderIdentity).catch(() => {})   // §12: drop durable responsibility
       announceTopics()
       emitTraceRaw({ dir: 'con', verb: 'release', from: holder, from_name: holderName, to: SESSION, size: 0,
         note: `released "${topic}"`, envelope_id: null })
@@ -1417,6 +1455,13 @@ mcp.oninitialized = () => {
       note: `client=${CLIENT.name || '?'}@${CLIENT.version || '?'} channel=${channelCapable} mode=${CLIENT.mode}${MODE_OVERRIDE ? ' (override)' : ''}` })
     if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.client = CLIENT.name; r.client_kind = clientKind(CLIENT.name); broadcastRoster() } }
     else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'SET_CLIENT', session: SESSION, client: CLIENT.name })
+    if (PERSIST && PROC_IDENT && !procClaimsRehydrated) {   // §12: restore this session's OWN claims (re-keyed to the new SESSION id)
+      procClaimsRehydrated = true
+      persistence.claims.byHolder(PROC_IDENT).then(dc => {
+        let n = 0; for (const rec of dc) if (rehydrateClaim(rec, SESSION, NAME, PROC_IDENT)) n++
+        if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: SESSION, from_name: NAME, to: SESSION, size: n, note: `${n} responsibility(ies) restored`, envelope_id: null }) }
+      }).catch(() => {})
+    }
   } catch (e) { log('client-detect failed', e.message) }
 }
 

@@ -49,13 +49,18 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   fixture, real clicks via jsdom (44); `test_subpeers.mjs` — registration, secrets, cursors/epochs,
   hierarchy, dead-letter, TTL, cross-process (26); `test_topics.mjs` — claims/icons/exclusive overlap,
   subscribe/publish/send patterns, mandatory subject, encryption roundtrip, reserved-surface codes,
-  wildcard-claim ban (responsibilities are concrete), lifecycle (31); `test_identity.mjs` — realm + project/user classification, child inheritance, gossip
+  wildcard-claim ban (responsibilities are concrete), lifecycle (32); `test_identity.mjs` — realm + project/user classification, child inheritance, gossip
   (13); `test_consent.mjs` — strict/grant/revoke, reply-cap return-traffic (incl. replies that survive
   an expired cap and a later revoke — Decision B), case-insensitive projects, bidirectional,
   request_project_access, project-scoped topics, open mode (36); `test_federation.mjs` — cross-host
   mesh (§7): two bridges discover each other via the `seeds` backend, gossip rosters, deliver
-  envelopes both directions through the gateway splice, and drop a departed host (10). Tests run in
-  place (or from any scratch copy with `node_modules` present); the spawn
+  envelopes both directions through the gateway splice, and drop a departed host (10);
+  `test_persistence.mjs` — persistence facet (§12) units: size-string parser, format-prefixed stable
+  identity keys + both-form lookup, mailbox store/drain/ack/caps/TTL, claims per-holder/byHolder/gcAll,
+  retained newest-wins (28); `test_persist_live.mjs` — live restart proof: a parked message survives a
+  bridge restart and is redelivered to the returning peer (consumed ones aren't), a durable claim
+  rehydrates and is routable on re-register (and stays gone after `release_topic`), incl. a process-held
+  claim (14). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -127,8 +132,9 @@ transport) is **copy a file, implement, register one line** — no core changes.
 
 ## Topics (amendment 2026-06-12 — v1.3.0)
 One hierarchical topic namespace (`/`-separated paths, e.g. `team/reviews`); two
-relationships, fully orthogonal; two message patterns. Everything gossips with the roster and
-**vanishes with its holder** (no persistence until offline delivery lands).
+relationships, fully orthogonal; two message patterns. Everything gossips with the roster. By default a
+topic **vanishes with its holder**; with persistence on (§12, v1.9) a claim is **durable** and
+**rehydrates** when its holder returns (see Persistence below).
 
 - **Subscribe** (interest — open to EVERYONE on any topic; wildcards `+` one level, `#` subtree):
   `subscribe {pattern}`. Exclusivity is about accountability, never watching.
@@ -146,10 +152,13 @@ relationships, fully orthogonal; two message patterns. Everything gossips with t
   description shown in traces/dashboard/channel meta. Omitting it errors (`subject-required`).
   Bodies are AES-256-GCM encrypted (key HKDF-derived from the config `token`); subject/verb/
   routing metadata stay cleartext by design. Trust-domain encryption, not per-pair E2E (D2 later).
-- **Reserved (T14, return `unsupported` for now):** `park` on send (offline parking; `offline` vs
-  `unknown-target` result codes), `retain` on publish, `persistent` + `force` on claims,
-  `set_wake` + WS `kind:"listener"` (wake/doorbell), `capabilities{}` on my_identity/roster is the
-  feature-detection surface.
+- **Persistence (v1.9, §12 — opt-in `AI_BRIDGE_PERSISTENCE=file`):** `persistent` on a claim is now
+  **built** — a claim is durable by default when persistence is on, and rehydrates when its holder
+  re-registers (or, for the session's own claims, on reconnect). Directed messages **auto-park** and are
+  redelivered to a returning peer. Still **reserved** (`unsupported`): `retain` on publish, explicit
+  `park` to a never-registered identity, `force` claim takeover, `set_wake` + WS `kind:"listener"`
+  (wake/doorbell). `capabilities{}` on my_identity/roster is the feature-detection surface (its
+  `park`/`retain`/`persistent_claims` bits flip true when persistence is active).
 - **Pages:** `AIMB_BRIDGE_CFG.subject` (a topic path) is auto-claimed (shared) + auto-subscribed;
   `AIMB_BRIDGE_CFG.subscribe: [patterns]` adds subscriptions; `aimbBridge.publish({topic, subject, …})`
   publishes; page sends require `subject` like everyone else (aimb-bridge-ui `opts.subject`).

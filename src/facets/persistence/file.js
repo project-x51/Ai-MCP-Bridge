@@ -120,9 +120,39 @@ export function create(ctx) {
       for (const f of await readDirSafe(cdir)) { if (!f.endsWith('.claim')) continue; const j = await readJson(path.join(cdir, f)); if (j) out.push(j) }
       return out
     },
+    // every claim FILED BY an identity (across BOTH key forms), so a returning holder can re-assert all of
+    // its responsibilities on register. The record carries its own project/topic, so a lossy slug never strands it.
+    async byHolder(identity) {
+      const { both } = identityKeys(identity, readable)
+      const names = new Set(both.map(k => `${k}.claim`))
+      const out = [], cbase = dir('claims')
+      for (const proj of await readDirSafe(cbase)) {
+        const pdir = path.join(cbase, proj)
+        for (const topic of await readDirSafe(pdir)) {
+          const tdir = path.join(pdir, topic)
+          for (const f of await readDirSafe(tdir)) { if (names.has(f)) { const j = await readJson(path.join(tdir, f)); if (j) out.push(j) } }
+        }
+      }
+      return out
+    },
     async remove(project, topic, identity) {
       const { both } = identityKeys(identity, readable)
       for (const key of new Set(both)) { try { await fsp.unlink(dir('claims', slug(project), slug(topic), `${key}.claim`)) } catch {} }
+    },
+    // hard expiry: a claim whose holder hasn't re-registered within hardExpiryMs is abandoned. Returns count dropped.
+    async gcAll({ now = Date.now(), maxAgeMs = 0 } = {}) {
+      if (!maxAgeMs) return 0
+      let dropped = 0, cbase = dir('claims')
+      for (const proj of await readDirSafe(cbase)) for (const topic of await readDirSafe(path.join(cbase, proj))) {
+        const tdir = path.join(cbase, proj, topic)
+        for (const f of await readDirSafe(tdir)) {
+          if (!f.endsWith('.claim')) continue
+          const file = path.join(tdir, f), j = await readJson(file)
+          const t = j && Date.parse(j.refreshed_at || j.claimed_at || '')
+          if (j && t && now - t > maxAgeMs) { try { await fsp.unlink(file) } catch {} dropped++ }
+        }
+      }
+      return dropped
     },
   }
 

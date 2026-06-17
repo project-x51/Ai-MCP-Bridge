@@ -66,6 +66,22 @@ await fH.claims.remove('AIMB', 'Bridge', B)
 check('claims: remove one holder', (await fH.claims.read('AIMB', 'Bridge')).length === 1)
 await fH.claims.put('AIMB', 'online-tool/retail', A, { topic: 'online-tool/retail', holder: 'A' })
 check('claims: topic path with slash stored + read', (await fH.claims.read('AIMB', 'online-tool/retail')).length === 1)
+// byHolder: every claim filed by an identity, across projects/topics (drives rehydrate-on-register)
+const byA = await fH.claims.byHolder(A)
+check('claims.byHolder returns all of one holder\'s claims', byA.length === 2 && byA.every(r => r.holder === 'A'), JSON.stringify(byA.map(r => r.topic)))
+check('claims.byHolder is holder-scoped (B removed earlier -> none)', (await fH.claims.byHolder(B)).length === 0)
+// both-form lookup: a claim written readable is still found by a hashed-mode drain
+await fR.claims.put('AIMB', 'flip', A, { topic: 'flip', holder: 'A' })
+check('claims.byHolder finds claims under the other key form', (await fH.claims.byHolder(A)).some(r => r.topic === 'flip'))
+// gcAll: a claim past hard expiry (stale refreshed_at) is dropped; a fresh one survives. Own dir so the
+// drop COUNT is deterministic (the shared root above holds unrelated claims).
+const fG = create({ HERE: tmp, CFG: { persistence: { dir: './gctest' } }, log: () => {} })
+const gid = { ...ID, name: 'StaleClaim' }
+await fG.claims.put('AIMB', 'old-resp', gid, { topic: 'old-resp', refreshed_at: '2000-01-01T00:00:00.000Z' })
+await fG.claims.put('AIMB', 'fresh-resp', gid, { topic: 'fresh-resp', refreshed_at: new Date(Date.now() - 1000).toISOString() })
+const droppedC = await fG.claims.gcAll({ maxAgeMs: 86400000 })
+const gAfter = (await fG.claims.byHolder(gid)).map(r => r.topic)
+check('claims.gcAll drops claims past hard expiry only', droppedC === 1 && gAfter.includes('fresh-resp') && !gAfter.includes('old-resp'), 'dropped=' + droppedC + ' after=' + JSON.stringify(gAfter))
 
 // ---- retained: newest publisher value wins ----
 await fH.retained.put('AIMB', 'news', A, { ts: '2026-06-17T00:00:00.000Z', body: 'old' })

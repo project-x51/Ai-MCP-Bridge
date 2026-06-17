@@ -54,14 +54,16 @@ check('concrete sub-path independently claimable (no subtree ownership)', c5.ok 
 const c6 = await call(B, 'claim_topic', { topic: 'bridge/admin', description: 'updated', exclusive: true, icon: '*B*' })
 check('re-claim idempotent', c6.ok === true && c6.reclaimed === true, JSON.stringify(c6))
 
-// --- reserved surface returns unsupported (T14)
+// --- persistent claims are ACCEPTED (durable only when a persistence facet is on; a no-op here, §12),
+//     while the still-reserved surface returns unsupported (T14)
 const u1 = await call(B, 'claim_topic', { topic: 'x/y', persistent: true })
 const u2 = await call(B, 'claim_topic', { topic: 'x/y', force: true })
 const u3 = await call(B, 'publish', { topic: 'x/y', subject: 's', message: 'm', retain: true })
 const u4 = await call(B, 'send_to_peer', { target: idA.session, subject: 's', message: 'm', park: true })
 const u5 = await call(B, 'set_wake', { mode: 'exit-on-message' })
-check('persistent/force/retain/park/set_wake all unsupported', [u1, u2, u3, u4, u5].every(r => r.ok === false && r.code === 'unsupported'),
-  JSON.stringify([u1.code, u2.code, u3.code, u4.code, u5.code]))
+check('persistent claim accepted (no-op without a persistence facet)', u1.ok === true && !u1.persistent, JSON.stringify(u1))
+check('force/retain/park/set_wake still unsupported', [u2, u3, u4, u5].every(r => r.ok === false && r.code === 'unsupported'),
+  JSON.stringify([u2.code, u3.code, u4.code, u5.code]))
 
 // --- send to topic owners (T3/T5) + encryption roundtrip (T8)
 const s1 = await call(A, 'send_to_peer', { target: 'topic:bridge/admin', subject: 'bridge question', message: 'secret payload 42' })

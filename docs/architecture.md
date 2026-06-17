@@ -446,15 +446,28 @@ Forward-compatibility features exist in the protocol so they land without churn.
 `{ok:false, code:"unsupported"}` until built, and is advertised via the `capabilities{}` object on
 `my_identity` / the roster (feature-detection, not version-sniffing):
 
-- **wake** — `set_wake` + a WS `listener` attach point (doorbell for idle Code sessions).
-- **park** (offline send) + **retain** (offline publish) + **persistent claims** + **force** (operator
-  takeover of an offline holder) — the durable-delivery feature, now **designed in §12 (Persistence)**;
-  also the home for durable reply-caps (§5).
+- **wake** — `set_wake` + a WS `listener` attach point (doorbell for idle Code sessions). *(reserved)*
+- **park** (durable messages) + **persistent claims** (durable responsibilities) — **built in v1.9
+  (§12)**; the `park`/`retain`/`persistent_claims` capability bits flip true when a `persistence` facet
+  is active. `persistent` claims are accepted always (a no-op without persistence).
+- **retain** (durable last-event-per-topic) + **force** (operator takeover of an offline holder) —
+  still **reserved**; also the home for durable reply-caps (§5).
 - **federation** — the `federation` config block + translator (§8).
 
 ---
 
-## 12. Persistence — durable messages & responsibilities (designed — pending)
+## 12. Persistence — durable messages & responsibilities (partly built — v1.9)
+
+> **Status (v1.9):** **built** — the `persistence` facet (`none` default / `file`), stable
+> format-prefixed identity keys with both-form lookup, **durable mailboxes** (auto-park on delivery →
+> redelivered to a returning peer on re-register; cursor-ack drops the durable copy; TTL + per-mailbox
+> caps with drop-and-log), and **durable responsibilities** (a claim is durable by default when
+> persistence is on; rehydrated on re-register for sub-peers and on connect for the session's own
+> claims; `release_topic` drops it; hard-expiry GC; won't clobber a live exclusive owner on return).
+> Enable with `profile.persistence:"file"` or `AI_BRIDGE_PERSISTENCE=file`; bodies stay encrypted at
+> rest. **Pending** — `retain` (durable last-event-per-topic), explicit `park` to a never-registered
+> identity, and the full lease → dormant → displaced negotiation (the v1.9 return path re-asserts a
+> holder's own claims but defers multi-claimant conflict resolution to explicit `request_responsibility`).
 
 Two features over one substrate: **durable messages** (a message to an offline peer survives and is
 delivered when it returns) and **durable responsibilities** (a topic claim survives a restart). Both
@@ -583,10 +596,17 @@ the whole store; per-mailbox caps are the primary defence.
   delivery via the gateway CONNECT-splice; bind/advertise address split. (Also live: reply-cap
   **Decision B** — replies always get through, §5.) *Follow-ups:* direct session pair-dial (vs the
   gateway splice) and cross-host HA re-election.
-- **Designed — pending:** persistence (§12) — durable messages (park + retain) and durable
-  responsibilities (persistent claims with the lease → dormant → displaced lifecycle + conflict-on-return),
-  over a shared-folder `persistence` facet, encrypted at rest; config knobs + the store skeleton
-  scaffolded (`config.example.json`, `persistence/`).
+- **Built (v1.9):** persistence (§12) over a shared-folder `persistence` facet (`none` default /
+  `file`), encrypted at rest — **durable mailboxes** (auto-park on delivery; redelivered to a returning
+  peer on re-register; cursor-ack drops the durable copy; TTL + per-mailbox caps drop-and-log) and
+  **durable responsibilities** (claims durable by default when persistence is on; rehydrated on
+  re-register / on connect; `release_topic` drops them; hard-expiry GC; no-clobber on return). Stable
+  format-prefixed identity keys with both-form lookup. Opt in with `AI_BRIDGE_PERSISTENCE=file`. Also:
+  user identity is taken from the **OS login** (`os.userInfo()`), not a session-declared value, so it
+  can't be fabricated. Live-verified by `test_persist_live.mjs` (restart → redelivery / rehydrate).
+- **Designed — pending:** `retain` (durable last-event-per-topic, §12); explicit `park` to a
+  never-registered identity; the full claim lease → dormant → displaced lifecycle with
+  conflict-on-return negotiation (v1.9 re-asserts a holder's own claims only).
 - **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,
   `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§9); `force` operator-takeover of
   an offline holder; durable reply-caps; the wake doorbell.

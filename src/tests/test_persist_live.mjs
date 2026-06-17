@@ -15,11 +15,11 @@ let pass = 0, fail = 0
 const check = (n, c, e = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, e)) }
 const persistDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aimb-live-'))
 
-async function spawnBridge(port) {
+async function spawnBridge(port, extraEnv = {}) {
   const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR,
     env: { ...process.env, AI_BRIDGE_NAME: 'PBridge', AI_BRIDGE_PORT: String(port), AI_BRIDGE_WS_PORT: String(port + 1),
       AI_BRIDGE_TOKEN: TOKEN, AI_BRIDGE_USER: 'robin', AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: persistDir,
-      AI_BRIDGE_SWEEP_MS: '5000' }, stderr: 'pipe' })
+      AI_BRIDGE_SWEEP_MS: '5000', ...extraEnv }, stderr: 'pipe' })
   const client = new Client({ name: 't-persist', version: '0' }, { capabilities: {} })
   await client.connect(transport)
   return { client, transport }
@@ -61,6 +61,56 @@ await call(B, 'register_self', { name: 'Bolletta', secret: 'sb', project: 'share
 await sleep(200)
 const in2 = await call(B, 'inbox', { for: 'Bolletta', secret: 'sb', cursor: 0 })
 check('consumed messages do NOT redeliver after a later restart', in2.messages.length === 0, JSON.stringify(in2.messages.map(m => m.body)))
+await B.transport.close()
+await sleep(700)
+
+// ============================ DURABLE CLAIMS (responsibilities survive a restart) ============================
+// ---- run 4: Bolletta claims a topic (durable by default), then the bridge dies ----
+B = await spawnBridge(7956); await sleep(700)
+await call(B, 'register_self', { name: 'Bolletta', secret: 'sb', project: 'shared' })
+const cl = await call(B, 'claim_topic', { topic: 'retail/pricing', as: 'Bolletta', secret: 'sb', exclusive: true })
+check('claim is durable by default when persistence is on', cl.ok === true && cl.persistent === true, JSON.stringify(cl))
+await sleep(300)
+await B.transport.close()
+await sleep(700)
+
+// ---- run 5: re-register Bolletta -> claim rehydrates and is routable; a directed send reaches her ----
+B = await spawnBridge(7958); await sleep(700)
+await call(B, 'register_self', { name: 'Bolletta', secret: 'sb', project: 'shared' })
+await call(B, 'register_self', { name: 'Sender', secret: 'ss', project: 'shared' })
+await sleep(300)
+const ds = await call(B, 'send_to_peer', { target: 'topic:retail/pricing', subject: 'q', message: 'who owns pricing?', as: 'Sender', secret: 'ss' })
+check('rehydrated claim is routable (directed topic send finds an owner)', ds.ok === true && ds.code !== 'no-owner', JSON.stringify(ds))
+await sleep(200)
+const cin = await call(B, 'inbox', { for: 'Bolletta', secret: 'sb', cursor: 0 })
+check('topic-directed message reached the rehydrated owner', cin.messages.some(m => m.body === 'who owns pricing?'), JSON.stringify(cin.messages.map(m => m.body)))
+const rel = await call(B, 'release_topic', { topic: 'retail/pricing', as: 'Bolletta', secret: 'sb' })
+check('release succeeds', rel.ok === true, JSON.stringify(rel))
+await sleep(300)
+await B.transport.close()
+await sleep(700)
+
+// ---- run 6: after release, the claim must NOT rehydrate ----
+B = await spawnBridge(7960); await sleep(700)
+await call(B, 'register_self', { name: 'Bolletta', secret: 'sb', project: 'shared' })
+await call(B, 'register_self', { name: 'Sender', secret: 'ss', project: 'shared' })
+await sleep(300)
+const ds2 = await call(B, 'send_to_peer', { target: 'topic:retail/pricing', subject: 'q', message: 'still there?', as: 'Sender', secret: 'ss' })
+check('released claim does NOT rehydrate (no owner after release)', ds2.ok === false && ds2.code === 'no-owner', JSON.stringify(ds2))
+await B.transport.close()
+await sleep(700)
+
+// ---- run 7-8: a PROCESS claim (held by the session itself, no `as`) also rehydrates across a restart ----
+B = await spawnBridge(7962, { AI_BRIDGE_PROJECT: 'ops' }); await sleep(700)
+const pc = await call(B, 'claim_topic', { topic: 'ops/alerts' })
+check('process claim accepted + durable', pc.ok === true && pc.persistent === true, JSON.stringify(pc))
+await sleep(300)
+await B.transport.close()
+await sleep(700)
+B = await spawnBridge(7964, { AI_BRIDGE_PROJECT: 'ops' }); await sleep(900)   // rehydrate fires on client connect
+const idp = await call(B, 'my_identity')
+check('process claim rehydrated into this session topics after restart',
+  (idp.topics || []).some(t => t.pattern === 'ops/alerts' && t.role === 'owner'), JSON.stringify((idp.topics || []).map(t => t.pattern)))
 await B.transport.close()
 
 console.log(`\n${pass} passed, ${fail} failed`)

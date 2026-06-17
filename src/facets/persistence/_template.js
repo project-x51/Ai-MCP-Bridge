@@ -18,11 +18,14 @@ export function create(ctx) {
       async drain(identity) { return [] },         // [{ envId, ts, record, _file, _size }] across both key forms, oldest first
       async ack(identity, envId) {},               // delete after delivery
       async gc(identity, opts) { return [] },      // enforce TTL + caps; return dropped [{envId, why}] for logging
+      async gcAll(opts) { return 0 },              // sweep EVERY mailbox for TTL-expired messages; return count dropped
     },
     claims: {
       async put(project, topic, identity, record) {},
       async read(project, topic) { return [] },    // every holder's claim record for the topic (ownership computed by the caller)
+      async byHolder(identity) { return [] },      // every claim filed by an identity, so it can re-assert them on register
       async remove(project, topic, identity) {},
+      async gcAll(opts) { return 0 },              // drop claims past hard expiry (holder never returned); return count dropped
     },
     retained: {
       async put(project, topic, identity, record) {},
