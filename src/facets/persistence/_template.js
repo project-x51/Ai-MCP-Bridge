@@ -1,0 +1,33 @@
+// Persistence facet (docs/architecture.md §12) — durable mailboxes (park), retained topic values, and
+// durable claim records, over a shared folder the realm's machines all see. Copy this to <name>.js and
+// implement the three stores; register it in facets/index.js. ctx = { CFG, HERE, REALM, env, log, ... }.
+//
+// Design invariants the impl MUST preserve (so it's conflict-free even on a no-lock backend like Dropbox):
+//   - one writer per file; names are content-addressed (envelope id) or per-writer (identity key)
+//   - messages are write-once; a claim/retained file is rewritten only by its own holder/publisher
+//   - effective state (owner, retained value, mailbox contents) is COMPUTED from the file set
+//   - atomic writes (temp + rename); deletes idempotent
+// Bodies arrive already-encrypted (cipher facet) and claims already-signed (capSigner) — this facet just
+// stores opaque records. Identity = { realm, project, user, name }; keys are format-prefixed + stable.
+export const meta = { facet: 'persistence', name: '_template' }
+export function create(ctx) {
+  return {
+    meta, root: null, readable: false,
+    mailbox: {
+      async put(identity, envId, record) {},      // park one message
+      async drain(identity) { return [] },         // [{ envId, ts, record, _file, _size }] across both key forms, oldest first
+      async ack(identity, envId) {},               // delete after delivery
+      async gc(identity, opts) { return [] },      // enforce TTL + caps; return dropped [{envId, why}] for logging
+    },
+    claims: {
+      async put(project, topic, identity, record) {},
+      async read(project, topic) { return [] },    // every holder's claim record for the topic (ownership computed by the caller)
+      async remove(project, topic, identity) {},
+    },
+    retained: {
+      async put(project, topic, identity, record) {},
+      async read(project, topic) { return null },  // the newest publisher value
+    },
+    limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
+  }
+}

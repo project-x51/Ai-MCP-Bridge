@@ -1,0 +1,78 @@
+// Persistence facet (§12) unit tests: the size-string parser, format-prefixed stable identity keys
+// (+ both-form lookup so flipping devReadableKeys strands nothing), and the conflict-free
+// mailbox/claims/retained file store (content-addressing, caps, TTL gc). No bridge spawn — pure facet.
+import { create, parseSize, identityKeys } from '../facets/persistence/file.js'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+let pass = 0, fail = 0
+const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aimb-persist-'))
+const mk = (readable = false) => create({ HERE: tmp, CFG: { persistence: { dir: '.', devReadableKeys: readable, mailboxMaxSize: '1MB' } }, log: () => {} })
+const ID = { realm: 'default', project: 'AIMB', user: 'Robin', name: 'Bridget' }
+
+// ---- size-string parser ----
+check('parseSize 16MB', parseSize('16MB') === 16 * 1024 * 1024)
+check('parseSize decimals + space', parseSize('12.5 MB') === Math.floor(12.5 * 1024 * 1024))
+check('parseSize 1 GB', parseSize('1 GB') === 1024 ** 3)
+check('parseSize unitless bytes', parseSize('1048576') === 1048576)
+check('parseSize kb/k lowercase', parseSize('1kb') === 1024 && parseSize('2 k') === 2048)
+check('parseSize number passthrough', parseSize(4096) === 4096)
+check('parseSize invalid -> null', parseSize('') === null && parseSize('big') === null && parseSize('-5MB') === null)
+check('config size parsed into limits', mk(false).limits.mailboxMaxBytes === 1024 * 1024)
+
+// ---- format-prefixed stable keys ----
+const kH = identityKeys(ID, false), kR = identityKeys(ID, true)
+check('hashed key h- prefix + stable', kH.primary.startsWith('h-') && identityKeys(ID, false).primary === kH.primary)
+check('readable key r- + slug + 4hash', kR.primary.startsWith('r-') && kR.primary.includes('Bridget') && /-[0-9a-f]{4}$/.test(kR.primary))
+check('different identity -> different key', identityKeys({ ...ID, name: 'Other' }, false).primary !== kH.primary)
+check('both forms returned regardless of mode', kH.both.length === 2 && kH.both.join() === kR.both.join())
+
+// ---- mailbox round-trip + content-addressing ----
+const fR = mk(true), fH = mk(false)
+await fR.mailbox.put(ID, 'e1', { ts: '2026-06-17T00:00:00.000Z', body: 'one' })
+await fR.mailbox.put(ID, 'e2', { ts: '2026-06-17T00:00:01.000Z', body: 'two' })
+await fR.mailbox.put(ID, 'e1', { ts: '2026-06-17T00:00:00.000Z', body: 'one' })   // same envId -> idempotent
+const d = await fR.mailbox.drain(ID)
+check('mailbox drains parked messages', d.length === 2, 'len=' + d.length)
+check('content-addressed: duplicate envId not double-stored', d.filter(m => m.envId === 'e1').length === 1)
+check('drain oldest-first', d[0].envId === 'e1' && d[1].envId === 'e2')
+
+// ---- both-form lookup: written readable, drained hashed -> still found ----
+check('flip devReadableKeys: mail under other prefix still found', (await fH.mailbox.drain(ID)).length === 2)
+
+// ---- ack ----
+await fR.mailbox.ack(ID, 'e1')
+check('ack removes the message', (await fR.mailbox.drain(ID)).length === 1)
+
+// ---- caps (drop oldest) + TTL gc, drops reported for logging ----
+const cid = { ...ID, name: 'CapTest' }
+for (let i = 0; i < 5; i++) await fH.mailbox.put(cid, 'c' + i, { ts: `2026-06-17T00:00:0${i}.000Z`, body: i })
+const dCount = await fH.mailbox.gc(cid, { maxCount: 3 })
+check('gc drops oldest over count cap + reports them', dCount.length === 2 && dCount.every(x => x.why === 'count'), JSON.stringify(dCount))
+check('gc leaves exactly the cap', (await fH.mailbox.drain(cid)).length === 3)
+const tid = { ...ID, name: 'TtlTest' }
+await fH.mailbox.put(tid, 'old', { ts: '2000-01-01T00:00:00.000Z', body: 'stale' })
+const dTtl = await fH.mailbox.gc(tid, { ttlMs: 86400000 })
+check('gc drops expired by ttl', dTtl.length === 1 && dTtl[0].why === 'ttl' && (await fH.mailbox.drain(tid)).length === 0)
+
+// ---- claims: per-holder files, ownership computed by caller ----
+const A = { ...ID, name: 'A' }, B = { ...ID, name: 'B' }
+await fH.claims.put('AIMB', 'Bridge', A, { topic: 'Bridge', holder: 'A', claimed_at: '2026-06-17T00:00:00Z' })
+await fH.claims.put('AIMB', 'Bridge', B, { topic: 'Bridge', holder: 'B', claimed_at: '2026-06-17T00:00:01Z' })
+check('claims: per-holder files, read returns all claimants', (await fH.claims.read('AIMB', 'Bridge')).length === 2)
+await fH.claims.remove('AIMB', 'Bridge', B)
+check('claims: remove one holder', (await fH.claims.read('AIMB', 'Bridge')).length === 1)
+await fH.claims.put('AIMB', 'online-tool/retail', A, { topic: 'online-tool/retail', holder: 'A' })
+check('claims: topic path with slash stored + read', (await fH.claims.read('AIMB', 'online-tool/retail')).length === 1)
+
+// ---- retained: newest publisher value wins ----
+await fH.retained.put('AIMB', 'news', A, { ts: '2026-06-17T00:00:00.000Z', body: 'old' })
+await fH.retained.put('AIMB', 'news', B, { ts: '2026-06-17T00:00:05.000Z', body: 'new' })
+const ret = await fH.retained.read('AIMB', 'news')
+check('retained: newest value wins', !!ret && ret.body === 'new', JSON.stringify(ret))
+
+console.log(`\n${pass} passed, ${fail} failed`)
+try { fs.rmSync(tmp, { recursive: true, force: true }) } catch {}
+process.exit(fail ? 1 : 0)
