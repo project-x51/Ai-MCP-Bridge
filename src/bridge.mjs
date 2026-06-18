@@ -91,6 +91,8 @@ const sendFrame = profile.transport.frame.send   // Transport framing
 const onFrames = profile.transport.frame.onFrames
 const discovery = profile.discovery              // Discovery facet (§7): cross-host peer-hub enumeration
 const persistence = profile.persistence          // Persistence facet (§12): durable mailboxes / claims / retained
+const authorizer = profile.authorizer            // Authorizer facet (§16): human-in-the-loop confirmation (none/script/hello)
+const ALLOW_CROSS_USER = CFG.allowCrossUserTakeover === true   // §16 global: may a DIFFERENT user take over a dormant topic after grace?
 const PERSIST = profile.names.persistence !== 'none'
 let procClaimsRehydrated = false                 // §12: restore THIS session's own (non-sub-peer) claims once, on connect
 if (PERSIST) {                                   // park/retain/persistent-claims become real once persistence is on
@@ -393,8 +395,60 @@ function persistClaim(identity, project, topic, rec) {
   persistence.claims.put(project, topic, identity, {
     pattern: topic, role: 'owner', description: rec.description || '', exclusive: !!rec.exclusive, icon: rec.icon || null,
     holder_name: rec.holder_name || null, project, realm: rec.realm || REALM,
+    user: identity.user || null, name: identity.name || null,         // §16: full identity so an OFFLINE owner can be parked to
+    announce_offline: !!rec.announce_offline,                          // §16: owner opted in to telling senders it's offline
+    grace_minutes: rec.grace_minutes ?? null, allow_other_user: rec.allow_other_user ?? null,   // §16: per-claim takeover policy
     claimed_at: rec.claimed_at || new Date().toISOString(), persistent: true, refreshed_at: new Date().toISOString(),
   }).catch(() => {})
+}
+// reconstruct the holder identity (realm:project:user:name) from a durable claim record, so a send to an
+// OFFLINE owner can be parked to the right mailbox. Needs user+name (added to the record above).
+function claimIdentity(rec, project) {
+  if (!rec || !rec.name) return null
+  return { realm: rec.realm || REALM, project: rec.project || project || 'unclassified', user: rec.user || 'unknown', name: rec.name }
+}
+// is the identity behind a durable claim record currently REGISTERED (live) on this host? (a live owner is
+// governed by the in-RAM `blocker` check; only a NOT-live owner is "dormant" for §16 takeover purposes)
+function isIdentityLive(rec) {
+  const want = `${projKey(rec.project)}|${rec.user || ''}|${rec.name || ''}`
+  for (const sp of subpeers.values()) if (sp.identity && `${projKey(sp.identity.project)}|${sp.identity.user || ''}|${sp.name || ''}` === want) return true
+  if (PROC_IDENT && `${projKey(PROC_IDENT.project)}|${PROC_IDENT.user || ''}|${HOSTNAME}` === want) return true
+  return false
+}
+// §16 re-claim conflict: a claimant wants `topic`, but a DORMANT (offline) durable owner holds an
+// overlapping exclusive claim. Same-user -> human confirmation via the authorizer (Hello in prod, script in
+// tests). Cross-user -> grace-then-displaceable, governed by the per-claim policy then the global config.
+// Returns null/{ok:true} to allow (displacing the dormant claim), or {ok:false, code:'held'} to block.
+async function resolveDormantConflict(topic, holderIdentity, holderProject, exclusive) {
+  if (!PERSIST) return null
+  let recs = []
+  try { recs = await persistence.claims.read(holderProject, topic) } catch { return null }
+  for (const rec of recs) {
+    if (!rec || rec.pattern !== topic) continue
+    const sameIdentity = projKey(rec.project) === projKey(holderIdentity.project) && (rec.user || '') === (holderIdentity.user || '') && (rec.name || '') === (holderIdentity.name || '')
+    if (sameIdentity) continue                          // my own durable claim — a re-claim, not a conflict
+    if (isIdentityLive(rec)) continue                   // a live owner — the in-RAM blocker check governs that
+    if (!(rec.exclusive || exclusive)) continue         // only exclusive overlaps conflict
+    const sameUser = (rec.user || '') === (holderIdentity.user || '')
+    if (sameUser) {                                     // taking over your OWN dormant topic — confirm presence
+      const v = await authorizer.confirm({ action: 'topic-takeover', topic, user: holderIdentity.user, requester: holderIdentity.name,
+        subject: `Take over "${topic}" from your other session "${rec.name}"?`, details: `held by ${rec.name} (offline)` })
+      if (!v || !v.approved) return { ok: false, code: 'held', topic, holder_name: rec.name, dormant: true, same_user: true,
+        reason: v ? v.reason : 'no-authorizer', hint: 'confirm via the authorizer (e.g. Windows Hello) to take over your own dormant topic' }
+      await persistence.claims.remove(holderProject, topic, claimIdentity(rec, holderProject)).catch(() => {})
+      return { ok: true, displaced: rec.name, by: v.by }
+    }
+    // cross-user: grace window then displaceable, per-claim policy overriding the global config
+    const graceMin = rec.grace_minutes != null ? Number(rec.grace_minutes) : (persistence.limits.graceMs / 60000)
+    const since = Date.parse(rec.refreshed_at || rec.claimed_at || '') || 0
+    const withinGrace = since > 0 && (Date.now() - since) < graceMin * 60000
+    const allow = rec.allow_other_user != null ? !!rec.allow_other_user : ALLOW_CROSS_USER
+    if (withinGrace || !allow) return { ok: false, code: 'held', topic, holder_name: rec.name, dormant: true, cross_user: true, within_grace: !!withinGrace,
+      hint: withinGrace ? 'owner offline but within its grace window — try later or negotiate' : 'cross-user takeover is not permitted for this topic' }
+    await persistence.claims.remove(holderProject, topic, claimIdentity(rec, holderProject)).catch(() => {})   // displaced after grace
+    return { ok: true, displaced: rec.name }
+  }
+  return null
 }
 // Re-assert a durable claim under a (new) holder id when its identity returns. Won't clobber a live
 // exclusive owner that took the topic while this holder was away — that's left for explicit negotiation.
@@ -717,11 +771,37 @@ function makeEnvelope({ to, verb, body, reply_to, from, subject, pattern, topic 
 // topic:<topic> send targeting (T3/T5): explicit prefix only. Delivered to the topic's OWNERS —
 // exclusive topic = exactly one; shared = every co-owner (one envelope each; dedupe is free).
 function askerProjectOf(from) { return (senderIdent(from && from.session ? from : { session: SESSION }).project) || 'unclassified' }
+// §16: a directed send to a topic whose durable owner is OFFLINE parks to that owner's mailbox (delivered
+// on its return) instead of bouncing no-owner. Consent is checked at park-time (you can only park what you
+// could send live). The sender is told it's offline ONLY if the owner opted in at claim time (announce_offline).
+async function parkToOfflineOwners(from, project, path, verb, body, reply_to, subject, askerProject, ref) {
+  if (!PERSIST) return { ok: false, code: 'no-owner', topic: ref }
+  let dormant = []
+  try { dormant = await persistence.claims.read(project, path) } catch { }
+  const ap = projKey(askerProject || 'unclassified')
+  const parked = [], announce = []
+  for (const rec of dormant) {
+    if (!rec || rec.pattern !== path) continue
+    const ident = claimIdentity(rec, project)
+    if (!ident) continue
+    if (!mayInitiate(ap, projKey(rec.project || project))) continue   // park only what you could send live
+    const env = makeEnvelope({ to: `topic:${path}`, verb, body, reply_to, from, subject, pattern: 'send', topic: path })
+    try { await persistence.mailbox.put(ident, env.id, env) } catch { continue }
+    parked.push(env.id)
+    if (rec.announce_offline) announce.push(rec.holder_name || ident.name)
+    emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
+      to: `topic:${path}`, to_name: path, to_kind: 'topic', subject: subject || null, pattern: 'send', topic: path,
+      size: String(body || '').length, note: `parked for offline owner ${ident.name}`, envelope_id: env.id })
+  }
+  if (!parked.length) return { ok: false, code: 'no-owner', topic: ref }
+  if (announce.length) return { ok: true, parked: true, offline: true, topic: path, project, owners: parked.length, offline_owners: announce }
+  return { ok: true, topic: path, project }   // owner chose silence: looks like a normal accept
+}
 async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, askerProject) {
   const { project, path } = parseTopicRef(ref, askerProject)
   if (isWildcard(path)) return { ok: false, code: 'wildcard-target', topic: ref }
   const owners = ownersOf(path, project)
-  if (!owners.length) return { ok: false, code: 'no-owner', topic: ref }
+  if (!owners.length) return parkToOfflineOwners(from, project, path, verb, body, reply_to, subject, askerProject, ref)
   const fanout = []
   for (const h of owners) {
     const env = makeEnvelope({ to: h.holder, verb, body, reply_to, from, subject, pattern: 'send', topic: path })
@@ -1151,14 +1231,17 @@ const TOOLS = [
       peer_id: { type: 'string' }, secret: { type: 'string' } }, required: ['peer_id', 'secret'] } },
   { name: 'list_sessions', description: 'List AI sessions (with their sub-peers) and page leaves currently on the mesh.',
     inputSchema: { type: 'object', properties: {} } },
-  { name: 'claim_topic', description: 'Claim ownership of (responsibility for) a topic. Topics are /-separated paths (e.g. "bridge/admin", "retail/contact-energy"); claims may cover a subtree ("retail/#"). exclusive:true = ONE owner mesh-wide; a claim overlapping a held exclusive topic returns code "held" — then negotiate with the holder via verb request_responsibility (grant/refuse/ask-operator), never seize. Re-claiming your own topic updates it. Owners are auto-subscribed. Sub-peers pass as + secret.',
+  { name: 'claim_topic', description: 'Claim ownership of (responsibility for) a CONCRETE topic (no wildcards — owning a subtree is unsendable). Topics are /-separated paths (e.g. "bridge/admin", "retail/contact-energy"). exclusive:true = ONE owner mesh-wide; a claim overlapping a held exclusive topic returns code "held" — negotiate via verb request_responsibility (grant/refuse/ask-operator), never seize. With persistence on, a claim is DURABLE by default (persistent:false opts out) and survives a restart. While the owner is offline, directed sends park for its return; set announce_offline to have senders told it is offline (else parked silently). Taking over your OWN offline (dormant) topic needs presence confirmation (authorizer/Windows Hello); a DIFFERENT user may take over only after a grace window and only if allowed. Re-claiming your own topic updates it. Owners are auto-subscribed. Sub-peers pass as + secret.',
     inputSchema: { type: 'object', properties: {
-      topic: { type: 'string', description: 'topic path, wildcards allowed for subtree claims (retail/#)' },
+      topic: { type: 'string', description: 'concrete topic path (no wildcards)' },
       description: { type: 'string', description: 'one line on what the responsibility covers' },
       exclusive: { type: 'boolean', description: 'true = single owner mesh-wide (default false)' },
       icon: { type: 'string', description: 'optional short markdown icon (e.g. an emoji) shown wherever the topic renders' },
-      persistent: { type: 'boolean', description: 'RESERVED (offline delivery): survive holder restarts — returns unsupported for now' },
-      force: { type: 'boolean', description: 'RESERVED (offline delivery): operator-authorised takeover of an offline holder — returns unsupported for now' },
+      persistent: { type: 'boolean', description: 'durable claim — survives a restart (default true when persistence is on; set false for an ephemeral claim)' },
+      announce_offline: { type: 'boolean', description: 'when you are offline, tell senders their message was parked because you are away (default false = parked silently)' },
+      grace_minutes: { type: 'number', description: 'how long after you go offline before a DIFFERENT user may take this topic over (default: realm config)' },
+      allow_other_user: { type: 'boolean', description: 'may a different user take this responsibility over (after grace)? default: realm config' },
+      force: { type: 'boolean', description: 'RESERVED: operator-authorised immediate takeover — returns unsupported for now' },
       as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
       secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['topic'] } },
   { name: 'release_topic', description: 'Give up ownership of a topic you hold. Sub-peers pass as + secret.',
@@ -1323,6 +1406,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const description = String(a.description || '')
       const exclusive = !!a.exclusive
       const icon = String(a.icon || '').trim().slice(0, 16) || null
+      const announce_offline = !!a.announce_offline                       // §16: tell senders when I'm offline (else parked silently)
+      const grace_minutes = a.grace_minutes != null ? Number(a.grace_minutes) : null   // §16: per-claim takeover grace
+      const allow_other_user = a.allow_other_user != null ? !!a.allow_other_user : null // §16: per-claim cross-user takeover
       let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) {
         const { sp, err } = authSub(String(a.as), a.secret)
@@ -1336,9 +1422,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         holder: blocker.holder, holder_name: blocker.holder_name || null, holder_pattern: blocker.pattern, holder_exclusive: !!blocker.exclusive,
         holders: others.map(o => o.holder),
         hint: 'negotiate: send the holder verb request_responsibility {topic, reason}' })
+      // §16: a DORMANT (offline) durable owner of an overlapping topic isn't in myTopics, so guard it here —
+      // same-user takeover needs human confirmation (authorizer); cross-user runs grace-then-displaceable.
+      if (persistent && holderIdentity) {
+        const verdict = await resolveDormantConflict(topic, holderIdentity, holderProject, exclusive)
+        if (verdict && !verdict.ok) return ok(verdict)
+      }
       const k = `${holder}|owner|${patternKey(topic)}`
       const reclaim = myTopics.has(k)
       myTopics.set(k, { pattern: topic, role: 'owner', description, exclusive, icon, holder, holder_name: holderName, project: holderProject, realm: holderRealm,
+        announce_offline, grace_minutes, allow_other_user,
         claimed_at: reclaim ? myTopics.get(k).claimed_at : new Date().toISOString() })
       if (persistent) persistClaim(holderIdentity, holderProject, topic, myTopics.get(k))   // §12: durable responsibility
       announceTopics()
