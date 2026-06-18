@@ -108,6 +108,11 @@ await fH.retained.put('AIMB', 'news', A, { ts: '2026-06-17T00:00:00.000Z', body:
 await fH.retained.put('AIMB', 'news', B, { ts: '2026-06-17T00:00:05.000Z', body: 'new' })
 const ret = await fH.retained.read('AIMB', 'news')
 check('retained: newest value wins', !!ret && ret.body === 'new', JSON.stringify(ret))
+const allRet = await fH.retained.allForProject('AIMB')
+check('retained.allForProject returns newest per topic, tagged with topic', allRet.some(x => x.topic === 'news' && x.record.body === 'new'), JSON.stringify(allRet.map(x => x.topic)))
+await fH.retained.put('AIMB', 'stale-news', A, { ts: '2000-01-01T00:00:00.000Z', body: 'ancient' })
+const dropRet = await fH.retained.gcAll({ ttlMs: 86400000 })
+check('retained.gcAll drops values older than ttl', dropRet >= 1 && !(await fH.retained.allForProject('AIMB')).some(x => x.topic === 'stale-news'), 'dropped=' + dropRet)
 
 console.log(`\n${pass} passed, ${fail} failed`)
 try { fs.rmSync(tmp, { recursive: true, force: true }) } catch {}

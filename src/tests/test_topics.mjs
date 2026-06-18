@@ -63,9 +63,9 @@ const u2 = await call(B, 'claim_topic', { topic: 'x/y', force: true })
 const u3 = await call(B, 'publish', { topic: 'x/y', subject: 's', message: 'm', retain: true })
 const u4 = await call(B, 'send_to_peer', { target: idA.session, subject: 's', message: 'm', park: true })
 const u5 = await call(B, 'set_wake', { mode: 'exit-on-message' })
-check('persistent claim accepted (no-op without a persistence facet)', u1.ok === true && !u1.persistent, JSON.stringify(u1))
-check('force/retain/park/set_wake still unsupported', [u2, u3, u4, u5].every(r => r.ok === false && r.code === 'unsupported'),
-  JSON.stringify([u2.code, u3.code, u4.code, u5.code]))
+check('persistent claim + retain accepted (no-op without a persistence facet)', u1.ok === true && !u1.persistent && u3.ok === true && !u3.retained, JSON.stringify([u1, u3]))
+check('force/park/set_wake still unsupported', [u2, u4, u5].every(r => r.ok === false && r.code === 'unsupported'),
+  JSON.stringify([u2.code, u4.code, u5.code]))
 
 // --- send to topic owners (T3/T5) + encryption roundtrip (T8)
 const s1 = await call(A, 'send_to_peer', { target: 'topic:bridge/admin', subject: 'bridge question', message: 'secret payload 42' })

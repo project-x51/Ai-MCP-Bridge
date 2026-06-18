@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.11.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.12.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -108,6 +108,7 @@ if (PERSIST) {                                   // park/retain/persistent-claim
     persistence.mailbox.gcAll({ ttlMs: persistence.limits.messageTtlMs }).catch(() => {})
     persistence.claims.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
     persistence.registrations.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
+    persistence.retained.gcAll({ ttlMs: persistence.limits.retainedTtlMs }).catch(() => {})
   }, Number(process.env.AI_BRIDGE_PERSIST_GC_MS) || 1800000).unref()
 }
 // the process's own classification (null ⇒ infrastructure, not a participant)
@@ -1303,7 +1304,7 @@ const TOOLS = [
       subject: { type: 'string', description: 'short PUBLIC one-line description of the event' },
       message: { type: 'string', description: 'the message body (encrypted in transit)' },
       verb: { type: 'string', description: 'advisory verb, default "message"' },
-      retain: { type: 'boolean', description: 'RESERVED (offline delivery): retained last message per topic — returns unsupported for now' },
+      retain: { type: 'boolean', description: 'keep this as the topic\'s retained "last value" (persistence on); a new/returning subscriber gets it immediately on subscribe. Concrete topics only.' },
       as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
       secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['topic', 'subject', 'message'] } },
   { name: 'send_to_peer', description: 'Send a directed message: target = id from list_sessions, a unique friendly name, or "topic:<topic>" to message the topic\'s OWNER(S) only (the prefix is required; subscribers do not see sends). With persistence on, a send to a name (or topic owner) that is OFFLINE but has a durable registration/claim PARKS and is delivered when it returns; a name that was never registered still errors unknown-target. subject is REQUIRED: short public one-line description (NOT encrypted — no private info; the body is encrypted). Registered sub-peers must pass as + secret.',
@@ -1513,6 +1514,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       announceTopics()
       if (!existed) emitTraceRaw({ dir: 'con', verb: 'subscribe', from: holder, from_name: holderName, to: SESSION, size: 0,
         note: `subscribed "${pattern}"`, envelope_id: null })
+      if (PERSIST && !existed) {   // §12 retain: catch the NEW subscriber up on retained values it matches
+        try {
+          const rl = await persistence.retained.allForProject(holderProject)
+          let n = 0
+          for (const { topic: rt, record } of rl) {
+            if (!record || !record.env || !rt || !topicMatch(pattern, rt)) continue
+            const env0 = record.env
+            const env = makeEnvelope({ to: holder, verb: env0.verb, body: plainBody(env0), from: env0.from, subject: env0.subject, pattern: 'publish', topic: rt })
+            env.retained = true
+            await routeEnvelope(env); n++
+          }
+          if (n) emitTraceRaw({ dir: 'send', verb: 'message', from: SESSION, from_name: NAME, to: holder, to_name: holderName, to_kind: 'subpeer', subject: `retained catch-up (${n})`, pattern: 'publish', size: 0, note: `${n} retained value(s) delivered on subscribe`, envelope_id: null })
+        } catch { }
+      }
       return ok({ ok: true, pattern, holder, resubscribed: existed || undefined })
     }
     case 'unsubscribe': {
@@ -1531,15 +1546,25 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     }
     case 'publish': {
       if (!String(a.subject || '').trim()) return ok({ ok: false, code: 'subject-required' })
-      if (a.retain) return ok({ ok: false, code: 'unsupported', what: 'retained messages (offline delivery, T14)' })
-      let from
+      const subject = String(a.subject).trim()
+      let from, fromIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) {
         const { sp, err } = authSub(String(a.as), a.secret)
         if (err) return ok(err)
         from = { session: sp.id, name: sp.name, kind: 'subpeer' }
+        fromIdentity = pIdent(sp.identity, sp.name)
       }
-      const r = await publishToTopic(from, String(a.topic || '').trim(), a.verb, a.message, String(a.subject).trim(), askerProjectOf(from))
-      return ok({ ...r, as: from ? from.session : SESSION })
+      const ref = String(a.topic || '').trim()
+      const r = await publishToTopic(from, ref, a.verb, a.message, subject, askerProjectOf(from))
+      const retain = PERSIST && !!a.retain
+      if (retain) {   // §12 retain: keep the last event per CONCRETE topic; delivered to a (re)subscriber on subscribe
+        const { project, path } = parseTopicRef(ref, askerProjectOf(from))
+        if (path && !isWildcard(path) && fromIdentity) {
+          const env = makeEnvelope({ to: `topic:${path}`, verb: a.verb, body: a.message, from, subject, pattern: 'publish', topic: path })
+          persistence.retained.put(project, path, fromIdentity, { ts: env.ts, env }).catch(() => {})
+        }
+      }
+      return ok({ ...r, retained: retain || undefined, as: from ? from.session : SESSION })
     }
     case 'allow_project': {
       let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }

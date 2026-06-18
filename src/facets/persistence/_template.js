@@ -43,6 +43,8 @@ export function create(ctx) {
     retained: {
       async put(project, topic, identity, record) {},
       async read(project, topic) { return null },  // the newest publisher value
+      async allForProject(project) { return [] },  // newest value per topic: [{topic, record}] (for subscribe-time catch-up)
+      async gcAll(opts) { return 0 },              // drop retained values older than ttlMs; return count dropped
     },
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
   }

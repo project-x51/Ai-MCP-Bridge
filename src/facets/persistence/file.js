@@ -217,17 +217,40 @@ export function create(ctx) {
     },
   }
 
-  // ---- retained: one file per publisher; effective value = newest ts ----
+  // ---- retained: one file per publisher; effective value = newest ts. The topic is stored in-body (the
+  // dir slug is lossy) so allForProject can recover it for wildcard subscribe-time catch-up. ----
   const retained = {
     async put(project, topic, identity, record) {
       const { primary } = identityKeys(identity, readable)
       await writeAtomic(dir('retained', slug(project), slug(topic), `${primary}.val`),
-        JSON.stringify({ ts: record.ts || new Date().toISOString(), record }))
+        JSON.stringify({ ts: record.ts || new Date().toISOString(), topic, project, record }))
     },
     async read(project, topic) {
       const rdir = dir('retained', slug(project), slug(topic)); let best = null
       for (const f of await readDirSafe(rdir)) { if (!f.endsWith('.val')) continue; const j = await readJson(path.join(rdir, f)); if (j && (!best || j.ts > best.ts)) best = j }
       return best ? best.record : null
+    },
+    async allForProject(project) {   // newest value per topic in this project: [{ topic, record }]
+      const pdir = dir('retained', slug(project)), out = []
+      for (const topicSlug of await readDirSafe(pdir)) {
+        const tdir = path.join(pdir, topicSlug); let best = null
+        for (const f of await readDirSafe(tdir)) { if (!f.endsWith('.val')) continue; const j = await readJson(path.join(tdir, f)); if (j && (!best || j.ts > best.ts)) best = j }
+        if (best) out.push({ topic: best.topic, record: best.record })
+      }
+      return out
+    },
+    async gcAll({ now = Date.now(), ttlMs = 0 } = {}) {   // drop retained values older than ttlMs
+      if (!ttlMs) return 0
+      let dropped = 0, base = dir('retained')
+      for (const proj of await readDirSafe(base)) for (const topicSlug of await readDirSafe(path.join(base, proj))) {
+        const tdir = path.join(base, proj, topicSlug)
+        for (const f of await readDirSafe(tdir)) {
+          if (!f.endsWith('.val')) continue
+          const file = path.join(tdir, f), j = await readJson(file)
+          if (j && now - Date.parse(j.ts) > ttlMs) { try { await fsp.unlink(file) } catch {} dropped++ }
+        }
+      }
+      return dropped
     },
   }
 

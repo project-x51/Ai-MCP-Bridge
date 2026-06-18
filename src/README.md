@@ -59,7 +59,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   envelopes both directions through the gateway splice, and drop a departed host (10);
   `test_persistence.mjs` — persistence facet (§12) units: size-string parser, format-prefixed stable
   identity keys + both-form lookup, mailbox store/drain/ack/caps/TTL, claims per-holder/byHolder/gcAll,
-  retained newest-wins, registrations + self-describing parked data (34); `test_persist_live.mjs` — live restart proof: a parked message survives a
+  retained (newest-wins, allForProject, gc), registrations + self-describing parked data (36); `test_persist_live.mjs` — live restart proof: a parked message survives a
   bridge restart and is redelivered to the returning peer (consumed ones aren't), per-peer mailbox keying
   (a sender's own send never echoes back), a durable claim rehydrates and is routable on re-register (and
   stays gone after `release_topic`), incl. a process-held claim, plus durable registrations (§19) — a send
@@ -68,7 +68,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   cross-project grants (§14): request → operator shortens the TTL → requester notified (project_access_
   granted) → send works → survives restart → revoke (persisted) → TTL expiry (12); `test_offline_park_live.mjs`
   — offline owners (§16): park to an offline owner + announce on/off + redelivery; same-user dormant-topic
-  takeover gated by the authorizer (none=held, script-approve=ok); cross-user grace/displace (8). Tests run in
+  takeover gated by the authorizer (none=held, script-approve=ok); cross-user grace/displace (8);
+  `test_retain_live.mjs` — retained values (§12): `publish {retain:true}` → a later/wildcard subscriber is
+  caught up on subscribe, survives a restart, last-value-wins (4). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -160,13 +162,14 @@ topic **vanishes with its holder**; with persistence on (§12, v1.9) a claim is 
   description shown in traces/dashboard/channel meta. Omitting it errors (`subject-required`).
   Bodies are AES-256-GCM encrypted (key HKDF-derived from the config `token`); subject/verb/
   routing metadata stay cleartext by design. Trust-domain encryption, not per-pair E2E (D2 later).
-- **Persistence (v1.9, §12 — opt-in `AI_BRIDGE_PERSISTENCE=file`):** `persistent` on a claim is now
-  **built** — a claim is durable by default when persistence is on, and rehydrates when its holder
-  re-registers (or, for the session's own claims, on reconnect). Directed messages **auto-park** and are
-  redelivered to a returning peer. Still **reserved** (`unsupported`): `retain` on publish, explicit
-  `park` to a never-registered identity, `force` claim takeover, `set_wake` + WS `kind:"listener"`
-  (wake/doorbell). `capabilities{}` on my_identity/roster is the feature-detection surface (its
-  `park`/`retain`/`persistent_claims` bits flip true when persistence is active).
+- **Persistence (§12 — opt-in `AI_BRIDGE_PERSISTENCE=file`):** durable **mailboxes** (auto-park on
+  delivery, redelivered to a returning peer), **claims** (durable by default; rehydrate on return),
+  **grants** (durable cross-project consent + TTL, §14), **registrations** (a send to an offline peer by
+  name parks, §19), and **retained** (`publish {retain:true}` keeps the last value per topic; a new
+  subscriber gets it on subscribe). Records are self-describing; bodies stay encrypted at rest. Still
+  **reserved** (`unsupported`): explicit `park` to a *never-registered* identity, `force` claim takeover,
+  `set_wake` + WS `kind:"listener"` (wake/doorbell). `capabilities{}` on my_identity/roster is the
+  feature-detection surface (its `park`/`retain`/`persistent_claims` bits flip true when persistence is active).
 - **Pages:** `AIMB_BRIDGE_CFG.subject` (a topic path) is auto-claimed (shared) + auto-subscribed;
   `AIMB_BRIDGE_CFG.subscribe: [patterns]` adds subscriptions; `aimbBridge.publish({topic, subject, …})`
   publishes; page sends require `subject` like everyone else (aimb-bridge-ui `opts.subject`).

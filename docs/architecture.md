@@ -453,27 +453,28 @@ Forward-compatibility features exist in the protocol so they land without churn.
 `my_identity` / the roster (feature-detection, not version-sniffing):
 
 - **wake** — `set_wake` + a WS `listener` attach point (doorbell for idle Code sessions). *(reserved)*
-- **park** (durable messages) + **persistent claims** (durable responsibilities) — **built in v1.9
-  (§12)**; the `park`/`retain`/`persistent_claims` capability bits flip true when a `persistence` facet
-  is active. `persistent` claims are accepted always (a no-op without persistence).
-- **retain** (durable last-event-per-topic) + **force** (operator takeover of an offline holder) —
-  still **reserved**; also the home for durable reply-caps (§5).
+- **park** (durable messages) + **persistent claims** (durable responsibilities) + **retain**
+  (last-value-per-topic) — **built (§12)**; the `park`/`retain`/`persistent_claims` capability bits flip
+  true when a `persistence` facet is active. `persistent`/`retain` are accepted always (a no-op without
+  persistence).
+- **force** (operator immediate-takeover of an offline holder) — still **reserved**; also the home for
+  durable reply-caps (§5).
 - **federation** — the `federation` config block + translator (§8).
 
 ---
 
 ## 12. Persistence — durable messages & responsibilities (partly built — v1.9)
 
-> **Status (v1.9):** **built** — the `persistence` facet (`none` default / `file`), stable
-> format-prefixed identity keys with both-form lookup, **durable mailboxes** (auto-park on delivery →
-> redelivered to a returning peer on re-register; cursor-ack drops the durable copy; TTL + per-mailbox
-> caps with drop-and-log), and **durable responsibilities** (a claim is durable by default when
-> persistence is on; rehydrated on re-register for sub-peers and on connect for the session's own
-> claims; `release_topic` drops it; hard-expiry GC; won't clobber a live exclusive owner on return).
-> Enable with `profile.persistence:"file"` or `AI_BRIDGE_PERSISTENCE=file`; bodies stay encrypted at
-> rest. **Pending** — `retain` (durable last-event-per-topic), explicit `park` to a never-registered
-> identity, and the full lease → dormant → displaced negotiation (the v1.9 return path re-asserts a
-> holder's own claims but defers multi-claimant conflict resolution to explicit `request_responsibility`).
+> **Status (built, v1.9 → v1.12):** the `persistence` facet (`none` default / `file`) with stable
+> format-prefixed identity keys, and **five stores** — **mailboxes** (auto-park on delivery, redelivered
+> to a returning peer; cursor-ack; TTL + caps), **claims** (durable responsibilities, rehydrated on
+> return; hard-expiry GC; no-clobber), **grants** (durable cross-project consent + TTL, §14), **durable
+> registrations** (name→identity so an offline-by-name send parks, §19), and **retained** (last value per
+> topic, delivered on subscribe). Enable with `profile.persistence:"file"` / `AI_BRIDGE_PERSISTENCE=file`;
+> bodies stay encrypted at rest, records are self-describing. **Pending** — explicit `park` to a
+> *never-registered* identity (registrations cover the once-registered case), and the full lease →
+> dormant → displaced negotiation (the return path re-asserts a holder's own claims + does same-user
+> Hello takeover / cross-user grace, but defers multi-claimant arbitration to `request_responsibility`).
 
 Two features over one substrate: **durable messages** (a message to an offline peer survives and is
 delivered when it returns) and **durable responsibilities** (a topic claim survives a restart). Both
@@ -692,8 +693,14 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   `unknown-target` (a never-registered name still errors). Parked `.msg` files now store the **recipient
   identity** in-body (not just the hashed key), so the data is attributable/migratable without reversing
   the key. Verified by `test_persist_live` (park-by-name across a restart). Suite 302 across 13.
-- **Designed — pending:** `retain` (durable last-event-per-topic, §12); the `wake`/doorbell (overlaps the
-  push fallback); durable reply-caps; the Hello-vault inbox-secret-unlock (a further use of the authorizer).
+- **Built (v1.12):** `retain` (§12) — `publish {retain:true}` keeps the **last value per concrete topic**
+  in the `retained` store; a new/returning **subscriber is caught up on it immediately on subscribe**
+  (wildcard patterns match), last-value-wins, survives a restart, TTL `retainedTtlDays`. This completes
+  §12 persistence (mailboxes, claims, grants, registrations, retained all built). Also hardened: a global
+  uncaughtException/unhandledRejection net so a stray frame-handler error can't drop the whole gateway.
+  Suite 308 across 14.
+- **Designed — pending:** the `wake`/doorbell (overlaps the push fallback); durable reply-caps; the
+  Hello-vault inbox-secret-unlock (a further use of the authorizer).
 - **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,
   `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§9); `force` operator-takeover of
   an offline holder.
