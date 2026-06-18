@@ -73,6 +73,13 @@ let CLIENT = process.env.AI_BRIDGE_CLIENT
   : null                                   // { name, version, channel_capable, detected_mode, mode }
 
 const log = (...a) => console.error(`[aimb ${NAME}]`, ...a)
+// Resilience (mesh daemon): a stray error in ONE connection's frame handler or an unobserved promise must
+// never take the whole gateway down — that would drop every session on the mesh. Registered HERE, up front,
+// so it also covers the election/discovery/inter-hub machinery that starts at module load. (Clean exit is
+// only via the signal handlers at the bottom.) This also removed a class of test flakiness where a racy
+// inter-hub frame crashed a bridge mid-suite.
+process.on('uncaughtException', e => { try { log('uncaughtException (continuing):', (e && e.stack) || e) } catch {} })
+process.on('unhandledRejection', e => { try { log('unhandledRejection (continuing):', (e && e.message) || e) } catch {} })
 const sha = s => crypto.createHash('sha256').update(String(s)).digest('hex')
 
 // ---------------------------------------------------------------- realm profile (pluggable facets)
