@@ -699,6 +699,10 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   §12 persistence (mailboxes, claims, grants, registrations, retained all built). Also hardened: a global
   uncaughtException/unhandledRejection net so a stray frame-handler error can't drop the whole gateway.
   Suite 308 across 14.
+- **Built (v1.13):** *inbox hint (doorbell-lite)* — every response to a call made by a registered
+  sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
+  has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
+  `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
 - **Designed — pending:** the `wake`/doorbell (overlaps the push fallback); durable reply-caps; the
   Hello-vault inbox-secret-unlock (a further use of the authorizer).
 - **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,

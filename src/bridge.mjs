@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.12.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.13.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -368,6 +368,14 @@ function resolveLocalSub(ref) {
   return byName.length === 1 ? byName[0] : null
 }
 function newQueue() { return { epoch: crypto.randomBytes(4).toString('hex'), base: 0, items: [], served: 0 } }
+// a compact "you have mail" hint piggybacked on tool responses (§ doorbell-lite): a registered caller
+// learns whether new messages arrived since its last inbox poll — without a dedicated round-trip. unread
+// = items past the served high-water; next_cursor is where to poll from; epoch change ⇒ reset cursor to 0.
+function inboxHint(spId) {
+  const q = subQueues.get(spId); if (!q) return null
+  const end = q.base + q.items.length
+  return { unread: Math.max(0, end - (q.served || 0)), next_cursor: end, queue_epoch: q.epoch }
+}
 function announceSubpeers() {
   const list = [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, kind: 'subpeer', client: s.client || null, client_kind: s.client_kind || null, mode: s.mode || null, project: s.identity?.project || null, user: s.identity?.user || null, realm: s.identity?.realm || REALM }))
   if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.subpeers = list }; broadcastRoster() }
@@ -1231,7 +1239,10 @@ const mcp = new Server(
       '<channel source="ai-mcp-bridge" from="..." from_name="..." verb="..." subject="...">body</channel>. ' +
       'Act on the verb (advisory: the verb and payload are defined by your application). ' +
       'Reply with the send_to_peer tool, passing the from session id as target. ' +
-      'In clients without channel support, poll the inbox tool instead. Use list_sessions for the roster. ' +
+      'In clients without channel support, poll the inbox tool instead. Every response to a call you make ' +
+      'as a registered sub-peer (as/secret) carries an `inbox` hint { unread, next_cursor, queue_epoch }: ' +
+      'if unread > 0, poll the inbox tool (with for/secret, cursor = next_cursor) to collect new mail — so ' +
+      'you rarely need to poll blindly. (queue_epoch change ⇒ reset cursor to 0.) Use list_sessions for the roster. ' +
       'IMPORTANT for Cowork/Desktop conversations and for subagents: this bridge process may be SHARED — ' +
       'call register_self with a name, a self-invented secret, and your project + user (the project the ' +
       'conversation is for, and the human supervising it) to get your own peer id and private inbox ' +
@@ -1347,7 +1358,15 @@ const TOOLS = [
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const a = req.params.arguments || {}
-  const ok = o => ({ content: [{ type: 'text', text: JSON.stringify(o, null, 1) }] })
+  let callerId = null   // the calling sub-peer (if it authenticates); drives the inbox hint, below
+  // every response to an identified caller carries `inbox` so it knows whether to poll (the `inbox` verb
+  // already returns the queue state, so skip it there to avoid redundancy).
+  const ok = o => {
+    if (callerId && req.params.name !== 'inbox' && o && typeof o === 'object' && o.inbox === undefined) {
+      const h = inboxHint(callerId); if (h) o = { ...o, inbox: h }
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(o, null, 1) }] }
+  }
   const authSub = (ref, secret) => {
     const sp = resolveLocalSub(ref)
     if (!sp) return { err: { ok: false, code: 'unknown-subpeer', ref } }
@@ -1355,6 +1374,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     sp.last_seen = Date.now()
     return { sp }
   }
+  if (a.as && a.secret != null) { const r = authSub(String(a.as), a.secret); if (!r.err) callerId = r.sp.id }   // identify the caller for the hint
   switch (req.params.name) {
     case 'my_identity': return ok({ session: SESSION, name: NAME, role, host: SESSION.split('/')[0], gateway: gatewayId, pair_port: pairPort, gateway_port: PORT,
       bridge_version: BRIDGE_VERSION, capabilities: CAPS, realm: REALM, profile: profile.names, identity: PROC_IDENT,
@@ -1422,6 +1442,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       emitTraceRaw({ dir: 'con', verb: 'connect', from: id, from_name: name, to: SESSION, size: 0,
         note: (parent ? `child of ${parent.split('/').pop()}` : 'sub-peer registered') + (ckind ? ` [${ckind}]` : '') + ` {${ident.project}/${ident.user}}`, envelope_id: null })
       const q = subQueues.get(id)
+      callerId = id   // so the response's inbox hint reflects any rehydrated parked mail this returning peer has waiting
       return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident })
     }
     case 'deregister': {

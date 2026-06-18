@@ -102,6 +102,18 @@ await sleep(300)
 const in6 = await call(B, 'inbox', { for: 'codepeer1', secret: 'cp1-sec' })
 check('codepeer1 received cross-process', in6.messages.length === 1 && in6.messages[0].body === 'cross-process hello')
 
+// --- inbox hint: every response to a registered caller says whether new mail is waiting
+await call(A, 'register_self', { name: 'hinter', secret: 'hs' })
+await call(B, 'send_to_peer', { subject: 'ping', target: 'hinter', message: 'mail-1' })
+await sleep(300)
+const hintCall = await call(A, 'subscribe', { pattern: 'misc/x', as: 'hinter', secret: 'hs' })   // any call as the caller
+check('response carries an inbox hint with unread + next_cursor', !!hintCall.inbox && hintCall.inbox.unread === 1 && hintCall.inbox.next_cursor === 1, JSON.stringify(hintCall.inbox))
+await call(A, 'inbox', { for: 'hinter', secret: 'hs', cursor: 0 })   // poll -> served catches up
+const hintAfter = await call(A, 'subscribe', { pattern: 'misc/y', as: 'hinter', secret: 'hs' })
+check('after polling, the hint shows unread 0', !!hintAfter.inbox && hintAfter.inbox.unread === 0, JSON.stringify(hintAfter.inbox))
+const noAuthHint = await call(A, 'list_sessions')   // no as/secret -> not attributable -> no hint
+check('un-attributed calls carry no inbox hint', noAuthHint.inbox === undefined)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 await A.transport.close(); await B.transport.close()
 process.exit(fail ? 1 : 0)
