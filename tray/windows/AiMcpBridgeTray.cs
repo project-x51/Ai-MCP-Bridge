@@ -30,6 +30,7 @@ class TrayApp : ApplicationContext
     string _root;          // folder containing bridge.mjs / config.json / dashboard.html
     int _wsPort = 7001;
     string _token = "";
+    string _version = "";  // bridge version (from the managed bridge's package.json) shown in the menu
     Icon _onIcon, _offIcon;
     int _emptyTicks;
 
@@ -55,6 +56,10 @@ class TrayApp : ApplicationContext
         _offIcon = MakeDot(Color.FromArgb(0x9C, 0xA3, 0xAF));
 
         var menu = new ContextMenuStrip();
+        var header = new ToolStripMenuItem(_version.Length > 0 ? ("Ai MCP Bridge  v" + _version) : "Ai MCP Bridge");
+        header.Enabled = false;        // non-clickable label: the running bridge version, at a glance
+        menu.Items.Add(header);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Open Dashboard", null, delegate { OpenDashboard(); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Quit", null, delegate { OnQuit(); });
@@ -192,6 +197,13 @@ class TrayApp : ApplicationContext
             if (mp.Success) _wsPort = int.Parse(mp.Groups[1].Value);
             var mt = Regex.Match(text, "\"token\"\\s*:\\s*\"([^\"]*)\"");
             if (mt.Success) _token = mt.Groups[1].Value;
+        }
+        catch { }
+        try
+        {   // version of the bridge this tray manages (kept in sync with the bridge's BRIDGE_VERSION)
+            var pj = File.ReadAllText(Path.Combine(_root, "package.json"));
+            var mv = Regex.Match(pj, "\"version\"\\s*:\\s*\"([^\"]+)\"");
+            if (mv.Success) _version = mv.Groups[1].Value;
         }
         catch { }
     }
