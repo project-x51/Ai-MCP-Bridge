@@ -12,23 +12,29 @@ const check = (name, cond, extra = '') => { if (cond) { pass++; console.log('PAS
 
 async function spawnBridge(name, port, extraEnv = {}) {
   const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR,
-    env: { ...process.env, AI_BRIDGE_NAME: name, AI_BRIDGE_PORT: String(port), AI_BRIDGE_WS_PORT: String(port + 1), AI_BRIDGE_TOKEN: TOKEN, AI_BRIDGE_SWEEP_MS: '400', ...extraEnv }, stderr: 'pipe' })
+    env: { ...process.env, AI_BRIDGE_NAME: name, AI_BRIDGE_PORT: String(port), AI_BRIDGE_WS_PORT: String(port + 1), AI_BRIDGE_TOKEN: TOKEN, AI_BRIDGE_SWEEP_MS: '400', AI_BRIDGE_PERSISTENCE: 'none', AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none', ...extraEnv }, stderr: 'pipe' })
   const client = new Client({ name: `test-${name}`, version: '0' }, { capabilities: {} })
   await client.connect(transport)
   return { client, transport, name }
 }
 const call = async (b, name, args = {}) => JSON.parse((await b.client.callTool({ name, arguments: args })).content[0].text)
 const drain = async (b, who, secret) => (await call(b, 'inbox', { for: who, secret })).messages
-// connect a probe page leaf and return the welcome roster it is served (visibility test)
+// connect a probe page leaf and return the welcome roster it is served (visibility test).
+// Retries transient WS failures and settles exactly once with full listener cleanup, so a late 'error'
+// (e.g. the socket dropping during teardown, more likely when the machine is loaded by a live bridge)
+// can't escape as an unhandled rejection and crash the whole suite.
 function pageRoster(wsPort, project, seeAll) {
-  return new Promise((resolve, reject) => {
+  const attempt = () => new Promise((resolve, reject) => {
     const ws = new WebSocket('ws://127.0.0.1:' + wsPort)
-    const t = setTimeout(() => { try { ws.close() } catch {} ; reject(new Error('timeout')) }, 3000)
-    ws.addEventListener('open', () => ws.send(JSON.stringify({ type: 'hello', kind: 'page', page_kind: 'probe',
-      title: 'probe', project: project, user: 'p', seeAll: seeAll, instance: 'probe-' + project + (seeAll ? '-all' : ''), token: TOKEN })))
-    ws.addEventListener('message', ev => { const m = JSON.parse(ev.data); if (m.type === 'welcome') { clearTimeout(t); try { ws.close() } catch {} ; resolve(m) } })
-    ws.addEventListener('error', e => { clearTimeout(t); reject(e) })
+    let done = false
+    const settle = (fn, v) => { if (done) return; done = true; clearTimeout(t); try { ws.onopen = ws.onmessage = ws.onerror = null } catch {} ; try { ws.close() } catch {} ; fn(v) }
+    const t = setTimeout(() => settle(reject, new Error('timeout')), 3000)
+    ws.onerror = () => settle(reject, new Error('ws-error'))
+    ws.onopen = () => { try { ws.send(JSON.stringify({ type: 'hello', kind: 'page', page_kind: 'probe',
+      title: 'probe', project, user: 'p', seeAll, instance: 'probe-' + project + (seeAll ? '-all' : ''), token: TOKEN })) } catch {} }
+    ws.onmessage = ev => { try { const m = JSON.parse(ev.data); if (m.type === 'welcome') settle(resolve, m) } catch {} }
   })
+  return (async () => { let last; for (let i = 0; i < 3; i++) { try { return await attempt() } catch (e) { last = e; await sleep(200) } } throw last })()
 }
 const subNames = r => { const o = []; (r.sessions || []).forEach(s => (s.subpeers || []).forEach(sp => o.push(sp.name))); return o }
 

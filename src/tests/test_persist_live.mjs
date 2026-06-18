@@ -19,7 +19,7 @@ async function spawnBridge(port, extraEnv = {}) {
   const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR,
     env: { ...process.env, AI_BRIDGE_NAME: 'PBridge', AI_BRIDGE_PORT: String(port), AI_BRIDGE_WS_PORT: String(port + 1),
       AI_BRIDGE_TOKEN: TOKEN, AI_BRIDGE_USER: 'robin', AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: persistDir,
-      AI_BRIDGE_SWEEP_MS: '5000', ...extraEnv }, stderr: 'pipe' })
+      AI_BRIDGE_SWEEP_MS: '5000', AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none', ...extraEnv }, stderr: 'pipe' })
   const client = new Client({ name: 't-persist', version: '0' }, { capabilities: {} })
   await client.connect(transport)
   return { client, transport }
@@ -63,6 +63,27 @@ const in2 = await call(B, 'inbox', { for: 'Bolletta', secret: 'sb', cursor: 0 })
 check('consumed messages do NOT redeliver after a later restart', in2.messages.length === 0, JSON.stringify(in2.messages.map(m => m.body)))
 await B.transport.close()
 await sleep(700)
+
+// ===== PER-PEER MAILBOX KEYING: two co-user peers must NOT share a mailbox (the "echo" regression) =====
+// Repro of Bolletta's bug: Alice sends to Bob; on reconnect Alice must NOT see her own outbound, and Bob
+// (a different sub-peer, SAME realm:project:user) must get it. Before the fix both shared one mailbox key.
+B = await spawnBridge(7966); await sleep(700)
+await call(B, 'register_self', { name: 'Alice', secret: 'sa', project: 'shared' })
+await call(B, 'register_self', { name: 'Bob', secret: 'sbob', project: 'shared' })
+await sleep(200)
+const es = await call(B, 'send_to_peer', { target: 'Bob', subject: 'job', message: 'work for bob', as: 'Alice', secret: 'sa' })
+check('co-user directed send accepted', es.ok === true, JSON.stringify(es))
+await sleep(300)
+await B.transport.close(); await sleep(700)
+B = await spawnBridge(7968); await sleep(700)
+await call(B, 'register_self', { name: 'Alice', secret: 'sa', project: 'shared' })
+await call(B, 'register_self', { name: 'Bob', secret: 'sbob', project: 'shared' })
+await sleep(200)
+const aliceIn = await call(B, 'inbox', { for: 'Alice', secret: 'sa', cursor: 0 })
+check("sender's own outbound does NOT echo into its inbox on reconnect", aliceIn.messages.length === 0, JSON.stringify(aliceIn.messages.map(m => m.body)))
+const bobIn = await call(B, 'inbox', { for: 'Bob', secret: 'sbob', cursor: 0 })
+check('the actual recipient (same user, different peer) gets the parked message', bobIn.messages.some(m => m.body === 'work for bob'), JSON.stringify(bobIn.messages.map(m => m.body)))
+await B.transport.close(); await sleep(700)
 
 // ============================ DURABLE CLAIMS (responsibilities survive a restart) ============================
 // ---- run 4: Bolletta claims a topic (durable by default), then the bridge dies ----

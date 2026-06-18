@@ -102,6 +102,13 @@ if (PERSIST) {                                   // park/retain/persistent-claim
 }
 // the process's own classification (null ⇒ infrastructure, not a participant)
 const PROC_IDENT = (PROC_PROJECT && PROC_USER) ? profile.identity.classify({ project: PROC_PROJECT, user: PROC_USER, realm: REALM }) : null
+const HOSTNAME = SESSION.split('/')[0]
+// §12 persistence is keyed by (realm, project, user, NAME): the name distinguishes co-user holders so two
+// sub-peers of the same human+project never share a mailbox/claim key. classify() omits name by design
+// (identity = the human+work, not the session), so it's attached here. Sub-peers use their register name
+// (stable across re-register, unique per logical peer); the process uses the hostname (stable per machine,
+// distinct across machines on a shared persistence dir). Without a name everything same-user collided.
+const pIdent = (identity, holderName) => identity ? { ...identity, name: holderName || '' } : null
 
 // ---------------------------------------------------------------- project consent + reply-cap (§4-§5)
 // Receiver-controlled inbound consent: a project may reach another only if same-project, the realm is
@@ -414,7 +421,7 @@ function deliverSub(id, env) {
   if (!deliveryAllowed(env, sp.identity?.project || 'unclassified', sp.identity?.realm, sp.capKey)) { emitTrace('recv', env, 'project-denied'); return { ok: false, code: 'project-denied' } }
   const q = subQueues.get(id)
   q.items.push(env)
-  if (PERSIST && sp.identity) persistence.mailbox.put(sp.identity, env.id, env).catch(() => {})   // §12: durable copy, redelivered on re-register after a restart
+  if (PERSIST && sp.identity) persistence.mailbox.put(pIdent(sp.identity, sp.name), env.id, env).catch(() => {})   // §12: durable copy (keyed per peer name), redelivered on re-register after a restart
   if (q.items.length > SUBQ_CAP) { q.items.shift(); q.base++ }
   emitTrace('recv', env, `subpeer:${id.split('/').pop()}`)
   if (MODE_OVERRIDE !== 'poll' && sp && sp.mode === 'push') {      // streaming sub-peer (e.g. code session sharing this bridge)
@@ -1228,17 +1235,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         identity: ident, capKey: capKeyFrom(secret) })   // capKey: RAM-only reply-cap signing key (§5)
       subQueues.set(id, newQueue())
       if (PERSIST && ident.project) {                  // §12: re-hydrate parked mail for this identity (survives restart/TTL)
+        const pid = pIdent(ident, name)                // keyed per peer name so co-user peers don't share a mailbox
         try {
           const L = persistence.limits
-          await persistence.mailbox.gc(ident, { ttlMs: L.messageTtlMs, maxCount: L.mailboxMaxCount, maxBytes: L.mailboxMaxBytes })
-          const parked = await persistence.mailbox.drain(ident)
+          await persistence.mailbox.gc(pid, { ttlMs: L.messageTtlMs, maxCount: L.mailboxMaxCount, maxBytes: L.mailboxMaxBytes })
+          const parked = await persistence.mailbox.drain(pid)
           const q0 = subQueues.get(id)
           for (const p of parked) if (p && p.record && p.record.id) q0.items.push(p.record)
           if (parked.length) emitTraceRaw({ dir: 'recv', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: parked.length, note: `${parked.length} parked message(s) restored`, envelope_id: null })
         } catch { }
         try {                                          // §12: re-assert this identity's durable claims (responsibilities)
-          const dc = await persistence.claims.byHolder(ident)
-          let n = 0; for (const rec of dc) if (rehydrateClaim(rec, id, name, ident)) n++
+          const dc = await persistence.claims.byHolder(pid)
+          let n = 0; for (const rec of dc) if (rehydrateClaim(rec, id, name, pid)) n++
           if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: n, note: `${n} responsibility(ies) restored`, envelope_id: null }) }
         } catch { }
       }
@@ -1272,11 +1280,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const description = String(a.description || '')
       const exclusive = !!a.exclusive
       const icon = String(a.icon || '').trim().slice(0, 16) || null
-      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM, holderIdentity = PROC_IDENT
+      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) {
         const { sp, err } = authSub(String(a.as), a.secret)
         if (err) return ok(err)
-        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderRealm = sp.identity?.realm || REALM; holderIdentity = sp.identity
+        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderRealm = sp.identity?.realm || REALM; holderIdentity = pIdent(sp.identity, sp.name)
       }
       // T6/§6: an exclusive claim conflicts with overlapping claims IN THE SAME PROJECT only
       const others = allTopicEntries().filter(e => e.role === 'owner' && e.holder !== holder && projKey(e.project) === projKey(holderProject) && patternsOverlap(e.pattern, topic))
@@ -1297,11 +1305,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     }
     case 'release_topic': {
       const topic = String(a.topic || '').trim()
-      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderIdentity = PROC_IDENT
+      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) {
         const { sp, err } = authSub(String(a.as), a.secret)
         if (err) return ok(err)
-        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderIdentity = sp.identity
+        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderIdentity = pIdent(sp.identity, sp.name)
       }
       const k = `${holder}|owner|${patternKey(topic)}`
       if (!myTopics.has(k)) return ok({ ok: false, code: 'not-held', topic, holder })
@@ -1431,7 +1439,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const start = Math.min(Math.max(cur - q.base, 0), q.items.length)
         const next = q.base + q.items.length
         q.served = Math.max(q.served || 0, next)
-        if (PERSIST && sp.identity) for (const m of q.items.slice(0, start)) persistence.mailbox.ack(sp.identity, m.id).catch(() => {})   // §12: consumed (cursor moved past) -> drop the durable copy
+        if (PERSIST && sp.identity) { const pid = pIdent(sp.identity, sp.name); for (const m of q.items.slice(0, start)) persistence.mailbox.ack(pid, m.id).catch(() => {}) }   // §12: consumed (cursor moved past) -> drop the durable copy
         return ok({ peer_id: sp.id, queue_epoch: q.epoch, messages: q.items.slice(start).map(decryptedView), next_cursor: next })
       }
       const cur = Number(a.cursor || 0)
@@ -1457,8 +1465,8 @@ mcp.oninitialized = () => {
     else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'SET_CLIENT', session: SESSION, client: CLIENT.name })
     if (PERSIST && PROC_IDENT && !procClaimsRehydrated) {   // §12: restore this session's OWN claims (re-keyed to the new SESSION id)
       procClaimsRehydrated = true
-      persistence.claims.byHolder(PROC_IDENT).then(dc => {
-        let n = 0; for (const rec of dc) if (rehydrateClaim(rec, SESSION, NAME, PROC_IDENT)) n++
+      persistence.claims.byHolder(pIdent(PROC_IDENT, HOSTNAME)).then(dc => {
+        let n = 0; for (const rec of dc) if (rehydrateClaim(rec, SESSION, NAME, pIdent(PROC_IDENT, HOSTNAME))) n++
         if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: SESSION, from_name: NAME, to: SESSION, size: n, note: `${n} responsibility(ies) restored`, envelope_id: null }) }
       }).catch(() => {})
     }

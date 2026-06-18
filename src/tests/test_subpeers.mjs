@@ -11,7 +11,7 @@ const check = (name, cond, extra='') => { if (cond) { pass++; console.log('PASS'
 
 async function spawnBridge(name) {
   const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR,
-    env: { ...process.env, AI_BRIDGE_NAME: name, AI_BRIDGE_PORT: PORT, AI_BRIDGE_WS_PORT: WSPORT, AI_BRIDGE_TOKEN: TOKEN, AI_BRIDGE_SWEEP_MS: '400' }, stderr: 'pipe' })
+    env: { ...process.env, AI_BRIDGE_NAME: name, AI_BRIDGE_PORT: PORT, AI_BRIDGE_WS_PORT: WSPORT, AI_BRIDGE_TOKEN: TOKEN, AI_BRIDGE_SWEEP_MS: '400', AI_BRIDGE_PERSISTENCE: 'none', AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none' }, stderr: 'pipe' })
   const client = new Client({ name: `test-${name}`, version: '0' }, { capabilities: {} })
   await client.connect(transport)
   return { client, transport, name }

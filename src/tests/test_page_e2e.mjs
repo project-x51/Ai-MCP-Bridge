@@ -19,7 +19,7 @@ const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++
 // follower), named so the widget shows it (unnamed hex processes are hidden by design).
 const PORT = '7852', WSPORT = '7853'
 const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + 'bridge.mjs'],
-  cwd: SRCDIR, env: { ...process.env, AI_BRIDGE_NAME: 'Gateway', AI_BRIDGE_PROJECT: 'demo', AI_BRIDGE_USER: 'tester', AI_BRIDGE_PORT: PORT, AI_BRIDGE_WS_PORT: WSPORT }, stderr: 'pipe' })
+  cwd: SRCDIR, env: { ...process.env, AI_BRIDGE_NAME: 'Gateway', AI_BRIDGE_PROJECT: 'demo', AI_BRIDGE_USER: 'tester', AI_BRIDGE_PORT: PORT, AI_BRIDGE_WS_PORT: WSPORT, AI_BRIDGE_PERSISTENCE: 'none', AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none' }, stderr: 'pipe' })
 const client = new Client({ name: 'e2e', version: '0' }, { capabilities: {} })
 const pushed = []
 client.fallbackNotificationHandler = async n => { if (n.method === 'notifications/claude/channel') pushed.push(n.params) }
@@ -131,7 +131,7 @@ sopt.selected = true; change(); await sleep(100)
 
 // --- named-conversations-only: an UNNAMED process (default hex id) must not appear
 const fol = spawn('node', [SRCDIR + 'bridge.mjs'], { cwd: SRCDIR,
-  env: { ...process.env, AI_BRIDGE_NAME: '', AI_BRIDGE_MODE: 'poll', AI_BRIDGE_PORT: PORT, AI_BRIDGE_WS_PORT: WSPORT }, stdio: ['pipe', 'ignore', 'ignore'] })
+  env: { ...process.env, AI_BRIDGE_NAME: '', AI_BRIDGE_MODE: 'poll', AI_BRIDGE_PORT: PORT, AI_BRIDGE_WS_PORT: WSPORT, AI_BRIDGE_PERSISTENCE: 'none', AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none' }, stdio: ['pipe', 'ignore', 'ignore'] })
 await sleep(1800)
 const ls2 = await call('list_sessions')
 check('unnamed follower joined roster', (ls2.sessions || []).length === 2, JSON.stringify((ls2.sessions || []).map(s => s.session)))
