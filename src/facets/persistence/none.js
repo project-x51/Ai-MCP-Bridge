@@ -7,6 +7,7 @@ export function create() {
     meta, root: null, readable: false,
     mailbox: { async put() {}, async drain() { return [] }, async ack() {}, async gc() { return [] }, async gcAll() { return 0 } },
     claims: { async put() {}, async read() { return [] }, async byHolder() { return [] }, async remove() {}, async gcAll() { return 0 } },
+    grants: { async put() {}, async all() { return [] }, async remove() {}, async gcAll() { return 0 } },
     retained: { async put() {}, async read() { return null } },
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
   }

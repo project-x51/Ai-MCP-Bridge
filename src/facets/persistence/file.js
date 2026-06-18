@@ -156,6 +156,27 @@ export function create(ctx) {
     },
   }
 
+  // ---- grants: durable cross-project consent edges (one file per from->to edge). Project names + mode +
+  // expiry are routing metadata (already cleartext in the roster/traces), so stored as plain JSON. ----
+  const grants = {
+    async put(from, to, record) { await writeAtomic(dir('grants', `${slug(from)}__${slug(to)}.grant`), JSON.stringify(record)) },
+    async all() {
+      const gdir = dir('grants'), out = []
+      for (const f of await readDirSafe(gdir)) { if (!f.endsWith('.grant')) continue; const j = await readJson(path.join(gdir, f)); if (j) out.push(j) }
+      return out
+    },
+    async remove(from, to) { try { await fsp.unlink(dir('grants', `${slug(from)}__${slug(to)}.grant`)) } catch {} },
+    async gcAll({ now = Date.now() } = {}) {   // drop expired edges (exp in the past); forever (exp null) survives
+      let dropped = 0, gdir = dir('grants')
+      for (const f of await readDirSafe(gdir)) {
+        if (!f.endsWith('.grant')) continue
+        const file = path.join(gdir, f), j = await readJson(file)
+        if (j && j.exp && j.exp < now) { try { await fsp.unlink(file) } catch {} dropped++ }
+      }
+      return dropped
+    },
+  }
+
   // ---- retained: one file per publisher; effective value = newest ts ----
   const retained = {
     async put(project, topic, identity, record) {
@@ -171,7 +192,7 @@ export function create(ctx) {
   }
 
   return {
-    meta, root, readable, mailbox, claims, retained,
+    meta, root, readable, mailbox, claims, grants, retained,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,

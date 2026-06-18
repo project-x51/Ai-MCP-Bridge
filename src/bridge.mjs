@@ -127,7 +127,20 @@ profile.config.watch(c => {
     log('project policy reloaded from config')
   }
 })
-const runtimeAllow = new Map()             // `${from}>${to}` -> mode   (in-memory grants; keys are projKey'd)
+const runtimeAllow = new Map()             // `${from}>${to}` -> { mode, exp }   (runtime grants; keys are projKey'd; exp = ms epoch or null=forever; §12 durable when persistence is on)
+const pendingAccess = new Map()            // reqId -> { from, to, requester, requesterName, ttlMin, ts }  (so a grant can notify the original requester — Bug 3)
+// a TTL is minutes (number) or a duration string (e.g. "30m", "24h", "7d"); null/0/"forever"/"" = no expiry.
+function parseTtlMin(v) {
+  if (v == null || v === '' || v === 0) return null
+  if (typeof v === 'number') return v > 0 ? v : null
+  const s = String(v).trim().toLowerCase()
+  if (s === 'forever' || s === 'never' || s === '0') return null
+  const m = s.match(/^([\d.]+)\s*(m|min|h|hr|hour|d|day|w|week)?s?$/)
+  if (!m) return null
+  const n = parseFloat(m[1]); if (!isFinite(n) || n <= 0) return null
+  const u = (m[2] || 'm')[0]
+  return Math.round(n * (u === 'w' ? 10080 : u === 'd' ? 1440 : u === 'h' ? 60 : 1))
+}
 const CAP_TTL_MS = Number(process.env.AI_BRIDGE_CAP_TTL_MS) || 30 * 60000   // reply_exp stamp horizon (informational since Decision B; no longer gates delivery — see verifyReplyCap). Env-overridable for tests.
 const PROC_CAPKEY = capKeyFrom(SESSION)    // process reply-cap key (rotates per process = correct for Code)
 
@@ -143,7 +156,11 @@ function edgeAllows(fromRaw, toRaw) {
     if (f === from && t === to) return true
     if (m === 'bidirectional' && f === to && t === from) return true
   }
-  for (const [k, m] of runtimeAllow) { const [f, t] = k.split('>'); if ((f === from && t === to) || (m === 'bidirectional' && f === to && t === from)) return true }
+  for (const [k, g] of runtimeAllow) {
+    if (g.exp && g.exp <= Date.now()) continue      // expired grant doesn't authorise (swept lazily here + periodically)
+    const [f, t] = k.split('>'), m = g.mode
+    if ((f === from && t === to) || (m === 'bidirectional' && f === to && t === from)) return true
+  }
   return false
 }
 function mayInitiate(fromProject, toProject) {     // may project `from` initiate to project `to`?
@@ -152,6 +169,23 @@ function mayInitiate(fromProject, toProject) {     // may project `from` initiat
   if (POLICY_OPEN) return true                     // realm-wide open
   return edgeAllows(fp, tp)
 }
+// persist a runtime grant edge (durable consent §12/§14) — best-effort, no-op without persistence
+function persistGrant(from, to, mode, exp) {
+  if (PERSIST) persistence.grants.put(from, to, { from, to, mode, exp: exp || null, granted_at: new Date().toISOString() }).catch(() => {})
+}
+if (PERSIST) {                                     // §14: re-hydrate durable grants so cross-project consent survives a restart
+  try {
+    for (const g of await persistence.grants.all()) {
+      if (g && g.from && g.to && (!g.exp || g.exp > Date.now())) runtimeAllow.set(`${projKey(g.from)}>${projKey(g.to)}`, { mode: g.mode === 'bidirectional' ? 'bidirectional' : 'send', exp: g.exp || null })
+    }
+  } catch { }
+}
+setInterval(() => {                                // §14: sweep expired grants + stale pending requests (always on; TTL works without persistence)
+  const now = Date.now()
+  for (const [k, g] of runtimeAllow) if (g.exp && g.exp <= now) runtimeAllow.delete(k)
+  for (const [id, p] of pendingAccess) if (now - p.ts > 3600000) pendingAccess.delete(id)
+  if (PERSIST) persistence.grants.gcAll({ now }).catch(() => {})
+}, Number(process.env.AI_BRIDGE_GRANT_GC_MS) || 600000).unref()
 function localCapKey(sessionId) {                  // reply-cap signing key for a LOCAL participant
   if (sessionId === SESSION) return PROC_CAPKEY
   const sp = subpeers.get(sessionId); if (sp) return sp.capKey
@@ -616,6 +650,13 @@ async function deliverSystemToProject(toProject, verb, body) {
     if (r && r.ok) n++
   }
   return n
+}
+// deliver a SYSTEM control message to a SINGLE target id (e.g. project_access_granted back to a requester —
+// Bug 3: the requester must be told its access request was approved instead of polling-by-retry).
+async function deliverSystemTo(toId, verb, body, subject) {
+  const env = makeEnvelope({ to: toId, verb, body, subject: subject || `system: ${verb}`, from: { session: SESSION, name: NAME, kind: 'session' } })
+  env.system = true
+  return routeEnvelope(env)
 }
 
 // the first bridge to become gateway can launch the Windows tray (in --ephemeral mode, so it exits
@@ -1154,18 +1195,20 @@ const TOOLS = [
       park: { type: 'boolean', description: 'RESERVED (offline delivery): park for a known-but-offline agent — returns unsupported for now' },
       as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
       secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['target', 'subject', 'message'] } },
-  { name: 'allow_project', description: 'Open YOUR project to inbound messages from another project (receiver-controlled consent). The caller\'s project grants `project` permission to initiate to it. mode "send" (one-way) or "bidirectional". In-memory until restart; for permanent access add an edge to config.json projects.allow. Sub-peers pass as + secret.',
+  { name: 'allow_project', description: 'Open YOUR project to inbound messages from another project (receiver-controlled consent). The caller\'s project grants `project` permission to initiate to it. mode "send" (one-way) or "bidirectional". As the operator you may set ttl_minutes to expire the grant (and may shorten what a requester asked for); omit for forever. Approving a pending request_project_access auto-notifies the requester (project_access_granted) with the permitted TTL. Durable across restart when persistence is on; for a permanent static edge add it to config.json projects.allow. Sub-peers pass as + secret.',
     inputSchema: { type: 'object', properties: {
       project: { type: 'string', description: 'the foreign project being granted access to yours' },
       mode: { type: 'string', description: 'send (default) | bidirectional' },
+      ttl_minutes: { type: ['number', 'string'], description: 'grant lifetime: minutes (number) or a duration like "24h"/"7d"; omit / 0 / "forever" = no expiry. May only shorten a requester\'s asked-for TTL.' },
       as: { type: 'string' }, secret: { type: 'string' } }, required: ['project'] } },
-  { name: 'revoke_project', description: 'Revoke a runtime grant created with allow_project (does not affect static config edges).',
+  { name: 'revoke_project', description: 'Revoke a runtime grant created with allow_project (drops the durable edge too; does not affect static config edges).',
     inputSchema: { type: 'object', properties: {
       project: { type: 'string' }, as: { type: 'string' }, secret: { type: 'string' } }, required: ['project'] } },
-  { name: 'request_project_access', description: 'Ask another project for permission to reach it. The bridge delivers a project_access_request to that project\'s sessions (by name, even though you cannot see them); an operator there approves by calling allow_project. Returns a request_id.',
+  { name: 'request_project_access', description: 'Ask another project for permission to reach it. The bridge delivers a project_access_request to that project\'s sessions (by name, even though you cannot see them); an operator there approves by calling allow_project. You will then receive a project_access_granted message echoing your request_id + the permitted TTL. Returns a request_id.',
     inputSchema: { type: 'object', properties: {
       to: { type: 'string', description: 'the project you want to reach' },
       reason: { type: 'string', description: 'why (shown to the target operator)' },
+      ttl_minutes: { type: ['number', 'string'], description: 'how long you want the access for: minutes (number) or a duration like "24h"/"7d"; omit / "forever" = indefinite. The operator may grant a shorter TTL.' },
       as: { type: 'string' }, secret: { type: 'string' } }, required: ['to'] } },
   { name: 'set_wake', description: 'RESERVED (wake feature): arm a wake listener for an idle session, with filters (sends always; publishes per pattern). Returns unsupported for now.',
     inputSchema: { type: 'object', properties: {
@@ -1368,32 +1411,52 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user } }
       if (!me0.project || me0.project === 'unclassified') return ok({ ok: false, code: 'caller-unclassified' })
-      const from = projKey(a.project)
       if (!a.project) return ok({ ok: false, code: 'project-required' })
+      const from = projKey(a.project), to = projKey(me0.project)
       const mode = a.mode === 'bidirectional' ? 'bidirectional' : 'send'
-      runtimeAllow.set(`${from}>${projKey(me0.project)}`, mode)   // keys are canonical (case-insensitive)
+      // §14 TTL: the operator may CAP (shorten) what the requester asked for. Effective = the operator's ttl
+      // if given, else the matching pending request's ttl, else forever; with both present, the operator can
+      // only shorten. forever is a null expiry.
+      const opTtl = parseTtlMin(a.ttl_minutes ?? a.ttl)
+      const pend = [...pendingAccess.values()].filter(p => p.from === from && p.to === to)
+      let reqTtl = null, sawReq = false
+      for (const p of pend) if (p.ttlMin != null) { sawReq = true; reqTtl = reqTtl == null ? p.ttlMin : Math.min(reqTtl, p.ttlMin) }
+      let effTtl = opTtl != null ? opTtl : (sawReq ? reqTtl : null)
+      if (opTtl != null && sawReq) effTtl = Math.min(opTtl, reqTtl)
+      const exp = effTtl != null ? Date.now() + effTtl * 60000 : null
+      runtimeAllow.set(`${from}>${to}`, { mode, exp })   // keys are canonical (case-insensitive)
+      persistGrant(from, to, mode, exp)          // §14: survives a restart
       broadcastRoster()                          // visibility may widen
       emitTraceRaw({ dir: 'con', verb: 'allow', from: me0.project, from_name: me0.user || NAME, to: from, size: 0,
-        note: `allow ${from} -> ${me0.project} (${mode})`, envelope_id: null })
-      return ok({ ok: true, allow: { from, to: me0.project, mode } })
+        note: `allow ${from} -> ${me0.project} (${mode}, ${exp ? effTtl + 'm' : 'forever'})`, envelope_id: null })
+      // Bug 3: tell the original requester(s) their access landed, echoing request_id + the permitted TTL
+      for (const p of pend) {
+        pendingAccess.delete(p.reqId)
+        deliverSystemTo(p.requester, 'project_access_granted', JSON.stringify({ to: me0.project, from, mode, request_id: p.reqId, ttl_minutes: effTtl, expires_at: exp ? new Date(exp).toISOString() : null }), `project access granted: ${from} -> ${me0.project}`).catch(() => {})
+      }
+      return ok({ ok: true, allow: { from, to: me0.project, mode, ttl_minutes: effTtl, expires_at: exp ? new Date(exp).toISOString() : null }, notified: pend.length })
     }
     case 'revoke_project': {
       let myProj = PROC_IDENT?.project
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); myProj = sp.identity?.project }
-      const from = projKey(a.project)
-      const had = runtimeAllow.delete(`${from}>${projKey(myProj)}`)
+      const from = projKey(a.project), to = projKey(myProj)
+      const had = runtimeAllow.delete(`${from}>${to}`)
+      if (PERSIST) persistence.grants.remove(from, to).catch(() => {})   // §14: drop the durable edge too
       if (had) broadcastRoster()
       return ok({ ok: true, revoked: had, from, to: myProj })
     }
     case 'request_project_access': {
-      let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }
-      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user } }
+      let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }, requester = SESSION
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user }; requester = sp.id }
       const to = String(a.to || '').trim().toLowerCase()
       if (!to) return ok({ ok: false, code: 'project-required' })
+      const ttlMin = parseTtlMin(a.ttl_minutes ?? a.ttl)   // null = requesting forever; the operator can shorten
       const reqId = 'req_' + crypto.randomBytes(5).toString('hex')
-      const payload = JSON.stringify({ from_project: me0.project || 'unclassified', from_user: me0.user || 'unknown', reason: String(a.reason || ''), request_id: reqId })
+      const fromProj = projKey(me0.project || 'unclassified')
+      pendingAccess.set(reqId, { reqId, from: fromProj, to, requester, requesterName: me0.user || NAME, ttlMin, ts: Date.now() })
+      const payload = JSON.stringify({ from_project: me0.project || 'unclassified', from_user: me0.user || 'unknown', reason: String(a.reason || ''), request_id: reqId, ttl_minutes: ttlMin })
       const reached = await deliverSystemToProject(to, 'project_access_request', payload)
-      return ok({ ok: true, request_id: reqId, to, delivered_to: reached })
+      return ok({ ok: true, request_id: reqId, to, ttl_minutes: ttlMin, delivered_to: reached })
     }
     case 'set_wake': return ok({ ok: false, code: 'unsupported', what: 'wake (T14 — reserved for the watcher/doorbell feature)' })
     case 'send_to_peer': {

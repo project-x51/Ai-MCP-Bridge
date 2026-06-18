@@ -13,7 +13,7 @@
     "ws": "^8.0.0"
   },
   "scripts": {
-    "test": "node tests/test_mesh.mjs && node tests/test_subpeers.mjs && node tests/test_topics.mjs && node tests/test_identity.mjs && node tests/test_consent.mjs && node tests/test_dashboard.mjs && node tests/test_page_e2e.mjs && node tests/test_federation.mjs && node tests/test_dashboard_multihost.mjs && node tests/test_persistence.mjs && node tests/test_persist_live.mjs"
+    "test": "node tests/test_mesh.mjs && node tests/test_subpeers.mjs && node tests/test_topics.mjs && node tests/test_identity.mjs && node tests/test_consent.mjs && node tests/test_dashboard.mjs && node tests/test_page_e2e.mjs && node tests/test_federation.mjs && node tests/test_dashboard_multihost.mjs && node tests/test_persistence.mjs && node tests/test_persist_live.mjs && node tests/test_grants_live.mjs"
   },
   "devDependencies": {
     "jsdom": "^24.1.3"

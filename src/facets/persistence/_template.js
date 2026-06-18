@@ -27,6 +27,12 @@ export function create(ctx) {
       async remove(project, topic, identity) {},
       async gcAll(opts) { return 0 },              // drop claims past hard expiry (holder never returned); return count dropped
     },
+    grants: {
+      async put(from, to, record) {},              // durable cross-project consent edge (from->to, mode, exp)
+      async all() { return [] },                   // every stored edge, to rehydrate runtimeAllow on startup
+      async remove(from, to) {},
+      async gcAll(opts) { return 0 },              // drop edges past their expiry; return count dropped
+    },
     retained: {
       async put(project, topic, identity, record) {},
       async read(project, topic) { return null },  // the newest publisher value
