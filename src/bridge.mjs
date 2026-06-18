@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.14.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.15.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -924,6 +924,16 @@ function broadcastRoster() {
   for (const ws of leaves) if (ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'roster', ...rosterFor(ws) })) } catch {} }
   gossipToPeers()   // §7: push my local slice to peer hubs (no-op unless it actually changed)
 }
+// push the durable-state snapshot to dashboard(s) (the Persistence view). `target` = one ws, else all.
+async function pushPersistence(target) {
+  if (!PERSIST) return
+  let snap; try { snap = await persistence.snapshot() } catch { return }
+  const msg = JSON.stringify({ type: 'persistence', snapshot: snap })
+  if (target) { if (target.readyState === 1) { try { target.send(msg) } catch {} } ; return }
+  for (const ws of leaves) if (ws.kind === 'dashboard' && ws.readyState === 1) { try { ws.send(msg) } catch {} }
+}
+setInterval(() => { for (const ws of leaves) { if (ws.kind === 'dashboard' && ws.readyState === 1) { pushPersistence(); break } } },
+  Number(process.env.AI_BRIDGE_DASH_PERSIST_MS) || 5000).unref()   // live-refresh the persistence view while a dashboard watches
 
 // ---------------------------------------------------------------- cross-host federation (§7)
 // Co-equal per-host hubs find each other through the discovery facet and gossip their LOCAL roster slice
@@ -1139,8 +1149,8 @@ function becomeGateway(server) {
           leaves.add(ws)
           log(`${ws.kind} connected: ${m.page_kind || ws.kind} "${m.title || ''}" (${ws.instance})`)
           if (ws.kind === 'page') emitTraceRaw({ dir: 'con', verb: 'connect', from: `page:${ws.instance}`, from_name: m.title || m.page_kind || 'page', to: SESSION, size: 0, note: `page joined (${m.page_kind || 'page'})`, envelope_id: null })
-          ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, ...rosterFor(ws) }))
-          if (ws.kind === 'dashboard') ws.send(JSON.stringify({ type: 'trace_history', traces: traceRing }))
+          ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, profile: profile.names, capabilities: CAPS, realm: REALM, ...rosterFor(ws) }))
+          if (ws.kind === 'dashboard') { ws.send(JSON.stringify({ type: 'trace_history', traces: traceRing })); pushPersistence(ws) }
           broadcastRoster()
         } else if (m.type === 'set_alias' && ws.kind === 'dashboard') {
           if (m.scope === 'host') { ALIASES[m.target] = m.alias; persistAliases() }

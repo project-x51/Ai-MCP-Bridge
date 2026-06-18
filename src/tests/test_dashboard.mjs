@@ -14,7 +14,7 @@ const check=(n,c,x='')=>{ c?(pass++,console.log('PASS',n)):(fail++,console.log('
 
 async function spawnBridge(name){
   const t=new StdioClientTransport({command:'node',args:[SRCDIR + 'bridge.mjs'],cwd:SRCDIR,
-    env:{...process.env,AI_BRIDGE_NAME:name,AI_BRIDGE_PORT:PORT,AI_BRIDGE_WS_PORT:WSPORT,AI_BRIDGE_TOKEN:TOKEN},stderr:'pipe'})
+    env:{...process.env,AI_BRIDGE_NAME:name,AI_BRIDGE_PORT:PORT,AI_BRIDGE_WS_PORT:WSPORT,AI_BRIDGE_TOKEN:TOKEN,AI_BRIDGE_PERSISTENCE:'none',AI_BRIDGE_BIND:'127.0.0.1',AI_BRIDGE_DISCOVERY:'none'},stderr:'pipe'})
   const c=new Client({name:'t-'+name,version:'0'},{capabilities:{}})
   await c.connect(t); return {c,t}
 }

@@ -57,16 +57,32 @@
   .edge.subp { stroke-dasharray: 3 3; stroke: #EAB308; }
   .pulse circle, .pulse rect { stroke: #F59E0B !important; stroke-width: 3.5 !important; }
   .edge.pulse-e { stroke: #F59E0B; stroke-width: 3; }
+  #prof { font-size:11.5px; color:#6B7280; margin:-6px 0 10px 2px; }
+  #prof b { color:#334155; } #prof .fk { color:#94A3B8; }
+  .chip { display:inline-block; background:#F8FAFC; border:1px solid #E5E7EB; border-radius:8px; padding:2px 10px; margin:0 7px 4px 0; font-size:12px; }
+  .chip b { font-weight:700; color:#0F172A; } .chip span { color:#64748B; }
+  table.pers { width:auto; margin:3px 0 2px; font-size:11.5px; }
+  table.pers th { background:transparent; color:#9CA3AF; font-weight:600; font-size:10px; text-transform:uppercase; letter-spacing:.03em; padding:1px 14px 3px 0; border:none; }
+  table.pers td { padding:2px 14px 2px 0; border:none; }
+  .empty { color:#9CA3AF; font-style:italic; }
 </style>
 </head>
 <body>
 <h1><span class="pip" id="pip"></span>Ai MCP Bridge — Dashboard</h1>
 <div class="sub" id="gw">connecting…</div>
+<div id="prof"></div>
 <h2>Mesh map</h2>
 <svg id="map" height="10"></svg>
 <div class="hint">Click a node to set its alias (sessions/pages rename live; host aliases persist in config.json). Amber flash = message activity.</div>
 <h2>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span></h2>
 <table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
+<div id="perssec" style="display:none">
+  <h2>Persistence <span id="perstag" class="bub b-info" style="font-weight:600"></span></h2>
+  <div id="perssum"></div>
+  <table><tbody id="persistence"></tbody></table>
+  <div class="hint">Durable state on the gateway's shared folder — survives a restart. Click a store to inspect it.</div>
+</div>
+<div id="persoff" class="sub" style="display:none">Persistence is <b>off</b> (profile.persistence = none) — nothing is stored durably.</div>
 <h2>Traces (newest first — click a row for details)</h2>
 <table><thead><tr><th></th><th>Time</th><th>Dir</th><th>From → To</th><th>Subject</th></tr></thead><tbody id="traces"></tbody></table>
 <script>
@@ -186,6 +202,53 @@
       });
       if(!hasGw) box.pages.forEach(renderPage);   // fallback: machine with pages but no visible gateway
     });
+  }
+
+  // ------------------------------------------------ persistence (durable-state view)
+  function tsf(t){ return t?esc(String(t).replace('T',' ').slice(0,19)):'—'; }
+  function bytes(n){ n=n||0; return n<1024?(n+' B'):n<1048576?((n/1024).toFixed(1)+' KB'):((n/1048576).toFixed(1)+' MB'); }
+  function mono(s){ return '<span class="mono">'+esc(s)+'</span>'; }
+  function chip(icon,n,label){ return '<span class="chip">'+icon+' <b>'+(n||0)+'</b> <span>'+label+'</span></span>'; }
+  function persTable(rows,cols){
+    return '<table class="pers"><tr>'+cols.map(function(c){return '<th>'+c[0]+'</th>';}).join('')+'</tr>'+
+      rows.map(function(r){return '<tr>'+cols.map(function(c){return '<td>'+c[1](r)+'</td>';}).join('')+'</tr>';}).join('')+'</table>';
+  }
+  var PROJU=function(r){ return '<span class="bub b-pu">'+esc(r.project||'?')+(r.user?' · '+esc(r.user):'')+'</span>'; };
+  var STORES=[
+    {key:'mailboxes',icon:'📨',name:'Mailboxes — parked mail',badge:'b-info',
+      cols:[['recipient',function(r){return mono(r.who)}],['msgs',function(r){return r.count}],['size',function(r){return bytes(r.bytes)}],['oldest',function(r){return tsf(r.oldest)}]]},
+    {key:'claims',icon:'🏷',name:'Claims — durable responsibilities',badge:'b-resp',
+      cols:[['topic',function(r){return r.exclusive?'<b>'+esc(r.topic)+'</b>':esc(r.topic)}],['owner',function(r){return esc(r.holder_name)}],['project · user',PROJU],['flags',function(r){var f=[];if(r.exclusive)f.push('exclusive');if(r.announce_offline)f.push('announce-offline');return f.join(' · ')||'—'}],['refreshed',function(r){return tsf(r.refreshed_at)}]]},
+    {key:'grants',icon:'🔑',name:'Grants — cross-project consent',badge:'b-con',
+      cols:[['edge',function(r){return '<b>'+esc(r.from)+'</b> → <b>'+esc(r.to)+'</b>'}],['mode',function(r){return esc(r.mode)}],['expires',function(r){return r.exp?tsf(new Date(r.exp).toISOString()):'<span class="empty">forever</span>'}],['granted',function(r){return tsf(r.granted_at)}]]},
+    {key:'registrations',icon:'📇',name:'Registrations — name → identity',badge:'b-pu',
+      cols:[['name',function(r){return '<b>'+esc(r.name)+'</b>'}],['project · user',PROJU],['kind',function(r){return esc(r.client_kind||'?')}],['last seen',function(r){return tsf(r.last_seen)}]]},
+    {key:'subscriptions',icon:'👂',name:'Subscriptions — interest',badge:'b-subp',
+      cols:[['pattern',function(r){return esc(r.pattern)}],['who',function(r){return esc(r.name)}],['project · user',PROJU]]},
+    {key:'retained',icon:'📌',name:'Retained — last value per topic',badge:'b-pub',
+      cols:[['topic',function(r){return esc(r.topic)}],['project',function(r){return esc(r.project)}],['updated',function(r){return tsf(r.ts)}]]}
+  ];
+  function setPersistence(snap){
+    if(!snap || !snap.enabled) return;   // "off" is shown via the profile on welcome
+    document.getElementById('perssec').style.display=''; document.getElementById('persoff').style.display='none';
+    document.getElementById('perstag').textContent='file';
+    var c=snap.counts||{};
+    document.getElementById('perssum').innerHTML=
+      chip('📨',c.parked,'parked')+chip('🗂',c.mailboxes,c.mailboxes===1?'mailbox':'mailboxes')+
+      chip('🏷',c.claims,c.claims===1?'claim':'claims')+chip('🔑',c.grants,c.grants===1?'grant':'grants')+
+      chip('📇',c.registrations,'registrations')+chip('👂',c.subscriptions,'subscriptions')+chip('📌',c.retained,'retained');
+    var tb=document.getElementById('persistence'); tb.innerHTML='';
+    STORES.forEach(function(s){ var rows=snap[s.key]||[];
+      expandable(tb,[s.icon+' '+esc(s.name),'<span class="bub '+s.badge+'">'+rows.length+'</span>'],
+        rows.length?persTable(rows,s.cols):'<span class="empty">empty</span>'); });
+  }
+  function renderProf(m){
+    var el=document.getElementById('prof'); if(!el||!m) return;
+    var p=m.profile||{}, parts=['<b>v'+esc(m.bridge_version||'?')+'</b>'];
+    Object.keys(p).forEach(function(k){ parts.push('<span class="fk">'+esc(k)+'</span>=<b>'+esc(p[k])+'</b>'); });
+    var cps=m.capabilities?Object.keys(m.capabilities).filter(function(k){return m.capabilities[k];}):[];
+    el.innerHTML=parts.join(' · ')+(cps.length?(' · <span class="fk">caps</span> '+cps.map(esc).join(', ')):'');
+    if(p.persistence==='none'){ document.getElementById('perssec').style.display='none'; document.getElementById('persoff').style.display=''; }
   }
 
   // ------------------------------------------------ map
@@ -358,8 +421,9 @@
     sock=ws;
     ws.onopen=function(){ ws.send(JSON.stringify({type:'hello',kind:'dashboard',instance:'dash-'+Math.random().toString(16).slice(2,8),token:token})); };
     ws.onmessage=function(ev){ var m; try{ m=JSON.parse(ev.data);}catch(e){return;}
-      if(m.type==='welcome'){ pip.classList.add('on'); backoff=1000; gw.textContent='gateway: '+m.gateway; last=m; setTables(m); drawMap(m); }
+      if(m.type==='welcome'){ pip.classList.add('on'); backoff=1000; gw.textContent='gateway: '+m.gateway; renderProf(m); last=m; setTables(m); drawMap(m); }
       else if(m.type==='roster'){ last.sessions=m.sessions; last.pages=m.pages; last.hosts=m.hosts||last.hosts; last.gateway=m.gateway||last.gateway; setTables(last); drawMap(last); }
+      else if(m.type==='persistence'){ setPersistence(m.snapshot); }
       else if(m.type==='trace'){ addTrace(m.trace); }
       else if(m.type==='trace_history'){ (m.traces||[]).forEach(addTrace); } };
     ws.onclose=function(){ pip.classList.remove('on'); gw.textContent='disconnected — retrying…'; retry(); };

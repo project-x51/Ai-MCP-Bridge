@@ -291,8 +291,41 @@ export function create(ctx) {
     },
   }
 
+  // a read-only summary of every store for the dashboard's persistence view. Records are self-describing,
+  // so this shows real identities/topics (not opaque hashes). Capped per store to bound the payload.
+  async function snapshot() {
+    const cap = 400
+    const readAll = async (sub, ext, map) => {
+      const out = [], base = dir(sub)
+      const walk = async (d, depth) => {
+        for (const f of await readDirSafe(d)) {
+          if (out.length >= cap) return
+          const p = path.join(d, f)
+          let st; try { st = await fsp.stat(p) } catch { continue }
+          if (st.isDirectory()) { if (depth < 4) await walk(p, depth + 1) }
+          else if (f.endsWith(ext)) { const j = await readJson(p); if (j) out.push(map(j, st)) }
+        }
+      }
+      await walk(base, 0)
+      return out
+    }
+    const msgs = await readAll('mailboxes', '.msg', (j, st) => ({ for: j.for || null, ts: j.ts, bytes: st.size }))
+    const mboxes = {}
+    for (const m of msgs) { const who = m.for ? `${m.for.project}/${m.for.user}/${m.for.name}` : '(unknown)'; const e = mboxes[who] || (mboxes[who] = { who, count: 0, bytes: 0, oldest: m.ts }); e.count++; e.bytes += m.bytes; if (m.ts < e.oldest) e.oldest = m.ts }
+    const claims = await readAll('claims', '.claim', j => ({ project: j.project, topic: j.pattern, holder_name: j.holder_name, user: j.user, exclusive: !!j.exclusive, announce_offline: !!j.announce_offline, refreshed_at: j.refreshed_at }))
+    const grants = await readAll('grants', '.grant', j => ({ from: j.from, to: j.to, mode: j.mode, exp: j.exp || null, granted_at: j.granted_at }))
+    const registrations = await readAll('registrations', '.reg', j => ({ name: j.name, project: j.project, user: j.user, client_kind: j.client_kind, last_seen: j.last_seen }))
+    const subscriptions = await readAll('subscriptions', '.sub', j => ({ name: j.name, project: j.project, user: j.user, pattern: j.pattern }))
+    const retained = await readAll('retained', '.val', j => ({ project: j.project, topic: j.topic, ts: j.ts }))
+    return {
+      enabled: true, readable, dir: root,
+      counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.length, registrations: registrations.length, subscriptions: subscriptions.length, retained: retained.length },
+      mailboxes: Object.values(mboxes).sort((a, b) => b.count - a.count), claims, grants, registrations, subscriptions, retained,
+    }
+  }
+
   return {
-    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, retained,
+    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, retained, snapshot,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,

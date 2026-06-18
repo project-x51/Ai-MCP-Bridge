@@ -703,6 +703,11 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.15):** *dashboard persistence view* — the gateway pushes a read-only `snapshot()` of all six
+  durable stores to the dashboard (self-describing records → real identities, not hashes), rendered as a
+  Persistence section: count chips + a per-store expander (mailboxes/claims/grants/registrations/
+  subscriptions/retained). A profile line shows version + facets + capabilities. Live-refreshed while a
+  dashboard watches.
 - **Built (v1.14):** *session resync (stateful bridge, stateless session)* — `register_self` now returns
   `topics` (the identity's owned **and subscribed** topics, rehydrated from durable state) + `access` (the
   projects it may reach) + the inbox hint, so a reconnecting/compacted session relearns its responsibilities

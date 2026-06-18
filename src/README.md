@@ -46,7 +46,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 - `test_mesh.mjs` — harness: 3 bridges, election, routing, push, leaves, traces, failover (22 checks).
 - `test_dashboard.mjs` — dashboard map/alias/sub-peer suite + agent-kind classification + page wildcard-subject guard (27); `test_dashboard_multihost.mjs` —
   by-machine grouping, remote-gateway marking, code=orange, cross-host edge, gossiped web sessions,
-  plus box/edge/node z-layering and the agent client-kind, via a synthetic two-machine roster in jsdom (15); `test_page_e2e.mjs` — generic
+  plus box/edge/node z-layering and the agent client-kind, via a synthetic two-machine roster in jsdom (15);
+  `test_dashboard_persistence.mjs` — the Persistence view: a real bridge's durable state (claim/registration/
+  subscription) is snapshotted to the dashboard and rendered into the per-store expanders + profile line (7); `test_page_e2e.mjs` — generic
   widget-contract E2E (dropdown/selection/send/sub-peers/topics/offline) against the `test_page.html`
   fixture, real clicks via jsdom (44); `test_subpeers.mjs` — registration, secrets, cursors/epochs,
   hierarchy, dead-letter, TTL, cross-process (26); `test_topics.mjs` — claims/icons/exclusive overlap,
