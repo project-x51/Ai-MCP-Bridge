@@ -18,8 +18,10 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 
 ## Files
 - `bridge.mjs` — the mesh node + gateway/WS/trace roles + MCP stdio server (realm-agnostic core).
-- `facets/` — the pluggable realm profile: `auth/ cipher/ capsigner/ identity/ config/ transport/`,
-  each with a `_template.js` + impl files, assembled by `facets/index.js`. Copy a file to add one.
+- `facets/` — the pluggable realm profile: `auth/ cipher/ capsigner/ identity/ config/ transport/
+  discovery/ persistence/ authorizer/`, each with a `_template.js` + impl files, assembled by
+  `facets/index.js`. Copy a file to add one. (`discovery` = §7 cross-host, `persistence` = §12 durable
+  state, `authorizer` = §16 presence-gated confirmation.)
 - `config.json` — `port`, `wsPort`, `token`, `realm`, optional `projects` policy / `profile` / `tray`.
 - `tools/` — embeddable client tools (consumers inline / inject these):
   - `tools/aimb-page-bridge.js` — leaf client embedded by page renderers (`window.AIMB_BRIDGE_CFG` + `aimbBridge.send`).
@@ -58,9 +60,13 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `test_persistence.mjs` — persistence facet (§12) units: size-string parser, format-prefixed stable
   identity keys + both-form lookup, mailbox store/drain/ack/caps/TTL, claims per-holder/byHolder/gcAll,
   retained newest-wins (28); `test_persist_live.mjs` — live restart proof: a parked message survives a
-  bridge restart and is redelivered to the returning peer (consumed ones aren't), a durable claim
-  rehydrates and is routable on re-register (and stays gone after `release_topic`), incl. a process-held
-  claim (14). Tests run in
+  bridge restart and is redelivered to the returning peer (consumed ones aren't), per-peer mailbox keying
+  (a sender's own send never echoes back), a durable claim rehydrates and is routable on re-register (and
+  stays gone after `release_topic`), incl. a process-held claim (17); `test_grants_live.mjs` — durable
+  cross-project grants (§14): request → operator shortens the TTL → requester notified (project_access_
+  granted) → send works → survives restart → revoke (persisted) → TTL expiry (12); `test_offline_park_live.mjs`
+  — offline owners (§16): park to an offline owner + announce on/off + redelivery; same-user dormant-topic
+  takeover gated by the authorizer (none=held, script-approve=ok); cross-user grace/displace (8). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.

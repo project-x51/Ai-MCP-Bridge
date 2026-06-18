@@ -380,12 +380,15 @@ A **`RealmProfile`** binds one implementation per facet:
 
 ```
 RealmProfile {
-  auth:      AuthProvider     // prove/accept identity of a connecting peer
-  cipher:    BodyCipher       // seal/open envelope bodies
-  capSigner: CapSigner        // mint/verify reply capabilities (§5)
-  transport: Transport        // listen / dial / frame
-  config:    ConfigSource     // load + watch realm policy
-  identity:  IdentityModel    // classify (project, user, realm); map across realms
+  auth:        AuthProvider     // prove/accept identity of a connecting peer
+  cipher:      BodyCipher       // seal/open envelope bodies
+  capSigner:   CapSigner        // mint/verify reply capabilities (§5)
+  transport:   Transport        // listen / dial / frame
+  config:      ConfigSource     // load + watch realm policy
+  identity:    IdentityModel    // classify (project, user, realm); map across realms
+  discovery:   Discovery        // enumerate candidate peer-hubs (§7) — none / seeds / tailscale
+  persistence: Persistence      // durable mailboxes / claims / grants / retained (§12) — none / file
+  authorizer:  Authorizer       // human-in-the-loop confirmation for presence-gated actions (§16) — none / script / hello
 }
 ```
 
@@ -397,6 +400,9 @@ RealmProfile {
 | `Transport` | `listen(onConn)`; `dial(addr)` → conn; framing contract | length-prefixed JSON / TCP + WS |
 | `ConfigSource` | `load()` → realm config; `watch(onChange)` | shared JSON file + fs-watch |
 | `IdentityModel` | `classify(declared)` → `{project, user, realm}`; `mapInbound(foreign, fromRealm)` | declared labels, no mapping |
+| `Discovery` | `peers()` → candidate host:port hubs to probe (§7) | none (single-host); seeds; tailscale |
+| `Persistence` | `mailbox` / `claims` / `grants` / `retained` stores over a shared folder (§12) | none (no-op); file |
+| `Authorizer` | `confirm({action,subject,…})` → `{approved}` — presence-gated yes/no (§16) | none (deny); script; hello |
 
 ### How the pieces compose
 
@@ -573,6 +579,47 @@ holds cleartext subjects/identities). Config sizes accept a **string** — plain
 space optional, decimals OK (`16MB`, `12.5 MB`, `1 GB`, `1048576`). A future `storeMaxSize` could bound
 the whole store; per-mailbox caps are the primary defence.
 
+> **Keying caveat (v1.10 fix):** the on-disk key is `(realm, project, user, NAME)`. The IdentityModel's
+> `classify()` deliberately omits the session name (an identity is the human+work, not the session), so
+> the bridge appends it before every persistence call — sub-peers by their register name, the process by
+> hostname. Earlier, the missing name collapsed all co-user sub-peers onto one mailbox/claim key (a
+> sender then drained its own send on reconnect). One writer per file still holds because the name is
+> part of the path.
+
+### Offline owners, dormant-claim takeover & the authorizer (§16) — built v1.10
+
+A durable claim makes a topic owner **addressable while offline**. Two behaviours follow:
+
+- **Park to an offline owner.** A directed `send_to_peer {target:"topic:<t>"}` whose owner holds a durable
+  claim but is not currently registered is **parked to that owner's mailbox** (by the identity rebuilt
+  from the claim record, which now stores `user`+`name`) and delivered when it returns — instead of
+  bouncing `no-owner`. Consent is checked at park-time (only park what you could send live). The owner
+  chooses at `claim_topic` whether senders are **told** it is offline (`announce_offline`) or whether the
+  message is parked **silently** (the send looks like a normal accept) — the default.
+- **Taking over a dormant topic.** When a claimant wants a topic an *offline* durable owner still holds,
+  the in-RAM exclusive-blocker check can't see it, so a dedicated guard resolves it:
+  - **Same user** (your own other session): gated by the **`authorizer` facet** — a presence check the
+    human must pass. `none` (default) denies; `hello` raises a real **Windows Hello** prompt via the
+    tray (proven in `experiments/hello-tpm-vault`; the live shim is the one unwired piece); `script`
+    (env/file decision) makes the whole flow testable headlessly. The facet **never silently approves**.
+  - **Different user**: **grace-then-displaceable** — held during the grace window, then displaceable
+    only if takeover is permitted. Policy is **per-claim** (`grace_minutes`, `allow_other_user`) over the
+    realm **config** (`claimGraceMinutes`, `allowCrossUserTakeover`, default deny).
+
+The authorizer is the reusable seam for any future presence-gated decision (e.g. the inbox secret-unlock
+/ Hello-vault recovery): the bridge calls `authorizer.confirm({action, subject, details, user})` and acts
+on `{approved}`; swapping the impl swaps *how* the human is asked without touching the core.
+
+### Durable cross-project grants with TTL + acknowledgement (§14) — built v1.10
+
+Runtime `allow_project` grants (§4) are now **durable** (a `grants` store in the persistence facet;
+re-hydrated into `runtimeAllow` on startup, dropping any expired) and may carry a **TTL** — minutes or a
+duration string, `forever` supported. A `request_project_access` may state a requested TTL; the operator
+may **only shorten** it; the grant response and the requester's notification both report the **permitted**
+TTL. Approving a request is no longer silent: the bridge sends the requester a **`project_access_granted`**
+echoing its `request_id` + the permitted TTL/expiry (it previously had to poll-by-retry). Edges are
+routing metadata (project names + mode + expiry, already cleartext in the roster) so stored as plain JSON.
+
 ---
 
 ## 13. Implementation status
@@ -604,9 +651,25 @@ the whole store; per-mailbox caps are the primary defence.
   format-prefixed identity keys with both-form lookup. Opt in with `AI_BRIDGE_PERSISTENCE=file`. Also:
   user identity is taken from the **OS login** (`os.userInfo()`), not a session-declared value, so it
   can't be fabricated. Live-verified by `test_persist_live.mjs` (restart → redelivery / rehydrate).
+- **Built (v1.10):**
+  - *Per-peer durable keying fix* — persistence keys by `(realm,project,user,name)`; without the name,
+    co-user sub-peers shared one mailbox and a sender saw its own send on reconnect (now keyed per peer:
+    sub-peers by name, the process by hostname). `test_persist_live` regression.
+  - *Offline owners (§16)* — a directed send to a topic whose durable owner is **offline** parks for its
+    return instead of bouncing `no-owner`; the owner opts in (`announce_offline`) to having senders told.
+  - *Dormant-claim takeover* via the new pluggable **`authorizer`** facet (`none`/`script`/`hello`):
+    taking over your **own** dormant topic needs presence confirmation (Windows Hello in prod, script in
+    CI); a **different** user may take over only after a grace window and only if allowed —
+    per-claim `grace_minutes` + `allow_other_user` over global `claimGraceMinutes` + `allowCrossUserTakeover`.
+  - *Durable cross-project grants with TTL (§4)* — `allow_project` survives a restart and may carry a
+    TTL (the operator can shorten what a requester asked for); approving a `request_project_access`
+    now **notifies the requester** (`project_access_granted`, echoing `request_id` + permitted TTL).
+    Persistence facet gains a `grants` store.
+  - *Tray* shows the running bridge version.
+  - Verified by `test_grants_live` + `test_offline_park_live`; suite 291 across 13.
 - **Designed — pending:** `retain` (durable last-event-per-topic, §12); explicit `park` to a
-  never-registered identity; the full claim lease → dormant → displaced lifecycle with
-  conflict-on-return negotiation (v1.9 re-asserts a holder's own claims only).
+  never-registered identity; wiring the **`hello` authorizer** to a real Windows Hello tray prompt (the
+  flow is proven via the `script` impl + experiments/hello-tpm-vault — only the live prompt is unwired).
 - **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,
   `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§9); `force` operator-takeover of
   an offline holder; durable reply-caps; the wake doorbell.
