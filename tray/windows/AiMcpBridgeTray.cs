@@ -66,7 +66,7 @@ class TrayApp : ApplicationContext
 
         _icon = new NotifyIcon();
         _icon.Icon = _offIcon;
-        _icon.Text = "Ai MCP Bridge";
+        _icon.Text = Tip(false, 0);
         _icon.Visible = true;
         _icon.ContextMenuStrip = menu;
         _icon.DoubleClick += delegate { OpenDashboard(); };
@@ -86,7 +86,7 @@ class TrayApp : ApplicationContext
         int n = CountBridges();
         bool up = n > 0;
         _icon.Icon = up ? _onIcon : _offIcon;
-        _icon.Text = "Ai MCP Bridge — " + (up ? (n + " bridge" + (n == 1 ? "" : "s") + " online") : "offline");
+        _icon.Text = Tip(up, n);
         if (_ephemeral)
         {
             if (!up) { _emptyTicks++; if (_emptyTicks >= 2) ExitApp(); }
@@ -116,6 +116,14 @@ class TrayApp : ApplicationContext
         try { _monitor.Stop(); } catch { }
         try { _icon.Visible = false; _icon.Dispose(); } catch { }
         Application.Exit();
+    }
+
+    // tray tooltip: name + version + live status (version also heads the right-click menu)
+    string Tip(bool up, int n)
+    {
+        string v = _version.Length > 0 ? " v" + _version : "";
+        string status = up ? (n + " bridge" + (n == 1 ? "" : "s") + " online") : "offline";
+        return "Ai MCP Bridge" + v + " — " + status;
     }
 
     // ---- bridge process control --------------------------------------------
