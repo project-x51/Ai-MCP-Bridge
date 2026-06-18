@@ -46,6 +46,11 @@ export function create(ctx) {
       async remove(identity, pattern) {},
       async gcAll(opts) { return 0 },              // drop subscriptions unseen past maxAgeMs; return count dropped
     },
+    vault: {
+      async put(identity, record) {},              // the user-SEALED secret (ciphertext only) for recovery (§21)
+      async get(identity) { return null },
+      async remove(identity) {},
+    },
     retained: {
       async put(project, topic, identity, record) {},
       async read(project, topic) { return null },  // the newest publisher value

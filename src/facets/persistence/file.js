@@ -254,6 +254,26 @@ export function create(ctx) {
     },
   }
 
+  // ---- vault: the user-sealed secret per identity, for presence-gated recovery (§21). Ciphertext only
+  // (sealed to the user's TPM); never the plaintext secret. One file per identity. ----
+  const vault = {
+    async put(identity, record) {
+      const { primary } = identityKeys(identity, readable)
+      await writeAtomic(dir('vault', `${primary}.vault`), JSON.stringify({
+        realm: identity.realm, project: identity.project, user: identity.user, name: identity.name,
+        sealed: record.sealed, sealed_at: record.sealed_at || new Date().toISOString() }))
+    },
+    async get(identity) {
+      const { both } = identityKeys(identity, readable)
+      for (const key of new Set(both)) { const j = await readJson(dir('vault', `${key}.vault`)); if (j) return j }
+      return null
+    },
+    async remove(identity) {
+      const { both } = identityKeys(identity, readable)
+      for (const key of new Set(both)) { try { await fsp.unlink(dir('vault', `${key}.vault`)) } catch {} }
+    },
+  }
+
   // ---- retained: one file per publisher; effective value = newest ts. The topic is stored in-body (the
   // dir slug is lossy) so allForProject can recover it for wildcard subscribe-time catch-up. ----
   const retained = {
@@ -317,15 +337,17 @@ export function create(ctx) {
     const registrations = await readAll('registrations', '.reg', j => ({ name: j.name, project: j.project, user: j.user, client_kind: j.client_kind, last_seen: j.last_seen }))
     const subscriptions = await readAll('subscriptions', '.sub', j => ({ name: j.name, project: j.project, user: j.user, pattern: j.pattern }))
     const retained = await readAll('retained', '.val', j => ({ project: j.project, topic: j.topic, ts: j.ts }))
+    const vaults = await readAll('vault', '.vault', j => ({ name: j.name, project: j.project, user: j.user, sealed_at: j.sealed_at }))   // identities only — never the sealed value
     return {
       enabled: true, readable, dir: root,
-      counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.length, registrations: registrations.length, subscriptions: subscriptions.length, retained: retained.length },
+      counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.length, registrations: registrations.length, subscriptions: subscriptions.length, vault: vaults.length, retained: retained.length },
+      vault: vaults,
       mailboxes: Object.values(mboxes).sort((a, b) => b.count - a.count), claims, grants, registrations, subscriptions, retained,
     }
   }
 
   return {
-    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, retained, snapshot,
+    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, snapshot,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,

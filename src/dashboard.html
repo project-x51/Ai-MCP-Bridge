@@ -245,6 +245,8 @@
       cols:[['name',function(r){return '<b>'+esc(r.name)+'</b>'}],['project · user',PROJU],['kind',function(r){return esc(r.client_kind||'?')}],['last seen',function(r){return tsf(r.last_seen)}]]},
     {key:'subscriptions',icon:'👂',name:'Subscriptions — interest',badge:'b-subp',
       cols:[['pattern',function(r){return esc(r.pattern)}],['who',function(r){return esc(r.name)}],['project · user',PROJU]]},
+    {key:'vault',icon:'🔐',name:'Vault — recoverable secrets',badge:'b-resp',
+      cols:[['session',function(r){return '<b>'+esc(r.name)+'</b>'}],['project · user',PROJU],['sealed',function(r){return tsf(r.sealed_at)}]]},
     {key:'retained',icon:'📌',name:'Retained — last value per topic',badge:'b-pub',
       cols:[['topic',function(r){return esc(r.topic)}],['project',function(r){return esc(r.project)}],['updated',function(r){return tsf(r.ts)}]]}
   ];
@@ -256,7 +258,7 @@
     document.getElementById('perssum').innerHTML=
       chip('📨',c.parked,'parked')+chip('🗂',c.mailboxes,c.mailboxes===1?'mailbox':'mailboxes')+
       chip('🏷',c.claims,c.claims===1?'claim':'claims')+chip('🔑',c.grants,c.grants===1?'grant':'grants')+
-      chip('📇',c.registrations,'registrations')+chip('👂',c.subscriptions,'subscriptions')+chip('📌',c.retained,'retained');
+      chip('📇',c.registrations,'registrations')+chip('👂',c.subscriptions,'subscriptions')+chip('🔐',c.vault,'vaulted')+chip('📌',c.retained,'retained');
     var tb=document.getElementById('persistence'); tb.innerHTML='';
     STORES.forEach(function(s){ var rows=snap[s.key]||[];
       expandable(tb,[s.icon+' '+esc(s.name),'<span class="bub '+s.badge+'">'+rows.length+'</span>'],

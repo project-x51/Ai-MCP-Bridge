@@ -403,6 +403,7 @@ RealmProfile {
 | `Discovery` | `peers()` → candidate host:port hubs to probe (§7) | none (single-host); seeds; tailscale |
 | `Persistence` | `mailbox` / `claims` / `grants` / `registrations` / `subscriptions` / `retained` stores over a shared folder (§12) | none (no-op); file |
 | `Authorizer` | `confirm({action,subject,…})` → `{approved}` — presence-gated yes/no (§16) | none (deny); script; hello |
+| `Vault` | `seal(secret)` → ciphertext; `unseal(ct)` → `{ok, plaintext}` — encrypt-to-user secret recovery (§21) | none; script; tpm (Hello + TPM) |
 
 ### How the pieces compose
 
@@ -703,6 +704,14 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.16):** *secret recovery (Hello-vault, §21)* — the bridge **seals** a session's secret at
+  registration (encrypt-to-the-user) into a `vault` persistence store; a session that lost it (a compact
+  throws away the bearer secret) calls **`recover_secret {name}`** and gets the original back after a
+  **presence check** — only the real human at their own machine can unseal it, and the secret was never
+  re-sent until then. New pluggable **`vault` facet**: `none` (off) / `script` (reversible, headless tests)
+  / `tpm` (RSA-OAEP to the Windows TPM key + a Windows Hello unseal, via Tpm.exe — proven in
+  experiments/hello-tpm-vault). Also: reattach now resyncs (topics/access) like a fresh register. The
+  tpm helper + multi-machine envelope (seal to each of the user's machines) are the live-verify follow-ups.
 - **Built (v1.15):** *dashboard persistence view* — the gateway pushes a read-only `snapshot()` of all six
   durable stores to the dashboard (self-describing records → real identities, not hashes), rendered as a
   Persistence section: count chips + a per-store expander (mailboxes/claims/grants/registrations/

@@ -72,7 +72,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   — offline owners (§16): park to an offline owner + announce on/off + redelivery; same-user dormant-topic
   takeover gated by the authorizer (none=held, script-approve=ok); cross-user grace/displace (8);
   `test_retain_live.mjs` — retained values (§12): `publish {retain:true}` → a later/wildcard subscriber is
-  caught up on subscribe, survives a restart, last-value-wins (4). Tests run in
+  caught up on subscribe, survives a restart, last-value-wins (4); `test_vault_live.mjs` — secret recovery
+  (§21): a sealed secret is recovered via the vault (presence-gated) + reattaches with resync, deny path
+  leaks nothing, unknown/unsupported handled (5). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.

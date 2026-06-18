@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.15.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.16.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -99,6 +99,8 @@ const onFrames = profile.transport.frame.onFrames
 const discovery = profile.discovery              // Discovery facet (§7): cross-host peer-hub enumeration
 const persistence = profile.persistence          // Persistence facet (§12): durable mailboxes / claims / retained
 const authorizer = profile.authorizer            // Authorizer facet (§16): human-in-the-loop confirmation (none/script/hello)
+const vault = profile.vault                       // Vault facet (§21): seal/unseal a session's secret for presence-gated recovery (none/script/tpm)
+const VAULT = profile.names.vault !== 'none'
 const ALLOW_CROSS_USER = CFG.allowCrossUserTakeover === true   // §16 global: may a DIFFERENT user take over a dormant topic after grace?
 const PERSIST = profile.names.persistence !== 'none'
 const PERSIST_SUBS = PERSIST && ((CFG.persistence && CFG.persistence.persistSubscriptions) !== false)   // §20: durable subscriptions (default on; opt out with persistSubscriptions:false)
@@ -1376,6 +1378,10 @@ const TOOLS = [
       cursor: { type: 'number' },
       for: { type: 'string', description: 'your registered sub-peer handle' },
       secret: { type: 'string' } } } },
+  { name: 'recover_secret', description: 'RECOVER a lost inbox secret via the user\'s PRESENCE (Windows Hello), for when a session forgot its secret (e.g. after a compact). No secret is required — the bridge sealed it to the user\'s TPM at registration, so only the real human at their own machine can unseal it. On approval it returns the original secret; re-register with name + that secret to reattach and get your topics + parked mail back. Requires the vault facet (returns unsupported otherwise).',
+    inputSchema: { type: 'object', properties: {
+      name: { type: 'string', description: 'the session name whose secret to recover' },
+      project: { type: 'string', description: 'optional — disambiguate if the name exists in more than one project' } }, required: ['name'] } },
 ]
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
@@ -1417,7 +1423,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (existing.secretHash !== sha(secret)) return ok({ ok: false, code: 'name-taken', name })
         existing.last_seen = Date.now()
         const q = subQueues.get(existing.id)
-        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity })
+        callerId = existing.id   // §20 resync on reattach too: hand back current topics + access + the inbox hint
+        const reTopics = [...myTopics.values()].filter(e => e.holder === existing.id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
+        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: reachableProjects(existing.identity?.project) })
       }
       let parent = null
       if (a.parent) {
@@ -1473,6 +1481,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // §19: record a DURABLE registration (name -> identity) so a directed send to this peer BY NAME can
         // resolve + park while it's offline, and a returning peer is recognised across a gateway restart.
         persistence.registrations.put(pid, { name, secret_hash: sha(secret), client_kind: ckind, last_seen: new Date().toISOString() }).catch(() => {})
+        if (VAULT) {   // §21: SEAL the secret to the user (silent) so a session that loses it can recover via Hello
+          try { const sealed = await vault.seal(secret); if (sealed) await persistence.vault.put(pid, { sealed }) } catch { }
+        }
       }
       announceSubpeers()
       emitTraceRaw({ dir: 'con', verb: 'connect', from: id, from_name: name, to: SESSION, size: 0,
@@ -1491,6 +1502,29 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       removeSubpeer(sp.id, 'deregister')
       announceSubpeers()
       return ok({ ok: true, removed: sp.id, children_removed: children })
+    }
+    case 'recover_secret': {
+      // §21: recover a lost secret via the USER's presence. No secret is required (you lost it); the vault
+      // unseal is presence-gated (Windows Hello in the tpm impl) and the secret was encrypted to the user's
+      // TPM, so only the real human at their own machine can recover it. Returns the original secret.
+      if (!VAULT) return ok({ ok: false, code: 'unsupported', what: 'secret recovery (no vault facet)' })
+      const name = String(a.name || '').trim()
+      if (!name) return ok({ ok: false, code: 'name-required' })
+      let regs = []
+      try { regs = await persistence.registrations.byName(name) } catch { }
+      const wantProj = a.project ? projKey(a.project) : null
+      const cands = regs.filter(r => !wantProj || projKey(r.project) === wantProj)
+      if (!cands.length) return ok({ ok: false, code: 'unknown-identity', name })
+      if (cands.length > 1) return ok({ ok: false, code: 'ambiguous-name', candidates: cands.map(r => `${r.project}:${r.name}`) })
+      const r = cands[0]
+      const ident = { realm: r.realm || REALM, project: r.project, user: r.user, name: r.name }
+      const v = await persistence.vault.get(ident)
+      if (!v || !v.sealed) return ok({ ok: false, code: 'no-vault-entry', name })
+      const res = await vault.unseal(v.sealed, { subject: `Recover the Ai MCP Bridge secret for session "${r.name}" (${r.project}).` })
+      if (!res || !res.ok) return ok({ ok: false, code: 'recovery-denied', reason: res ? res.reason : 'unseal-failed' })
+      emitTraceRaw({ dir: 'con', verb: 'recover_secret', from: SESSION, from_name: NAME, to: SESSION, size: 0, note: `secret recovered for "${r.name}" (${res.by})`, envelope_id: null })
+      return ok({ ok: true, name: r.name, project: r.project, secret: res.plaintext, by: res.by,
+        hint: 're-register with name + this secret to reattach (you get your topics + parked mail back), then use it as as/secret on send_to_peer and for/secret on inbox' })
     }
     case 'list_sessions': return ok({ role, host: SESSION.split('/')[0], ...rosterPayload() })
     case 'claim_topic': {

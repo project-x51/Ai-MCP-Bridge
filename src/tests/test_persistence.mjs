@@ -108,6 +108,14 @@ await fH.subscriptions.put({ ...ID, name: 'StaleSub' }, 'old/#', { subscribed_at
 const dropSub = await fH.subscriptions.gcAll({ maxAgeMs: 86400000 })
 check('subscriptions.gcAll drops unseen-past-maxAge', dropSub >= 1 && (await fH.subscriptions.byHolder({ ...ID, name: 'StaleSub' })).length === 0, 'dropped=' + dropSub)
 
+// ---- vault: the user-sealed secret per identity (ciphertext only) ----
+await fH.vault.put({ ...ID, name: 'Vaulted' }, { sealed: 'tpm:abc123' })
+const got = await fH.vault.get({ ...ID, name: 'Vaulted' })
+check('vault.get returns the sealed ciphertext + identity', !!got && got.sealed === 'tpm:abc123' && got.name === 'Vaulted' && got.user === ID.user, JSON.stringify(got))
+check('vault is identity-scoped (different name -> none)', (await fH.vault.get({ ...ID, name: 'Other' })) === null)
+await fH.vault.remove({ ...ID, name: 'Vaulted' })
+check('vault.remove', (await fH.vault.get({ ...ID, name: 'Vaulted' })) === null)
+
 // ---- mailbox stores the recipient identity (self-describing), not only the hashed key ----
 await fH.mailbox.put({ ...ID, name: 'SelfDesc' }, 'sd1', { ts: '2026-06-18T00:00:00.000Z', body: 'x' })
 const sd = (await fH.mailbox.drain({ ...ID, name: 'SelfDesc' }))[0]

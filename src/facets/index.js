@@ -24,6 +24,9 @@ import * as persistenceFile from './persistence/file.js'
 import * as authorizerNone from './authorizer/none.js'
 import * as authorizerScript from './authorizer/script.js'
 import * as authorizerHello from './authorizer/hello.js'
+import * as vaultNone from './vault/none.js'
+import * as vaultScript from './vault/script.js'
+import * as vaultTpm from './vault/tpm.js'
 
 const IMPLS = {
   auth:      { token: authToken },
@@ -35,17 +38,19 @@ const IMPLS = {
   discovery: { none: discoveryNone, seeds: discoverySeeds, tailscale: discoveryTailscale },
   persistence: { none: persistenceNone, file: persistenceFile },
   authorizer: { none: authorizerNone, script: authorizerScript, hello: authorizerHello },
+  vault: { none: vaultNone, script: vaultScript, tpm: vaultTpm },
 }
 // discovery + persistence + authorizer default to 'none' (single-host, no durability, no interactive
 // confirmation — unchanged behaviour). Opt in with config profile.<facet> or env AI_BRIDGE_<FACET>.
-const DEFAULTS = { auth: 'token', cipher: 'aesgcm', capsigner: 'hmac', identity: 'label', config: 'file', transport: 'tcp', discovery: 'none', persistence: 'none', authorizer: 'none' }
-const PROP = { auth: 'auth', cipher: 'cipher', capsigner: 'capSigner', identity: 'identity', config: 'config', transport: 'transport', discovery: 'discovery', persistence: 'persistence', authorizer: 'authorizer' }
+const DEFAULTS = { auth: 'token', cipher: 'aesgcm', capsigner: 'hmac', identity: 'label', config: 'file', transport: 'tcp', discovery: 'none', persistence: 'none', authorizer: 'none', vault: 'none' }
+const PROP = { auth: 'auth', cipher: 'cipher', capsigner: 'capSigner', identity: 'identity', config: 'config', transport: 'transport', discovery: 'discovery', persistence: 'persistence', authorizer: 'authorizer', vault: 'vault' }
 
 export function buildProfile(ctx) {
   const spec = { ...DEFAULTS, ...((ctx.CFG && ctx.CFG.profile) || {}) }
   if (ctx.env && ctx.env.AI_BRIDGE_DISCOVERY) spec.discovery = ctx.env.AI_BRIDGE_DISCOVERY
   if (ctx.env && ctx.env.AI_BRIDGE_PERSISTENCE) spec.persistence = ctx.env.AI_BRIDGE_PERSISTENCE
   if (ctx.env && ctx.env.AI_BRIDGE_AUTHORIZER) spec.authorizer = ctx.env.AI_BRIDGE_AUTHORIZER
+  if (ctx.env && ctx.env.AI_BRIDGE_VAULT) spec.vault = ctx.env.AI_BRIDGE_VAULT
   const profile = { realm: ctx.REALM, names: {} }
   for (const facet of Object.keys(DEFAULTS)) {
     const name = spec[facet]
