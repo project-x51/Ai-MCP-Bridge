@@ -430,11 +430,15 @@ async function resolveDormantConflict(topic, holderIdentity, holderProject, excl
     // that would wrongly read a returning owner's own dormant topic as another user's. Skip it; the claim
     // proceeds and rewrites a proper (identified) record over the top.
     if (!rec.user || !rec.name) continue
-    const sameIdentity = projKey(rec.project) === projKey(holderIdentity.project) && (rec.user || '') === (holderIdentity.user || '') && (rec.name || '') === (holderIdentity.name || '')
+    // user is the OS login — compare case-INSENSITIVELY (project already is): an older claim recorded
+    // under declared "Robin" must match the OS-authenticated "robin", else the owner is locked out of its
+    // own dormant topic as a phantom "different user". (name stays exact — it's a chosen peer label.)
+    const userKey = u => String(u || '').trim().toLowerCase()
+    const sameIdentity = projKey(rec.project) === projKey(holderIdentity.project) && userKey(rec.user) === userKey(holderIdentity.user) && (rec.name || '') === (holderIdentity.name || '')
     if (sameIdentity) continue                          // my own durable claim — a re-claim, not a conflict
     if (isIdentityLive(rec)) continue                   // a live owner — the in-RAM blocker check governs that
     if (!(rec.exclusive || exclusive)) continue         // only exclusive overlaps conflict
-    const sameUser = (rec.user || '') === (holderIdentity.user || '')
+    const sameUser = userKey(rec.user) === userKey(holderIdentity.user)
     if (sameUser) {                                     // taking over your OWN dormant topic — confirm presence
       const v = await authorizer.confirm({ action: 'topic-takeover', topic, user: holderIdentity.user, requester: holderIdentity.name,
         subject: `Take over "${topic}" from your other session "${rec.name}"?`, details: `held by ${rec.name} (offline)` })

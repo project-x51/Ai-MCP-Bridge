@@ -100,6 +100,17 @@ await call(B, 'register_self', { name: 'Newbie', secret: 'sn', project: 'shared'
 await sleep(150)
 const legacyClaim = await call(B, 'claim_topic', { topic: 'legacy-topic', as: 'Newbie', secret: 'sn', exclusive: true })
 check('a legacy record (no user/name) does NOT block a claim of that topic', legacyClaim.ok === true, JSON.stringify(legacyClaim))
+// a record recorded under declared "Robin" (capital) must be recognised as the SAME owner as OS "robin"
+const caseDir = path.join(persistDir, 'claims', 'shared', 'case-topic')
+fs.mkdirSync(caseDir, { recursive: true })
+fs.writeFileSync(path.join(caseDir, 'case.claim'), JSON.stringify({
+  pattern: 'case-topic', role: 'owner', exclusive: true, holder_name: 'CaseOwner',
+  project: 'shared', realm: 'default', user: 'Robin', name: 'CaseOwner', persistent: true,   // user CAPITALISED
+  claimed_at: '2026-06-17T00:00:00.000Z', refreshed_at: '2026-06-17T00:00:00.000Z' }))
+await call(B, 'register_self', { name: 'CaseOwner', secret: 'sc', project: 'shared' })   // OS user = robin (lowercase)
+await sleep(150)
+const caseClaim = await call(B, 'claim_topic', { topic: 'case-topic', as: 'CaseOwner', secret: 'sc', exclusive: true })
+check('own claim recorded under "Robin" is reclaimable as OS "robin" (case-insensitive user)', caseClaim.ok === true, JSON.stringify(caseClaim))
 await B.transport.close()
 
 console.log(`\n${pass} passed, ${fail} failed`)
