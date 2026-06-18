@@ -119,6 +119,14 @@ await sleep(400)
 const agSp=(await call(A,'list_sessions')).sessions.flatMap(s=>s.subpeers||[]).find(sp=>sp.name==='agent-conv')
 check('local-agent client classified as agent kind', agSp && agSp.client_kind==='agent', JSON.stringify(agSp))
 
+// collapsible top-level sections (Mesh map | Sessions | Persistence | Traces)
+check('four collapsible sections present', doc.querySelectorAll('section.sec').length === 4, ''+doc.querySelectorAll('section.sec').length)
+const psec = doc.querySelector('section.sec[data-sec="persist"]')
+const was = psec.classList.contains('collapsed')
+psec.querySelector('.sech').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+check('clicking a section header toggles its collapse', psec.classList.contains('collapsed') !== was)
+check('chevron reflects collapsed state', psec.querySelector('.chev').textContent === (psec.classList.contains('collapsed') ? '▸' : '▾'))
+
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close(); try{wsPage.close()}catch{}
 await A.t.close(); await B.t.close()

@@ -65,26 +65,46 @@
   table.pers th { background:transparent; color:#9CA3AF; font-weight:600; font-size:10px; text-transform:uppercase; letter-spacing:.03em; padding:1px 14px 3px 0; border:none; }
   table.pers td { padding:2px 14px 2px 0; border:none; }
   .empty { color:#9CA3AF; font-style:italic; }
+  .sech { cursor:pointer; user-select:none; }
+  .sech:hover { color:#0F172A; }
+  .chev { display:inline-block; width:15px; color:#9CA3AF; font-size:11px; vertical-align:1px; }
+  .sec.collapsed .secb { display:none; }
 </style>
 </head>
 <body>
 <h1><span class="pip" id="pip"></span>Ai MCP Bridge — Dashboard</h1>
 <div class="sub" id="gw">connecting…</div>
 <div id="prof"></div>
-<h2>Mesh map</h2>
-<svg id="map" height="10"></svg>
-<div class="hint">Click a node to set its alias (sessions/pages rename live; host aliases persist in config.json). Amber flash = message activity.</div>
-<h2>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span></h2>
-<table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
-<div id="perssec" style="display:none">
-  <h2>Persistence <span id="perstag" class="bub b-info" style="font-weight:600"></span></h2>
-  <div id="perssum"></div>
-  <table><tbody id="persistence"></tbody></table>
-  <div class="hint">Durable state on the gateway's shared folder — survives a restart. Click a store to inspect it.</div>
-</div>
-<div id="persoff" class="sub" style="display:none">Persistence is <b>off</b> (profile.persistence = none) — nothing is stored durably.</div>
-<h2>Traces (newest first — click a row for details)</h2>
-<table><thead><tr><th></th><th>Time</th><th>Dir</th><th>From → To</th><th>Subject</th></tr></thead><tbody id="traces"></tbody></table>
+<section class="sec" data-sec="map">
+  <h2 class="sech"><span class="chev">▾</span>Mesh map</h2>
+  <div class="secb">
+    <svg id="map" height="10"></svg>
+    <div class="hint">Click a node to set its alias (sessions/pages rename live; host aliases persist in config.json). Amber flash = message activity.</div>
+  </div>
+</section>
+<section class="sec" data-sec="sessions">
+  <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span></h2>
+  <div class="secb">
+    <table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
+  </div>
+</section>
+<section class="sec" data-sec="persist">
+  <h2 class="sech"><span class="chev">▾</span>Persistence <span id="perstag" class="bub b-info" style="font-weight:600"></span></h2>
+  <div class="secb">
+    <div id="perssec" style="display:none">
+      <div id="perssum"></div>
+      <table><tbody id="persistence"></tbody></table>
+      <div class="hint">Durable state on the gateway's shared folder — survives a restart. Click a store to inspect it.</div>
+    </div>
+    <div id="persoff" class="sub" style="display:none">Persistence is <b>off</b> (profile.persistence = none) — nothing is stored durably.</div>
+  </div>
+</section>
+<section class="sec" data-sec="traces">
+  <h2 class="sech"><span class="chev">▾</span>Traces <span style="font-weight:400;color:#9CA3AF;font-size:12px">(newest first — click a row for details)</span></h2>
+  <div class="secb">
+    <table><thead><tr><th></th><th>Time</th><th>Dir</th><th>From → To</th><th>Subject</th></tr></thead><tbody id="traces"></tbody></table>
+  </div>
+</section>
 <script>
 (function(){
   var qs = new URLSearchParams(location.search);
@@ -430,6 +450,20 @@
     ws.onerror=function(){ try{ws.close();}catch(e){} };
     function retry(){ setTimeout(connect, backoff); backoff=Math.min(backoff*2,15000); }
   }
+  // collapsible top-level sections — click a header to show/hide; the choice persists per section.
+  function wireSections(){
+    var secs=document.querySelectorAll('section.sec');
+    for(var i=0;i<secs.length;i++){ (function(sec){
+      var h=sec.querySelector('.sech'), chev=h.querySelector('.chev'), key='aimb.sec.'+sec.getAttribute('data-sec');
+      try{ if(localStorage.getItem(key)==='1') sec.classList.add('collapsed'); }catch(e){}
+      chev.textContent=sec.classList.contains('collapsed')?'▸':'▾';
+      h.addEventListener('click',function(){
+        var c=sec.classList.toggle('collapsed'); chev.textContent=c?'▸':'▾';
+        try{ localStorage.setItem(key,c?'1':'0'); }catch(e){}
+      });
+    })(secs[i]); }
+  }
+  wireSections();
   connect();
 })();
 </script>
