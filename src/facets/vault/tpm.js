@@ -20,15 +20,17 @@ export function create(ctx) {
   function pubKey() {
     if (pubCache) return pubCache
     if (process.platform !== 'win32' || !ensureExe()) return null
-    try { const r = spawnSync(exe, ['--pubkey'], { encoding: 'utf8', timeout: 30000, windowsHide: true }); if (r.status === 0) { const m = (r.stdout || '').match(/PUBKEY=([A-Za-z0-9+/=]+)/); if (m) { pubCache = m[1]; return pubCache } } } catch { }
+    try { const r = spawnSync(exe, ['--pubkey'], { encoding: 'utf8', timeout: 30000, windowsHide: true }); if (r.status === 0) { const m = (r.stdout || '').match(/PUBKEY=([A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+)/); if (m) { pubCache = m[1]; return pubCache } } } catch { }
     return null
   }
+  const b64url = s => s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')   // standard base64 -> base64url (for JWK n/e)
   return {
     meta, enabled: true,
     async seal(plaintext) {
       const pub = pubKey(); if (!pub) return null
       try {
-        const key = crypto.createPublicKey({ key: Buffer.from(pub, 'base64'), format: 'der', type: 'spki' })
+        const [nB64, eB64] = pub.split('.')   // Tpm.exe --pubkey => "<modulus_b64>.<exponent_b64>"
+        const key = crypto.createPublicKey({ key: { kty: 'RSA', n: b64url(nB64), e: b64url(eB64) }, format: 'jwk' })
         const ct = crypto.publicEncrypt({ key, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha1' }, Buffer.from(String(plaintext), 'utf8'))
         return 'tpm:' + ct.toString('base64')
       } catch { return null }
