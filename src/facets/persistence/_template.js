@@ -33,6 +33,13 @@ export function create(ctx) {
       async remove(from, to) {},
       async gcAll(opts) { return 0 },              // drop edges past their expiry; return count dropped
     },
+    registrations: {
+      async put(identity, record) {},              // durable name->identity (+ secret_hash, last_seen), self-describing
+      async all() { return [] },
+      async byName(name) { return [] },            // every registration with this name (case-insensitive); caller scopes by consent
+      async remove(identity) {},
+      async gcAll(opts) { return 0 },              // drop registrations unseen past maxAgeMs; return count dropped
+    },
     retained: {
       async put(project, topic, identity, record) {},
       async read(project, topic) { return null },  // the newest publisher value

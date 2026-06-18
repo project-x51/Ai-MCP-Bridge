@@ -134,6 +134,25 @@ check('process claim rehydrated into this session topics after restart',
   (idp.topics || []).some(t => t.pattern === 'ops/alerts' && t.role === 'owner'), JSON.stringify((idp.topics || []).map(t => t.pattern)))
 await B.transport.close()
 
+// ===== §19: a directed send to an OFFLINE peer BY NAME parks via its durable registration (survives a restart) =====
+B = await spawnBridge(7976); await sleep(700)
+await call(B, 'register_self', { name: 'Carol', secret: 'sca', project: 'shared' })   // writes a durable registration
+await call(B, 'register_self', { name: 'Dave', secret: 'sdv', project: 'shared' })
+await sleep(200)
+await B.transport.close(); await sleep(700)   // gateway restart: live registrations gone, durable ones survive
+B = await spawnBridge(7978); await sleep(700)
+await call(B, 'register_self', { name: 'Dave', secret: 'sdv', project: 'shared' })   // Dave is back; Carol stays offline
+await sleep(200)
+const toCarol = await call(B, 'send_to_peer', { target: 'Carol', subject: 'job', message: 'for carol', as: 'Dave', secret: 'sdv' })
+check('send to an offline peer BY NAME parks via its durable registration', toCarol.ok === true && toCarol.parked === true && toCarol.offline === true, JSON.stringify(toCarol))
+const toNobody = await call(B, 'send_to_peer', { target: 'Nobody', subject: 'x', message: 'y', as: 'Dave', secret: 'sdv' })
+check('send to a genuinely unknown name still errors (no durable registration)', toNobody.ok === false && toNobody.code === 'unknown-target', JSON.stringify(toNobody))
+await call(B, 'register_self', { name: 'Carol', secret: 'sca', project: 'shared' })   // Carol returns
+await sleep(250)
+const carolIn = (await call(B, 'inbox', { for: 'Carol', secret: 'sca', cursor: 0 })).messages.map(m => m.body)
+check('the parked message is delivered to the named peer on its return', carolIn.includes('for carol'), JSON.stringify(carolIn))
+await B.transport.close(); await sleep(500)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 try { fs.rmSync(persistDir, { recursive: true, force: true }) } catch { }
 process.exit(fail ? 1 : 0)

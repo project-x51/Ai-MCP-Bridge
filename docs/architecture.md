@@ -401,7 +401,7 @@ RealmProfile {
 | `ConfigSource` | `load()` → realm config; `watch(onChange)` | shared JSON file + fs-watch |
 | `IdentityModel` | `classify(declared)` → `{project, user, realm}`; `mapInbound(foreign, fromRealm)` | declared labels, no mapping |
 | `Discovery` | `peers()` → candidate host:port hubs to probe (§7) | none (single-host); seeds; tailscale |
-| `Persistence` | `mailbox` / `claims` / `grants` / `retained` stores over a shared folder (§12) | none (no-op); file |
+| `Persistence` | `mailbox` / `claims` / `grants` / `registrations` / `retained` stores over a shared folder (§12) | none (no-op); file |
 | `Authorizer` | `confirm({action,subject,…})` → `{approved}` — presence-gated yes/no (§16) | none (deny); script; hello |
 
 ### How the pieces compose
@@ -620,6 +620,21 @@ TTL. Approving a request is no longer silent: the bridge sends the requester a *
 echoing its `request_id` + the permitted TTL/expiry (it previously had to poll-by-retry). Edges are
 routing metadata (project names + mode + expiry, already cleartext in the roster) so stored as plain JSON.
 
+### Durable registrations — offline-by-name delivery (§19) — built v1.11
+
+Sub-peer registrations are RAM-only, so a gateway restart drops them and a directed send to that peer **by
+name** bounced `unknown-target` — the message evaporated. Now `register_self` also records a durable,
+**self-describing** `name → identity` mapping in a `registrations` store (one file per identity: the full
+`{realm, project, user, name}` + `secret_hash` + `last_seen`). A send to a name with no *live* peer then
+looks up the registration, checks consent (you can only park what you could send live), and **parks** to
+that identity's mailbox — delivered when the peer returns. A name that was *never* registered still errors
+`unknown-target` (you can't park for a string nobody ever claimed). Registrations age out on the same
+hard-expiry as claims.
+
+This is also why a parked **`.msg` stores the recipient identity in-body**, not only in the hashed dir key:
+a record that carries its own identity can be attributed, migrated, and audited without reversing the key —
+the exact property whose *absence* (claims with no `user`/`name`) caused the v1.10.x owner-lockout bug.
+
 ---
 
 ## 13. Implementation status
@@ -667,12 +682,21 @@ routing metadata (project names + mode + expiry, already cleartext in the roster
     Persistence facet gains a `grants` store.
   - *Tray* shows the running bridge version.
   - Verified by `test_grants_live` + `test_offline_park_live`; suite 291 across 13.
-- **Designed — pending:** `retain` (durable last-event-per-topic, §12); explicit `park` to a
-  never-registered identity; wiring the **`hello` authorizer** to a real Windows Hello tray prompt (the
-  flow is proven via the `script` impl + experiments/hello-tpm-vault — only the live prompt is unwired).
+- **Built (v1.10.x fixes):** back-compat for claim records — skip an unattributable legacy record (no
+  user/name) and compare the user **case-insensitively** (`"Robin"` ≡ OS `"robin"`), so a returning owner
+  is never locked out of its own dormant topic. The **`hello` authorizer** is now wired to a real
+  **`HelloConfirm.exe`** (UserConsentVerifier) and live-verified both ways (approve → takeover, deny → held).
+- **Built (v1.11):** *durable registrations (§19)* — `register_self` records a self-describing
+  `name → identity` mapping in a new `registrations` persistence store, so a directed send to a peer **by
+  name** that is offline / lost on a gateway restart **parks** for its return instead of bouncing
+  `unknown-target` (a never-registered name still errors). Parked `.msg` files now store the **recipient
+  identity** in-body (not just the hashed key), so the data is attributable/migratable without reversing
+  the key. Verified by `test_persist_live` (park-by-name across a restart). Suite 302 across 13.
+- **Designed — pending:** `retain` (durable last-event-per-topic, §12); the `wake`/doorbell (overlaps the
+  push fallback); durable reply-caps; the Hello-vault inbox-secret-unlock (a further use of the authorizer).
 - **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,
   `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§9); `force` operator-takeover of
-  an offline holder; durable reply-caps; the wake doorbell.
+  an offline holder.
 
 ---
 

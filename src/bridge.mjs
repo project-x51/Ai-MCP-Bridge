@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.10.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.11.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -97,9 +97,10 @@ const PERSIST = profile.names.persistence !== 'none'
 let procClaimsRehydrated = false                 // §12: restore THIS session's own (non-sub-peer) claims once, on connect
 if (PERSIST) {                                   // park/retain/persistent-claims become real once persistence is on
   CAPS.park = true; CAPS.retain = true; CAPS.persistent_claims = true
-  setInterval(() => {                            // age out parked mail + abandoned claims whose owner never returned
+  setInterval(() => {                            // age out parked mail + abandoned claims/registrations whose owner never returned
     persistence.mailbox.gcAll({ ttlMs: persistence.limits.messageTtlMs }).catch(() => {})
     persistence.claims.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
+    persistence.registrations.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
   }, Number(process.env.AI_BRIDGE_PERSIST_GC_MS) || 1800000).unref()
 }
 // the process's own classification (null ⇒ infrastructure, not a participant)
@@ -806,6 +807,27 @@ async function parkToOfflineOwners(from, project, path, verb, body, reply_to, su
   if (announce.length) return { ok: true, parked: true, offline: true, topic: path, project, owners: parked.length, offline_owners: announce }
   return { ok: true, topic: path, project }   // owner chose silence: looks like a normal accept
 }
+// §19: a directed send to a peer BY NAME that has no LIVE registration but DOES have a durable one (it's
+// just offline / its gateway restarted) parks to that peer's mailbox instead of bouncing unknown-target.
+// Returns the park result, or null to let the caller fall through to a clear unknown-target.
+async function parkToOfflineName(from, name, verb, body, reply_to, subject, askerProject) {
+  if (!PERSIST) return null
+  let regs = []
+  try { regs = await persistence.registrations.byName(name) } catch { return null }
+  if (!regs.length) return null
+  const ap = projKey(askerProject || 'unclassified')
+  const reachable = regs.filter(r => mayInitiate(ap, projKey(r.project)))   // only park what you could send live
+  if (!reachable.length) return null
+  if (reachable.length > 1) return { ok: false, code: 'ambiguous-name', candidates: reachable.map(r => `${r.project}:${r.name}`) }
+  const r = reachable[0]
+  const ident = { realm: r.realm || REALM, project: r.project, user: r.user, name: r.name }
+  const env = makeEnvelope({ to: `name:${r.name}`, verb, body, reply_to, from, subject })
+  try { await persistence.mailbox.put(ident, env.id, env) } catch { return null }
+  emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
+    to: r.name, to_name: r.name, to_kind: 'subpeer', subject: subject || null, pattern: 'send',
+    size: String(body || '').length, note: `parked for offline peer ${r.name}`, envelope_id: env.id })
+  return { ok: true, parked: true, offline: true, to: r.name, project: r.project, envelope_id: env.id }
+}
 async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, askerProject) {
   const { project, path } = parseTopicRef(ref, askerProject)
   if (isWildcard(path)) return { ok: false, code: 'wildcard-target', topic: ref }
@@ -1277,7 +1299,7 @@ const TOOLS = [
       retain: { type: 'boolean', description: 'RESERVED (offline delivery): retained last message per topic — returns unsupported for now' },
       as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
       secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['topic', 'subject', 'message'] } },
-  { name: 'send_to_peer', description: 'Send a directed message: target = id from list_sessions, a unique friendly name, or "topic:<topic>" to message the topic\'s OWNER(S) only (the prefix is required; subscribers do not see sends). subject is REQUIRED: short public one-line description (NOT encrypted — no private info; the body is encrypted). Registered sub-peers must pass as + secret.',
+  { name: 'send_to_peer', description: 'Send a directed message: target = id from list_sessions, a unique friendly name, or "topic:<topic>" to message the topic\'s OWNER(S) only (the prefix is required; subscribers do not see sends). With persistence on, a send to a name (or topic owner) that is OFFLINE but has a durable registration/claim PARKS and is delivered when it returns; a name that was never registered still errors unknown-target. subject is REQUIRED: short public one-line description (NOT encrypted — no private info; the body is encrypted). Registered sub-peers must pass as + secret.',
     inputSchema: { type: 'object', properties: {
       target: { type: 'string', description: 'session/sub-peer id, unique friendly name, or topic:<topic>' },
       subject: { type: 'string', description: 'short PUBLIC one-line description of the action' },
@@ -1384,6 +1406,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           let n = 0; for (const rec of dc) if (rehydrateClaim(rec, id, name, pid)) n++
           if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: n, note: `${n} responsibility(ies) restored`, envelope_id: null }) }
         } catch { }
+        // §19: record a DURABLE registration (name -> identity) so a directed send to this peer BY NAME can
+        // resolve + park while it's offline, and a returning peer is recognised across a gateway restart.
+        persistence.registrations.put(pid, { name, secret_hash: sha(secret), client_kind: ckind, last_seen: new Date().toISOString() }).catch(() => {})
       }
       announceSubpeers()
       emitTraceRaw({ dir: 'con', verb: 'connect', from: id, from_name: name, to: SESSION, size: 0,
@@ -1590,6 +1615,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const uniq = [...new Set(cand)]
         if (uniq.length === 1) target = uniq[0]
         else if (uniq.length > 1) return ok({ ok: false, code: 'ambiguous-name', candidates: uniq })
+        else {
+          // §19: no LIVE peer by this name — if it has a durable registration (offline/gateway-restarted),
+          // park for its return; otherwise fall through to a clear unknown-target.
+          const parked = await parkToOfflineName(from, target, a.verb, a.message, a.reply_to, subject, askerProjectOf(from))
+          if (parked) return ok({ ...parked, as: from ? from.session : SESSION })
+        }
       }
       const env = makeEnvelope({ to: target, verb: a.verb, body: a.message, reply_to: a.reply_to, from, subject })
       const r = await routeEnvelope(env)

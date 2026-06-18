@@ -83,6 +83,26 @@ const droppedC = await fG.claims.gcAll({ maxAgeMs: 86400000 })
 const gAfter = (await fG.claims.byHolder(gid)).map(r => r.topic)
 check('claims.gcAll drops claims past hard expiry only', droppedC === 1 && gAfter.includes('fresh-resp') && !gAfter.includes('old-resp'), 'dropped=' + droppedC + ' after=' + JSON.stringify(gAfter))
 
+// ---- registrations: durable name->identity, case-insensitive byName, self-describing, gc by last_seen ----
+const now = new Date().toISOString()
+await fH.registrations.put({ ...ID, name: 'Scout' }, { name: 'Scout', secret_hash: 'abc', client_kind: 'code', last_seen: now })
+await fH.registrations.put({ ...ID, name: 'Other' }, { name: 'Other', last_seen: now })
+check('registrations.byName is case-insensitive', (await fH.registrations.byName('scout')).length === 1 && (await fH.registrations.byName('SCOUT')).length === 1)
+const regRec = (await fH.registrations.byName('scout'))[0]
+check('registration record is self-describing (carries identity)', regRec.user === ID.user && regRec.project === ID.project && regRec.name === 'Scout')
+check('byName matches only the named registration', (await fH.registrations.byName('other')).length === 1)
+await fH.registrations.put({ ...ID, name: 'Stale' }, { name: 'Stale', last_seen: '2000-01-01T00:00:00.000Z' })
+const dropReg = await fH.registrations.gcAll({ maxAgeMs: 86400000 })
+check('registrations.gcAll drops only the unseen-past-maxAge one', dropReg === 1 && (await fH.registrations.byName('stale')).length === 0 && (await fH.registrations.byName('scout')).length === 1, 'dropped=' + dropReg)
+await fH.registrations.remove({ ...ID, name: 'Scout' })
+check('registrations.remove', (await fH.registrations.byName('scout')).length === 0)
+
+// ---- mailbox stores the recipient identity (self-describing), not only the hashed key ----
+await fH.mailbox.put({ ...ID, name: 'SelfDesc' }, 'sd1', { ts: '2026-06-18T00:00:00.000Z', body: 'x' })
+const sd = (await fH.mailbox.drain({ ...ID, name: 'SelfDesc' }))[0]
+const sdRaw = JSON.parse(fs.readFileSync(sd._file, 'utf8'))
+check('parked .msg carries the recipient identity (for)', !!sdRaw.for && sdRaw.for.user === ID.user && sdRaw.for.name === 'SelfDesc', JSON.stringify(sdRaw.for))
+
 // ---- retained: newest publisher value wins ----
 await fH.retained.put('AIMB', 'news', A, { ts: '2026-06-17T00:00:00.000Z', body: 'old' })
 await fH.retained.put('AIMB', 'news', B, { ts: '2026-06-17T00:00:05.000Z', body: 'new' })

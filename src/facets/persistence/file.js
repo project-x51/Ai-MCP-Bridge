@@ -56,8 +56,11 @@ export function create(ctx) {
   const mailbox = {
     async put(identity, envId, record) {
       const { primary } = identityKeys(identity, readable)
+      // self-describing: store the RECIPIENT identity in the body (not only the hashed dir key) so the parked
+      // message can be attributed/migrated/audited without reversing the key (the lesson from the claim records).
       await writeAtomic(dir('mailboxes', primary, `env_${slug(envId, 80)}.msg`),
-        JSON.stringify({ envId, ts: record.ts || new Date().toISOString(), record }))
+        JSON.stringify({ envId, ts: record.ts || new Date().toISOString(),
+          for: { realm: identity.realm, project: identity.project, user: identity.user, name: identity.name }, record }))
     },
     // every parked message for an identity, across BOTH key forms, oldest first
     async drain(identity) {
@@ -177,6 +180,43 @@ export function create(ctx) {
     },
   }
 
+  // ---- registrations: durable (name -> identity) so a directed send to an OFFLINE peer BY NAME can resolve
+  // and park, and a returning peer is recognised. Self-describing (stores the full identity + name), one file
+  // per identity (per-writer). secret_hash + last_seen are kept for verification/audit and dormancy GC. ----
+  const registrations = {
+    async put(identity, record) {
+      const { primary } = identityKeys(identity, readable)
+      await writeAtomic(dir('registrations', `${primary}.reg`), JSON.stringify({
+        name: record.name, realm: identity.realm, project: identity.project, user: identity.user,
+        secret_hash: record.secret_hash || null, client_kind: record.client_kind || null,
+        last_seen: record.last_seen || new Date().toISOString() }))
+    },
+    async all() {
+      const rdir = dir('registrations'), out = []
+      for (const f of await readDirSafe(rdir)) { if (!f.endsWith('.reg')) continue; const j = await readJson(path.join(rdir, f)); if (j) out.push(j) }
+      return out
+    },
+    async byName(name) {   // every durable registration with this name (case-insensitive); caller scopes by project/consent
+      const want = String(name || '').trim().toLowerCase()
+      return (await this.all()).filter(r => String(r.name || '').trim().toLowerCase() === want)
+    },
+    async remove(identity) {
+      const { both } = identityKeys(identity, readable)
+      for (const key of new Set(both)) { try { await fsp.unlink(dir('registrations', `${key}.reg`)) } catch {} }
+    },
+    async gcAll({ now = Date.now(), maxAgeMs = 0 } = {}) {   // drop registrations whose peer hasn't been seen within maxAgeMs
+      if (!maxAgeMs) return 0
+      let dropped = 0, rdir = dir('registrations')
+      for (const f of await readDirSafe(rdir)) {
+        if (!f.endsWith('.reg')) continue
+        const file = path.join(rdir, f), j = await readJson(file)
+        const t = j && Date.parse(j.last_seen || '')
+        if (j && t && now - t > maxAgeMs) { try { await fsp.unlink(file) } catch {} dropped++ }
+      }
+      return dropped
+    },
+  }
+
   // ---- retained: one file per publisher; effective value = newest ts ----
   const retained = {
     async put(project, topic, identity, record) {
@@ -192,7 +232,7 @@ export function create(ctx) {
   }
 
   return {
-    meta, root, readable, mailbox, claims, grants, retained,
+    meta, root, readable, mailbox, claims, grants, registrations, retained,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,
