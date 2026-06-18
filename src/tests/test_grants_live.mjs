@@ -54,7 +54,8 @@ await B.transport.close(); await sleep(700)
 
 // ---- run 2: the grant survived the restart (no re-grant needed) ----
 B = await spawn(7972); await sleep(700)
-await call(B, 'register_self', { name: 'Req', secret: 'sr', project: 'alpha' })
+const reqReg = await call(B, 'register_self', { name: 'Req', secret: 'sr', project: 'alpha' })
+check('register_self access reflects the (durable) grant — alpha can reach beta', Array.isArray(reqReg.access) && reqReg.access.includes('beta'), JSON.stringify(reqReg.access))
 await call(B, 'register_self', { name: 'Op', secret: 'so', project: 'beta' })
 await sleep(200)
 const afterRestart = await call(B, 'send_to_peer', { target: 'Op', subject: 'hi', message: 'after restart', as: 'Req', secret: 'sr' })

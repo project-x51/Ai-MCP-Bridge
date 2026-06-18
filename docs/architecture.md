@@ -401,7 +401,7 @@ RealmProfile {
 | `ConfigSource` | `load()` → realm config; `watch(onChange)` | shared JSON file + fs-watch |
 | `IdentityModel` | `classify(declared)` → `{project, user, realm}`; `mapInbound(foreign, fromRealm)` | declared labels, no mapping |
 | `Discovery` | `peers()` → candidate host:port hubs to probe (§7) | none (single-host); seeds; tailscale |
-| `Persistence` | `mailbox` / `claims` / `grants` / `registrations` / `retained` stores over a shared folder (§12) | none (no-op); file |
+| `Persistence` | `mailbox` / `claims` / `grants` / `registrations` / `subscriptions` / `retained` stores over a shared folder (§12) | none (no-op); file |
 | `Authorizer` | `confirm({action,subject,…})` → `{approved}` — presence-gated yes/no (§16) | none (deny); script; hello |
 
 ### How the pieces compose
@@ -703,6 +703,11 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.14):** *session resync (stateful bridge, stateless session)* — `register_self` now returns
+  `topics` (the identity's owned **and subscribed** topics, rehydrated from durable state) + `access` (the
+  projects it may reach) + the inbox hint, so a reconnecting/compacted session relearns its responsibilities
+  in one call, no re-claim/re-subscribe. Backing this: **durable subscriptions** (a 6th persistence store;
+  default-on `persistSubscriptions`, opt-out) that rehydrate like owned claims. Additive + backward-compatible.
 - **Designed — pending:** the `wake`/doorbell (overlaps the push fallback); durable reply-caps; the
   Hello-vault inbox-secret-unlock (a further use of the authorizer).
 - **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,

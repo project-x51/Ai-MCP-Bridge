@@ -40,6 +40,12 @@ export function create(ctx) {
       async remove(identity) {},
       async gcAll(opts) { return 0 },              // drop registrations unseen past maxAgeMs; return count dropped
     },
+    subscriptions: {
+      async put(identity, pattern, record) {},     // durable per-holder interest (self-describing)
+      async byHolder(identity) { return [] },      // an identity's subscriptions, to rehydrate on re-register
+      async remove(identity, pattern) {},
+      async gcAll(opts) { return 0 },              // drop subscriptions unseen past maxAgeMs; return count dropped
+    },
     retained: {
       async put(project, topic, identity, record) {},
       async read(project, topic) { return null },  // the newest publisher value

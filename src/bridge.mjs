@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.13.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.14.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -101,13 +101,15 @@ const persistence = profile.persistence          // Persistence facet (§12): du
 const authorizer = profile.authorizer            // Authorizer facet (§16): human-in-the-loop confirmation (none/script/hello)
 const ALLOW_CROSS_USER = CFG.allowCrossUserTakeover === true   // §16 global: may a DIFFERENT user take over a dormant topic after grace?
 const PERSIST = profile.names.persistence !== 'none'
+const PERSIST_SUBS = PERSIST && ((CFG.persistence && CFG.persistence.persistSubscriptions) !== false)   // §20: durable subscriptions (default on; opt out with persistSubscriptions:false)
 let procClaimsRehydrated = false                 // §12: restore THIS session's own (non-sub-peer) claims once, on connect
 if (PERSIST) {                                   // park/retain/persistent-claims become real once persistence is on
   CAPS.park = true; CAPS.retain = true; CAPS.persistent_claims = true
-  setInterval(() => {                            // age out parked mail + abandoned claims/registrations whose owner never returned
+  setInterval(() => {                            // age out parked mail + abandoned claims/registrations/subscriptions whose owner never returned
     persistence.mailbox.gcAll({ ttlMs: persistence.limits.messageTtlMs }).catch(() => {})
     persistence.claims.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
     persistence.registrations.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
+    persistence.subscriptions.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
     persistence.retained.gcAll({ ttlMs: persistence.limits.retainedTtlMs }).catch(() => {})
   }, Number(process.env.AI_BRIDGE_PERSIST_GC_MS) || 1800000).unref()
 }
@@ -179,6 +181,17 @@ function mayInitiate(fromProject, toProject) {     // may project `from` initiat
   if (fp === tp) return true                       // same project always open
   if (POLICY_OPEN) return true                     // realm-wide open
   return edgeAllows(fp, tp)
+}
+// §20: the FOREIGN projects `fromProject` may currently initiate to (besides its own) — handed back on
+// register_self so a session knows its consent edges without trial-and-error. 'all' when the realm is open.
+function reachableProjects(fromProject) {
+  const fp = projKey(fromProject)
+  if (POLICY_OPEN) return 'all'
+  const out = new Set()
+  for (const e of (POLICY.allow || [])) { const f = projKey(e.from), t = projKey(e.to), m = e.mode || 'send'; if (f === fp) out.add(t); if (m === 'bidirectional' && t === fp) out.add(f) }
+  for (const [k, g] of runtimeAllow) { if (g.exp && g.exp <= Date.now()) continue; const [f, t] = k.split('>'); if (f === fp) out.add(t); if (g.mode === 'bidirectional' && t === fp) out.add(f) }
+  out.delete(fp)
+  return [...out]
 }
 // persist a runtime grant edge (durable consent §12/§14) — best-effort, no-op without persistence
 function persistGrant(from, to, mode, exp) {
@@ -1266,7 +1279,7 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} } },
   { name: 'set_name', description: 'Set this session\'s friendly name on the mesh roster (e.g. "Scout"). NOTE: in a shared (Cowork) bridge this renames the PROCESS node — conversations should use register_self instead.',
     inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
-  { name: 'register_self', description: 'Register THIS conversation (or subagent) as a sub-peer with its own identity and private inbox on a shared bridge. Invent a secret and keep it; same (name, secret) re-attaches after idle/expiry. Returns peer_id + queue_epoch (epoch change means the queue was rebuilt: reset your cursor).',
+  { name: 'register_self', description: 'Register THIS conversation (or subagent) as a sub-peer with its own identity and private inbox on a shared bridge. Invent a secret and keep it; same (name, secret) re-attaches after idle/expiry. Returns peer_id + queue_epoch (epoch change ⇒ reset your cursor). RESYNC: the response also returns `topics` (the owned + subscribed topics you currently hold, rehydrated from durable state — so a reconnecting/compacted session relearns what it is responsible for without re-claiming/re-subscribing), `access` (the projects you may reach), and an `inbox` hint (unread parked mail waiting). The bridge is the source of truth for your state across a restart.',
     inputSchema: { type: 'object', properties: {
       name: { type: 'string', description: 'friendly name, e.g. "Scout" or "scout/worker-1"' },
       secret: { type: 'string', description: 'self-invented bearer secret; only its hash is stored' },
@@ -1434,6 +1447,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           let n = 0; for (const rec of dc) if (rehydrateClaim(rec, id, name, pid)) n++
           if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: n, note: `${n} responsibility(ies) restored`, envelope_id: null }) }
         } catch { }
+        if (PERSIST_SUBS) {                            // §20: re-establish this identity's durable subscriptions
+          try {
+            const subs = await persistence.subscriptions.byHolder(pid)
+            let n = 0
+            for (const s of subs) {
+              if (!s.pattern) continue
+              const sk = `${id}|subscriber|${patternKey(s.pattern)}`
+              if (!myTopics.has(sk)) { myTopics.set(sk, { pattern: s.pattern, role: 'subscriber', holder: id, holder_name: name, project: ident.project, realm: ident.realm, claimed_at: s.subscribed_at || new Date().toISOString() }); n++ }
+              persistence.subscriptions.put(pid, s.pattern, { subscribed_at: new Date().toISOString() }).catch(() => {})   // refresh the lease
+            }
+            if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: n, note: `${n} subscription(s) restored`, envelope_id: null }) }
+          } catch { }
+        }
         // §19: record a DURABLE registration (name -> identity) so a directed send to this peer BY NAME can
         // resolve + park while it's offline, and a returning peer is recognised across a gateway restart.
         persistence.registrations.put(pid, { name, secret_hash: sha(secret), client_kind: ckind, last_seen: new Date().toISOString() }).catch(() => {})
@@ -1443,7 +1469,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         note: (parent ? `child of ${parent.split('/').pop()}` : 'sub-peer registered') + (ckind ? ` [${ckind}]` : '') + ` {${ident.project}/${ident.user}}`, envelope_id: null })
       const q = subQueues.get(id)
       callerId = id   // so the response's inbox hint reflects any rehydrated parked mail this returning peer has waiting
-      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident })
+      // §20 resync: hand back the identity's current topics (owned + subscribed, post-rehydration) and the
+      // projects it may reach — so a reconnecting/compacted session relearns its state without re-attaching.
+      const myTopicsNow = [...myTopics.values()].filter(e => e.holder === id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
+      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: reachableProjects(ident.project) })
     }
     case 'deregister': {
       const { sp, err } = authSub(String(a.peer_id || ''), a.secret)
@@ -1522,16 +1551,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     case 'subscribe': {
       const pattern = String(a.pattern || '').trim()
       if (!pattern) return ok({ ok: false, code: 'pattern-required' })
-      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM
+      let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) {
         const { sp, err } = authSub(String(a.as), a.secret)
         if (err) return ok(err)
-        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderRealm = sp.identity?.realm || REALM
+        holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderRealm = sp.identity?.realm || REALM; holderIdentity = pIdent(sp.identity, sp.name)
       }
       const k = `${holder}|subscriber|${patternKey(pattern)}`
       const existed = myTopics.has(k)
       myTopics.set(k, { pattern, role: 'subscriber', holder, holder_name: holderName, project: holderProject, realm: holderRealm,
         claimed_at: existed ? myTopics.get(k).claimed_at : new Date().toISOString() })
+      if (PERSIST_SUBS && holderIdentity) persistence.subscriptions.put(holderIdentity, pattern, {}).catch(() => {})   // §20: durable interest, rehydrated on re-register
       announceTopics()
       if (!existed) emitTraceRaw({ dir: 'con', verb: 'subscribe', from: holder, from_name: holderName, to: SESSION, size: 0,
         note: `subscribed "${pattern}"`, envelope_id: null })
@@ -1553,15 +1583,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     }
     case 'unsubscribe': {
       const pattern = String(a.pattern || '').trim()
-      let holder = SESSION
+      let holder = SESSION, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) {
         const { sp, err } = authSub(String(a.as), a.secret)
         if (err) return ok(err)
-        holder = sp.id
+        holder = sp.id; holderIdentity = pIdent(sp.identity, sp.name)
       }
       const k = `${holder}|subscriber|${patternKey(pattern)}`
       if (!myTopics.has(k)) return ok({ ok: false, code: 'not-subscribed', pattern, holder })
       myTopics.delete(k)
+      if (PERSIST_SUBS && holderIdentity) persistence.subscriptions.remove(holderIdentity, pattern).catch(() => {})   // §20: drop durable interest
       announceTopics()
       return ok({ ok: true, pattern, holder })
     }

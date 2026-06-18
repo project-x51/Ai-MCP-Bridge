@@ -59,7 +59,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   envelopes both directions through the gateway splice, and drop a departed host (10);
   `test_persistence.mjs` — persistence facet (§12) units: size-string parser, format-prefixed stable
   identity keys + both-form lookup, mailbox store/drain/ack/caps/TTL, claims per-holder/byHolder/gcAll,
-  retained (newest-wins, allForProject, gc), registrations + self-describing parked data (36); `test_persist_live.mjs` — live restart proof: a parked message survives a
+  retained (newest-wins, allForProject, gc), registrations, subscriptions + self-describing parked data (40); `test_persist_live.mjs` — live restart proof: a parked message survives a
   bridge restart and is redelivered to the returning peer (consumed ones aren't), per-peer mailbox keying
   (a sender's own send never echoes back), a durable claim rehydrates and is routable on re-register (and
   stays gone after `release_topic`), incl. a process-held claim, plus durable registrations (§19) — a send

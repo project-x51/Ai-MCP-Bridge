@@ -97,6 +97,17 @@ check('registrations.gcAll drops only the unseen-past-maxAge one', dropReg === 1
 await fH.registrations.remove({ ...ID, name: 'Scout' })
 check('registrations.remove', (await fH.registrations.byName('scout')).length === 0)
 
+// ---- subscriptions: durable per-holder interest, self-describing, gc by subscribed_at ----
+await fH.subscriptions.put({ ...ID, name: 'Sub1' }, 'team/#')
+await fH.subscriptions.put({ ...ID, name: 'Sub1' }, 'alerts/+')
+check('subscriptions.byHolder returns the holder\'s patterns', (await fH.subscriptions.byHolder({ ...ID, name: 'Sub1' })).map(s => s.pattern).sort().join() === 'alerts/+,team/#')
+check('subscription record is self-describing', (await fH.subscriptions.byHolder({ ...ID, name: 'Sub1' }))[0].user === ID.user)
+await fH.subscriptions.remove({ ...ID, name: 'Sub1' }, 'team/#')
+check('subscriptions.remove', (await fH.subscriptions.byHolder({ ...ID, name: 'Sub1' })).map(s => s.pattern).join() === 'alerts/+')
+await fH.subscriptions.put({ ...ID, name: 'StaleSub' }, 'old/#', { subscribed_at: '2000-01-01T00:00:00.000Z' })
+const dropSub = await fH.subscriptions.gcAll({ maxAgeMs: 86400000 })
+check('subscriptions.gcAll drops unseen-past-maxAge', dropSub >= 1 && (await fH.subscriptions.byHolder({ ...ID, name: 'StaleSub' })).length === 0, 'dropped=' + dropSub)
+
 // ---- mailbox stores the recipient identity (self-describing), not only the hashed key ----
 await fH.mailbox.put({ ...ID, name: 'SelfDesc' }, 'sd1', { ts: '2026-06-18T00:00:00.000Z', body: 'x' })
 const sd = (await fH.mailbox.drain({ ...ID, name: 'SelfDesc' }))[0]

@@ -153,6 +153,28 @@ const carolIn = (await call(B, 'inbox', { for: 'Carol', secret: 'sca', cursor: 0
 check('the parked message is delivered to the named peer on its return', carolIn.includes('for carol'), JSON.stringify(carolIn))
 await B.transport.close(); await sleep(500)
 
+// ===== §20: register_self resync — returns topics + access, and durable subscriptions rehydrate =====
+B = await spawnBridge(7982); await sleep(700)
+await call(B, 'register_self', { name: 'Resync', secret: 'sre', project: 'shared' })
+await call(B, 'claim_topic', { topic: 'jobs', as: 'Resync', secret: 'sre', exclusive: true })
+await call(B, 'subscribe', { pattern: 'news/#', as: 'Resync', secret: 'sre' })
+await sleep(250)
+await B.transport.close(); await sleep(700)
+B = await spawnBridge(7984); await sleep(700)
+const resync = await call(B, 'register_self', { name: 'Resync', secret: 'sre', project: 'shared' })
+const owned = (resync.topics || []).some(t => t.pattern === 'jobs' && t.role === 'owner')
+const subbed = (resync.topics || []).some(t => t.pattern === 'news/#' && t.role === 'subscriber')
+check('register_self returns the identity\'s owned + subscribed topics (resync)', owned && subbed, JSON.stringify(resync.topics))
+check('register_self returns an access list (reachable projects)', Array.isArray(resync.access), JSON.stringify(resync.access))
+// the rehydrated subscription is live: a publish to a matching topic reaches the returning subscriber
+await call(B, 'register_self', { name: 'Editor', secret: 'sed', project: 'shared' })
+await sleep(150)
+await call(B, 'publish', { topic: 'news/breaking', subject: 'n', message: 'hot off the press', as: 'Editor', secret: 'sed' })
+await sleep(200)
+const resyncIn = (await call(B, 'inbox', { for: 'Resync', secret: 'sre', cursor: 0 })).messages.map(m => m.body)
+check('a rehydrated subscription still delivers after the restart', resyncIn.includes('hot off the press'), JSON.stringify(resyncIn))
+await B.transport.close(); await sleep(500)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 try { fs.rmSync(persistDir, { recursive: true, force: true }) } catch { }
 process.exit(fail ? 1 : 0)

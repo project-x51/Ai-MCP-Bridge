@@ -217,6 +217,43 @@ export function create(ctx) {
     },
   }
 
+  // ---- subscriptions: durable per-holder interest, so a returning session keeps its subscriptions and the
+  // register_self resync can hand them back. One file per (holder, pattern); self-describing. ----
+  const subscriptions = {
+    async put(identity, pattern, record = {}) {
+      const { primary } = identityKeys(identity, readable)
+      await writeAtomic(dir('subscriptions', primary, `${slug(pattern, 80)}.sub`), JSON.stringify({
+        pattern, realm: identity.realm, project: identity.project, user: identity.user, name: identity.name,
+        subscribed_at: record.subscribed_at || new Date().toISOString() }))
+    },
+    async byHolder(identity) {
+      const { both } = identityKeys(identity, readable), out = []
+      for (const key of new Set(both)) {
+        const sdir = dir('subscriptions', key)
+        for (const f of await readDirSafe(sdir)) { if (!f.endsWith('.sub')) continue; const j = await readJson(path.join(sdir, f)); if (j) out.push(j) }
+      }
+      return out
+    },
+    async remove(identity, pattern) {
+      const { both } = identityKeys(identity, readable)
+      for (const key of new Set(both)) { try { await fsp.unlink(dir('subscriptions', key, `${slug(pattern, 80)}.sub`)) } catch {} }
+    },
+    async gcAll({ now = Date.now(), maxAgeMs = 0 } = {}) {
+      if (!maxAgeMs) return 0
+      let dropped = 0, base = dir('subscriptions')
+      for (const keyDir of await readDirSafe(base)) {
+        const sdir = path.join(base, keyDir)
+        for (const f of await readDirSafe(sdir)) {
+          if (!f.endsWith('.sub')) continue
+          const file = path.join(sdir, f), j = await readJson(file)
+          const t = j && Date.parse(j.subscribed_at || '')
+          if (j && t && now - t > maxAgeMs) { try { await fsp.unlink(file) } catch {} dropped++ }
+        }
+      }
+      return dropped
+    },
+  }
+
   // ---- retained: one file per publisher; effective value = newest ts. The topic is stored in-body (the
   // dir slug is lossy) so allForProject can recover it for wildcard subscribe-time catch-up. ----
   const retained = {
@@ -255,7 +292,7 @@ export function create(ctx) {
   }
 
   return {
-    meta, root, readable, mailbox, claims, grants, registrations, retained,
+    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, retained,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,

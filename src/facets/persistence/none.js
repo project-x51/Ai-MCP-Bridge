@@ -9,6 +9,7 @@ export function create() {
     claims: { async put() {}, async read() { return [] }, async byHolder() { return [] }, async remove() {}, async gcAll() { return 0 } },
     grants: { async put() {}, async all() { return [] }, async remove() {}, async gcAll() { return 0 } },
     registrations: { async put() {}, async all() { return [] }, async byName() { return [] }, async remove() {}, async gcAll() { return 0 } },
+    subscriptions: { async put() {}, async byHolder() { return [] }, async remove() {}, async gcAll() { return 0 } },
     retained: { async put() {}, async read() { return null }, async allForProject() { return [] }, async gcAll() { return 0 } },
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
   }
