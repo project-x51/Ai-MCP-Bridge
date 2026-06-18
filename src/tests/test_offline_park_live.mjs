@@ -85,6 +85,23 @@ const xWait = await call(A, 'claim_topic', { topic: 'wait', as: 'AL', secret: 's
 check('cross-user takeover HELD while within the grace window', xWait.ok === false && xWait.within_grace === true, JSON.stringify(xWait))
 await A.transport.close()
 
+// ===== E: a LEGACY claim record (pre-v1.10, no user/name) must NOT block a same-user reclaim (back-compat) =====
+// Reproduces the live ROBIN-Z790 issue: v1.9.0 wrote claims without user/name, and v1.10.0 read them as a
+// different user's dormant claim, blocking the real owner (held/cross_user). The fix skips unattributable
+// legacy records.
+const legDir = path.join(persistDir, 'claims', 'shared', 'legacy-topic')
+fs.mkdirSync(legDir, { recursive: true })
+fs.writeFileSync(path.join(legDir, 'legacy.claim'), JSON.stringify({
+  pattern: 'legacy-topic', role: 'owner', exclusive: true, holder_name: 'OldOwner',
+  project: 'shared', realm: 'default', persistent: true,
+  claimed_at: '2026-06-17T00:00:00.000Z', refreshed_at: '2026-06-17T00:00:00.000Z' }))   // NO user, NO name
+B = await spawn(7990); await sleep(700)
+await call(B, 'register_self', { name: 'Newbie', secret: 'sn', project: 'shared' })
+await sleep(150)
+const legacyClaim = await call(B, 'claim_topic', { topic: 'legacy-topic', as: 'Newbie', secret: 'sn', exclusive: true })
+check('a legacy record (no user/name) does NOT block a claim of that topic', legacyClaim.ok === true, JSON.stringify(legacyClaim))
+await B.transport.close()
+
 console.log(`\n${pass} passed, ${fail} failed`)
 try { fs.rmSync(persistDir, { recursive: true, force: true }) } catch { }
 process.exit(fail ? 1 : 0)

@@ -425,6 +425,11 @@ async function resolveDormantConflict(topic, holderIdentity, holderProject, excl
   try { recs = await persistence.claims.read(holderProject, topic) } catch { return null }
   for (const rec of recs) {
     if (!rec || rec.pattern !== topic) continue
+    // §16 back-compat: a claim written before v1.10.0 has no user/name (persistClaim didn't store them),
+    // so it can't be ATTRIBUTED to a holder. Never let an unidentifiable legacy record block a claim —
+    // that would wrongly read a returning owner's own dormant topic as another user's. Skip it; the claim
+    // proceeds and rewrites a proper (identified) record over the top.
+    if (!rec.user || !rec.name) continue
     const sameIdentity = projKey(rec.project) === projKey(holderIdentity.project) && (rec.user || '') === (holderIdentity.user || '') && (rec.name || '') === (holderIdentity.name || '')
     if (sameIdentity) continue                          // my own durable claim — a re-claim, not a conflict
     if (isIdentityLive(rec)) continue                   // a live owner — the in-RAM blocker check governs that
