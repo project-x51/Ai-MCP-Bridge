@@ -75,6 +75,7 @@
 <h1><span class="pip" id="pip"></span>Ai MCP Bridge — Dashboard</h1>
 <div class="sub" id="gw">connecting…</div>
 <div id="prof"></div>
+<div class="sub" style="font-size:11px;color:#9CA3AF;margin-top:2px">Names &amp; topics are shown as entered; matching is <b>case-insensitive</b> (stored &amp; compared lower-case).</div>
 <section class="sec" data-sec="map">
   <h2 class="sech"><span class="chev">▾</span>Mesh map</h2>
   <div class="secb">
@@ -114,6 +115,10 @@
   var pip=document.getElementById('pip'), gw=document.getElementById('gw');
   var backoff=1000, sock=null, last={sessions:[],pages:[],hosts:{},gateway:null};
   var nodePos={};   // id -> {x,y,el}
+  // remembered open/closed state of inner expanders, keyed by a STABLE id (session/sub-peer/store), so a
+  // roster/persistence push that rebuilds the tables doesn't snap open rows shut. In-memory only —
+  // these entities are ephemeral, so the set is rebuilt naturally as you click; it just survives re-renders.
+  var openRows={};
   function esc(s){ var d=document.createElement('span'); d.textContent=s==null?'—':String(s); return d.innerHTML; }
   function row(tb,cells){ var tr=document.createElement('tr'); tr.innerHTML=cells.map(function(c){return '<td>'+c+'</td>';}).join(''); tb.insertBefore(tr, tb.firstChild); }
 
@@ -135,13 +140,15 @@
         (r.claimed_at?' <span class="mono">'+esc(String(r.claimed_at).replace('T',' ').slice(0,19))+'</span>':'')+'</div>';
     }).join('');
   }
-  function expandable(tb,titleCells,detailHtml,cls){
+  function expandable(tb,titleCells,detailHtml,cls,key){
     var tr=document.createElement('tr'); tr.className='x-row'+(cls?(' '+cls):'');
     tr.innerHTML='<td><span class="x-chev">▸</span></td>'+titleCells.map(function(c){return '<td>'+c+'</td>';}).join('');
     var det=document.createElement('tr'); det.className='x-det'; det.style.display='none';
     det.innerHTML='<td colspan="'+(titleCells.length+1)+'">'+detailHtml+'</td>';
+    if(key && openRows[key]){ det.style.display=''; tr.querySelector('.x-chev').textContent='▾'; }   // restore after a rebuild
     tr.addEventListener('click',function(){ var open=det.style.display!=='none';
-      det.style.display=open?'none':''; tr.querySelector('.x-chev').textContent=open?'▸':'▾'; });
+      det.style.display=open?'none':''; tr.querySelector('.x-chev').textContent=open?'▸':'▾';
+      if(key){ if(open) delete openRows[key]; else openRows[key]=1; } });
     tb.appendChild(tr); tb.appendChild(det);
     return tr;
   }
@@ -191,7 +198,7 @@
           '<span class="kv"><b>instance</b> <span class="mono">'+esc(p.instance)+'</span></span>'+
           (p.subject?'<span class="kv"><b>subject</b> '+esc(p.subject)+'</span>':'')+
           '<span class="kv"><b>project</b> '+esc(p.project||'(infra)')+'</span>'+
-          '<span class="kv"><b>user</b> '+esc(p.user||'—')+'</span>');
+          '<span class="kv"><b>user</b> '+esc(p.user||'—')+'</span>',null,'page/'+p.instance);
       };
       var sess=box.sessions.slice().sort(function(a,b){ return (b.is_gateway?1:0)-(a.is_gateway?1:0); });   // gateway first
       var hasGw=sess.some(function(s){ return s.is_gateway; });
@@ -202,7 +209,7 @@
           '<span class="mono">'+esc(s.client||'')+'</span>',
           pu(s.project,s.user),
           topicNames(tops,s.session)],
-          sessDetail(s,tops));
+          sessDetail(s,tops),null,'sess/'+s.session);
         (s.subpeers||[]).forEach(function(sp){
           expandable(sb,[
             '<span style="padding-left:18px">↳</span> <span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(sp.name)+'</span>',
@@ -216,7 +223,7 @@
             '<span class="kv"><b>parent</b> '+(sp.parent?esc(sp.parent.split('/').pop()):'—')+'</span>'+
             '<span class="kv"><b>client</b> '+esc(sp.client||'?')+'</span>'+
             '<span class="kv"><b>mode</b> '+esc(sp.mode||'poll')+'</span>'+
-            '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>');
+            '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>',null,'sp/'+sp.id);
         });
         if(isGw) box.pages.forEach(renderPage);   // pages belong to the gateway
       });
@@ -262,7 +269,7 @@
     var tb=document.getElementById('persistence'); tb.innerHTML='';
     STORES.forEach(function(s){ var rows=snap[s.key]||[];
       expandable(tb,[s.icon+' '+esc(s.name),'<span class="bub '+s.badge+'">'+rows.length+'</span>'],
-        rows.length?persTable(rows,s.cols):'<span class="empty">empty</span>'); });
+        rows.length?persTable(rows,s.cols):'<span class="empty">empty</span>',null,'pers/'+s.key); });
   }
   function renderProf(m){
     var el=document.getElementById('prof'); if(!el||!m) return;

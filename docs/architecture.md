@@ -490,12 +490,19 @@ thing stable across a restart is `(name, secret)`, which already derives a stabl
 HKDF(secret)` (§5). So durable state is keyed by a **stable identity** — `realm:project:user:name` —
 never the session id.
 
+The identity tuple is **lower-cased before keying** (v1.17), so names are case-insensitive end-to-end:
+`"Bolletta"` and `"bolletta"` resolve to one mailbox/claim/vault, and live lookups
+(`register_self`/`send_to_peer`/`inbox`) compare names case-folded too. The as-typed `name` is still
+stored in the record body for **display** — only the *key* is canonicalised. Topic/project/pattern path
+segments are likewise lower-cased into their on-disk keys (an `lslug` over the case-sensitive `slug`,
+which is reserved for content-addressed envelope ids).
+
 The on-disk key is **format-prefixed**, so the store is self-describing and switching formats never
 strands data:
 - **`h-<sha256(realm|project|user|name)>`** — production: fixed-length, fs-safe, leaks no identity
   taxonomy in a directory listing.
-- **`r-<slug>-<first-4-of-that-sha>`** — dev (`devReadableKeys:true`): a sanitised slug
-  (`default__AIMB__Robin__Bridget`) plus a 4-char hash for uniqueness. Legible when eyeballing the
+- **`r-<slug>-<first-4-of-that-sha>`** — dev (`devReadableKeys:true`): a sanitised, lower-cased slug
+  (`default__aimb__robin__bridget`) plus a 4-char hash for uniqueness. Legible when eyeballing the
   folder mid-test.
 
 On lookup the bridge computes **both** forms for an identity and drains whichever exists — so flipping
@@ -704,6 +711,37 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.18):** *parked mail surfaces on poll + reattach (§23)* — fixed a real gap: a message written to
+  a peer's **durable mailbox while that peer is already LIVE** (parked out-of-band by another federated
+  process, or while the peer was momentarily treated as offline) only surfaced on a **fresh `register_self`**;
+  a plain `inbox` poll or a reattach served the in-RAM queue and never re-read the durable store, so the
+  message stranded until the in-RAM entry expired. `inbox` (and the reattach branch) now call
+  **`syncDurableMailbox`** — drain the durable mailbox and push any envelope ids **not already queued** into
+  the queue (dedup by id, so normally live-delivered mail is never doubled). Live delivery is unchanged.
+  Regression test `test_parked_live` (7 checks) parks straight into the persist dir via the facet to simulate
+  another process and asserts a plain poll + a reattach both surface it exactly once; verified to FAIL with the
+  fix neutered. Suite 355 across 17.
+- **Built (v1.17):** *case-insensitive names & topics* — every **name** (peer/sub-peer) and **topic** is
+  now **presented in its original case but stored and compared lower-case**, so all checks are
+  case-insensitive: `register_self`/`send_to_peer`/`inbox` match `"Bolletta"` ≡ `"bolletta"`, and the
+  persistence keys (identity tuple, claim/retained/subscription paths) canonicalise to lower-case so a
+  case variant never splits a mailbox/claim/vault. Display strings keep their original case (record bodies
+  store the as-typed `name`/`pattern`/`holder_name`). Topics were already level-wise case-folded
+  (`splitTopic`); this extends the same rule to names and the on-disk keys. Existing mixed-case persistence
+  files written before v1.17 self-heal as owners re-assert (re-persisted under the lower-case key) — but
+  **parked mail** under the old mixed-case keys would strand, so an upgrade ships with a one-shot
+  migration: **`scripts/migrate-persistence-lowercase.mjs <dir>`** re-keys every mailbox/claim/registration
+  /subscription/vault entry (and lower-cases retained paths) using the facet's own `identityKeys`/`lslug`
+  (no drift), then reads everything back through the facet to verify. Dry-run by default; `--apply` only
+  with the bridge **stopped**; idempotent and FS-case-aware (on case-insensitive NTFS the identity hashes
+  are still re-keyed; dir casing is cosmetic). Run order for a 1.15→1.17 upgrade: stop bridge → dry-run →
+  `--apply` → restart.
+  The **dashboard** reflects the rule with a header note ("shown as entered; matching is case-insensitive")
+  and also fixes an expander bug: a roster/persistence push rebuilds the tables (`innerHTML=''`), which used
+  to snap any open inner expander (a mailbox, a session) shut a moment later — open state is now kept in an
+  in-memory `openRows` map keyed by a stable id (`sess/`, `sp/`, `page/`, `pers/`) and restored after each
+  rebuild. Verified by new case-insensitivity checks in `test_subpeers` + `test_persistence` and an
+  expander-survives-rerender check in `test_dashboard_persistence`. Suite 348 across 16.
 - **Built (v1.16):** *secret recovery (Hello-vault, §21)* — the bridge **seals** a session's secret at
   registration (encrypt-to-the-user) into a `vault` persistence store; a session that lost it (a compact
   throws away the bearer secret) calls **`recover_secret {name}`** and gets the original back after a

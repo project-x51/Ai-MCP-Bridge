@@ -114,6 +114,20 @@ check('after polling, the hint shows unread 0', !!hintAfter.inbox && hintAfter.i
 const noAuthHint = await call(A, 'list_sessions')   // no as/secret -> not attributable -> no hint
 check('un-attributed calls carry no inbox hint', noAuthHint.inbox === undefined)
 
+// --- names are case-INSENSITIVE: presented in original case but stored/compared lower-case
+const ci = await call(A, 'register_self', { name: 'Bolletta', secret: 'boll-sec' })
+check('mixed-case name registers', ci.ok === true, JSON.stringify(ci))
+check('registered name keeps original case', (await call(A, 'my_identity')).subpeers.some(s => s.name === 'Bolletta'))
+const ciTaken = await call(A, 'register_self', { name: 'BOLLETTA', secret: 'WRONG' })
+check('name-taken matches across case', ciTaken.ok === false && ciTaken.code === 'name-taken')
+const ciRe = await call(A, 'register_self', { name: 'bolletta', secret: 'boll-sec' })
+check('re-attach matches across case', ciRe.peer_id === ci.peer_id && ciRe.reattached === true, JSON.stringify(ciRe))
+const ciSend = await call(B, 'send_to_peer', { subject: 'ci probe', target: 'BoLLeTTa', message: 'case-insensitive route' })
+check('send by different-case name routes', ciSend.ok === true && ciSend.to === ci.peer_id, JSON.stringify(ciSend))
+await sleep(300)
+const ciIn = await call(A, 'inbox', { for: 'BOLLETTA', secret: 'boll-sec' })   // inbox lookup also case-insensitive
+check('inbox lookup by different-case name', ciIn.messages.some(m => m.body === 'case-insensitive route'), JSON.stringify(ciIn.messages))
+
 console.log(`\n${pass} passed, ${fail} failed`)
 await A.transport.close(); await B.transport.close()
 process.exit(fail ? 1 : 0)

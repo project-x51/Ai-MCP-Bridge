@@ -23,13 +23,20 @@ export function parseSize(v) {
   return Math.floor(n * mult)
 }
 
-const slug = (s, max = 48) => String(s == null ? '' : s).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, max) || '_'
+// exported so the v1.17 key-lowercasing migration (scripts/migrate-persistence-lowercase.mjs) re-keys with
+// the EXACT same logic the running facet uses — no drift between migrator and reader.
+export const slug = (s, max = 48) => String(s == null ? '' : s).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, max) || '_'
+// case-INSENSITIVE slug for names/topics/projects: lower-case first, so "Bills" and "bills" share one path.
+// (Plain `slug` stays case-sensitive — used for content-addressed envelope ids.) Display case is preserved
+// in the record bodies; only the on-disk KEY is canonicalised.
+export const lslug = (s, max = 48) => slug(String(s == null ? '' : s).toLowerCase(), max)
 
 // Stable, format-prefixed on-disk key for an identity (§12). `primary` is the form for the current mode;
 // `both` is [hashed, readable] so a drain finds data written under the OTHER mode — flipping
-// devReadableKeys with files already on disk strands nothing.
+// devReadableKeys with files already on disk strands nothing. The tuple is LOWER-CASED so the identity is
+// case-insensitive ("Robin"/"robin", "Bolletta"/"bolletta" share one mailbox/claim/vault key).
 export function identityKeys(identity, readable) {
-  const tuple = [identity.realm || 'default', identity.project || 'unclassified', identity.user || 'unknown', identity.name || '']
+  const tuple = [identity.realm || 'default', identity.project || 'unclassified', identity.user || 'unknown', identity.name || ''].map(t => String(t).trim().toLowerCase())
   const sha = crypto.createHash('sha256').update(tuple.join('|')).digest('hex')
   const hashed = 'h-' + sha
   const human = 'r-' + tuple.map(t => slug(t, 24)).join('__') + '-' + sha.slice(0, 4)
@@ -116,10 +123,10 @@ export function create(ctx) {
   const claims = {
     async put(project, topic, identity, record) {
       const { primary } = identityKeys(identity, readable)
-      await writeAtomic(dir('claims', slug(project), slug(topic), `${primary}.claim`), JSON.stringify(record))
+      await writeAtomic(dir('claims', lslug(project), lslug(topic), `${primary}.claim`), JSON.stringify(record))
     },
     async read(project, topic) {
-      const cdir = dir('claims', slug(project), slug(topic)), out = []
+      const cdir = dir('claims', lslug(project), lslug(topic)), out = []
       for (const f of await readDirSafe(cdir)) { if (!f.endsWith('.claim')) continue; const j = await readJson(path.join(cdir, f)); if (j) out.push(j) }
       return out
     },
@@ -140,7 +147,7 @@ export function create(ctx) {
     },
     async remove(project, topic, identity) {
       const { both } = identityKeys(identity, readable)
-      for (const key of new Set(both)) { try { await fsp.unlink(dir('claims', slug(project), slug(topic), `${key}.claim`)) } catch {} }
+      for (const key of new Set(both)) { try { await fsp.unlink(dir('claims', lslug(project), lslug(topic), `${key}.claim`)) } catch {} }
     },
     // hard expiry: a claim whose holder hasn't re-registered within hardExpiryMs is abandoned. Returns count dropped.
     async gcAll({ now = Date.now(), maxAgeMs = 0 } = {}) {
@@ -222,7 +229,7 @@ export function create(ctx) {
   const subscriptions = {
     async put(identity, pattern, record = {}) {
       const { primary } = identityKeys(identity, readable)
-      await writeAtomic(dir('subscriptions', primary, `${slug(pattern, 80)}.sub`), JSON.stringify({
+      await writeAtomic(dir('subscriptions', primary, `${lslug(pattern, 80)}.sub`), JSON.stringify({
         pattern, realm: identity.realm, project: identity.project, user: identity.user, name: identity.name,
         subscribed_at: record.subscribed_at || new Date().toISOString() }))
     },
@@ -236,7 +243,7 @@ export function create(ctx) {
     },
     async remove(identity, pattern) {
       const { both } = identityKeys(identity, readable)
-      for (const key of new Set(both)) { try { await fsp.unlink(dir('subscriptions', key, `${slug(pattern, 80)}.sub`)) } catch {} }
+      for (const key of new Set(both)) { try { await fsp.unlink(dir('subscriptions', key, `${lslug(pattern, 80)}.sub`)) } catch {} }
     },
     async gcAll({ now = Date.now(), maxAgeMs = 0 } = {}) {
       if (!maxAgeMs) return 0
@@ -279,16 +286,16 @@ export function create(ctx) {
   const retained = {
     async put(project, topic, identity, record) {
       const { primary } = identityKeys(identity, readable)
-      await writeAtomic(dir('retained', slug(project), slug(topic), `${primary}.val`),
+      await writeAtomic(dir('retained', lslug(project), lslug(topic), `${primary}.val`),
         JSON.stringify({ ts: record.ts || new Date().toISOString(), topic, project, record }))
     },
     async read(project, topic) {
-      const rdir = dir('retained', slug(project), slug(topic)); let best = null
+      const rdir = dir('retained', lslug(project), lslug(topic)); let best = null
       for (const f of await readDirSafe(rdir)) { if (!f.endsWith('.val')) continue; const j = await readJson(path.join(rdir, f)); if (j && (!best || j.ts > best.ts)) best = j }
       return best ? best.record : null
     },
     async allForProject(project) {   // newest value per topic in this project: [{ topic, record }]
-      const pdir = dir('retained', slug(project)), out = []
+      const pdir = dir('retained', lslug(project)), out = []
       for (const topicSlug of await readDirSafe(pdir)) {
         const tdir = path.join(pdir, topicSlug); let best = null
         for (const f of await readDirSafe(tdir)) { if (!f.endsWith('.val')) continue; const j = await readJson(path.join(tdir, f)); if (j && (!best || j.ts > best.ts)) best = j }

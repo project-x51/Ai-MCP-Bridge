@@ -45,6 +45,21 @@ check('claims store lists the durable claim (builds)', /builds/.test(persText), 
 check('registrations store lists the peer (Worker)', /Worker/.test(persText))
 check('subscriptions store lists the pattern (alerts/#)', /alerts\/#/.test(persText))
 
+// --- regression: an opened expander must SURVIVE a re-render. roster/persistence pushes rebuild the
+// table (innerHTML=''), which used to snap any open inner expander shut "a moment later". The open state
+// is now remembered by a stable key (here 'pers/claims').
+const detOpen = r => !!(r && r.nextElementSibling && r.nextElementSibling.classList.contains('x-det') && r.nextElementSibling.style.display !== 'none')
+const findClaims = () => [...doc.getElementById('persistence').querySelectorAll('tr.x-row')].find(r => /Claims/.test(r.textContent))
+const claimRow = findClaims()
+check('claims store expander present', !!claimRow)
+claimRow.dispatchEvent(new dom.window.Event('click'))
+check('expander opens on click', detOpen(claimRow))
+await call('subscribe', { pattern: 'metrics/+', as: 'Worker', secret: 'sw' })   // mutate state + let the periodic push rebuild
+await sleep(1300)                                                                // > one DASH_PERSIST_MS (500ms) push cycle
+const claimRow2 = findClaims()
+check('persistence table was rebuilt by the push', !!claimRow2 && claimRow2 !== claimRow)   // proves the bug path is exercised
+check('opened expander stays open across the re-render', detOpen(claimRow2))
+
 await t.close()
 console.log(`\n${pass} passed, ${fail} failed`)
 try { fs.rmSync(persistDir, { recursive: true, force: true }) } catch { }

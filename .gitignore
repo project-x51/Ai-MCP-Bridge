@@ -14,6 +14,9 @@ config.json
 dev-logs/
 .claude/
 
+# Persistence backups (snapshots of the live store taken before a migration — contain real runtime data)
+persistence.bak-*/
+
 # Test scratch
 /tmp/
 

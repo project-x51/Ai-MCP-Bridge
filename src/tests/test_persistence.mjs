@@ -25,9 +25,13 @@ check('config size parsed into limits', mk(false).limits.mailboxMaxBytes === 102
 // ---- format-prefixed stable keys ----
 const kH = identityKeys(ID, false), kR = identityKeys(ID, true)
 check('hashed key h- prefix + stable', kH.primary.startsWith('h-') && identityKeys(ID, false).primary === kH.primary)
-check('readable key r- + slug + 4hash', kR.primary.startsWith('r-') && kR.primary.includes('Bridget') && /-[0-9a-f]{4}$/.test(kR.primary))
+check('readable key r- + lower-slug + 4hash', kR.primary.startsWith('r-') && kR.primary.includes('bridget') && /-[0-9a-f]{4}$/.test(kR.primary))
 check('different identity -> different key', identityKeys({ ...ID, name: 'Other' }, false).primary !== kH.primary)
 check('both forms returned regardless of mode', kH.both.length === 2 && kH.both.join() === kR.both.join())
+// identity keys are CASE-INSENSITIVE: case/whitespace variants of the same identity collapse to one key,
+// so "Bridget"/"bridget"/"Robin"/"robin" never split a mailbox/claim/vault (the case-insensitive design).
+check('identity key is case-insensitive', identityKeys({ ...ID, user: 'robin', name: 'BRIDGET' }, false).primary === kH.primary
+  && identityKeys({ ...ID, name: '  bridget  ' }, true).primary === kR.primary)
 
 // ---- mailbox round-trip + content-addressing ----
 const fR = mk(true), fH = mk(false)

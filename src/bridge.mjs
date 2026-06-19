@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.16.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.18.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -254,6 +254,11 @@ function deliveryAllowed(env, toProject, toRealm, targetCapKey) {
   return verifyReplyCap(env, toProject, targetCapKey)   // signed reply exception
 }
 
+// Names (peer/sub-peer) are PRESENTED in their original case but STORED and COMPARED lower-case, so all
+// name lookups are case-insensitive ("Bolletta" === "bolletta"). Display strings keep their original case.
+const lc = s => String(s == null ? '' : s).trim().toLowerCase()
+const ciEq = (a, b) => lc(a) === lc(b)
+
 // ---------------------------------------------------------------- topic matching (T1/T4)
 // Topics are /-separated paths, matched case-insensitively per level. Wildcards (subscriptions and
 // claims only): '+' one level, '#' the rest of the subtree.
@@ -379,7 +384,7 @@ function resolveLocalSub(ref) {
   if (subpeers.has(ref)) return subpeers.get(ref)
   const full = `${SESSION}/${ref}`
   if (subpeers.has(full)) return subpeers.get(full)
-  const byName = [...subpeers.values()].filter(s => s.name === ref)
+  const byName = [...subpeers.values()].filter(s => ciEq(s.name, ref))
   return byName.length === 1 ? byName[0] : null
 }
 function newQueue() { return { epoch: crypto.randomBytes(4).toString('hex'), base: 0, items: [], served: 0 } }
@@ -464,9 +469,10 @@ async function resolveDormantConflict(topic, holderIdentity, holderProject, excl
     if (!rec.user || !rec.name) continue
     // user is the OS login — compare case-INSENSITIVELY (project already is): an older claim recorded
     // under declared "Robin" must match the OS-authenticated "robin", else the owner is locked out of its
-    // own dormant topic as a phantom "different user". (name stays exact — it's a chosen peer label.)
+    // own dormant topic as a phantom "different user". Name is also case-insensitive (presented in original
+    // case but stored/compared lower-case) so "Bolletta"/"bolletta" re-claim, not conflict.
     const userKey = u => String(u || '').trim().toLowerCase()
-    const sameIdentity = projKey(rec.project) === projKey(holderIdentity.project) && userKey(rec.user) === userKey(holderIdentity.user) && (rec.name || '') === (holderIdentity.name || '')
+    const sameIdentity = projKey(rec.project) === projKey(holderIdentity.project) && userKey(rec.user) === userKey(holderIdentity.user) && ciEq(rec.name, holderIdentity.name)
     if (sameIdentity) continue                          // my own durable claim — a re-claim, not a conflict
     if (isIdentityLive(rec)) continue                   // a live owner — the in-RAM blocker check governs that
     if (!(rec.exclusive || exclusive)) continue         // only exclusive overlaps conflict
@@ -564,6 +570,28 @@ function deliverSub(id, env) {
     }).catch(() => {})
   }
   return { ok: true }
+}
+// §23: pull durably-parked messages that AREN'T already in the live queue into it. Live delivery writes both
+// the queue AND a durable copy, so the durable mailbox normally just mirrors unconsumed queue items — but mail
+// parked OUT-OF-BAND (by another federated process, or while this peer was momentarily treated as offline) lands
+// only in the durable store and, pre-§23, surfaced only on a FRESH register — a plain poll/reattach never drained
+// it, so it stranded. We now sync on poll + reattach. Dedup by envelope id so live-delivered mail isn't doubled.
+async function syncDurableMailbox(sp) {
+  if (!PERSIST || !sp || !sp.identity) return 0
+  const q = subQueues.get(sp.id); if (!q) return 0
+  let parked
+  try { parked = await persistence.mailbox.drain(pIdent(sp.identity, sp.name)) } catch { return 0 }
+  if (!parked || !parked.length) return 0
+  const have = new Set(q.items.map(e => e && e.id))
+  let added = 0
+  for (const p of parked) {
+    const rec = p && p.record
+    if (!rec || !rec.id || have.has(rec.id)) continue
+    q.items.push(rec); have.add(rec.id); added++
+    if (q.items.length > SUBQ_CAP) { q.items.shift(); q.base++ }
+  }
+  if (added) emitTraceRaw({ dir: 'recv', verb: 'rehydrate', from: sp.id, from_name: sp.name, to: SESSION, size: added, note: `${added} out-of-band parked message(s) surfaced on poll/reattach`, envelope_id: null })
+  return added
 }
 function deadLetterStrays(sp) {
   const q = subQueues.get(sp.id); if (!q) return 0
@@ -1418,11 +1446,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     case 'register_self': {
       const name = String(a.name || '').trim(), secret = String(a.secret || '')
       if (!name || !secret) return ok({ ok: false, code: 'name-and-secret-required' })
-      const existing = [...subpeers.values()].find(s => s.name === name)
+      const existing = [...subpeers.values()].find(s => ciEq(s.name, name))
       if (existing) {
         if (existing.secretHash !== sha(secret)) return ok({ ok: false, code: 'name-taken', name })
         existing.last_seen = Date.now()
         const q = subQueues.get(existing.id)
+        await syncDurableMailbox(existing)   // §23: a returning peer also picks up out-of-band parked mail
         callerId = existing.id   // §20 resync on reattach too: hand back current topics + access + the inbox hint
         const reTopics = [...myTopics.values()].filter(e => e.holder === existing.id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
         return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: reachableProjects(existing.identity?.project) })
@@ -1736,10 +1765,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (!target.startsWith('page:') && !roster.has(target) && !ownerOf(target)) {
         const cand = []
         for (const s of roster.values()) {
-          if (s.name === target) cand.push(s.session)
-          for (const sp of (s.subpeers || [])) if (sp.name === target) cand.push(sp.id)
+          if (ciEq(s.name, target)) cand.push(s.session)
+          for (const sp of (s.subpeers || [])) if (ciEq(sp.name, target)) cand.push(sp.id)
         }
-        for (const sp of subpeers.values()) if (sp.name === target && !cand.includes(sp.id)) cand.push(sp.id)
+        for (const sp of subpeers.values()) if (ciEq(sp.name, target) && !cand.includes(sp.id)) cand.push(sp.id)
         const uniq = [...new Set(cand)]
         if (uniq.length === 1) target = uniq[0]
         else if (uniq.length > 1) return ok({ ok: false, code: 'ambiguous-name', candidates: uniq })
@@ -1759,6 +1788,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const { sp, err } = authSub(String(a.for), a.secret)
         if (err) return ok(err)
         const q = subQueues.get(sp.id)
+        await syncDurableMailbox(sp)   // §23: surface any out-of-band parked mail before serving
         const cur = Number(a.cursor || 0)
         const start = Math.min(Math.max(cur - q.base, 0), q.items.length)
         const next = q.base + q.items.length
