@@ -711,6 +711,17 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.20):** *keep-alive topics — park directed sends through an ownerless handoff (#26)* — by default a
+  released topic is gone and directed sends bounce `no-owner`. Now **`release_topic {keep_alive:true}`** (or a
+  topic **claimed `keep_alive`**) keeps it alive as a durable **ownerless** marker: directed sends PARK against
+  the topic itself (a synthetic topic-mailbox, consent-checked against the topic's project) and the **next
+  session that claims it drains the queue** + inherits the kept description/icon. A **safety TTL**
+  (`limits.ownerlessTtlMs`, default 7d, via `ownerlessTtlDays`) sweeps abandoned ownerless topics + their parked
+  mail in the GC tick. New persistence store `keptTopics` (+ `none` stub); `claim_topic`/`release_topic` take a
+  `keep_alive` flag; dashboard shows a 🪧 *Kept-alive* store. Surfaced a latent fix on the way: `persistClaim`
+  was fire-and-forget, so a claim→release in quick succession could leave a stale durable claim — `claim_topic`
+  now **awaits** the durable write. Verified by `test_keepalive_live` (10 checks: park, drain-on-reclaim,
+  release-flag vs claim-time, no-owner preserved) + `test_persistence` keptTopics TTL GC. Suite 378 across 18.
 - **Built (v1.19):** *first-class cross-project topic send + clearer codes (#27/#28)* — a **bare** `topic:<t>`
   send still resolves in the sender's own project, but when there is **no owner there** it now resolves
   **realm-wide**: if exactly one **grant-reachable** other project owns the topic, the send **auto-routes**

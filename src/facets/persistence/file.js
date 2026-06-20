@@ -323,6 +323,42 @@ export function create(ctx) {
     },
   }
 
+  // ---- kept-alive (ownerless) topics (#26): when an owner releases a topic with keep_alive (or it was claimed
+  // keep_alive), the topic survives as a durable OWNERLESS marker so directed sends PARK against it (in the
+  // mailbox, keyed by a synthetic topic identity) until someone reclaims it and drains the queue. A safety TTL
+  // (ownerless_since + limits.ownerlessTtlMs) drops abandoned ones. Self-describing: carries the topic metadata
+  // to hand to the next owner. One file per topic. ----
+  const keptTopics = {
+    async put(project, topic, record) {
+      await writeAtomic(dir('kept', lslug(project), `${lslug(topic, 80)}.kept`),
+        JSON.stringify({ realm: record.realm || 'default', project, topic,
+          description: record.description || '', icon: record.icon || null, exclusive: !!record.exclusive,
+          announce_offline: !!record.announce_offline, keep_alive: true,
+          ownerless_since: record.ownerless_since || new Date().toISOString() }))
+    },
+    async get(project, topic) { return readJson(dir('kept', lslug(project), `${lslug(topic, 80)}.kept`)) },
+    async remove(project, topic) { try { await fsp.unlink(dir('kept', lslug(project), `${lslug(topic, 80)}.kept`)) } catch {} },
+    async all() {
+      const out = [], base = dir('kept')
+      for (const proj of await readDirSafe(base)) for (const f of await readDirSafe(path.join(base, proj))) {
+        if (!f.endsWith('.kept')) continue; const j = await readJson(path.join(base, proj, f)); if (j) out.push(j)
+      }
+      return out
+    },
+    // drop ownerless topics past the safety TTL; returns the dropped markers so the caller can also clear their parked mail + LOG it
+    async gcAll({ now = Date.now(), ttlMs = 0 } = {}) {
+      if (!ttlMs) return []
+      const dropped = [], base = dir('kept')
+      for (const proj of await readDirSafe(base)) for (const f of await readDirSafe(path.join(base, proj))) {
+        if (!f.endsWith('.kept')) continue
+        const file = path.join(base, proj, f), j = await readJson(file)
+        const t = j && Date.parse(j.ownerless_since || '')
+        if (j && t && now - t > ttlMs) { try { await fsp.unlink(file) } catch {} dropped.push({ realm: j.realm, project: j.project, topic: j.topic }) }
+      }
+      return dropped
+    },
+  }
+
   // a read-only summary of every store for the dashboard's persistence view. Records are self-describing,
   // so this shows real identities/topics (not opaque hashes). Capped per store to bound the payload.
   async function snapshot() {
@@ -350,22 +386,24 @@ export function create(ctx) {
     const subscriptions = await readAll('subscriptions', '.sub', j => ({ name: j.name, project: j.project, user: j.user, pattern: j.pattern }))
     const retained = await readAll('retained', '.val', j => ({ project: j.project, topic: j.topic, ts: j.ts }))
     const vaults = await readAll('vault', '.vault', j => ({ name: j.name, project: j.project, user: j.user, sealed_at: j.sealed_at }))   // identities only — never the sealed value
+    const kept = await readAll('kept', '.kept', j => ({ project: j.project, topic: j.topic, icon: j.icon, exclusive: !!j.exclusive, ownerless_since: j.ownerless_since }))
     return {
       enabled: true, readable, dir: root,
-      counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.length, registrations: registrations.length, subscriptions: subscriptions.length, vault: vaults.length, retained: retained.length },
-      vault: vaults,
+      counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.length, registrations: registrations.length, subscriptions: subscriptions.length, vault: vaults.length, retained: retained.length, kept: kept.length },
+      vault: vaults, kept,
       mailboxes: Object.values(mboxes).sort((a, b) => b.count - a.count), claims, grants, registrations, subscriptions, retained,
     }
   }
 
   return {
-    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, snapshot,
+    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, snapshot,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,
       retainedTtlMs: (Number(cfg.retainedTtlDays) || 14) * 86400000,
       graceMs: (Number(cfg.claimGraceMinutes) || 60) * 60000,
       hardExpiryMs: (Number(cfg.claimHardExpiryDays) || 14) * 86400000,
+      ownerlessTtlMs: (Number(cfg.ownerlessTtlDays) || 7) * 86400000,   // #26: abandoned kept-alive topics drop after this
       mailboxMaxCount: Number(cfg.mailboxMaxCount) || 1000,
       mailboxMaxBytes: parseSize(cfg.mailboxMaxSize) ?? (16 * 1024 * 1024),
     },

@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.19.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.20.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -113,6 +113,13 @@ if (PERSIST) {                                   // park/retain/persistent-claim
     persistence.registrations.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
     persistence.subscriptions.gcAll({ maxAgeMs: persistence.limits.hardExpiryMs }).catch(() => {})
     persistence.retained.gcAll({ ttlMs: persistence.limits.retainedTtlMs }).catch(() => {})
+    persistence.keptTopics.gcAll({ ttlMs: persistence.limits.ownerlessTtlMs }).then(dropped => {   // #26: abandoned ownerless topics + their parked mail
+      for (const d of (dropped || [])) {
+        log(`gc: dropped abandoned kept-alive topic ${d.project}/${d.topic} (never reclaimed)`)
+        const tident = topicMailIdent(d.realm, d.project, d.topic)
+        persistence.mailbox.drain(tident).then(ps => ps.forEach(p => persistence.mailbox.ack(tident, p.envId).catch(() => {}))).catch(() => {})
+      }
+    }).catch(() => {})
   }, Number(process.env.AI_BRIDGE_PERSIST_GC_MS) || 1800000).unref()
 }
 // the process's own classification (null ⇒ infrastructure, not a participant)
@@ -124,6 +131,10 @@ const HOSTNAME = SESSION.split('/')[0]
 // (stable across re-register, unique per logical peer); the process uses the hostname (stable per machine,
 // distinct across machines on a shared persistence dir). Without a name everything same-user collided.
 const pIdent = (identity, holderName) => identity ? { ...identity, name: holderName || '' } : null
+// #26: a synthetic identity that keys the durable mailbox for a kept-alive OWNERLESS topic, so directed sends
+// can park against the topic itself (no owner) and the next claimant drains them. The reserved user sentinel
+// keeps it distinct from any real peer identity.
+const topicMailIdent = (realm, project, topic) => ({ realm: realm || REALM, project: project || 'unclassified', user: '#ownerless', name: `topic:${topic}` })
 
 // ---------------------------------------------------------------- project consent + reply-cap (§4-§5)
 // Receiver-controlled inbound consent: a project may reach another only if same-project, the realm is
@@ -427,14 +438,15 @@ function allTopicEntries() {
 }
 // §12 durable claims: write/refresh a claim's durable record under its holder identity (volatile holder id
 // is NOT stored — it's re-bound on rehydrate). The refreshed_at acts as the lease the hard-expiry GC reads.
-function persistClaim(identity, project, topic, rec) {
-  if (!(PERSIST && identity)) return
-  persistence.claims.put(project, topic, identity, {
+function persistClaim(identity, project, topic, rec) {   // returns the write promise so a caller that needs durability before continuing can await it
+  if (!(PERSIST && identity)) return Promise.resolve()
+  return persistence.claims.put(project, topic, identity, {
     pattern: topic, role: 'owner', description: rec.description || '', exclusive: !!rec.exclusive, icon: rec.icon || null,
     holder_name: rec.holder_name || null, project, realm: rec.realm || REALM,
     user: identity.user || null, name: identity.name || null,         // §16: full identity so an OFFLINE owner can be parked to
     announce_offline: !!rec.announce_offline,                          // §16: owner opted in to telling senders it's offline
     grace_minutes: rec.grace_minutes ?? null, allow_other_user: rec.allow_other_user ?? null,   // §16: per-claim takeover policy
+    keep_alive: !!rec.keep_alive,                                      // #26: survives a restart so a later release still keeps the topic alive
     claimed_at: rec.claimed_at || new Date().toISOString(), persistent: true, refreshed_at: new Date().toISOString(),
   }).catch(() => {})
 }
@@ -509,6 +521,7 @@ function rehydrateClaim(rec, holderId, holderName, identity) {
   const k = `${holderId}|owner|${patternKey(topic)}`
   myTopics.set(k, { pattern: topic, role: 'owner', description: rec.description || '', exclusive: !!rec.exclusive,
     icon: rec.icon || null, holder: holderId, holder_name: holderName, project: proj,
+    announce_offline: !!rec.announce_offline, grace_minutes: rec.grace_minutes ?? null, allow_other_user: rec.allow_other_user ?? null, keep_alive: !!rec.keep_alive,   // #26: keep_alive must survive a restart so a later release still keeps the topic alive
     realm: rec.realm || identity.realm || REALM, claimed_at: rec.claimed_at || new Date().toISOString() })
   persistClaim(identity, proj, topic, myTopics.get(k))   // refresh the lease + re-anchor to the live holder
   return true
@@ -862,7 +875,23 @@ async function parkToOfflineOwners(from, project, path, verb, body, reply_to, su
       to: `topic:${path}`, to_name: path, to_kind: 'topic', subject: subject || null, pattern: 'send', topic: path,
       size: String(body || '').length, note: `parked for offline owner ${ident.name}`, envelope_id: env.id })
   }
-  if (!parked.length) return { ok: false, code: 'no-owner', topic: ref }
+  if (!parked.length) {
+    // #26: no live or dormant owner — but if the topic was kept ALIVE (ownerless) on release, park against the
+    // TOPIC itself (synthetic topic-mailbox); the next claimant drains it. Consent-checked against the topic's project.
+    let kept = null
+    try { kept = await persistence.keptTopics.get(project, path) } catch { }
+    if (kept && mayInitiate(ap, projKey(kept.project || project))) {
+      const env = makeEnvelope({ to: `topic:${path}`, verb, body, reply_to, from, subject, pattern: 'send', topic: path })
+      try { await persistence.mailbox.put(topicMailIdent(kept.realm, kept.project || project, path), env.id, env) }
+      catch { return { ok: false, code: 'no-owner', topic: ref } }
+      emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
+        to: `topic:${path}`, to_name: path, to_kind: 'topic', subject: subject || null, pattern: 'send', topic: path,
+        size: String(body || '').length, note: 'parked for ownerless kept-alive topic', envelope_id: env.id })
+      return { ok: true, parked: true, ownerless: true, topic: path, project: kept.project || project, envelope_id: env.id,
+        ...(kept.announce_offline ? { offline: true } : {}) }
+    }
+    return { ok: false, code: 'no-owner', topic: ref }
+  }
   if (announce.length) return { ok: true, parked: true, offline: true, topic: path, project, owners: parked.length, offline_owners: announce }
   return { ok: true, topic: path, project }   // owner chose silence: looks like a normal accept
 }
@@ -1368,12 +1397,14 @@ const TOOLS = [
       announce_offline: { type: 'boolean', description: 'when you are offline, tell senders their message was parked because you are away (default false = parked silently)' },
       grace_minutes: { type: 'number', description: 'how long after you go offline before a DIFFERENT user may take this topic over (default: realm config)' },
       allow_other_user: { type: 'boolean', description: 'may a different user take this responsibility over (after grace)? default: realm config' },
+      keep_alive: { type: 'boolean', description: 'mark this topic to SURVIVE HANDOFFS: if released it stays alive (ownerless) so directed sends PARK against it until reclaimed, instead of bouncing no-owner (default false). Abandoned ownerless topics expire after a safety TTL.' },
       force: { type: 'boolean', description: 'RESERVED: operator-authorised immediate takeover — returns unsupported for now' },
       as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
       secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['topic'] } },
-  { name: 'release_topic', description: 'Give up ownership of a topic you hold. Sub-peers pass as + secret.',
+  { name: 'release_topic', description: 'Give up ownership of a topic you hold. By default the topic is gone (directed sends then bounce no-owner). Pass keep_alive:true (or claim it keep_alive) to KEEP IT ALIVE ownerless during a handoff: directed sends PARK and are delivered to the next session that claims it. Sub-peers pass as + secret.',
     inputSchema: { type: 'object', properties: {
       topic: { type: 'string' },
+      keep_alive: { type: 'boolean', description: 'keep the topic alive (ownerless) after release so directed sends park until someone reclaims it (default = the claim\'s keep_alive setting; explicit value wins)' },
       as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
       secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['topic'] } },
   { name: 'subscribe', description: 'Subscribe to a topic pattern — open to everyone on any topic (exclusivity is about accountability, never watching). Wildcards: "+" one level, "#" subtree (e.g. "retail/#"). Publishes to matching topics land in your inbox. Sub-peers pass as + secret.',
@@ -1617,16 +1648,37 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const verdict = await resolveDormantConflict(topic, holderIdentity, holderProject, exclusive)
         if (verdict && !verdict.ok) return ok(verdict)
       }
+      // #26: if this topic was kept ALIVE (ownerless) it has a durable marker — inherit its metadata where the
+      // claimer left a field unset, preserve the keep_alive intent unless overridden, and drain its parked queue below.
+      let kept = null
+      if (persistent) { try { kept = await persistence.keptTopics.get(holderProject, topic) } catch { } }
+      const keep_alive = a.keep_alive != null ? !!a.keep_alive : !!kept   // claim-time property: this topic should survive handoffs
+      const eDesc = description || (kept && kept.description) || ''
+      const eIcon = icon || (kept && kept.icon) || null
+      const eAnnounce = a.announce_offline != null ? announce_offline : !!(kept && kept.announce_offline)
       const k = `${holder}|owner|${patternKey(topic)}`
       const reclaim = myTopics.has(k)
-      myTopics.set(k, { pattern: topic, role: 'owner', description, exclusive, icon, holder, holder_name: holderName, project: holderProject, realm: holderRealm,
-        announce_offline, grace_minutes, allow_other_user,
+      myTopics.set(k, { pattern: topic, role: 'owner', description: eDesc, exclusive, icon: eIcon, holder, holder_name: holderName, project: holderProject, realm: holderRealm,
+        announce_offline: eAnnounce, grace_minutes, allow_other_user, keep_alive,
         claimed_at: reclaim ? myTopics.get(k).claimed_at : new Date().toISOString() })
-      if (persistent) persistClaim(holderIdentity, holderProject, topic, myTopics.get(k))   // §12: durable responsibility
+      if (persistent) await persistClaim(holderIdentity, holderProject, topic, myTopics.get(k))   // §12: durable responsibility (awaited so a later release reliably sees + removes it)
+      // #26: a (re)claim of a kept-alive topic drains its ownerless parked queue to the new owner and clears the marker.
+      let drained = 0
+      if (kept) {
+        try {
+          const tident = topicMailIdent(kept.realm || holderRealm, holderProject, topic)
+          for (const p of await persistence.mailbox.drain(tident)) {
+            if (!p.record || !p.record.id) continue
+            await routeEnvelope({ ...p.record, to: holder }); await persistence.mailbox.ack(tident, p.record.id); drained++
+          }
+        } catch { }
+        persistence.keptTopics.remove(holderProject, topic).catch(() => {})
+        if (drained) emitTraceRaw({ dir: 'recv', verb: 'rehydrate', from: holder, from_name: holderName, to: SESSION, size: drained, note: `${drained} parked message(s) delivered on reclaim of kept-alive "${topic}"`, envelope_id: null })
+      }
       announceTopics()
       emitTraceRaw({ dir: 'con', verb: 'claim', from: holder, from_name: holderName, to: SESSION, size: 0,
-        note: `${reclaim ? 're-claimed' : 'claimed'} "${topic}"${exclusive ? ' (exclusive)' : ''}${persistent ? ' [durable]' : ''}${icon ? ' ' + icon : ''}`, envelope_id: null })
-      return ok({ ok: true, topic, holder, exclusive, icon, persistent: persistent || undefined, reclaimed: reclaim || undefined })
+        note: `${reclaim ? 're-claimed' : 'claimed'} "${topic}"${exclusive ? ' (exclusive)' : ''}${persistent ? ' [durable]' : ''}${keep_alive ? ' [keep-alive]' : ''}${eIcon ? ' ' + eIcon : ''}`, envelope_id: null })
+      return ok({ ok: true, topic, holder, exclusive, icon: eIcon, persistent: persistent || undefined, keep_alive: keep_alive || undefined, reclaimed: reclaim || undefined, ...(drained ? { drained } : {}) })
     }
     case 'release_topic': {
       const topic = String(a.topic || '').trim()
@@ -1638,12 +1690,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       const k = `${holder}|owner|${patternKey(topic)}`
       if (!myTopics.has(k)) return ok({ ok: false, code: 'not-held', topic, holder })
+      const rec = myTopics.get(k)
+      // #26: keep the topic ALIVE (ownerless) after release if the caller asks OR the claim was marked keep_alive —
+      // so directed sends PARK against it until reclaimed, instead of bouncing no-owner during a handoff. Only when
+      // no OTHER live owner remains for it in this project (a shared co-owner means it's still owned).
+      const keepAlive = (a.keep_alive != null ? !!a.keep_alive : !!rec.keep_alive)
+        && !allTopicEntries().some(e => e.role === 'owner' && e.holder !== holder && projKey(e.project) === projKey(holderProject) && patternKey(e.pattern) === patternKey(topic))
       myTopics.delete(k)
-      if (PERSIST && holderIdentity) persistence.claims.remove(holderProject, topic, holderIdentity).catch(() => {})   // §12: drop durable responsibility
+      // AWAIT both the durable claim removal AND the marker write (not fire-and-forget): a handoff often sends to
+      // the topic immediately after release, and that send must see NO dormant claim (else it parks to the
+      // just-released owner) and DOES see the kept-alive marker (so it parks ownerless rather than bouncing no-owner).
+      if (PERSIST && holderIdentity) { try { await persistence.claims.remove(holderProject, topic, holderIdentity) } catch { } }   // §12: drop durable responsibility
+      if (PERSIST && keepAlive) { try { await persistence.keptTopics.put(holderProject, topic, { realm: rec.realm || REALM, description: rec.description, icon: rec.icon, exclusive: rec.exclusive, announce_offline: rec.announce_offline }) } catch { } }
       announceTopics()
       emitTraceRaw({ dir: 'con', verb: 'release', from: holder, from_name: holderName, to: SESSION, size: 0,
-        note: `released "${topic}"`, envelope_id: null })
-      return ok({ ok: true, topic, holder })
+        note: `released "${topic}"${keepAlive ? ' [kept alive — sends park until reclaimed]' : ''}`, envelope_id: null })
+      return ok({ ok: true, topic, holder, ...(keepAlive ? { kept_alive: true } : {}) })
     }
     case 'subscribe': {
       const pattern = String(a.pattern || '').trim()

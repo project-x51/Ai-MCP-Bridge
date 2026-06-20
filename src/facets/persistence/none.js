@@ -12,7 +12,8 @@ export function create() {
     subscriptions: { async put() {}, async byHolder() { return [] }, async remove() {}, async gcAll() { return 0 } },
     vault: { async put() {}, async get() { return null }, async remove() {} },
     retained: { async put() {}, async read() { return null }, async allForProject() { return [] }, async gcAll() { return 0 } },
+    keptTopics: { async put() {}, async get() { return null }, async remove() {}, async all() { return [] }, async gcAll() { return [] } },
     async snapshot() { return { enabled: false } },
-    limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
+    limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, ownerlessTtlMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
   }
 }

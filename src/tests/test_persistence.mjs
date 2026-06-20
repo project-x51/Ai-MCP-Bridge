@@ -151,6 +151,15 @@ await fH.retained.put('AIMB', 'stale-news', A, { ts: '2000-01-01T00:00:00.000Z',
 const dropRet = await fH.retained.gcAll({ ttlMs: 86400000 })
 check('retained.gcAll drops values older than ttl', dropRet >= 1 && !(await fH.retained.allForProject('AIMB')).some(x => x.topic === 'stale-news'), 'dropped=' + dropRet)
 
+// ---- kept-alive (ownerless) topics (#26): put/get (case-insensitive) + safety-TTL GC ----
+await fH.keptTopics.put('CamelCo', 'work/x', { realm: 'default', description: 'd', icon: '🌉', exclusive: true, ownerless_since: '2020-01-01T00:00:00.000Z' })
+check('keptTopics.get returns the marker', (await fH.keptTopics.get('CamelCo', 'work/x'))?.topic === 'work/x')
+check('keptTopics.get is case-insensitive', (await fH.keptTopics.get('camelco', 'WORK/X'))?.icon === '🌉')
+await fH.keptTopics.put('CamelCo', 'fresh', { realm: 'default', ownerless_since: new Date('2099-01-01').toISOString() })
+const kdrop = await fH.keptTopics.gcAll({ ttlMs: 1000 })
+check('keptTopics.gcAll drops markers past the safety TTL (returns realm/project/topic)', kdrop.some(d => d.topic === 'work/x' && d.project === 'CamelCo') && (await fH.keptTopics.get('CamelCo', 'work/x')) === null)
+check('keptTopics.gcAll keeps a fresh marker', (await fH.keptTopics.get('CamelCo', 'fresh')) !== null)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 try { fs.rmSync(tmp, { recursive: true, force: true }) } catch {}
 process.exit(fail ? 1 : 0)
