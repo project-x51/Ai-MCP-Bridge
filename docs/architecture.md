@@ -711,6 +711,10 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.18.1):** *mailbox filename fix* — the envelope id already carries the `env_` prefix
+  (`envelopeId()` → `env_<hash>`), but the mailbox `put`/`ack` template prepended another, producing
+  `env_env_<hash>.msg` on disk. Now the file is just `<envId>.msg`. `ack` tries both the new and the legacy
+  double-prefixed name, so files written before the fix still drain and get cleaned (no migration needed).
 - **Built (v1.18):** *parked mail surfaces on poll + reattach (§23)* — fixed a real gap: a message written to
   a peer's **durable mailbox while that peer is already LIVE** (parked out-of-band by another federated
   process, or while the peer was momentarily treated as offline) only surfaced on a **fresh `register_self`**;

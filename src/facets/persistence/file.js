@@ -60,12 +60,17 @@ export function create(ctx) {
   const readJson = async f => { try { return JSON.parse(await fsp.readFile(f, 'utf8')) } catch { return null } }
 
   // ---- mailboxes: one IMMUTABLE file per parked message, content-addressed by envelope id ----
+  // the envelope id ALREADY carries the "env_" prefix (envelopeId() returns "env_<hash>"), so the on-disk
+  // file is just `<envId>.msg` — NOT `env_<envId>.msg`, which double-prefixed to "env_env_…". `msgFile`
+  // also accepts the legacy double-prefixed name so ack still cleans files written before this fix.
+  const msgFile = envId => `${slug(envId, 80)}.msg`
+  const legacyMsgFile = envId => `env_${slug(envId, 80)}.msg`
   const mailbox = {
     async put(identity, envId, record) {
       const { primary } = identityKeys(identity, readable)
       // self-describing: store the RECIPIENT identity in the body (not only the hashed dir key) so the parked
       // message can be attributed/migrated/audited without reversing the key (the lesson from the claim records).
-      await writeAtomic(dir('mailboxes', primary, `env_${slug(envId, 80)}.msg`),
+      await writeAtomic(dir('mailboxes', primary, msgFile(envId)),
         JSON.stringify({ envId, ts: record.ts || new Date().toISOString(),
           for: { realm: identity.realm, project: identity.project, user: identity.user, name: identity.name }, record }))
     },
@@ -86,9 +91,9 @@ export function create(ctx) {
       out.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
       return out
     },
-    async ack(identity, envId) {   // delete after delivery (try both forms)
+    async ack(identity, envId) {   // delete after delivery (try both key forms + new/legacy filename)
       const { both } = identityKeys(identity, readable)
-      for (const key of new Set(both)) { try { await fsp.unlink(dir('mailboxes', key, `env_${slug(envId, 80)}.msg`)) } catch {} }
+      for (const key of new Set(both)) for (const fn of [msgFile(envId), legacyMsgFile(envId)]) { try { await fsp.unlink(dir('mailboxes', key, fn)) } catch {} }
     },
     // TTL + per-mailbox caps; returns the dropped entries so the caller can LOG them (no silent truncation, §12)
     async gc(identity, { now = Date.now(), ttlMs = 0, maxCount = 0, maxBytes = 0 } = {}) {

@@ -126,6 +126,20 @@ const sd = (await fH.mailbox.drain({ ...ID, name: 'SelfDesc' }))[0]
 const sdRaw = JSON.parse(fs.readFileSync(sd._file, 'utf8'))
 check('parked .msg carries the recipient identity (for)', !!sdRaw.for && sdRaw.for.user === ID.user && sdRaw.for.name === 'SelfDesc', JSON.stringify(sdRaw.for))
 
+// ---- mailbox filename: envId already carries the 'env_' prefix, so the file is <envId>.msg, NOT env_env_…
+await fH.mailbox.put({ ...ID, name: 'NameFix' }, 'env_abc123def456', { ts: '2026-06-18T00:00:01.000Z', body: 'y' })
+const nf = (await fH.mailbox.drain({ ...ID, name: 'NameFix' }))[0]
+check('parked .msg filename is not double-prefixed (no env_env_)', path.basename(nf._file) === 'env_abc123def456.msg', path.basename(nf._file))
+await fH.mailbox.ack({ ...ID, name: 'NameFix' }, 'env_abc123def456')
+check('ack removes the parked file', (await fH.mailbox.drain({ ...ID, name: 'NameFix' })).length === 0)
+// legacy back-compat: a file written under the old env_env_ name still drains AND gets cleaned by ack
+const legId = { ...ID, name: 'Legacy' }, legDir = path.join(tmp, 'mailboxes', identityKeys(legId, false).primary)
+fs.mkdirSync(legDir, { recursive: true })
+fs.writeFileSync(path.join(legDir, 'env_env_legacy1.msg'), JSON.stringify({ envId: 'env_legacy1', ts: '2026-06-18T00:00:02.000Z', for: legId, record: { id: 'env_legacy1', body: 'z' } }))
+check('legacy double-prefixed .msg still drains', (await fH.mailbox.drain(legId)).some(m => m.envId === 'env_legacy1'))
+await fH.mailbox.ack(legId, 'env_legacy1')
+check('ack cleans up the legacy double-prefixed file', !fs.existsSync(path.join(legDir, 'env_env_legacy1.msg')))
+
 // ---- retained: newest publisher value wins ----
 await fH.retained.put('AIMB', 'news', A, { ts: '2026-06-17T00:00:00.000Z', body: 'old' })
 await fH.retained.put('AIMB', 'news', B, { ts: '2026-06-17T00:00:05.000Z', body: 'new' })
