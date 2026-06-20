@@ -13,9 +13,13 @@
     "ws": "^8.0.0"
   },
   "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "npm run typecheck",
     "test": "node tests/test_mesh.mjs && node tests/test_subpeers.mjs && node tests/test_topics.mjs && node tests/test_identity.mjs && node tests/test_consent.mjs && node tests/test_dashboard.mjs && node tests/test_page_e2e.mjs && node tests/test_federation.mjs && node tests/test_dashboard_multihost.mjs && node tests/test_dashboard_persistence.mjs && node tests/test_persistence.mjs && node tests/test_persist_live.mjs && node tests/test_grants_live.mjs && node tests/test_offline_park_live.mjs && node tests/test_parked_live.mjs && node tests/test_keepalive_live.mjs && node tests/test_behaviors_live.mjs && node tests/test_retain_live.mjs && node tests/test_vault_live.mjs"
   },
   "devDependencies": {
-    "jsdom": "^24.1.3"
+    "@types/node": "^26.0.0",
+    "jsdom": "^24.1.3",
+    "typescript": "^6.0.3"
   }
 }

@@ -3,6 +3,7 @@
 // later with zero wire churn (architecture.md §8).
 export const meta = { facet: 'identity', name: 'label' }
 export function create(ctx) {
+  /** @param {import('../../types').IdentityInput} [id] */
   function classify({ project, user, realm } = {}) {
     const p = String(project || '').trim() || 'unclassified'
     const u = String(user || '').trim() || 'unknown'

@@ -23,6 +23,7 @@ export function create(ctx) {
   }
   return {
     meta,
+    /** @param {import('../../types').AuthorizerConfirmOpts} [opts] */
     async confirm({ subject, details } = {}) {
       if (process.platform !== 'win32') return { approved: false, reason: 'hello-unavailable-platform', by: 'hello' }
       if (!ensureExe()) return { approved: false, reason: 'hello-helper-missing', by: 'hello' }

@@ -80,6 +80,10 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   no hardcoded paths.
   The suites live in **`tests/`** and spawn `../bridge.mjs` with absolute paths, so `npm test` (run
   from `src/`) or `node tests/test_*.mjs` works from anywhere.
+- **Type-checking (zero build).** The bridge ships as plain `node bridge.mjs` — no compile step. Types are
+  applied via **JSDoc + `checkJs`** (`tsconfig.json` + shared shapes in `types.d.ts`), so `npm run typecheck`
+  (`tsc --noEmit`) catches missing/renamed fields without emitting anything or adding a runtime dependency.
+  `npm test` runs it first (a `pretest` gate). `typescript`/`@types/node` are devDependencies only.
 - `test_page.html` — generic demo leaf + fixture for the page E2E (open in a browser with `?token=`).
 - `claude_code_mcp.example.json` — MCP server entry.
 - `../tray/windows/` — the Windows system-tray component (Open Dashboard / Quit; supervises the

@@ -79,7 +79,7 @@ const log = (...a) => console.error(`[aimb ${NAME}]`, ...a)
 // only via the signal handlers at the bottom.) This also removed a class of test flakiness where a racy
 // inter-hub frame crashed a bridge mid-suite.
 process.on('uncaughtException', e => { try { log('uncaughtException (continuing):', (e && e.stack) || e) } catch {} })
-process.on('unhandledRejection', e => { try { log('unhandledRejection (continuing):', (e && e.message) || e) } catch {} })
+process.on('unhandledRejection', (/** @type {any} */ e) => { try { log('unhandledRejection (continuing):', (e && e.message) || e) } catch {} })
 const sha = s => crypto.createHash('sha256').update(String(s)).digest('hex')
 
 // ---------------------------------------------------------------- realm profile (pluggable facets)
@@ -852,8 +852,9 @@ function senderIdent(f) {
   if (String(f.session).startsWith('page:')) { const p = pages.get(String(f.session).slice(5)); if (p && p.identity) return { project: p.identity.project, user: p.identity.user, realm: p.identity.realm } }
   return { realm: REALM }
 }
+/** @param {import('./types').EnvelopeInput} input @returns {import('./types').Envelope} */
 function makeEnvelope({ to, verb, body, reply_to, from, subject, pattern, topic }) {
-  const base = from || { session: SESSION, name: NAME, kind: 'session' }
+  const base = from || /** @type {import('./types').EnvelopeFrom} */ ({ session: SESSION, name: NAME, kind: 'session' })
   const f = base.project ? base : { ...base, ...senderIdent(base) }
   const hops = [...(from?.hops || [])]
   // sender joins the chain unless delivering within its own process (itself, or its own sub-peer —
@@ -1291,7 +1292,7 @@ function becomeGateway(server) {
             return
           }
           if (String(m.to || '').startsWith('topic:')) {                 // page -> topic owners (T3)
-            const r = await routeToTopicOwners(from, String(m.to).slice(6).trim(), m.verb, m.body, null, String(m.subject).trim(), askerProjectOf(from))
+            const r = /** @type {any} */ (await routeToTopicOwners(from, String(m.to).slice(6).trim(), m.verb, m.body, null, String(m.subject).trim(), askerProjectOf(from)))
             ws.send(JSON.stringify({ type: 'sent', ref: m.ref || null, ok: !!r.ok, code: r.code || null,
               envelope_id: r.envelope_id || null, fanout: r.fanout || null }))
             return
