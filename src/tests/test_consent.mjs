@@ -111,6 +111,27 @@ const xOk = await call(S, 'send_to_peer', { target: 'topic:@beta/svc/api', subje
 check('cross-project @beta/topic allowed once granted', xOk.ok === true && xOk.fanout.some(f => f.ok), JSON.stringify(xOk))
 check('beta owner received the cross-project topic msg', (await drain(S, 'b', 'sb')).some(m => m.body === 'cross granted'))
 
+// 7b. first-class cross-project BARE topic send (#27/#28): a bare ref owned ONLY in another project resolves
+// cross-project — auto-routed WITH a grant, a DISTINCT code without (not the overloaded bare 'no-owner').
+await call(S, 'register_self', { name: 'd', secret: 'sd', project: 'delta', user: 'dan' })
+await call(S, 'claim_topic', { topic: 'delta/work', exclusive: true, as: 'd', secret: 'sd' })
+await sleep(120)
+const noGrant = await call(S, 'send_to_peer', { target: 'topic:delta/work', subject: 'x', message: 'xproj nogrant', as: 'a', secret: 'sa' })
+check('bare cross-project topic w/o grant -> cross-project-no-grant (not no-owner)', noGrant.ok === false && noGrant.code === 'cross-project-no-grant' && (noGrant.owner_projects || []).includes('delta'), JSON.stringify(noGrant))
+const unknown = await call(S, 'send_to_peer', { target: 'topic:nope/nothere', subject: 'x', message: 'void', as: 'a', secret: 'sa' })
+check('genuinely ownerless topic still -> no-owner', unknown.ok === false && unknown.code === 'no-owner', JSON.stringify(unknown))
+await call(S, 'allow_project', { project: 'alpha', as: 'd', secret: 'sd' })   // delta opens to alpha
+await sleep(150)
+const xauto = await call(S, 'send_to_peer', { target: 'topic:delta/work', subject: 'x', message: 'xproj auto', as: 'a', secret: 'sa' })
+check('bare cross-project topic auto-routes once granted (first-class)', xauto.ok === true && xauto.cross_project === 'delta' && xauto.fanout.some(f => f.ok), JSON.stringify(xauto))
+check('delta owner received the auto-routed cross-project send', (await drain(S, 'd', 'sd')).some(m => m.body === 'xproj auto'))
+// ambiguous: a bare topic owned in TWO projects the sender can reach -> distinct ambiguous code (alpha reaches beta + gamma)
+await call(S, 'claim_topic', { topic: 'shared/x', exclusive: true, as: 'b', secret: 'sb' })
+await call(S, 'claim_topic', { topic: 'shared/x', exclusive: true, as: 'g', secret: 'sg' })
+await sleep(120)
+const amb = await call(S, 'send_to_peer', { target: 'topic:shared/x', subject: 'x', message: 'which?', as: 'a', secret: 'sa' })
+check('bare topic owned in 2 reachable projects -> cross-project-ambiguous', amb.ok === false && amb.code === 'cross-project-ambiguous' && (amb.owner_projects || []).length === 2, JSON.stringify(amb))
+
 // 8. visibility: a beta page sees only beta-reachable sub-peers by default; seeAll sees everything
 const vF = subNames(await pageRoster(7901, 'beta', false))
 check('filtered page view excludes unreachable projects', vF.includes('b') && !vF.includes('a') && !vF.includes('g'), JSON.stringify(vF))

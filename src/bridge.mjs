@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.18.1'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.19.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -888,9 +888,32 @@ async function parkToOfflineName(from, name, verb, body, reply_to, subject, aske
   return { ok: true, parked: true, offline: true, to: r.name, project: r.project, envelope_id: env.id }
 }
 async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, askerProject) {
+  const explicit = String(ref || '').trim().startsWith('@')   // "@project/path" names a project — respect it, no cross-project fallback
   const { project, path } = parseTopicRef(ref, askerProject)
   if (isWildcard(path)) return { ok: false, code: 'wildcard-target', topic: ref }
-  const owners = ownersOf(path, project)
+  let owners = ownersOf(path, project), routedProject = project
+  // First-class cross-project topic send (#27/#28): a BARE ref with no owner in the SENDER'S OWN project
+  // resolves to a live owner in another project — consent-gated. Auto-route when exactly ONE grant-reachable
+  // project owns it; otherwise a DISTINCT code, so "no-owner" stops doubling as "owned in another project".
+  if (!owners.length && !explicit) {
+    const ap = projKey(askerProject || 'unclassified'), foreign = new Map()   // projKey -> { name, owners[] }
+    for (const e of allTopicEntries()) {
+      if (e.role !== 'owner' || !topicMatch(e.pattern, path)) continue
+      const pk = projKey(e.project); if (pk === projKey(project)) continue
+      if (!foreign.has(pk)) foreign.set(pk, { name: e.project, owners: [] })
+      foreign.get(pk).owners.push(e)
+    }
+    if (foreign.size) {
+      const reachable = [...foreign].filter(([pk]) => mayInitiate(ap, pk))
+      if (!reachable.length) return { ok: false, code: 'cross-project-no-grant', topic: path,
+        owner_projects: [...foreign.values()].map(f => f.name),
+        hint: `"${path}" is owned in another project — request_project_access first, or target it explicitly as @<project>/${path}` }
+      if (reachable.length > 1) return { ok: false, code: 'cross-project-ambiguous', topic: path,
+        owner_projects: reachable.map(([, f]) => f.name),
+        hint: `"${path}" is owned in several projects you can reach — target one explicitly as @<project>/${path}` }
+      owners = reachable[0][1].owners; routedProject = reachable[0][1].name
+    }
+  }
   if (!owners.length) return parkToOfflineOwners(from, project, path, verb, body, reply_to, subject, askerProject, ref)
   const fanout = []
   for (const h of owners) {
@@ -898,7 +921,8 @@ async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, aske
     const r = await routeEnvelope(env)
     fanout.push({ to: h.holder, holder_name: h.holder_name || null, ok: !!r.ok, code: r.code || null, envelope_id: env.id })
   }
-  return { ok: fanout.some(f => f.ok), topic: path, project, fanout,
+  return { ok: fanout.some(f => f.ok), topic: path, project: routedProject,
+    ...(routedProject !== project ? { cross_project: routedProject } : {}), fanout,
     ...(fanout.length === 1 ? { envelope_id: fanout[0].envelope_id, to: fanout[0].to } : {}) }
 }
 // publish (T3/T5): event to every subscriber in the target project (wildcards + owners included).
@@ -1373,7 +1397,7 @@ const TOOLS = [
       secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['topic', 'subject', 'message'] } },
   { name: 'send_to_peer', description: 'Send a directed message: target = id from list_sessions, a unique friendly name, or "topic:<topic>" to message the topic\'s OWNER(S) only (the prefix is required; subscribers do not see sends). With persistence on, a send to a name (or topic owner) that is OFFLINE but has a durable registration/claim PARKS and is delivered when it returns; a name that was never registered still errors unknown-target. subject is REQUIRED: short public one-line description (NOT encrypted — no private info; the body is encrypted). Registered sub-peers must pass as + secret.',
     inputSchema: { type: 'object', properties: {
-      target: { type: 'string', description: 'session/sub-peer id, unique friendly name, or topic:<topic>' },
+      target: { type: 'string', description: 'session/sub-peer id, unique friendly name, or topic:<topic>. A bare topic resolves to an owner in YOUR project; if none, it resolves cross-project to a grant-reachable owner in another project (auto-routed when exactly one — else code cross-project-no-grant / cross-project-ambiguous). Use topic:@<project>/<topic> to target a specific project explicitly.' },
       subject: { type: 'string', description: 'short PUBLIC one-line description of the action' },
       message: { type: 'string', description: 'the message body (encrypted in transit)' },
       verb: { type: 'string', description: 'advisory verb, default "message"' },

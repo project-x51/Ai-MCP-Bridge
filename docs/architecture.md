@@ -711,6 +711,17 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.19):** *first-class cross-project topic send + clearer codes (#27/#28)* — a **bare** `topic:<t>`
+  send still resolves in the sender's own project, but when there is **no owner there** it now resolves
+  **realm-wide**: if exactly one **grant-reachable** other project owns the topic, the send **auto-routes**
+  there (consent-checked at delivery via `mayInitiate`) and the result carries `cross_project:<project>` —
+  so reaching a foreign-project owner no longer requires the throwaway-peer workaround (register in the
+  target project, send, deregister). When the owner's project is **not** grant-reachable, the code is now
+  **`cross-project-no-grant`** (with `owner_projects` + a hint to `request_project_access` or use
+  `@<project>/`); when several reachable projects own it, **`cross-project-ambiguous`**. So `no-owner` stops
+  doubling as "owned in another project" and only means *genuinely ownerless*. Explicit
+  `topic:@<project>/<t>` is unchanged (respected as-is, no fallback). Verified by `test_consent` §7b
+  (auto-route with grant, distinct codes without, no-owner preserved). Suite 364 across 17.
 - **Built (v1.18.1):** *mailbox filename fix* — the envelope id already carries the `env_` prefix
   (`envelopeId()` → `env_<hash>`), but the mailbox `put`/`ack` template prepended another, producing
   `env_env_<hash>.msg` on disk. Now the file is just `<envId>.msg`. `ack` tries both the new and the legacy
