@@ -711,6 +711,18 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.21):** *per-session behaviour reminders (#29)* — a session registers short 'how to behave when a
+  message arrives' prompts scoped to a **topic** it owns / a **host** / a **project** / a **subscription**
+  pattern / **all**, via `set_behavior {scope, match, behavior}` (+ `list_behaviors` / `clear_behavior`). The
+  bridge attaches the matching reminder(s) to each delivered message — in the push channel meta AND in inbox
+  items — as `reminders: [{scope, match, behavior}]`. A message can satisfy several scopes, so it returns a
+  LIST, ordered **most-specific first** (topic > subscription > project > host > all); `all` skips self/system
+  messages. Caps: ≤280 chars, ≤64 per session. Durable per-identity (new `behaviors` store + `none` stub),
+  rehydrated on `register_self` (the resync now also returns `behaviors`). **Topic-scoped reminders ride along
+  a kept-alive handoff (#26):** on a `keep_alive` release the topic's reminders are stashed in the kept marker
+  and the next claimant inherits them. Dashboard shows a 🧭 *Behaviours* store. Verified by
+  `test_behaviors_live` (14 checks: all five scopes, ordering, validation, resync, cross-handoff inheritance).
+  Suite 392 across 19.
 - **Built (v1.20):** *keep-alive topics — park directed sends through an ownerless handoff (#26)* — by default a
   released topic is gone and directed sends bounce `no-owner`. Now **`release_topic {keep_alive:true}`** (or a
   topic **claimed `keep_alive`**) keeps it alive as a durable **ownerless** marker: directed sends PARK against

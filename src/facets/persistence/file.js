@@ -334,6 +334,7 @@ export function create(ctx) {
         JSON.stringify({ realm: record.realm || 'default', project, topic,
           description: record.description || '', icon: record.icon || null, exclusive: !!record.exclusive,
           announce_offline: !!record.announce_offline, keep_alive: true,
+          behaviors: Array.isArray(record.behaviors) ? record.behaviors : [],   // #29: topic-scoped reminders ride along to the next owner
           ownerless_since: record.ownerless_since || new Date().toISOString() }))
     },
     async get(project, topic) { return readJson(dir('kept', lslug(project), `${lslug(topic, 80)}.kept`)) },
@@ -356,6 +357,40 @@ export function create(ctx) {
         if (j && t && now - t > ttlMs) { try { await fsp.unlink(file) } catch {} dropped.push({ realm: j.realm, project: j.project, topic: j.topic }) }
       }
       return dropped
+    },
+  }
+
+  // ---- behaviors (#29): a session's own 'how to behave when a message arrives' reminders, scoped to a topic it
+  // owns / a host / a project / a subscription pattern / all. Durable per-identity (rehydrated on resync), one
+  // file per (scope, match). Self-describing. The bridge returns the matching ones alongside each delivered message. ----
+  const behaviors = {
+    async put(identity, scope, match, behavior) {
+      await writeAtomic(dir('behaviors', identityKeys(identity, readable).primary, `${slug(scope, 16)}__${lslug(match || '', 80)}.beh`),
+        JSON.stringify({ realm: identity.realm, project: identity.project, user: identity.user, name: identity.name,
+          scope, match: match || null, behavior: String(behavior || ''), set_at: new Date().toISOString() }))
+    },
+    async byHolder(identity) {
+      const { both } = identityKeys(identity, readable), out = []
+      for (const key of new Set(both)) {
+        const bdir = dir('behaviors', key)
+        for (const f of await readDirSafe(bdir)) { if (!f.endsWith('.beh')) continue; const j = await readJson(path.join(bdir, f)); if (j) out.push(j) }
+      }
+      return out
+    },
+    async remove(identity, scope, match) {
+      const { both } = identityKeys(identity, readable)
+      for (const key of new Set(both)) { try { await fsp.unlink(dir('behaviors', key, `${slug(scope, 16)}__${lslug(match || '', 80)}.beh`)) } catch {} }
+    },
+    async clear(identity) {   // drop ALL of an identity's behaviors
+      const { both } = identityKeys(identity, readable)
+      for (const key of new Set(both)) { const bdir = dir('behaviors', key); for (const f of await readDirSafe(bdir)) { if (f.endsWith('.beh')) try { await fsp.unlink(path.join(bdir, f)) } catch {} } }
+    },
+    async all() {
+      const out = [], base = dir('behaviors')
+      for (const key of await readDirSafe(base)) for (const f of await readDirSafe(path.join(base, key))) {
+        if (!f.endsWith('.beh')) continue; const j = await readJson(path.join(base, key, f)); if (j) out.push(j)
+      }
+      return out
     },
   }
 
@@ -387,16 +422,17 @@ export function create(ctx) {
     const retained = await readAll('retained', '.val', j => ({ project: j.project, topic: j.topic, ts: j.ts }))
     const vaults = await readAll('vault', '.vault', j => ({ name: j.name, project: j.project, user: j.user, sealed_at: j.sealed_at }))   // identities only — never the sealed value
     const kept = await readAll('kept', '.kept', j => ({ project: j.project, topic: j.topic, icon: j.icon, exclusive: !!j.exclusive, ownerless_since: j.ownerless_since }))
+    const behaviors = await readAll('behaviors', '.beh', j => ({ name: j.name, project: j.project, user: j.user, scope: j.scope, match: j.match, behavior: j.behavior }))
     return {
       enabled: true, readable, dir: root,
-      counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.length, registrations: registrations.length, subscriptions: subscriptions.length, vault: vaults.length, retained: retained.length, kept: kept.length },
-      vault: vaults, kept,
+      counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.length, registrations: registrations.length, subscriptions: subscriptions.length, vault: vaults.length, retained: retained.length, kept: kept.length, behaviors: behaviors.length },
+      vault: vaults, kept, behaviors,
       mailboxes: Object.values(mboxes).sort((a, b) => b.count - a.count), claims, grants, registrations, subscriptions, retained,
     }
   }
 
   return {
-    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, snapshot,
+    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, behaviors, snapshot,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,

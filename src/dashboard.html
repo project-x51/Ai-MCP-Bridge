@@ -257,7 +257,9 @@
     {key:'retained',icon:'📌',name:'Retained — last value per topic',badge:'b-pub',
       cols:[['topic',function(r){return esc(r.topic)}],['project',function(r){return esc(r.project)}],['updated',function(r){return tsf(r.ts)}]]},
     {key:'kept',icon:'🪧',name:'Kept-alive — ownerless topics (sends park until reclaimed)',badge:'b-resp',
-      cols:[['topic',function(r){return (r.icon?esc(r.icon)+' ':'')+(r.exclusive?'<b>'+esc(r.topic)+'</b>':esc(r.topic))}],['project',function(r){return esc(r.project)}],['ownerless since',function(r){return tsf(r.ownerless_since)}]]}
+      cols:[['topic',function(r){return (r.icon?esc(r.icon)+' ':'')+(r.exclusive?'<b>'+esc(r.topic)+'</b>':esc(r.topic))}],['project',function(r){return esc(r.project)}],['ownerless since',function(r){return tsf(r.ownerless_since)}]]},
+    {key:'behaviors',icon:'🧭',name:'Behaviours — per-session reminders on delivery',badge:'b-info',
+      cols:[['who',function(r){return '<b>'+esc(r.name)+'</b>'}],['scope',function(r){return esc(r.scope)+(r.match?' · '+esc(r.match):'')}],['reminder',function(r){return esc(r.behavior)}]]}
   ];
   function setPersistence(snap){
     if(!snap || !snap.enabled) return;   // "off" is shown via the profile on welcome
@@ -267,7 +269,7 @@
     document.getElementById('perssum').innerHTML=
       chip('📨',c.parked,'parked')+chip('🗂',c.mailboxes,c.mailboxes===1?'mailbox':'mailboxes')+
       chip('🏷',c.claims,c.claims===1?'claim':'claims')+chip('🔑',c.grants,c.grants===1?'grant':'grants')+
-      chip('📇',c.registrations,'registrations')+chip('👂',c.subscriptions,'subscriptions')+chip('🔐',c.vault,'vaulted')+chip('📌',c.retained,'retained')+(c.kept?chip('🪧',c.kept,'kept-alive'):'');
+      chip('📇',c.registrations,'registrations')+chip('👂',c.subscriptions,'subscriptions')+chip('🔐',c.vault,'vaulted')+chip('📌',c.retained,'retained')+(c.kept?chip('🪧',c.kept,'kept-alive'):'')+(c.behaviors?chip('🧭',c.behaviors,'behaviours'):'');
     var tb=document.getElementById('persistence'); tb.innerHTML='';
     STORES.forEach(function(s){ var rows=snap[s.key]||[];
       expandable(tb,[s.icon+' '+esc(s.name),'<span class="bub '+s.badge+'">'+rows.length+'</span>'],

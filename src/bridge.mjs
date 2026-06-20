@@ -61,7 +61,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.20.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.21.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -328,6 +328,38 @@ const SUBQ_CAP = 300
 // sub-peers; vanish with their holder. Owners are auto-subscribed (T2).
 const myTopics = new Map()        // `${holder}|${role}|${patternKey}` -> {pattern, role, description, exclusive, icon, holder, holder_name, claimed_at}
 const patternKey = t => splitTopic(t).join('/')
+// #29: per-session BEHAVIOUR reminders — short 'how to act when a message arrives' prompts a session registers
+// against a scope (a topic it owns / a host / a project / a subscription pattern / all). Held in RAM per holder
+// id, durable per identity, rehydrated on resync; the matching ones ride along with each delivered message.
+const behaviors = new Map()       // holderId -> [{ scope, match, behavior, set_at }]
+const BEHAVIOR_SCOPES = ['topic', 'host', 'project', 'subscription', 'all']
+const BEHAVIOR_ORDER = { topic: 0, subscription: 1, project: 2, host: 3, all: 4 }   // most-specific first in the returned list
+const BEHAVIOR_MAX_LEN = 280, BEHAVIOR_MAX_COUNT = 64
+const behKey = (scope, match) => `${scope}|${scope === 'topic' || scope === 'subscription' ? patternKey(match || '') : scope === 'all' ? '' : lc(match || '')}`
+// reminders whose scope matches THIS envelope being delivered to holder `id` — returned with the message so the
+// session is reminded how to behave. Skips self-sent + system messages for the catch-all 'all' scope.
+function remindersFor(id, env, matchedPattern) {
+  const list = behaviors.get(id); if (!list || !list.length) return []
+  const fromHost = String(env.from?.session || '').split('/')[0], fromProj = env.from?.project, topic = env.topic
+  const out = []
+  for (const b of list) {
+    let hit = false
+    if (b.scope === 'all') hit = !env.system && env.from?.session !== id
+    else if (b.scope === 'host') hit = !!fromHost && lc(b.match) === lc(fromHost)
+    else if (b.scope === 'project') hit = !!fromProj && projKey(b.match) === projKey(fromProj)
+    else if (b.scope === 'topic') hit = !!topic && patternKey(b.match) === patternKey(topic)
+    else if (b.scope === 'subscription') hit = !!(topic && (patternKey(b.match) === patternKey(topic) || (matchedPattern && patternKey(b.match) === patternKey(matchedPattern)) || topicMatch(b.match, topic)))
+    if (hit) out.push({ scope: b.scope, match: b.match, behavior: b.behavior })
+  }
+  out.sort((a, b2) => (BEHAVIOR_ORDER[a.scope] ?? 9) - (BEHAVIOR_ORDER[b2.scope] ?? 9))
+  return out
+}
+// rehydrate an identity's durable behaviors into RAM under its (new) holder id, on register/reattach (§20 resync)
+async function loadBehaviors(holderId, pid) {
+  if (!PERSIST || !pid) return
+  try { const recs = await persistence.behaviors.byHolder(pid); if (recs.length) behaviors.set(holderId, recs.map(r => ({ scope: r.scope, match: r.match, behavior: r.behavior, set_at: r.set_at }))) } catch { }
+}
+const behaviorList = id => (behaviors.get(id) || []).map(b => ({ scope: b.scope, match: b.match, behavior: b.behavior, set_at: b.set_at }))
 
 function envelopeId(env) {                 // computed over PLAINTEXT body, before encryption (T8/T9)
   return 'env_' + crypto.createHash('sha1')
@@ -573,13 +605,14 @@ function deliverSub(id, env) {
   if (q.items.length > SUBQ_CAP) { q.items.shift(); q.base++ }
   emitTrace('recv', env, `subpeer:${id.split('/').pop()}`)
   if (MODE_OVERRIDE !== 'poll' && sp && sp.mode === 'push') {      // streaming sub-peer (e.g. code session sharing this bridge)
+    const reminders = remindersFor(sp.id, env)   // #29: scoped 'how to behave' prompts for this message
     mcp.notification({
       method: 'notifications/claude/channel',
       params: { content: plainBody(env),
         meta: { from: String(env.from?.session || ''), from_name: String(env.from?.name || ''),
                 from_kind: String(env.from?.kind || 'session'), verb: String(env.verb || ''), envelope_id: env.id,
                 subject: String(env.subject || ''), pattern: String(env.pattern || 'send'), topic: env.topic || null,
-                for: sp.id, for_name: sp.name } },
+                for: sp.id, for_name: sp.name, ...(reminders.length ? { reminders } : {}) } },
     }).catch(() => {})
   }
   return { ok: true }
@@ -1417,6 +1450,23 @@ const TOOLS = [
       pattern: { type: 'string' },
       as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
       secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['pattern'] } },
+  { name: 'set_behavior', description: 'Register a short REMINDER of how YOU want to behave when a message arrives that matches a scope. The bridge attaches the matching reminder(s) to each delivered message (in the channel meta and in inbox items) as reminders:[{scope,match,behavior}] — a message can match several scopes, so you may get several, ordered most-specific first (topic > subscription > project > host > all). Durable + per-identity (rehydrated on register_self). Re-registering the same scope+match replaces it. Topic-scoped reminders ride along with a kept-alive topic on handoff (the next claimant inherits them). Sub-peers pass as + secret.',
+    inputSchema: { type: 'object', properties: {
+      scope: { type: 'string', enum: ['topic', 'host', 'project', 'subscription', 'all'], description: 'topic = a topic you OWN; host = messages from a host; project = messages from a project; subscription = messages matching one of your subscription patterns; all = every incoming message' },
+      match: { type: 'string', description: 'the topic / host / project / subscription-pattern this applies to (omit for scope=all)' },
+      behavior: { type: 'string', description: 'the reminder prompt (short; max 280 chars) returned to you when a matching message arrives' },
+      as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
+      secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['scope', 'behavior'] } },
+  { name: 'list_behaviors', description: 'List the behaviour reminders you have registered. Sub-peers pass as + secret.',
+    inputSchema: { type: 'object', properties: {
+      as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
+      secret: { type: 'string', description: 'the secret used at register_self' } } } },
+  { name: 'clear_behavior', description: 'Remove a behaviour reminder (scope + match), or ALL of them if scope is omitted. Sub-peers pass as + secret.',
+    inputSchema: { type: 'object', properties: {
+      scope: { type: 'string', enum: ['topic', 'host', 'project', 'subscription', 'all'], description: 'the scope to clear; omit to clear every reminder' },
+      match: { type: 'string', description: 'the match to clear (for scope other than all)' },
+      as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
+      secret: { type: 'string', description: 'the secret used at register_self' } } } },
   { name: 'publish', description: 'Publish an event to a concrete topic: delivered to ALL subscribers (wildcard matches included; owners are auto-subscribed). Nobody is obliged to act — for directed work send to "topic:<topic>" instead. Zero subscribers is ok. subject is REQUIRED: short public one-line description (NOT encrypted — no private info).',
     inputSchema: { type: 'object', properties: {
       topic: { type: 'string', description: 'concrete topic path (no wildcards)' },
@@ -1509,7 +1559,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         await syncDurableMailbox(existing)   // §23: a returning peer also picks up out-of-band parked mail
         callerId = existing.id   // §20 resync on reattach too: hand back current topics + access + the inbox hint
         const reTopics = [...myTopics.values()].filter(e => e.holder === existing.id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: reachableProjects(existing.identity?.project) })
+        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: reachableProjects(existing.identity?.project), behaviors: behaviorList(existing.id) })
       }
       let parent = null
       if (a.parent) {
@@ -1562,6 +1612,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: n, note: `${n} subscription(s) restored`, envelope_id: null }) }
           } catch { }
         }
+        await loadBehaviors(id, pid)   // #29: rehydrate this identity's durable behaviour reminders into RAM
         // §19: record a DURABLE registration (name -> identity) so a directed send to this peer BY NAME can
         // resolve + park while it's offline, and a returning peer is recognised across a gateway restart.
         persistence.registrations.put(pid, { name, secret_hash: sha(secret), client_kind: ckind, last_seen: new Date().toISOString() }).catch(() => {})
@@ -1577,7 +1628,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // §20 resync: hand back the identity's current topics (owned + subscribed, post-rehydration) and the
       // projects it may reach — so a reconnecting/compacted session relearns its state without re-attaching.
       const myTopicsNow = [...myTopics.values()].filter(e => e.holder === id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: reachableProjects(ident.project) })
+      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: reachableProjects(ident.project), behaviors: behaviorList(id) })
     }
     case 'deregister': {
       const { sp, err } = authSub(String(a.peer_id || ''), a.secret)
@@ -1672,6 +1723,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             await routeEnvelope({ ...p.record, to: holder }); await persistence.mailbox.ack(tident, p.record.id); drained++
           }
         } catch { }
+        // #29: inherit any topic-scoped behaviour reminders the previous owner left on this topic
+        for (const beh of (Array.isArray(kept.behaviors) ? kept.behaviors : [])) {
+          const b = String(beh || '').slice(0, BEHAVIOR_MAX_LEN); if (!b) continue
+          const without = (behaviors.get(holder) || []).filter(x => behKey(x.scope, x.match) !== behKey('topic', topic))
+          behaviors.set(holder, [...without, { scope: 'topic', match: topic, behavior: b, set_at: new Date().toISOString() }])
+          if (PERSIST && holderIdentity) persistence.behaviors.put(holderIdentity, 'topic', topic, b).catch(() => {})
+        }
         persistence.keptTopics.remove(holderProject, topic).catch(() => {})
         if (drained) emitTraceRaw({ dir: 'recv', verb: 'rehydrate', from: holder, from_name: holderName, to: SESSION, size: drained, note: `${drained} parked message(s) delivered on reclaim of kept-alive "${topic}"`, envelope_id: null })
       }
@@ -1701,7 +1759,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // the topic immediately after release, and that send must see NO dormant claim (else it parks to the
       // just-released owner) and DOES see the kept-alive marker (so it parks ownerless rather than bouncing no-owner).
       if (PERSIST && holderIdentity) { try { await persistence.claims.remove(holderProject, topic, holderIdentity) } catch { } }   // §12: drop durable responsibility
-      if (PERSIST && keepAlive) { try { await persistence.keptTopics.put(holderProject, topic, { realm: rec.realm || REALM, description: rec.description, icon: rec.icon, exclusive: rec.exclusive, announce_offline: rec.announce_offline }) } catch { } }
+      if (PERSIST && keepAlive) {
+        // #29: topic-scoped behaviour reminders for THIS topic ride along to the next owner via the kept marker
+        const topicBeh = (behaviors.get(holder) || []).filter(b => b.scope === 'topic' && patternKey(b.match) === patternKey(topic)).map(b => b.behavior)
+        try { await persistence.keptTopics.put(holderProject, topic, { realm: rec.realm || REALM, description: rec.description, icon: rec.icon, exclusive: rec.exclusive, announce_offline: rec.announce_offline, behaviors: topicBeh }) } catch { }
+      }
       announceTopics()
       emitTraceRaw({ dir: 'con', verb: 'release', from: holder, from_name: holderName, to: SESSION, size: 0,
         note: `released "${topic}"${keepAlive ? ' [kept alive — sends park until reclaimed]' : ''}`, envelope_id: null })
@@ -1880,10 +1942,48 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const next = q.base + q.items.length
         q.served = Math.max(q.served || 0, next)
         if (PERSIST && sp.identity) { const pid = pIdent(sp.identity, sp.name); for (const m of q.items.slice(0, start)) persistence.mailbox.ack(pid, m.id).catch(() => {}) }   // §12: consumed (cursor moved past) -> drop the durable copy
-        return ok({ peer_id: sp.id, queue_epoch: q.epoch, messages: q.items.slice(start).map(decryptedView), next_cursor: next })
+        return ok({ peer_id: sp.id, queue_epoch: q.epoch, next_cursor: next,
+          messages: q.items.slice(start).map(e => { const v = decryptedView(e), r = remindersFor(sp.id, e); return r.length ? { ...v, reminders: r } : v }) })   // #29: attach scoped behaviour reminders
       }
       const cur = Number(a.cursor || 0)
       return ok({ messages: inbox.slice(cur).map(decryptedView), next_cursor: inbox.length })
+    }
+    case 'set_behavior': {   // #29: register a 'how to behave when a message arrives' reminder for a scope
+      const scope = String(a.scope || '').trim().toLowerCase()
+      if (!BEHAVIOR_SCOPES.includes(scope)) return ok({ ok: false, code: 'bad-scope', scopes: BEHAVIOR_SCOPES })
+      const match = scope === 'all' ? null : String(a.match || '').trim()
+      if (scope !== 'all' && !match) return ok({ ok: false, code: 'match-required', scope })
+      const behavior = String(a.behavior || '').trim()
+      if (!behavior) return ok({ ok: false, code: 'behavior-required' })
+      if (behavior.length > BEHAVIOR_MAX_LEN) return ok({ ok: false, code: 'behavior-too-long', max: BEHAVIOR_MAX_LEN, got: behavior.length })
+      let holder = SESSION, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); holder = sp.id; holderIdentity = pIdent(sp.identity, sp.name) }
+      const without = (behaviors.get(holder) || []).filter(b => behKey(b.scope, b.match) !== behKey(scope, match))
+      if (without.length >= BEHAVIOR_MAX_COUNT) return ok({ ok: false, code: 'too-many-behaviors', max: BEHAVIOR_MAX_COUNT })
+      behaviors.set(holder, [...without, { scope, match, behavior, set_at: new Date().toISOString() }])
+      if (PERSIST && holderIdentity) persistence.behaviors.put(holderIdentity, scope, match, behavior).catch(() => {})
+      return ok({ ok: true, scope, match, behavior, count: behaviors.get(holder).length })
+    }
+    case 'list_behaviors': {
+      let holder = SESSION
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); holder = sp.id }
+      return ok({ ok: true, behaviors: behaviorList(holder) })
+    }
+    case 'clear_behavior': {   // omit scope to clear ALL; else clear the one (scope + match)
+      const scope = a.scope != null ? String(a.scope).trim().toLowerCase() : null
+      const match = scope && scope !== 'all' ? String(a.match || '').trim() : null
+      let holder = SESSION, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); holder = sp.id; holderIdentity = pIdent(sp.identity, sp.name) }
+      const list = behaviors.get(holder) || []
+      if (!scope) {
+        behaviors.set(holder, [])
+        if (PERSIST && holderIdentity) persistence.behaviors.clear(holderIdentity).catch(() => {})
+        return ok({ ok: true, cleared: list.length })
+      }
+      const kept = list.filter(b => behKey(b.scope, b.match) !== behKey(scope, match))
+      behaviors.set(holder, kept)
+      if (PERSIST && holderIdentity) persistence.behaviors.remove(holderIdentity, scope, match).catch(() => {})
+      return ok({ ok: true, cleared: list.length - kept.length })
     }
     default: throw new Error(`unknown tool: ${req.params.name}`)
   }
