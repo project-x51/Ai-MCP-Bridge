@@ -18,9 +18,13 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 
 ## Files
 - `bridge.mjs` — the mesh node + gateway/WS/trace roles + MCP stdio server (realm-agnostic core).
-- `lib/` — **pure**, shared-state-free helpers extracted from `bridge.mjs` so they're isolation-testable:
-  `topics.js` (path matching / `parseTopicRef`), `envelope.js` (`envelopeId`), `tool-schemas.js` (the
-  `tools/list` payload). Imported by `bridge.mjs`; unit-tested by `tests/test_lib_unit.mjs` (no spawn).
+- `lib/` — logic factored out of `bridge.mjs` so it's reasoned-about + unit-tested in isolation (no spawn —
+  `tests/test_lib_unit.mjs`). **Pure** helpers: `topics.js` (path matching / `parseTopicRef`), `envelope.js`
+  (`envelopeId`), `keys.js` (`lc` / `projKey` canonicalisers), `tool-schemas.js` (the `tools/list` payload).
+  **Encapsulated stateful modules** that OWN their data behind an API (bridge.mjs calls the API, never the
+  Maps): `consent.js` (runtime grants + pending requests; `mayInitiate`/`allow`/`revoke`/…) and `reminders.js`
+  (#29 per-session behaviours; `remindersFor`/`set`/`clear`/…). The bridge core (handlers, routing, delivery,
+  gateway) deliberately stays in `bridge.mjs`.
 - `types.d.ts` — shared shapes for JSDoc + `checkJs` (see Type-checking below).
 - `facets/` — the pluggable realm profile: `auth/ cipher/ capsigner/ identity/ config/ transport/
   discovery/ persistence/ authorizer/`, each with a `_template.js` + impl files, assembled by

@@ -24,6 +24,9 @@ import { buildProfile } from './facets/index.js'
 import { splitTopic, isWildcard, topicMatch, patternsOverlap, patternKey, parseTopicRef } from './lib/topics.js'
 import { envelopeId } from './lib/envelope.js'
 import { TOOLS } from './lib/tool-schemas.js'
+import { lc, projKey } from './lib/keys.js'
+import { createConsent, parseTtlMin } from './lib/consent.js'
+import { createReminders } from './lib/reminders.js'
 
 // ---------------------------------------------------------------- config / identity
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -140,92 +143,23 @@ const pIdent = (identity, holderName) => identity ? { ...identity, name: holderN
 const topicMailIdent = (realm, project, topic) => ({ realm: realm || REALM, project: project || 'unclassified', user: '#ownerless', name: `topic:${topic}` })
 
 // ---------------------------------------------------------------- project consent + reply-cap (§4-§5)
-// Receiver-controlled inbound consent: a project may reach another only if same-project, the realm is
-// `open`, a static config edge allows it, or a runtime grant does. Enforced receiver-side at delivery.
-// The reply exception (firewall return-traffic) is gated by the signed reply-cap, not policy.
-let POLICY = (CFG.projects && typeof CFG.projects === 'object') ? CFG.projects : { default: 'strict', allow: [] }
-let POLICY_OPEN = process.env.AI_BRIDGE_OPEN === '1' || String(POLICY.default || 'strict') === 'open'
-// live-reload the project policy when the shared config file changes (ConfigSource facet); the bridge
-// only READS config, so a Dropbox/SMB-synced edit propagates to the realm without a restart. Realm/
-// token changes still need a restart. fs.watchFile polls — cross-platform safe, idempotent re-read.
-// live-reload via the ConfigSource facet: a synced edit to the policy propagates without a restart.
+// Project consent (the runtime-grant map + pending requests + mayInitiate/reachable/allow/revoke) is
+// encapsulated in lib/consent.js — bridge.mjs calls the API, never the Maps. Receiver-controlled inbound
+// consent: a project may reach another only if same-project, the realm is `open`, a static config edge
+// allows it, or a runtime grant does. The reply exception (firewall return-traffic) is gated by the signed
+// reply-cap below, NOT by policy. `projKey`/`lc` are in lib/keys.js; `parseTtlMin` in lib/consent.js.
+const consent = createConsent({ persistence, persist: PERSIST })
+const computeOpen = pol => process.env.AI_BRIDGE_OPEN === '1' || String((pol && pol.default) || 'strict') === 'open'
+consent.setPolicy((CFG.projects && typeof CFG.projects === 'object') ? CFG.projects : { default: 'strict', allow: [] }, computeOpen(CFG.projects))
+// live-reload via the ConfigSource facet: a synced edit to the policy propagates without a restart (the
+// bridge only READS config). Realm/token changes still need a restart. fs.watchFile polls — cross-platform.
 profile.config.watch(c => {
-  if (c && c.projects && typeof c.projects === 'object') {
-    POLICY = c.projects
-    POLICY_OPEN = process.env.AI_BRIDGE_OPEN === '1' || String(POLICY.default || 'strict') === 'open'
-    log('project policy reloaded from config')
-  }
+  if (c && c.projects && typeof c.projects === 'object') { consent.setPolicy(c.projects, computeOpen(c.projects)); log('project policy reloaded from config') }
 })
-const runtimeAllow = new Map()             // `${from}>${to}` -> { mode, exp }   (runtime grants; keys are projKey'd; exp = ms epoch or null=forever; §12 durable when persistence is on)
-const pendingAccess = new Map()            // reqId -> { from, to, requester, requesterName, ttlMin, ts }  (so a grant can notify the original requester — Bug 3)
-// a TTL is minutes (number) or a duration string (e.g. "30m", "24h", "7d"); null/0/"forever"/"" = no expiry.
-function parseTtlMin(v) {
-  if (v == null || v === '' || v === 0) return null
-  if (typeof v === 'number') return v > 0 ? v : null
-  const s = String(v).trim().toLowerCase()
-  if (s === 'forever' || s === 'never' || s === '0') return null
-  const m = s.match(/^([\d.]+)\s*(m|min|h|hr|hour|d|day|w|week)?s?$/)
-  if (!m) return null
-  const n = parseFloat(m[1]); if (!isFinite(n) || n <= 0) return null
-  const u = (m[2] || 'm')[0]
-  return Math.round(n * (u === 'w' ? 10080 : u === 'd' ? 1440 : u === 'h' ? 60 : 1))
-}
+await consent.rehydrate()   // §14: durable grants survive a restart
+setInterval(() => consent.gc(), Number(process.env.AI_BRIDGE_GRANT_GC_MS) || 600000).unref()   // §14: sweep expired grants + stale pending requests
 const CAP_TTL_MS = Number(process.env.AI_BRIDGE_CAP_TTL_MS) || 30 * 60000   // reply_exp stamp horizon (informational since Decision B; no longer gates delivery — see verifyReplyCap). Env-overridable for tests.
 const PROC_CAPKEY = capKeyFrom(SESSION)    // process reply-cap key (rotates per process = correct for Code)
-
-// project names are matched case-INSENSITIVELY everywhere (display keeps the declared case); this is
-// the canonical comparison key. (Mixed-case names like "CamelCo"/"AIMB" tripped a half-lowercased
-// path before — fixed 2026-06-14.)
-const projKey = p => (String(p == null ? '' : p).trim().toLowerCase() || 'unclassified')
-
-function edgeAllows(fromRaw, toRaw) {
-  const from = projKey(fromRaw), to = projKey(toRaw)
-  for (const e of (POLICY.allow || [])) {
-    const f = projKey(e.from), t = projKey(e.to), m = e.mode || 'send'
-    if (f === from && t === to) return true
-    if (m === 'bidirectional' && f === to && t === from) return true
-  }
-  for (const [k, g] of runtimeAllow) {
-    if (g.exp && g.exp <= Date.now()) continue      // expired grant doesn't authorise (swept lazily here + periodically)
-    const [f, t] = k.split('>'), m = g.mode
-    if ((f === from && t === to) || (m === 'bidirectional' && f === to && t === from)) return true
-  }
-  return false
-}
-function mayInitiate(fromProject, toProject) {     // may project `from` initiate to project `to`?
-  const fp = projKey(fromProject), tp = projKey(toProject)
-  if (fp === tp) return true                       // same project always open
-  if (POLICY_OPEN) return true                     // realm-wide open
-  return edgeAllows(fp, tp)
-}
-// §20: the FOREIGN projects `fromProject` may currently initiate to (besides its own) — handed back on
-// register_self so a session knows its consent edges without trial-and-error. 'all' when the realm is open.
-function reachableProjects(fromProject) {
-  const fp = projKey(fromProject)
-  if (POLICY_OPEN) return 'all'
-  const out = new Set()
-  for (const e of (POLICY.allow || [])) { const f = projKey(e.from), t = projKey(e.to), m = e.mode || 'send'; if (f === fp) out.add(t); if (m === 'bidirectional' && t === fp) out.add(f) }
-  for (const [k, g] of runtimeAllow) { if (g.exp && g.exp <= Date.now()) continue; const [f, t] = k.split('>'); if (f === fp) out.add(t); if (g.mode === 'bidirectional' && t === fp) out.add(f) }
-  out.delete(fp)
-  return [...out]
-}
-// persist a runtime grant edge (durable consent §12/§14) — best-effort, no-op without persistence
-function persistGrant(from, to, mode, exp) {
-  if (PERSIST) persistence.grants.put(from, to, { from, to, mode, exp: exp || null, granted_at: new Date().toISOString() }).catch(() => {})
-}
-if (PERSIST) {                                     // §14: re-hydrate durable grants so cross-project consent survives a restart
-  try {
-    for (const g of await persistence.grants.all()) {
-      if (g && g.from && g.to && (!g.exp || g.exp > Date.now())) runtimeAllow.set(`${projKey(g.from)}>${projKey(g.to)}`, { mode: g.mode === 'bidirectional' ? 'bidirectional' : 'send', exp: g.exp || null })
-    }
-  } catch { }
-}
-setInterval(() => {                                // §14: sweep expired grants + stale pending requests (always on; TTL works without persistence)
-  const now = Date.now()
-  for (const [k, g] of runtimeAllow) if (g.exp && g.exp <= now) runtimeAllow.delete(k)
-  for (const [id, p] of pendingAccess) if (now - p.ts > 3600000) pendingAccess.delete(id)
-  if (PERSIST) persistence.grants.gcAll({ now }).catch(() => {})
-}, Number(process.env.AI_BRIDGE_GRANT_GC_MS) || 600000).unref()
 function localCapKey(sessionId) {                  // reply-cap signing key for a LOCAL participant
   if (sessionId === SESSION) return PROC_CAPKEY
   const sp = subpeers.get(sessionId); if (sp) return sp.capKey
@@ -264,13 +198,13 @@ function verifyReplyCap(env, toProject, targetCapKey) {
 function deliveryAllowed(env, toProject, toRealm, targetCapKey) {
   if (env.system) return true                      // system control messages (e.g. project_access_request)
   const sameRealm = (env.from?.realm || REALM) === (toRealm || REALM)
-  if (sameRealm && mayInitiate(env.from?.project, toProject)) return true
+  if (sameRealm && consent.mayInitiate(env.from?.project, toProject)) return true
   return verifyReplyCap(env, toProject, targetCapKey)   // signed reply exception
 }
 
 // Names (peer/sub-peer) are PRESENTED in their original case but STORED and COMPARED lower-case, so all
 // name lookups are case-insensitive ("Bolletta" === "bolletta"). Display strings keep their original case.
-const lc = s => String(s == null ? '' : s).trim().toLowerCase()
+// `lc` (lower-case/trim) and `projKey` live in lib/keys.js (imported above).
 const ciEq = (a, b) => lc(a) === lc(b)
 
 // ---------------------------------------------------------------- topic matching (T1/T4)
@@ -306,38 +240,10 @@ const SUBQ_CAP = 300
 // (role:subscriber) held by THIS process or its sub-peers; gossiped via the roster like
 // sub-peers; vanish with their holder. Owners are auto-subscribed (T2).
 const myTopics = new Map()        // `${holder}|${role}|${patternKey}` -> {pattern, role, description, exclusive, icon, holder, holder_name, claimed_at}
-// #29: per-session BEHAVIOUR reminders — short 'how to act when a message arrives' prompts a session registers
-// against a scope (a topic it owns / a host / a project / a subscription pattern / all). Held in RAM per holder
-// id, durable per identity, rehydrated on resync; the matching ones ride along with each delivered message.
-const behaviors = new Map()       // holderId -> [{ scope, match, behavior, set_at }]
-const BEHAVIOR_SCOPES = ['topic', 'host', 'project', 'subscription', 'all']
-const BEHAVIOR_ORDER = { topic: 0, subscription: 1, project: 2, host: 3, all: 4 }   // most-specific first in the returned list
-const BEHAVIOR_MAX_LEN = 280, BEHAVIOR_MAX_COUNT = 64
-const behKey = (scope, match) => `${scope}|${scope === 'topic' || scope === 'subscription' ? patternKey(match || '') : scope === 'all' ? '' : lc(match || '')}`
-// reminders whose scope matches THIS envelope being delivered to holder `id` — returned with the message so the
-// session is reminded how to behave. Skips self-sent + system messages for the catch-all 'all' scope.
-function remindersFor(id, env, matchedPattern) {
-  const list = behaviors.get(id); if (!list || !list.length) return []
-  const fromHost = String(env.from?.session || '').split('/')[0], fromProj = env.from?.project, topic = env.topic
-  const out = []
-  for (const b of list) {
-    let hit = false
-    if (b.scope === 'all') hit = !env.system && env.from?.session !== id
-    else if (b.scope === 'host') hit = !!fromHost && lc(b.match) === lc(fromHost)
-    else if (b.scope === 'project') hit = !!fromProj && projKey(b.match) === projKey(fromProj)
-    else if (b.scope === 'topic') hit = !!topic && patternKey(b.match) === patternKey(topic)
-    else if (b.scope === 'subscription') hit = !!(topic && (patternKey(b.match) === patternKey(topic) || (matchedPattern && patternKey(b.match) === patternKey(matchedPattern)) || topicMatch(b.match, topic)))
-    if (hit) out.push({ scope: b.scope, match: b.match, behavior: b.behavior })
-  }
-  out.sort((a, b2) => (BEHAVIOR_ORDER[a.scope] ?? 9) - (BEHAVIOR_ORDER[b2.scope] ?? 9))
-  return out
-}
-// rehydrate an identity's durable behaviors into RAM under its (new) holder id, on register/reattach (§20 resync)
-async function loadBehaviors(holderId, pid) {
-  if (!PERSIST || !pid) return
-  try { const recs = await persistence.behaviors.byHolder(pid); if (recs.length) behaviors.set(holderId, recs.map(r => ({ scope: r.scope, match: r.match, behavior: r.behavior, set_at: r.set_at }))) } catch { }
-}
-const behaviorList = id => (behaviors.get(id) || []).map(b => ({ scope: b.scope, match: b.match, behavior: b.behavior, set_at: b.set_at }))
+// #29: per-session BEHAVIOUR reminders — encapsulated in lib/reminders.js (it owns the behaviours map +
+// matching). The bridge calls reminders.remindersFor(...) at delivery, .set/.clear/.list in the handlers,
+// .load on resync, and .topicBehaviors/.inherit for the #26 kept-alive handoff.
+const reminders = createReminders({ persistence, persist: PERSIST })
 
 // envelopeId() (pure content hash) lives in lib/envelope.js (imported above).
 function remember(id) {
@@ -567,14 +473,14 @@ function deliverSub(id, env) {
   if (q.items.length > SUBQ_CAP) { q.items.shift(); q.base++ }
   emitTrace('recv', env, `subpeer:${id.split('/').pop()}`)
   if (MODE_OVERRIDE !== 'poll' && sp && sp.mode === 'push') {      // streaming sub-peer (e.g. code session sharing this bridge)
-    const reminders = remindersFor(sp.id, env)   // #29: scoped 'how to behave' prompts for this message
+    const rems = reminders.remindersFor(sp.id, env)   // #29: scoped 'how to behave' prompts for this message
     mcp.notification({
       method: 'notifications/claude/channel',
       params: { content: plainBody(env),
         meta: { from: String(env.from?.session || ''), from_name: String(env.from?.name || ''),
                 from_kind: String(env.from?.kind || 'session'), verb: String(env.verb || ''), envelope_id: env.id,
                 subject: String(env.subject || ''), pattern: String(env.pattern || 'send'), topic: env.topic || null,
-                for: sp.id, for_name: sp.name, ...(reminders.length ? { reminders } : {}) } },
+                for: sp.id, for_name: sp.name, ...(rems.length ? { reminders: rems } : {}) } },
     }).catch(() => {})
   }
   return { ok: true }
@@ -862,7 +768,7 @@ async function parkToOfflineOwners(from, project, path, verb, body, reply_to, su
     if (!rec || rec.pattern !== path) continue
     const ident = claimIdentity(rec, project)
     if (!ident) continue
-    if (!mayInitiate(ap, projKey(rec.project || project))) continue   // park only what you could send live
+    if (!consent.mayInitiate(ap, projKey(rec.project || project))) continue   // park only what you could send live
     const env = makeEnvelope({ to: `topic:${path}`, verb, body, reply_to, from, subject, pattern: 'send', topic: path })
     try { await persistence.mailbox.put(ident, env.id, env) } catch { continue }
     parked.push(env.id)
@@ -876,7 +782,7 @@ async function parkToOfflineOwners(from, project, path, verb, body, reply_to, su
     // TOPIC itself (synthetic topic-mailbox); the next claimant drains it. Consent-checked against the topic's project.
     let kept = null
     try { kept = await persistence.keptTopics.get(project, path) } catch { }
-    if (kept && mayInitiate(ap, projKey(kept.project || project))) {
+    if (kept && consent.mayInitiate(ap, projKey(kept.project || project))) {
       const env = makeEnvelope({ to: `topic:${path}`, verb, body, reply_to, from, subject, pattern: 'send', topic: path })
       try { await persistence.mailbox.put(topicMailIdent(kept.realm, kept.project || project, path), env.id, env) }
       catch { return { ok: false, code: 'no-owner', topic: ref } }
@@ -900,7 +806,7 @@ async function parkToOfflineName(from, name, verb, body, reply_to, subject, aske
   try { regs = await persistence.registrations.byName(name) } catch { return null }
   if (!regs.length) return null
   const ap = projKey(askerProject || 'unclassified')
-  const reachable = regs.filter(r => mayInitiate(ap, projKey(r.project)))   // only park what you could send live
+  const reachable = regs.filter(r => consent.mayInitiate(ap, projKey(r.project)))   // only park what you could send live
   if (!reachable.length) return null
   if (reachable.length > 1) return { ok: false, code: 'ambiguous-name', candidates: reachable.map(r => `${r.project}:${r.name}`) }
   const r = reachable[0]
@@ -929,7 +835,7 @@ async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, aske
       foreign.get(pk).owners.push(e)
     }
     if (foreign.size) {
-      const reachable = [...foreign].filter(([pk]) => mayInitiate(ap, pk))
+      const reachable = [...foreign].filter(([pk]) => consent.mayInitiate(ap, pk))
       if (!reachable.length) return { ok: false, code: 'cross-project-no-grant', topic: path,
         owner_projects: [...foreign.values()].map(f => f.name),
         hint: `"${path}" is owned in another project — request_project_access first, or target it explicitly as @<project>/${path}` }
@@ -983,7 +889,7 @@ function rosterPayload() {
 // (delivery still enforces them). The raw list_sessions tool stays full (observability).
 function rosterPayloadFor(viewerProject, viewerRealm) {
   const vp = viewerProject || 'unclassified'
-  const reach = p => mayInitiate(vp, p || 'unclassified')
+  const reach = p => consent.mayInitiate(vp, p || 'unclassified')
   const base = rosterPayload()
   const sessions = []
   for (const s of base.sessions) {
@@ -1407,7 +1313,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         await syncDurableMailbox(existing)   // §23: a returning peer also picks up out-of-band parked mail
         callerId = existing.id   // §20 resync on reattach too: hand back current topics + access + the inbox hint
         const reTopics = [...myTopics.values()].filter(e => e.holder === existing.id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: reachableProjects(existing.identity?.project), behaviors: behaviorList(existing.id) })
+        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: consent.reachable(existing.identity?.project), behaviors: reminders.list(existing.id) })
       }
       let parent = null
       if (a.parent) {
@@ -1460,7 +1366,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: id, from_name: name, to: SESSION, size: n, note: `${n} subscription(s) restored`, envelope_id: null }) }
           } catch { }
         }
-        await loadBehaviors(id, pid)   // #29: rehydrate this identity's durable behaviour reminders into RAM
+        await reminders.load(id, pid)   // #29: rehydrate this identity's durable behaviour reminders into RAM
         // §19: record a DURABLE registration (name -> identity) so a directed send to this peer BY NAME can
         // resolve + park while it's offline, and a returning peer is recognised across a gateway restart.
         persistence.registrations.put(pid, { name, secret_hash: sha(secret), client_kind: ckind, last_seen: new Date().toISOString() }).catch(() => {})
@@ -1476,7 +1382,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // §20 resync: hand back the identity's current topics (owned + subscribed, post-rehydration) and the
       // projects it may reach — so a reconnecting/compacted session relearns its state without re-attaching.
       const myTopicsNow = [...myTopics.values()].filter(e => e.holder === id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: reachableProjects(ident.project), behaviors: behaviorList(id) })
+      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: consent.reachable(ident.project), behaviors: reminders.list(id) })
     }
     case 'deregister': {
       const { sp, err } = authSub(String(a.peer_id || ''), a.secret)
@@ -1571,13 +1477,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             await routeEnvelope({ ...p.record, to: holder }); await persistence.mailbox.ack(tident, p.record.id); drained++
           }
         } catch { }
-        // #29: inherit any topic-scoped behaviour reminders the previous owner left on this topic
-        for (const beh of (Array.isArray(kept.behaviors) ? kept.behaviors : [])) {
-          const b = String(beh || '').slice(0, BEHAVIOR_MAX_LEN); if (!b) continue
-          const without = (behaviors.get(holder) || []).filter(x => behKey(x.scope, x.match) !== behKey('topic', topic))
-          behaviors.set(holder, [...without, { scope: 'topic', match: topic, behavior: b, set_at: new Date().toISOString() }])
-          if (PERSIST && holderIdentity) persistence.behaviors.put(holderIdentity, 'topic', topic, b).catch(() => {})
-        }
+        reminders.inherit(holder, holderIdentity, topic, kept.behaviors)   // #29: new owner inherits the topic's reminders
         persistence.keptTopics.remove(holderProject, topic).catch(() => {})
         if (drained) emitTraceRaw({ dir: 'recv', verb: 'rehydrate', from: holder, from_name: holderName, to: SESSION, size: drained, note: `${drained} parked message(s) delivered on reclaim of kept-alive "${topic}"`, envelope_id: null })
       }
@@ -1609,7 +1509,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (PERSIST && holderIdentity) { try { await persistence.claims.remove(holderProject, topic, holderIdentity) } catch { } }   // §12: drop durable responsibility
       if (PERSIST && keepAlive) {
         // #29: topic-scoped behaviour reminders for THIS topic ride along to the next owner via the kept marker
-        const topicBeh = (behaviors.get(holder) || []).filter(b => b.scope === 'topic' && patternKey(b.match) === patternKey(topic)).map(b => b.behavior)
+        const topicBeh = reminders.topicBehaviors(holder, topic)
         try { await persistence.keptTopics.put(holderProject, topic, { realm: rec.realm || REALM, description: rec.description, icon: rec.icon, exclusive: rec.exclusive, announce_offline: rec.announce_offline, behaviors: topicBeh }) } catch { }
       }
       announceTopics()
@@ -1698,20 +1598,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // if given, else the matching pending request's ttl, else forever; with both present, the operator can
       // only shorten. forever is a null expiry.
       const opTtl = parseTtlMin(a.ttl_minutes ?? a.ttl)
-      const pend = [...pendingAccess.values()].filter(p => p.from === from && p.to === to)
+      const pend = consent.pendingFor(from, to)
       let reqTtl = null, sawReq = false
       for (const p of pend) if (p.ttlMin != null) { sawReq = true; reqTtl = reqTtl == null ? p.ttlMin : Math.min(reqTtl, p.ttlMin) }
       let effTtl = opTtl != null ? opTtl : (sawReq ? reqTtl : null)
       if (opTtl != null && sawReq) effTtl = Math.min(opTtl, reqTtl)
       const exp = effTtl != null ? Date.now() + effTtl * 60000 : null
-      runtimeAllow.set(`${from}>${to}`, { mode, exp })   // keys are canonical (case-insensitive)
-      persistGrant(from, to, mode, exp)          // §14: survives a restart
+      consent.allow(from, to, mode, exp)         // §14: runtime grant + durable copy (survives a restart)
       broadcastRoster()                          // visibility may widen
       emitTraceRaw({ dir: 'con', verb: 'allow', from: me0.project, from_name: me0.user || NAME, to: from, size: 0,
         note: `allow ${from} -> ${me0.project} (${mode}, ${exp ? effTtl + 'm' : 'forever'})`, envelope_id: null })
       // Bug 3: tell the original requester(s) their access landed, echoing request_id + the permitted TTL
       for (const p of pend) {
-        pendingAccess.delete(p.reqId)
+        consent.deletePending(p.reqId)
         deliverSystemTo(p.requester, 'project_access_granted', JSON.stringify({ to: me0.project, from, mode, request_id: p.reqId, ttl_minutes: effTtl, expires_at: exp ? new Date(exp).toISOString() : null }), `project access granted: ${from} -> ${me0.project}`).catch(() => {})
       }
       return ok({ ok: true, allow: { from, to: me0.project, mode, ttl_minutes: effTtl, expires_at: exp ? new Date(exp).toISOString() : null }, notified: pend.length })
@@ -1720,8 +1619,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       let myProj = PROC_IDENT?.project
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); myProj = sp.identity?.project }
       const from = projKey(a.project), to = projKey(myProj)
-      const had = runtimeAllow.delete(`${from}>${to}`)
-      if (PERSIST) persistence.grants.remove(from, to).catch(() => {})   // §14: drop the durable edge too
+      const had = consent.revoke(from, to)   // §14: drop the runtime grant + its durable edge
       if (had) broadcastRoster()
       return ok({ ok: true, revoked: had, from, to: myProj })
     }
@@ -1733,7 +1631,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const ttlMin = parseTtlMin(a.ttl_minutes ?? a.ttl)   // null = requesting forever; the operator can shorten
       const reqId = 'req_' + crypto.randomBytes(5).toString('hex')
       const fromProj = projKey(me0.project || 'unclassified')
-      pendingAccess.set(reqId, { reqId, from: fromProj, to, requester, requesterName: me0.user || NAME, ttlMin, ts: Date.now() })
+      consent.addPending(reqId, { reqId, from: fromProj, to, requester, requesterName: me0.user || NAME, ttlMin, ts: Date.now() })
       const payload = JSON.stringify({ from_project: me0.project || 'unclassified', from_user: me0.user || 'unknown', reason: String(a.reason || ''), request_id: reqId, ttl_minutes: ttlMin })
       const reached = await deliverSystemToProject(to, 'project_access_request', payload)
       return ok({ ok: true, request_id: reqId, to, ttl_minutes: ttlMin, delivered_to: reached })
@@ -1791,47 +1689,25 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         q.served = Math.max(q.served || 0, next)
         if (PERSIST && sp.identity) { const pid = pIdent(sp.identity, sp.name); for (const m of q.items.slice(0, start)) persistence.mailbox.ack(pid, m.id).catch(() => {}) }   // §12: consumed (cursor moved past) -> drop the durable copy
         return ok({ peer_id: sp.id, queue_epoch: q.epoch, next_cursor: next,
-          messages: q.items.slice(start).map(e => { const v = decryptedView(e), r = remindersFor(sp.id, e); return r.length ? { ...v, reminders: r } : v }) })   // #29: attach scoped behaviour reminders
+          messages: q.items.slice(start).map(e => { const v = decryptedView(e), r = reminders.remindersFor(sp.id, e); return r.length ? { ...v, reminders: r } : v }) })   // #29: attach scoped behaviour reminders
       }
       const cur = Number(a.cursor || 0)
       return ok({ messages: inbox.slice(cur).map(decryptedView), next_cursor: inbox.length })
     }
     case 'set_behavior': {   // #29: register a 'how to behave when a message arrives' reminder for a scope
-      const scope = String(a.scope || '').trim().toLowerCase()
-      if (!BEHAVIOR_SCOPES.includes(scope)) return ok({ ok: false, code: 'bad-scope', scopes: BEHAVIOR_SCOPES })
-      const match = scope === 'all' ? null : String(a.match || '').trim()
-      if (scope !== 'all' && !match) return ok({ ok: false, code: 'match-required', scope })
-      const behavior = String(a.behavior || '').trim()
-      if (!behavior) return ok({ ok: false, code: 'behavior-required' })
-      if (behavior.length > BEHAVIOR_MAX_LEN) return ok({ ok: false, code: 'behavior-too-long', max: BEHAVIOR_MAX_LEN, got: behavior.length })
       let holder = SESSION, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); holder = sp.id; holderIdentity = pIdent(sp.identity, sp.name) }
-      const without = (behaviors.get(holder) || []).filter(b => behKey(b.scope, b.match) !== behKey(scope, match))
-      if (without.length >= BEHAVIOR_MAX_COUNT) return ok({ ok: false, code: 'too-many-behaviors', max: BEHAVIOR_MAX_COUNT })
-      behaviors.set(holder, [...without, { scope, match, behavior, set_at: new Date().toISOString() }])
-      if (PERSIST && holderIdentity) persistence.behaviors.put(holderIdentity, scope, match, behavior).catch(() => {})
-      return ok({ ok: true, scope, match, behavior, count: behaviors.get(holder).length })
+      return ok(reminders.set(holder, holderIdentity, a.scope, a.match, a.behavior))
     }
     case 'list_behaviors': {
       let holder = SESSION
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); holder = sp.id }
-      return ok({ ok: true, behaviors: behaviorList(holder) })
+      return ok({ ok: true, behaviors: reminders.list(holder) })
     }
     case 'clear_behavior': {   // omit scope to clear ALL; else clear the one (scope + match)
-      const scope = a.scope != null ? String(a.scope).trim().toLowerCase() : null
-      const match = scope && scope !== 'all' ? String(a.match || '').trim() : null
       let holder = SESSION, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); holder = sp.id; holderIdentity = pIdent(sp.identity, sp.name) }
-      const list = behaviors.get(holder) || []
-      if (!scope) {
-        behaviors.set(holder, [])
-        if (PERSIST && holderIdentity) persistence.behaviors.clear(holderIdentity).catch(() => {})
-        return ok({ ok: true, cleared: list.length })
-      }
-      const kept = list.filter(b => behKey(b.scope, b.match) !== behKey(scope, match))
-      behaviors.set(holder, kept)
-      if (PERSIST && holderIdentity) persistence.behaviors.remove(holderIdentity, scope, match).catch(() => {})
-      return ok({ ok: true, cleared: list.length - kept.length })
+      return ok(reminders.clear(holder, holderIdentity, a.scope, a.match))
     }
     default: throw new Error(`unknown tool: ${req.params.name}`)
   }
