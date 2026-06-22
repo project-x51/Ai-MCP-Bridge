@@ -13,6 +13,6 @@
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["bridge.mjs", "facets/**/*.js", "types.d.ts"],
+  "include": ["bridge.mjs", "facets/**/*.js", "lib/**/*.js", "types.d.ts"],
   "exclude": ["node_modules", "tests", "tools"]
 }

@@ -18,6 +18,10 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 
 ## Files
 - `bridge.mjs` — the mesh node + gateway/WS/trace roles + MCP stdio server (realm-agnostic core).
+- `lib/` — **pure**, shared-state-free helpers extracted from `bridge.mjs` so they're isolation-testable:
+  `topics.js` (path matching / `parseTopicRef`), `envelope.js` (`envelopeId`), `tool-schemas.js` (the
+  `tools/list` payload). Imported by `bridge.mjs`; unit-tested by `tests/test_lib_unit.mjs` (no spawn).
+- `types.d.ts` — shared shapes for JSDoc + `checkJs` (see Type-checking below).
 - `facets/` — the pluggable realm profile: `auth/ cipher/ capsigner/ identity/ config/ transport/
   discovery/ persistence/ authorizer/`, each with a `_template.js` + impl files, assembled by
   `facets/index.js`. Copy a file to add one. (`discovery` = §7 cross-host, `persistence` = §12 durable
