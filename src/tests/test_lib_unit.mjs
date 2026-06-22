@@ -98,6 +98,21 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   r.inherit(HEIR, { ...id, name: 'Heir' }, 'reviews/api', carried)
   check('reminders: inherit lands a topic reminder on the heir', r.list(HEIR).some(b => b.scope === 'topic' && b.match === 'reviews/api'))
 }
+// #32 config DEFAULT behaviours: apply to every session, overridable, tagged default:true
+{
+  const r = createReminders({ persistence: {}, persist: false })
+  r.setDefaults([{ scope: 'all', match: null, behavior: 'Summarize; ask first' }])
+  const env = { from: { session: 'host/sender', project: 'P' }, topic: 'a/b' }
+  check('default: defaultList returns the configured default', r.defaultList().length === 1 && /Summarize/.test(r.defaultList()[0].behavior))
+  const ds = r.remindersFor('host/fresh', env)   // a session with NO own behaviours still gets it
+  check('default: fires for a session with none of its own, tagged default:true', ds.length === 1 && ds[0].default === true && ds[0].scope === 'all')
+  r.set('host/own', { realm: 'default', project: 'P', user: 'u', name: 'O' }, 'all', null, 'my own rule')
+  const os = r.remindersFor('host/own', env)
+  check('default: a session OWN all-scope overrides the default', os.length === 1 && os[0].default === undefined && /my own rule/.test(os[0].behavior))
+  check('default: default all-scope still skips self-sent', r.remindersFor('host/fresh', { from: { session: 'host/fresh' }, topic: null }).length === 0)
+  r.setDefaults([{ scope: 'all', behavior: 'one' }, { scope: 'all', behavior: 'two' }])
+  check('default: setDefaults dedupes by scope+match (last wins)', r.defaultList().length === 1 && r.defaultList()[0].behavior === 'two')
+}
 
 // ---- traces module (owns the ring buffer + dashboard fan-out) ----
 {

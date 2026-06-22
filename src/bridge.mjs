@@ -68,7 +68,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.21.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.22.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -156,6 +156,7 @@ consent.setPolicy((CFG.projects && typeof CFG.projects === 'object') ? CFG.proje
 // bridge only READS config). Realm/token changes still need a restart. fs.watchFile polls — cross-platform.
 profile.config.watch(c => {
   if (c && c.projects && typeof c.projects === 'object') { consent.setPolicy(c.projects, computeOpen(c.projects)); log('project policy reloaded from config') }
+  reminders.setDefaults(defaultBehaviors(c))   // #29: default behaviour reminders are live-reloadable too
 })
 await consent.rehydrate()   // §14: durable grants survive a restart
 setInterval(() => consent.gc(), Number(process.env.AI_BRIDGE_GRANT_GC_MS) || 600000).unref()   // §14: sweep expired grants + stale pending requests
@@ -247,6 +248,17 @@ const myTopics = new Map()        // `${holder}|${role}|${patternKey}` -> {patte
 // matching). The bridge calls reminders.remindersFor(...) at delivery, .set/.clear/.list in the handlers,
 // .load on resync, and .topicBehaviors/.inherit for the #26 kept-alive handoff.
 const reminders = createReminders({ persistence, persist: PERSIST })
+// #29: bridge-wide DEFAULT behaviour reminders from config (config.behaviors.default — a string = an all-scope
+// default, or an array of {scope,match,behavior}). Applied to every session, overridable by a session's own
+// reminder for the same scope+match, tagged `default:true` on delivery. Live-reloadable; env override for tests.
+function defaultBehaviors(cfg) {
+  const out = [], d = cfg && cfg.behaviors && cfg.behaviors.default
+  if (typeof d === 'string') out.push({ scope: 'all', match: null, behavior: d })
+  else if (Array.isArray(d)) for (const x of d) if (x && x.behavior) out.push({ scope: x.scope, match: x.match, behavior: x.behavior })
+  if (process.env.AI_BRIDGE_DEFAULT_BEHAVIOR) out.push({ scope: 'all', match: null, behavior: process.env.AI_BRIDGE_DEFAULT_BEHAVIOR })
+  return out
+}
+reminders.setDefaults(defaultBehaviors(CFG))
 
 // envelopeId() (pure content hash) lives in lib/envelope.js (imported above).
 function remember(id) {
@@ -1312,7 +1324,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         await syncDurableMailbox(existing)   // §23: a returning peer also picks up out-of-band parked mail
         callerId = existing.id   // §20 resync on reattach too: hand back current topics + access + the inbox hint
         const reTopics = [...myTopics.values()].filter(e => e.holder === existing.id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: consent.reachable(existing.identity?.project), behaviors: reminders.list(existing.id) })
+        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: consent.reachable(existing.identity?.project), behaviors: reminders.list(existing.id), default_behaviors: reminders.defaultList() })
       }
       let parent = null
       if (a.parent) {
@@ -1381,7 +1393,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // §20 resync: hand back the identity's current topics (owned + subscribed, post-rehydration) and the
       // projects it may reach — so a reconnecting/compacted session relearns its state without re-attaching.
       const myTopicsNow = [...myTopics.values()].filter(e => e.holder === id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: consent.reachable(ident.project), behaviors: reminders.list(id) })
+      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: consent.reachable(ident.project), behaviors: reminders.list(id), default_behaviors: reminders.defaultList() })
     }
     case 'deregister': {
       const { sp, err } = authSub(String(a.peer_id || ''), a.secret)

@@ -711,6 +711,17 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.22):** *config-level default behaviour reminder (#32)* — extends #29 with a bridge-wide DEFAULT
+  reminder set in **`config.behaviors.default`** (a string = an `all`-scope default; or an array of
+  `{scope,match,behavior}`). It's attached to **every** session's delivered messages — even one that never
+  called `set_behavior` — **tagged `default:true`**, so an operator can make all sessions e.g. *"Summarize but
+  don't act without user permission"* by default. A session's OWN reminder for the same `scope`+`match`
+  **overrides** the default (the default then doesn't fire). Runtime-only (not persisted; config is the source
+  of truth) and **live-reloadable** via the ConfigSource watch; `register_self` advertises the active defaults
+  as `default_behaviors`. Env `AI_BRIDGE_DEFAULT_BEHAVIOR` adds/overrides an `all`-scope default (used by the
+  test). Lives in `lib/reminders.js` (`setDefaults`/`defaultList`, deduped by scope+match). Verified by
+  `test_lib_unit` (fires for a session with none of its own, override, self-skip, dedupe) + a live
+  `test_default_behavior_live`. Suite 448 across 21.
 - **Built (v1.21):** *per-session behaviour reminders (#29)* — a session registers short 'how to behave when a
   message arrives' prompts scoped to a **topic** it owns / a **host** / a **project** / a **subscription**
   pattern / **all**, via `set_behavior {scope, match, behavior}` (+ `list_behaviors` / `clear_behavior`). The

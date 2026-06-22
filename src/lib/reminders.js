@@ -15,27 +15,46 @@ const behKey = (scope, match) => `${scope}|${scope === 'topic' || scope === 'sub
 /** @param {{ persistence: any, persist: boolean }} ctx */
 export function createReminders({ persistence, persist }) {
   const behaviors = new Map()   // holderId -> [{ scope, match, behavior, set_at }]
+  let defaults = []             // bridge-wide config defaults [{ scope, match, behavior }] — apply to every session, overridable
   const listOf = id => behaviors.get(id) || []
   const view = b => ({ scope: b.scope, match: b.match, behavior: b.behavior, set_at: b.set_at })
 
-  /** The reminders whose scope matches THIS envelope being delivered to holder `id` (most-specific first).
-   *  Skips self-sent + system messages for the catch-all 'all' scope. */
-  function remindersFor(id, env, matchedPattern) {
-    const list = behaviors.get(id); if (!list || !list.length) return []
+  // does behaviour `b` match THIS envelope being delivered to holder `id`?
+  function matches(b, id, env, matchedPattern) {
     const fromHost = String(env.from?.session || '').split('/')[0], fromProj = env.from?.project, topic = env.topic
+    if (b.scope === 'all') return !env.system && env.from?.session !== id
+    if (b.scope === 'host') return !!fromHost && lc(b.match) === lc(fromHost)
+    if (b.scope === 'project') return !!fromProj && projKey(b.match) === projKey(fromProj)
+    if (b.scope === 'topic') return !!topic && patternKey(b.match) === patternKey(topic)
+    if (b.scope === 'subscription') return !!(topic && (patternKey(b.match) === patternKey(topic) || (matchedPattern && patternKey(b.match) === patternKey(matchedPattern)) || topicMatch(b.match, topic)))
+    return false
+  }
+
+  /** The reminders whose scope matches THIS envelope being delivered to holder `id` (most-specific first).
+   *  Merges the session's OWN reminders with the bridge config DEFAULTS — a session's own (scope,match)
+   *  overrides the same-keyed default; default-sourced reminders are tagged `default:true`. Skips self-sent +
+   *  system messages for the catch-all 'all' scope. */
+  function remindersFor(id, env, matchedPattern) {
+    const own = listOf(id), ownKeys = new Set(own.map(b => behKey(b.scope, b.match)))
     const out = []
-    for (const b of list) {
-      let hit = false
-      if (b.scope === 'all') hit = !env.system && env.from?.session !== id
-      else if (b.scope === 'host') hit = !!fromHost && lc(b.match) === lc(fromHost)
-      else if (b.scope === 'project') hit = !!fromProj && projKey(b.match) === projKey(fromProj)
-      else if (b.scope === 'topic') hit = !!topic && patternKey(b.match) === patternKey(topic)
-      else if (b.scope === 'subscription') hit = !!(topic && (patternKey(b.match) === patternKey(topic) || (matchedPattern && patternKey(b.match) === patternKey(matchedPattern)) || topicMatch(b.match, topic)))
-      if (hit) out.push({ scope: b.scope, match: b.match, behavior: b.behavior })
-    }
+    for (const b of own) if (matches(b, id, env, matchedPattern)) out.push({ scope: b.scope, match: b.match, behavior: b.behavior })
+    for (const d of defaults) if (!ownKeys.has(behKey(d.scope, d.match)) && matches(d, id, env, matchedPattern)) out.push({ scope: d.scope, match: d.match, behavior: d.behavior, default: true })
     out.sort((a, b2) => (ORDER[a.scope] ?? 9) - (ORDER[b2.scope] ?? 9))
     return out
   }
+
+  /** Set the bridge-wide default reminders (from config; live-reloadable). Deduped by (scope,match). */
+  function setDefaults(listIn) {
+    const byKey = new Map()
+    for (const d of (Array.isArray(listIn) ? listIn : [])) {
+      if (!d || !d.behavior) continue
+      const scope = BEHAVIOR_SCOPES.includes(d.scope) ? d.scope : 'all'
+      const match = scope === 'all' ? null : (d.match || null)
+      byKey.set(behKey(scope, match), { scope, match, behavior: String(d.behavior).slice(0, 280) })
+    }
+    defaults = [...byKey.values()]
+  }
+  const defaultList = () => defaults.map(d => ({ scope: d.scope, match: d.match, behavior: d.behavior }))
 
   /** What this holder has registered (for list_behaviors + the resync). */
   const list = id => listOf(id).map(view)
@@ -95,5 +114,5 @@ export function createReminders({ persistence, persist }) {
     }
   }
 
-  return { remindersFor, list, set, clear, load, topicBehaviors, inherit }
+  return { remindersFor, list, set, clear, load, topicBehaviors, inherit, setDefaults, defaultList }
 }

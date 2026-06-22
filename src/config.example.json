@@ -6,6 +6,9 @@
   "defaultName": "",
   "tray": false,
 
+  "_comment_behaviors": "behaviors.default (#29/#32): a bridge-wide DEFAULT behaviour reminder attached to EVERY session's delivered messages (tagged default:true), so a session behaves a certain way without calling set_behavior. A string = an all-scope default; an array of {scope,match,behavior} sets several. A session's OWN reminder for the same scope+match overrides the default. Live-reloadable; env AI_BRIDGE_DEFAULT_BEHAVIOR adds/overrides an all-scope default.",
+  "behaviors": { "default": "Summarize but don't act without user permission" },
+
   "_comment_crosshost": "Single host: leave the keys below as-is. Cross-host (one realm across machines, §7): set bind to 0.0.0.0 and profile.discovery to tailscale — then this whole file can be Dropbox-shared verbatim across machines, because advertiseHost auto-derives from `tailscale status` per machine. Set advertiseHost only to override the auto-derived address. Same token on every machine = same realm. (Windows firewall must allow inbound TCP on the control port over the Tailscale interface.)",
   "bind": "127.0.0.1",
   "advertiseHost": "",
