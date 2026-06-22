@@ -22,9 +22,10 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `tests/test_lib_unit.mjs`). **Pure** helpers: `topics.js` (path matching / `parseTopicRef`), `envelope.js`
   (`envelopeId`), `keys.js` (`lc` / `projKey` canonicalisers), `tool-schemas.js` (the `tools/list` payload).
   **Encapsulated stateful modules** that OWN their data behind an API (bridge.mjs calls the API, never the
-  Maps): `consent.js` (runtime grants + pending requests; `mayInitiate`/`allow`/`revoke`/…) and `reminders.js`
-  (#29 per-session behaviours; `remindersFor`/`set`/`clear`/…). The bridge core (handlers, routing, delivery,
-  gateway) deliberately stays in `bridge.mjs`.
+  Maps): `consent.js` (runtime grants + pending requests; `mayInitiate`/`allow`/`revoke`/…), `reminders.js`
+  (#29 per-session behaviours; `remindersFor`/`set`/`clear`/…), and `traces.js` (the observation-plane ring
+  buffer + dashboard fan-out; `collect`/`history`). The bridge core (handlers, routing, delivery, gateway)
+  deliberately stays in `bridge.mjs`.
 - `types.d.ts` — shared shapes for JSDoc + `checkJs` (see Type-checking below).
 - `facets/` — the pluggable realm profile: `auth/ cipher/ capsigner/ identity/ config/ transport/
   discovery/ persistence/ authorizer/`, each with a `_template.js` + impl files, assembled by

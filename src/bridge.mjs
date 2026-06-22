@@ -27,6 +27,7 @@ import { TOOLS } from './lib/tool-schemas.js'
 import { lc, projKey } from './lib/keys.js'
 import { createConsent, parseTtlMin } from './lib/consent.js'
 import { createReminders } from './lib/reminders.js'
+import { createTraces } from './lib/traces.js'
 
 // ---------------------------------------------------------------- config / identity
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -227,9 +228,11 @@ let gatewayId = null             // session id of the current gateway (both role
 
 const inbox = []                  // process inbox: delivered envelopes (cursor = index)
 const seen = new Set()            // envelope dedupe (LRU-ish)
-const traceRing = []              // gateway: recent traces for late dashboards
 const followers = new Map()       // gateway: session -> control socket
-const leaves = new Set()          // gateway: ws clients
+const leaves = new Set()          // gateway: ws clients (dashboards + page leaves)
+// fan a JSON string out to every connected dashboard (the observation sink) — shared by traces + persistence push
+const dashSend = msg => { for (const ws of leaves) if (ws.kind === 'dashboard' && ws.readyState === 1) { try { ws.send(msg) } catch {} } }
+const traces = createTraces({ broadcast: dashSend })   // owns the recent-traces ring + fan-out (lib/traces.js)
 
 // sub-peers (conversations sharing this stdio: Cowork sessions, subagents)
 const subpeers = new Map()        // id -> {id, name, secretHash, parent, kind:'subpeer', created, last_seen, ttl_ms, mode}
@@ -265,14 +268,14 @@ function clientKind(name) {
 const pendingTraces = []
 function emitTraceRaw(trace) {
   const tr = { t: 'TRACE', trace: { ts: new Date().toISOString(), session: SESSION, ...trace } }
-  if (role === 'gateway') collectTrace(tr.trace)
+  if (role === 'gateway') traces.collect(tr.trace)
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, tr)
   else { pendingTraces.push(tr); if (pendingTraces.length > 20) pendingTraces.shift() }
 }
 function flushPendingTraces() {
   while (pendingTraces.length) {
     const tr = pendingTraces.shift()
-    if (role === 'gateway') collectTrace(tr.trace)
+    if (role === 'gateway') traces.collect(tr.trace)
     else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, tr)
     else { pendingTraces.unshift(tr); break }
   }
@@ -295,11 +298,7 @@ function emitTrace(dir, env, note) {
     topic_icon: env.topic ? iconOf(env.topic, env.from?.project || 'unclassified') : null,
     verb: env.verb || null, dir, size: (env.body || '').length, note: note || null })
 }
-function collectTrace(trace) {
-  traceRing.push(trace); if (traceRing.length > 200) traceRing.shift()
-  const msg = JSON.stringify({ type: 'trace', trace })
-  for (const ws of leaves) if (ws.kind === 'dashboard' && ws.readyState === 1) { try { ws.send(msg) } catch {} }
-}
+// trace collection (the ring + dashboard fan-out) lives in lib/traces.js — emit here, collect there.
 
 // ---------------------------------------------------------------- sub-peer machinery
 function isLocalSubId(id) { return typeof id === 'string' && id.startsWith(SESSION + '/') }
@@ -915,7 +914,7 @@ async function pushPersistence(target) {
   let snap; try { snap = await persistence.snapshot() } catch { return }
   const msg = JSON.stringify({ type: 'persistence', snapshot: snap })
   if (target) { if (target.readyState === 1) { try { target.send(msg) } catch {} } ; return }
-  for (const ws of leaves) if (ws.kind === 'dashboard' && ws.readyState === 1) { try { ws.send(msg) } catch {} }
+  dashSend(msg)
 }
 setInterval(() => { for (const ws of leaves) { if (ws.kind === 'dashboard' && ws.readyState === 1) { pushPersistence(); break } } },
   Number(process.env.AI_BRIDGE_DASH_PERSIST_MS) || 5000).unref()   // live-refresh the persistence view while a dashboard watches
@@ -1062,7 +1061,7 @@ function becomeGateway(server) {
       } else if (f.t === 'SET_CLIENT') {
         const r = roster.get(f.session); if (r) { r.client = f.client || null; r.client_kind = clientKind(f.client); broadcastRoster() }
       } else if (f.t === 'TRACE') {
-        collectTrace(f.trace)
+        traces.collect(f.trace)
       } else if (f.t === 'PAGE_MSG') {                       // follower forwarding an envelope to a page leaf
         if (f.env && String(f.env.to || '').startsWith('page:')) deliverPage(f.env)
       } else if (f.t === 'CONNECT') {                        // cross-host ingress: splice to local target
@@ -1135,7 +1134,7 @@ function becomeGateway(server) {
           log(`${ws.kind} connected: ${m.page_kind || ws.kind} "${m.title || ''}" (${ws.instance})`)
           if (ws.kind === 'page') emitTraceRaw({ dir: 'con', verb: 'connect', from: `page:${ws.instance}`, from_name: m.title || m.page_kind || 'page', to: SESSION, size: 0, note: `page joined (${m.page_kind || 'page'})`, envelope_id: null })
           ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, profile: profile.names, capabilities: CAPS, realm: REALM, ...rosterFor(ws) }))
-          if (ws.kind === 'dashboard') { ws.send(JSON.stringify({ type: 'trace_history', traces: traceRing })); pushPersistence(ws) }
+          if (ws.kind === 'dashboard') { ws.send(JSON.stringify({ type: 'trace_history', traces: traces.history() })); pushPersistence(ws) }
           broadcastRoster()
         } else if (m.type === 'set_alias' && ws.kind === 'dashboard') {
           if (m.scope === 'host') { ALIASES[m.target] = m.alias; persistAliases() }

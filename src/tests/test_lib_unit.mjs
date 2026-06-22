@@ -6,6 +6,7 @@ import { envelopeId } from '../lib/envelope.js'
 import { TOOLS } from '../lib/tool-schemas.js'
 import { createConsent, parseTtlMin } from '../lib/consent.js'
 import { createReminders } from '../lib/reminders.js'
+import { createTraces } from '../lib/traces.js'
 let pass = 0, fail = 0
 const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
 
@@ -96,6 +97,18 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   const HEIR = 'host/heir'
   r.inherit(HEIR, { ...id, name: 'Heir' }, 'reviews/api', carried)
   check('reminders: inherit lands a topic reminder on the heir', r.list(HEIR).some(b => b.scope === 'topic' && b.match === 'reviews/api'))
+}
+
+// ---- traces module (owns the ring buffer + dashboard fan-out) ----
+{
+  const sent = []
+  const t = createTraces({ broadcast: m => sent.push(m), cap: 3 })
+  t.collect({ verb: 'a' })
+  check('traces: collect broadcasts a {type:trace} message', sent.length === 1 && JSON.parse(sent[0]).type === 'trace' && JSON.parse(sent[0]).trace.verb === 'a')
+  check('traces: history holds the collected trace', t.history().length === 1 && t.history()[0].verb === 'a')
+  t.collect({ verb: 'b' }); t.collect({ verb: 'c' }); t.collect({ verb: 'd' })
+  check('traces: ring is capped (oldest dropped)', t.history().length === 3 && t.history().map(x => x.verb).join('') === 'bcd')
+  check('traces: history is a copy (mutating it does not corrupt the ring)', (() => { const h = t.history(); h.push({ verb: 'x' }); return t.history().length === 3 })())
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
