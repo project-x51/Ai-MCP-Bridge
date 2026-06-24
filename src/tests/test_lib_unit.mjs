@@ -7,6 +7,7 @@ import { TOOLS } from '../lib/tool-schemas.js'
 import { createConsent, parseTtlMin } from '../lib/consent.js'
 import { createReminders } from '../lib/reminders.js'
 import { createTraces } from '../lib/traces.js'
+import { create as createEgress } from '../services/egress.js'
 let pass = 0, fail = 0
 const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
 
@@ -124,6 +125,36 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   t.collect({ verb: 'b' }); t.collect({ verb: 'c' }); t.collect({ verb: 'd' })
   check('traces: ring is capped (oldest dropped)', t.history().length === 3 && t.history().map(x => x.verb).join('') === 'bcd')
   check('traces: history is a copy (mutating it does not corrupt the ring)', (() => { const h = t.history(); h.push({ verb: 'x' }); return t.history().length === 3 })())
+}
+
+// ---- egress service (#33): named-backend HTTP proxy with project allowlist + origin containment (fake fetch) ----
+{
+  const fakeRes = (status, body, ct = 'text/plain') => ({
+    ok: status >= 200 && status < 300, status, statusText: 'X',
+    headers: { _h: { 'content-type': ct }, get(k) { return this._h[k.toLowerCase()] }, forEach(fn) { for (const [k, v] of Object.entries(this._h)) fn(v, k) } },
+    async arrayBuffer() { return new TextEncoder().encode(body).buffer },
+  })
+  let last = null
+  const fakeFetch = async (url, opts) => { last = { url, opts }; return fakeRes(200, 'ok ' + url) }
+  const e = createEgress({ fetchImpl: fakeFetch, config: { backends: { be: { base: 'http://localhost:8080', methods: ['GET', 'POST'], projects: ['ops'], allowHeaders: ['x-test'], headers: { 'x-api-key': 'secret' } } } } })
+  const call = (a, project = 'ops') => e.handle('http_request', a, { project, holder: 'h', name: 'H' })
+  check('egress: exposes http_request tool', e.tools.some(t => t.name === 'http_request'))
+  check('egress: unknown backend', (await call({ backend: 'nope' })).code === 'unknown-backend')
+  check('egress: project not allowed -> forbidden', (await call({ backend: 'be' }, 'other')).code === 'forbidden')
+  check('egress: project allowlist is case-insensitive', (await call({ backend: 'be', path: '/x' }, 'OPS')).ok === true)
+  check('egress: method not allowed', (await call({ backend: 'be', method: 'DELETE' })).code === 'method-not-allowed')
+  check('egress: absolute-URL path rejected', (await call({ backend: 'be', path: 'http://evil/x' })).code === 'bad-path')
+  check('egress: //host path rejected', (await call({ backend: 'be', path: '//evil.com/x' })).code === 'bad-path')
+  check('egress: ".." escape rejected', (await call({ backend: 'be', path: '/a/../../x' })).code === 'bad-path')
+  const r = await call({ backend: 'be', path: '/foo', query: { q: '1' }, headers: { 'x-test': '1', 'x-evil': '2' } })
+  check('egress: GET ok + URL contained to base origin', r.ok && last.url === 'http://localhost:8080/foo?q=1')
+  check('egress: caller headers filtered to allowHeaders', last.opts.headers['x-test'] === '1' && !('x-evil' in last.opts.headers))
+  check('egress: server-side header injected and NOT echoed', last.opts.headers['x-api-key'] === 'secret' && !JSON.stringify(r).includes('x-api-key'))
+  const rp = await call({ backend: 'be', method: 'POST', path: '/p', json: { a: 1 } })
+  check('egress: POST json sets body + content-type', rp.ok && last.opts.method === 'POST' && last.opts.body === '{"a":1}' && last.opts.headers['content-type'] === 'application/json')
+  const e2 = createEgress({ fetchImpl: async () => fakeRes(200, 'PNGDATA', 'image/png'), config: { backends: { be: { base: 'http://localhost:8080', methods: ['GET'], projects: ['ops'] } } } })
+  const rb = await e2.handle('http_request', { backend: 'be', path: '/img' }, { project: 'ops' })
+  check('egress: binary response returned as base64', rb.encoding === 'base64' && typeof rb.body === 'string')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

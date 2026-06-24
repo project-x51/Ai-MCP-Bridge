@@ -711,6 +711,22 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.23):** *services layer + HTTP egress (#33; see docs/web-edge-node.md)* — introduces an opt-in
+  **services** layer: in-process capability modules in `src/services/`, loaded only when configured
+  (`config.services.<name>`), each contributing MCP tools (merged into `tools/list`, routed to its `handle()`)
+  and live-reloadable. A capability that isn't opened has **no surface**. First inhabitant: **egress** — an
+  **`http_request`** tool letting a session GET/POST to **operator-declared backends only** (no arbitrary
+  URLs), so cowork/sandboxed sessions can reach a local dev API (e.g. a GCloud emulator). Safety: a backend
+  declares `base`, allowed `methods`, a **required `projects` allowlist** (no `*`), `allowHeaders` (caller-
+  settable request headers), `headers` (injected **server-side**, e.g. auth — never echoed), `timeoutMs`,
+  `maxResponseBytes`, `followRedirects`. The **core SSRF defense**: the final URL is built from `base + path`
+  and its **origin must equal the backend's** (`new URL(...).origin` check) — `//host`, absolute URLs, and
+  `..` escapes are rejected, so a session can't reach the metadata endpoint or any other local port. Runs in
+  the bridge process the caller is attached to (no port); env `AI_BRIDGE_EGRESS_BACKENDS` overrides for
+  automation. This is step 1 of the **web-edge-node** roadmap (the static file server #30 becomes the first
+  out-of-process brick later). Verified by `test_lib_unit` (13: backend/project/method gates, origin
+  containment, header filter + server-side inject, base64) + a live `test_http_egress_live` (real MCP → bridge
+  → echo server). Suite 470 across 22.
 - **Built (v1.22):** *config-level default behaviour reminder (#32)* — extends #29 with a bridge-wide DEFAULT
   reminder set in **`config.behaviors.default`** (a string = an `all`-scope default; or an array of
   `{scope,match,behavior}`). It's attached to **every** session's delivered messages — even one that never

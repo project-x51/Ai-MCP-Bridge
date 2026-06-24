@@ -28,6 +28,7 @@ import { lc, projKey } from './lib/keys.js'
 import { createConsent, parseTtlMin } from './lib/consent.js'
 import { createReminders } from './lib/reminders.js'
 import { createTraces } from './lib/traces.js'
+import { create as createEgress } from './services/egress.js'
 
 // ---------------------------------------------------------------- config / identity
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -68,7 +69,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.22.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.23.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -311,6 +312,29 @@ function emitTrace(dir, env, note) {
     verb: env.verb || null, dir, size: (env.body || '').length, note: note || null })
 }
 // trace collection (the ring + dashboard fan-out) lives in lib/traces.js — emit here, collect there.
+
+// ---------------------------------------------------------------- services layer (#33; docs/web-edge-node.md)
+// Opt-in IN-PROCESS capability modules. A service is loaded only when configured (config.services.<name>) —
+// an unopened capability has no surface. Each contributes MCP tools (merged into tools/list, routed to its
+// handle()) and is live-reloadable via setConfig. First inhabitant: egress (the http_request proxy).
+const serviceTools = []                     // schemas contributed by services -> tools/list
+const serviceHandlers = new Map()           // toolName -> service instance
+function loadService(svc) {
+  if (!svc) return
+  for (const t of (svc.tools || [])) { serviceTools.push(t); serviceHandlers.set(t.name, svc) }
+}
+// egress config = config.services.egress, with an optional env override (AI_BRIDGE_EGRESS_BACKENDS = JSON
+// backends map) for tests/automation; either present => the service (and its http_request tool) exists.
+function egressConfig(cfg) {
+  const c = (cfg && cfg.services && cfg.services.egress) ? { ...cfg.services.egress } : null
+  const envB = process.env.AI_BRIDGE_EGRESS_BACKENDS
+  if (envB) { try { return { backends: { ...((c && c.backends) || {}), ...JSON.parse(envB) } } } catch (e) { log('AI_BRIDGE_EGRESS_BACKENDS parse failed', e.message) } }
+  return c
+}
+const egc0 = egressConfig(CFG)
+const egress = egc0 ? createEgress({ config: egc0, log, trace: emitTraceRaw }) : null
+loadService(egress)
+if (egress) profile.config.watch(c => egress.setConfig(egressConfig(c)))   // live-reload backends
 
 // ---------------------------------------------------------------- sub-peer machinery
 function isLocalSubId(id) { return typeof id === 'string' && id.startsWith(SESSION + '/') }
@@ -1282,7 +1306,7 @@ const mcp = new Server(
 
 // TOOLS schema array (the tools/list payload) lives in lib/tool-schemas.js (imported above).
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...TOOLS, ...serviceTools] }))   // core tools + any loaded service tools
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const a = req.params.arguments || {}
   let callerId = null   // the calling sub-peer (if it authenticates); drives the inbox hint, below
@@ -1720,7 +1744,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); holder = sp.id; holderIdentity = pIdent(sp.identity, sp.name) }
       return ok(reminders.clear(holder, holderIdentity, a.scope, a.match))
     }
-    default: throw new Error(`unknown tool: ${req.params.name}`)
+    default: {
+      // #33 services layer: route a service-contributed tool to its handle(), with the caller's resolved
+      // identity (project) so the service can enforce its own consent (e.g. egress's per-backend allowlist).
+      const svc = serviceHandlers.get(req.params.name)
+      if (svc) {
+        let caller = { project: PROC_IDENT?.project || 'unclassified', holder: SESSION, name: NAME }
+        if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); caller = { project: sp.identity?.project || 'unclassified', holder: sp.id, name: sp.name } }
+        return ok(await svc.handle(req.params.name, a, caller))
+      }
+      throw new Error(`unknown tool: ${req.params.name}`)
+    }
   }
 })
 

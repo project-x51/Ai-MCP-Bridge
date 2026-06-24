@@ -6,6 +6,15 @@
   "defaultName": "",
   "tray": false,
 
+  "_comment_services": "services (docs/web-edge-node.md): OPT-IN in-process capability modules — a service is loaded only when its config key is present, so an unopened capability has no surface. egress (#33) gives sessions an http_request tool that proxies to NAMED backends only (no arbitrary URLs): each backend declares base, methods, a REQUIRED projects allowlist (no '*'), allowHeaders (the request headers a caller may set), headers (injected server-side e.g. auth, never returned), timeoutMs, maxResponseBytes, followRedirects. The final URL is contained to the backend's origin (path can't escape). Caller's project must be in the backend's allowlist. Live-reloadable; env AI_BRIDGE_EGRESS_BACKENDS (JSON backends map) overrides/adds for automation.",
+  "services": {
+    "egress": {
+      "backends": {
+        "example-dev": { "base": "http://localhost:8080", "methods": ["GET", "POST"], "projects": ["MyProject"], "allowHeaders": ["accept", "content-type"], "headers": {}, "timeoutMs": 15000, "maxResponseBytes": "8MB", "followRedirects": false }
+      }
+    }
+  },
+
   "_comment_behaviors": "behaviors.default (#29/#32): a bridge-wide DEFAULT behaviour reminder attached to EVERY session's delivered messages (tagged default:true), so a session behaves a certain way without calling set_behavior. A string = an all-scope default; an array of {scope,match,behavior} sets several. A session's OWN reminder for the same scope+match overrides the default. Live-reloadable; env AI_BRIDGE_DEFAULT_BEHAVIOR adds/overrides an all-scope default.",
   "behaviors": { "default": "Summarize but don't act without user permission" },
 
