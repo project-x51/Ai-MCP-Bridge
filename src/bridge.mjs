@@ -69,7 +69,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.23.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.23.1'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -1722,7 +1722,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const start = Math.min(Math.max(cur - q.base, 0), q.items.length)
         const next = q.base + q.items.length
         q.served = Math.max(q.served || 0, next)
-        if (PERSIST && sp.identity) { const pid = pIdent(sp.identity, sp.name); for (const m of q.items.slice(0, start)) persistence.mailbox.ack(pid, m.id).catch(() => {}) }   // §12: consumed (cursor moved past) -> drop the durable copy
+        // §12/#34: drop the durable copy ON SERVE (the messages being returned now), NOT on the next cursor
+        // advance — else a session that reads-then-reattaches (or a fresh register after a restart, which starts
+        // a queue at base 0) re-drains the still-undeleted copies and the same mail is redelivered every time.
+        if (PERSIST && sp.identity) { const pid = pIdent(sp.identity, sp.name); for (const m of q.items.slice(start)) persistence.mailbox.ack(pid, m.id).catch(() => {}) }
         return ok({ peer_id: sp.id, queue_epoch: q.epoch, next_cursor: next,
           messages: q.items.slice(start).map(e => { const v = decryptedView(e), r = reminders.remindersFor(sp.id, e); return r.length ? { ...v, reminders: r } : v }) })   // #29: attach scoped behaviour reminders
       }

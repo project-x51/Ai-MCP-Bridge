@@ -711,6 +711,18 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.23.1):** *fix: durable mail redelivered on every re-register (#34)* — the inbox poll acked a
+  message's durable copy only once the cursor moved **past** it (`q.items.slice(0, start)` — the messages
+  *before* the cursor), i.e. lazily on the *next* poll. On a fresh register the queue restarts at base 0, so the
+  first poll (cursor 0) had `start = 0` and acked **nothing**, even though it *returned* the mail. A session that
+  read-then-reattached — or re-registered after a bridge restart (new session id ⇒ fresh queue ⇒ re-drain of the
+  durable mailbox) — re-surfaced the same already-read messages every time. Fix: ack **on serve** — the poll now
+  drops the durable copy of the messages it is **returning now** (`q.items.slice(start)`), so each parked message
+  is acked exactly when first delivered and a later re-register won't re-pull it. The park guarantee is
+  preserved: a message stays durable until actually read (served in a poll). Residual (noted, not fixed): a
+  pure push-only client that **never** polls won't ack its live-delivered durable copies — most clients poll via
+  the inbox hint, so this is rare. Verified by `test_parked_live` (new assertion: the durable mailbox is empty
+  the instant after a cursor-0 serve — fails on the old deferred-ack code). Suite 471 across 22.
 - **Built (v1.23):** *services layer + HTTP egress (#33; see docs/web-edge-node.md)* — introduces an opt-in
   **services** layer: in-process capability modules in `src/services/`, loaded only when configured
   (`config.services.<name>`), each contributing MCP tools (merged into `tools/list`, routed to its `handle()`)

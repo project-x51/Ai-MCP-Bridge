@@ -42,6 +42,12 @@ const in1 = await call('inbox', { for: 'Owner', secret: 'os', cursor: 0 })
 check('baseline: live message delivered once (no drain dup)', in1.messages.length === 1 && in1.messages.filter(m => m.body === 'live-one').length === 1, JSON.stringify(in1.messages.map(m => m.body)))
 const cur1 = in1.next_cursor
 
+// --- #34: the durable copy of a message is dropped ON SERVE — even on the FIRST poll at cursor 0 — not deferred
+// to the next cursor advance. The old "ack everything BEFORE the cursor" deferred this one poll, so a session
+// that read-then-reattached (or re-registered after a restart, queue back at base 0) re-drained already-read mail
+// every time. Assert the durable mailbox is empty the instant after live-one is served at cursor 0.
+check('#34: a served message is acked ON SERVE (no deferral past the cursor)', (await store.mailbox.drain(ownerIdentity)).length === 0, 'still on disk after serve: ' + JSON.stringify((await store.mailbox.drain(ownerIdentity)).map(p => p.envId)))
+
 // --- THE BUG: park a message out-of-band while Owner is LIVE, then a PLAIN poll must surface it
 await parkOutOfBand('env_oob1', 'out-of-band-1')
 const in2 = await call('inbox', { for: 'Owner', secret: 'os', cursor: cur1 })
