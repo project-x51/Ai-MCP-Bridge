@@ -8,6 +8,7 @@ import { createConsent, parseTtlMin } from '../lib/consent.js'
 import { createReminders } from '../lib/reminders.js'
 import { createTraces } from '../lib/traces.js'
 import { create as createEgress } from '../services/egress.js'
+import { hostOf } from '../facets/discovery/tailscale.js'
 let pass = 0, fail = 0
 const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
 
@@ -156,6 +157,14 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   const rb = await e2.handle('http_request', { backend: 'be', path: '/img' }, { project: 'ops' })
   check('egress: binary response returned as base64', rb.encoding === 'base64' && typeof rb.body === 'string')
 }
+
+// #35: tailscale hostOf returns ONLY tailnet-routable forms; a partial `tailscale status` (node up, no IP
+// assigned yet) must yield null so advertise-derivation retries instead of latching the bare hostname — which
+// would sort above peer IPs and break the "smaller ADVERTISE:PORT dials" tie-break (nobody dials).
+check('hostOf prefers the tailnet IP', hostOf({ TailscaleIPs: ['100.64.0.1'], DNSName: 'x.ts.net.', HostName: 'X' }) === '100.64.0.1')
+check('hostOf falls back to MagicDNS FQDN (trailing dot stripped)', hostOf({ TailscaleIPs: [], DNSName: 'little-001.tail.ts.net.', HostName: 'LITTLE-001' }) === 'little-001.tail.ts.net')
+check('hostOf returns null on a partial status (HostName only) — no bare-hostname latch (#35)', hostOf({ TailscaleIPs: [], DNSName: '', HostName: 'ROBIN-Z790' }) === null)
+check('hostOf null for empty/absent node', hostOf(null) === null && hostOf({}) === null)
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

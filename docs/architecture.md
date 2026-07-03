@@ -711,6 +711,23 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.23.2):** *fix: cross-host mesh splits when a hub starts before Tailscale is ready (#35)* — the
+  advertise host (the one per-machine value that can't live in a shared config) auto-derives from the discovery
+  backend (`tailscale status` Self). It was derived **once, at gateway startup**; a hub that started before
+  Tailscale had assigned this node its tailnet IP saw a *partial* status (Self has `HostName` but no
+  `TailscaleIPs`/`DNSName`), and `hostOf()` fell back to the bare hostname (e.g. `ROBIN-Z790`). That value never
+  corrected. Because the deterministic dial tie-break is *only the lexicographically smaller `ADVERTISE:PORT`
+  dials*, a hostname (`'R'`=0x52) sorts **above** every peer IP (`'1'`=0x31), so the hub decided it should never
+  dial out; IP-addressed peers, comparing IP-vs-IP, also declined — split brain, no link forms, silently.
+  Symptom: worked on first boot (Tailscale up), dead after any restart that beat Tailscale's readiness. Fix,
+  three parts: (1) `hostOf()` returns **only tailnet-routable** forms (WireGuard IP or MagicDNS FQDN), never the
+  bare `HostName`, so a partial status yields `null`; (2) advertise derivation is **retried every
+  `discoveryTick`** (not one-shot) until a routable address is in hand; (3) `discoveryTick` **refuses to run the
+  dial tie-break** while the advertise host is still un-derived (loopback/hostname). Backends without a
+  `selfHost` (seeds/none) and operator-pinned/bind-IP advertise addresses are treated as ready immediately, so
+  the federation/multihost paths are unchanged. Verified by `test_lib_unit` (`hostOf`: IP-preferred, MagicDNS
+  fallback, partial-status→null) + the unchanged cross-host `test_federation`/`test_dashboard_multihost`. Suite
+  475 across 22.
 - **Built (v1.23.1):** *fix: durable mail redelivered on every re-register (#34)* — the inbox poll acked a
   message's durable copy only once the cursor moved **past** it (`q.items.slice(0, start)` — the messages
   *before* the cursor), i.e. lazily on the *next* poll. On a fresh register the queue restarts at base 0, so the

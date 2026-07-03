@@ -69,7 +69,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.23.1'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.23.2'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -1026,8 +1026,22 @@ function connectToPeer(host, port) {
   sock.on('close', () => { peerByAddr.delete(addr); if (peerSession && peerGw.get(peerSession)?.sock === sock) dropPeer(peerSession) })
   sock.on('error', () => {})
 }
+// §7/#35: the advertise host is the one per-machine value that can't live in a shared config, so when left
+// auto (no advertiseHost, bind 0.0.0.0 ⇒ ADVERTISE starts as loopback) we derive it from the discovery
+// backend (tailscale Self). That derivation must be ROBUST to a backend that isn't ready yet: a bridge that
+// starts before Tailscale has assigned this node its tailnet IP would otherwise latch the bare hostname,
+// which sorts ABOVE peer IPs and permanently breaks the "smaller ADVERTISE:PORT dials" tie-break (nobody
+// dials ⇒ split brain). So we RETRY every tick and refuse to dial until a routable address is in hand.
+const CAN_DERIVE = ADVERTISE_AUTO && ADVERTISE === HOST && !!(discovery && discovery.selfHost)
+let advertiseReady = !CAN_DERIVE   // backends that can't/needn't derive (seeds/none, pinned, bind-IP) are ready now
+async function deriveAdvertise() {
+  if (advertiseReady) return
+  try { const h = await discovery.selfHost(); if (h && h !== HOST) { ADVERTISE = h; advertiseReady = true; log(`advertise host auto-derived: ${h}`) } } catch {}
+}
 async function discoveryTick() {
   if (role !== 'gateway') return
+  await deriveAdvertise()
+  if (!advertiseReady) return   // #35: don't run the dial tie-break on an un-derived (loopback/hostname) advertise
   let cands = []
   try { cands = await discovery.candidates() } catch {}
   const me = selfAddr()
@@ -1040,12 +1054,10 @@ async function discoveryTick() {
 }
 let discoveryTimer = null
 async function startDiscovery() {
-  // auto-derive the advertise host (the one per-machine value that can't live in a shared config): if it
-  // was left as loopback and the backend knows this machine's address (tailscale Self), adopt it.
-  if (ADVERTISE_AUTO && ADVERTISE === HOST && discovery.selfHost) {
-    try { const h = await discovery.selfHost(); if (h) { ADVERTISE = h; log(`advertise host auto-derived: ${h}`) } } catch {}
-  }
-  if (discovery.selfHost && BIND === HOST && ADVERTISE === HOST)
+  await deriveAdvertise()
+  if (CAN_DERIVE && !advertiseReady)
+    log('cross-host discovery on but advertise host not derived yet (tailscale not ready?) — retrying each tick, not dialing until routable')
+  else if (discovery.selfHost && BIND === HOST && ADVERTISE === HOST)
     log('cross-host discovery is on but bind+advertise are loopback — peers cannot reach this hub; set "bind":"0.0.0.0" (or a tailnet IP)')
   try { discovery.advertise && discovery.advertise() } catch {}
   discoveryTick()

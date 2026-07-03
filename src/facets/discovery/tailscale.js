@@ -25,7 +25,12 @@ function run(bin, args) {
     })
   })
 }
-const hostOf = node => node && ((node.TailscaleIPs && node.TailscaleIPs[0]) || (node.DNSName ? String(node.DNSName).replace(/\.$/, '') : null) || node.HostName) || null
+// Only TAILNET-ROUTABLE forms: the WireGuard IP, or the MagicDNS FQDN. Never the bare HostName — it isn't
+// routable off-machine and, if latched as our own advertise address, sorts ABOVE peer IPs and breaks the
+// deterministic "smaller ADVERTISE:PORT dials" tie-break (§7). A PARTIAL `tailscale status` (node up but no
+// tailnet IP assigned yet, e.g. bridge started before Tailscale finished coming up) therefore yields null,
+// so the caller retries instead of latching a bad value (#35).
+export const hostOf = node => node && ((node.TailscaleIPs && node.TailscaleIPs[0]) || (node.DNSName ? String(node.DNSName).replace(/\.$/, '') : null)) || null
 
 export function create(ctx) {
   async function status() {
