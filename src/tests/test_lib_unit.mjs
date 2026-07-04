@@ -10,6 +10,7 @@ import { createTraces } from '../lib/traces.js'
 import { create as createEgress } from '../services/egress.js'
 import { hostOf } from '../facets/discovery/tailscale.js'
 import { makeResolver, envResolver } from '../lib/secret-resolver.js'
+import { parseRegQuery } from '../lib/win-env.js'
 let pass = 0, fail = 0
 const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
 
@@ -228,6 +229,21 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
     auth: { inject: { header: 'Authorization', format: 'Bearer {token}' }, source: { type: 'static', token: '${env:T}' } } } } } })
   const rs = await egS.handle('http_request', { backend: 'be', path: '/x' }, { project: 'ops' })
   check('#36: static source injects the resolved token (no mint)', rs.ok && sentAuth.at(-1) === 'Bearer statictok' && mintCount === 0)
+}
+
+// ---- win-env: parse `reg query` output — rehydrate env vars the MCP launcher stripped so ${env:} resolves ----
+{
+  const sample = [
+    'HKEY_CURRENT_USER\\Environment',
+    '    OneDrive    REG_SZ    C:\\Users\\robin\\OneDrive',
+    '    Path    REG_EXPAND_SZ    %USERPROFILE%\\AppData\\Local\\Microsoft\\WindowsApps',
+    '    SOME_SECRET    REG_SZ    s3cr3t-value',
+    '',
+  ].join('\r\n')
+  const m = parseRegQuery(sample)
+  check('win-env: parses a REG_SZ value', m.SOME_SECRET && m.SOME_SECRET.type === 'REG_SZ' && m.SOME_SECRET.value === 's3cr3t-value')
+  check('win-env: parses REG_EXPAND_SZ', m.Path && m.Path.type === 'REG_EXPAND_SZ' && m.Path.value.includes('WindowsApps'))
+  check('win-env: skips the key-header line + only string types', !('HKEY_CURRENT_USER\\Environment' in m) && Object.keys(m).length === 3)
 }
 
 // #35: tailscale hostOf returns ONLY tailnet-routable forms; a partial `tailscale status` (node up, no IP

@@ -711,6 +711,18 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.1):** *rehydrate launcher-stripped env so `${env:…}` secret refs resolve (#36 follow-up)* —
+  some MCP hosts (Claude Desktop among them) spawn a server with a **curated, minimal environment**: arbitrary
+  user variables aren't forwarded unless named in the server's `env` block. That silently broke egress‑auth
+  `${env:VAR}` references — the credential is set in the user environment and present in every *normal* process,
+  but absent from the bridge's `process.env`, so a mint fails with `secret-unresolved` (no amount of rebooting
+  helps, because it's the launcher, not the logon, that strips it). Fix (`lib/win-env.js`): on Windows the
+  bridge reads the **live registry** (`HKCU\Environment`, then the HKLM system environment) at startup and fills
+  in any variable **missing** from `process.env` — never overriding what the launcher provided (`PATH` etc.
+  stay as given). The secret stays exactly where the operator set it (no new files, no plaintext in any launcher
+  config, no config‑reference change); `${env:VAR}` "just works." No‑op off Windows; best‑effort (never throws).
+  Verified by `test_lib_unit` (`parseRegQuery`: REG_SZ / REG_EXPAND_SZ / header‑line skip) plus a live
+  strip‑then‑rehydrate‑then‑mint check. Suite 493 across 22.
 - **Built (v1.24.0):** *egress server-side auth token sources (#36)* — extends #33 so an egress backend can
   declare `auth`: the bridge **mints, caches, refreshes, and injects** a bearer token, and the caller never
   supplies, sees, or can override the credential or the token ("approach A"). `auth.source.type` is pluggable —

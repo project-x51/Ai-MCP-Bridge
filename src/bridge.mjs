@@ -25,6 +25,7 @@ import { splitTopic, isWildcard, topicMatch, patternsOverlap, patternKey, parseT
 import { envelopeId } from './lib/envelope.js'
 import { TOOLS } from './lib/tool-schemas.js'
 import { lc, projKey } from './lib/keys.js'
+import { hydrateEnvFromRegistry } from './lib/win-env.js'
 import { createConsent, parseTtlMin } from './lib/consent.js'
 import { createReminders } from './lib/reminders.js'
 import { createTraces } from './lib/traces.js'
@@ -69,7 +70,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.24.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.24.1'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -331,6 +332,9 @@ function egressConfig(cfg) {
   if (envB) { try { return { backends: { ...((c && c.backends) || {}), ...JSON.parse(envB) } } } catch (e) { log('AI_BRIDGE_EGRESS_BACKENDS parse failed', e.message) } }
   return c
 }
+// #36/#33: when launched as an MCP server the host may have stripped our environment — rehydrate stripped
+// user/machine vars from the registry (Windows) so ${env:VAR} secret refs in egress backends resolve.
+if (egressConfig(CFG)) hydrateEnvFromRegistry(log)
 const egc0 = egressConfig(CFG)
 const egress = egc0 ? createEgress({ config: egc0, log, trace: emitTraceRaw }) : null
 loadService(egress)
