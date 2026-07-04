@@ -9,6 +9,7 @@ import { createReminders } from '../lib/reminders.js'
 import { createTraces } from '../lib/traces.js'
 import { create as createEgress } from '../services/egress.js'
 import { hostOf } from '../facets/discovery/tailscale.js'
+import { makeResolver, envResolver } from '../lib/secret-resolver.js'
 let pass = 0, fail = 0
 const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
 
@@ -156,6 +157,77 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   const e2 = createEgress({ fetchImpl: async () => fakeRes(200, 'PNGDATA', 'image/png'), config: { backends: { be: { base: 'http://localhost:8080', methods: ['GET'], projects: ['ops'] } } } })
   const rb = await e2.handle('http_request', { backend: 'be', path: '/img' }, { project: 'ops' })
   check('egress: binary response returned as base64', rb.encoding === 'base64' && typeof rb.body === 'string')
+}
+
+// ---- #36: secret-resolver — ${scheme:key} refs so secrets live outside config text ----
+{
+  const r = makeResolver({ env: k => ({ TOK: 'abc', PW: 'p@ss' })[k] })
+  check('resolver: full ${env:VAR}', r('${env:TOK}') === 'abc')
+  check('resolver: embedded ref', r('Bearer ${env:TOK}!') === 'Bearer abc!')
+  check('resolver: deep object/array', JSON.stringify(r({ a: '${env:PW}', b: [1, '${env:TOK}'] })) === JSON.stringify({ a: 'p@ss', b: [1, 'abc'] }))
+  check('resolver: non-ref passthrough', r('plain') === 'plain' && r(5) === 5)
+  check('resolver: missing env throws secret-unresolved', (() => { try { r('${env:NOPE}'); return false } catch (e) { return e.code === 'secret-unresolved' } })())
+  check('resolver: unwired scheme throws (vault seam)', (() => { try { r('${vault:k}'); return false } catch (e) { return e.code === 'secret-scheme-unsupported' } })())
+}
+
+// ---- #36: egress server-side auth — bridge mints/caches/refreshes/injects the token; caller never sees it ----
+{
+  const jsonRes = (status, obj) => ({
+    ok: status >= 200 && status < 300, status, statusText: 'X',
+    headers: { _h: { 'content-type': 'application/json' }, get(k) { return this._h[k.toLowerCase()] }, forEach(fn) { for (const [k, v] of Object.entries(this._h)) fn(v, k) } },
+    async arrayBuffer() { return new TextEncoder().encode(JSON.stringify(obj)).buffer },
+    async json() { return obj },
+  })
+  const MINT = 'http://auth.local/mint', API = 'http://api.local'
+  const resolveSecret = envResolver({ PW: 'dev-password' })
+  let mintCount = 0, sentAuth = [], plan = {}
+  const fetchImpl = async (url, opts) => {
+    if (url.startsWith(MINT)) {
+      mintCount++
+      plan.mintBodyPw = JSON.parse(opts.body || '{}').password    // proves ${env:PW} resolved into the mint request
+      if (plan.mintFail) return jsonRes(401, { error: 'bad' })
+      return jsonRes(200, { idToken: 'tok-' + mintCount, expiresIn: String(plan.expiresIn ?? 3600) })
+    }
+    sentAuth.push((opts.headers || {})['Authorization'])
+    if (plan.api401Once && !plan.api401Done) { plan.api401Done = true; return jsonRes(401, { e: 'stale' }) }
+    return jsonRes(200, { ok: true })
+  }
+  const httpBackend = () => ({ base: API, methods: ['GET'], projects: ['ops'], allowHeaders: ['authorization'],
+    auth: { inject: { header: 'Authorization', format: 'Bearer {token}' }, refreshOn401: true,
+      source: { type: 'http', url: MINT, method: 'POST', json: { email: 'dev@x', password: '${env:PW}', returnSecureToken: true }, tokenPath: 'idToken', expiryPath: 'expiresIn' } } })
+  const mk = backend => createEgress({ fetchImpl, resolveSecret, config: { backends: { be: backend } } })
+  const call = (eg, a = {}) => eg.handle('http_request', { backend: 'be', path: '/x', ...a }, { project: 'ops', holder: 'h', name: 'H' })
+
+  mintCount = 0; sentAuth = []; plan = {}
+  let eg = mk(httpBackend())
+  const r1 = await call(eg)
+  check('#36: http-auth mints + injects Bearer token', r1.ok && sentAuth.at(-1) === 'Bearer tok-1')
+  check('#36: credential reached the mint request (${env:PW} resolved)', plan.mintBodyPw === 'dev-password')
+  check('#36: token + credential NOT in the caller response', !JSON.stringify(r1).includes('tok-1') && !JSON.stringify(r1).includes('dev-password'))
+  await call(eg)
+  check('#36: token cached across calls (single mint)', mintCount === 1)
+  sentAuth = []; await call(eg, { headers: { Authorization: 'Bearer HACK' } })
+  check('#36: caller cannot override the injected auth header', sentAuth.at(-1) === 'Bearer tok-1')
+
+  mintCount = 0; sentAuth = []; plan = { api401Once: true }
+  eg = mk(httpBackend())
+  const r401 = await call(eg)
+  check('#36: 401 -> invalidate + re-mint + retry once', r401.ok && mintCount === 2 && sentAuth[0] === 'Bearer tok-1' && sentAuth[1] === 'Bearer tok-2')
+
+  mintCount = 0; plan = { expiresIn: 0 }
+  eg = mk(httpBackend()); await call(eg); await call(eg)
+  check('#36: expired token re-minted on next call', mintCount === 2)
+
+  mintCount = 0; plan = { mintFail: true }
+  const rf = await call(mk(httpBackend()))
+  check('#36: mint failure -> auth-failed, no credential leak', rf.ok === false && rf.code === 'auth-failed' && !JSON.stringify(rf).includes('dev-password'))
+
+  sentAuth = []; mintCount = 0
+  const egS = createEgress({ fetchImpl, resolveSecret: envResolver({ T: 'statictok' }), config: { backends: { be: {
+    base: API, methods: ['GET'], projects: ['ops'], allowHeaders: [],
+    auth: { inject: { header: 'Authorization', format: 'Bearer {token}' }, source: { type: 'static', token: '${env:T}' } } } } } })
+  const rs = await egS.handle('http_request', { backend: 'be', path: '/x' }, { project: 'ops' })
+  check('#36: static source injects the resolved token (no mint)', rs.ok && sentAuth.at(-1) === 'Bearer statictok' && mintCount === 0)
 }
 
 // #35: tailscale hostOf returns ONLY tailnet-routable forms; a partial `tailscale status` (node up, no IP

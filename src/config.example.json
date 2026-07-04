@@ -6,11 +6,26 @@
   "defaultName": "",
   "tray": false,
 
-  "_comment_services": "services (docs/web-edge-node.md): OPT-IN in-process capability modules — a service is loaded only when its config key is present, so an unopened capability has no surface. egress (#33) gives sessions an http_request tool that proxies to NAMED backends only (no arbitrary URLs): each backend declares base, methods, a REQUIRED projects allowlist (no '*'), allowHeaders (the request headers a caller may set), headers (injected server-side e.g. auth, never returned), timeoutMs, maxResponseBytes, followRedirects. The final URL is contained to the backend's origin (path can't escape). Caller's project must be in the backend's allowlist. Live-reloadable; env AI_BRIDGE_EGRESS_BACKENDS (JSON backends map) overrides/adds for automation.",
+  "_comment_services": "services (docs/web-edge-node.md): OPT-IN in-process capability modules — a service is loaded only when its config key is present, so an unopened capability has no surface. egress (#33) gives sessions an http_request tool that proxies to NAMED backends only (no arbitrary URLs): each backend declares base, methods, a REQUIRED projects allowlist (no '*'), allowHeaders (the request headers a caller may set), headers (static headers injected server-side e.g. a fixed key, never returned), timeoutMs, maxResponseBytes, followRedirects. The final URL is contained to the backend's origin (path can't escape). Caller's project must be in the backend's allowlist. Live-reloadable; env AI_BRIDGE_EGRESS_BACKENDS (JSON backends map) overrides/adds for automation.",
+  "_comment_services_auth": "egress backend auth (#36): a backend may declare `auth` so the bridge MINTS/CACHES/REFRESHES a bearer token and INJECTS it — the caller never supplies, sees, or can override the credential or token (approach A). auth.inject={header,format}; auth.source.type = 'static' (token = a resolved secret) or 'http' (mint via a request: url/method/json|body, read token at tokenPath, TTL from expiryPath seconds or ttlSec; re-mint on expiry and, unless refreshOn401:false, on a 401 from the backend). SECRETS ARE REFERENCES not literals: write ${env:VAR} (resolved from the bridge's environment) so the secret is not in this file — a clean seam for ${vault:...}/${service:...} later. NB an env var is not hidden from a local shell-capable process running as the same user; it prevents durable/off-machine leaks (repo, synced config, transcript) and lets a stronger boundary drop in without a schema change. The token is NEVER logged/traced/returned. example-authed mints from a local Firebase-auth-emulator; set the credential via e.g. `setx EXAMPLE_DEV_PASSWORD ...` (a user env var the bridge inherits at launch).",
   "services": {
     "egress": {
       "backends": {
-        "example-dev": { "base": "http://localhost:8080", "methods": ["GET", "POST"], "projects": ["MyProject"], "allowHeaders": ["accept", "content-type"], "headers": {}, "timeoutMs": 15000, "maxResponseBytes": "8MB", "followRedirects": false }
+        "example-dev": { "base": "http://localhost:8080", "methods": ["GET", "POST"], "projects": ["MyProject"], "allowHeaders": ["accept", "content-type"], "headers": {}, "timeoutMs": 15000, "maxResponseBytes": "8MB", "followRedirects": false },
+        "example-authed": {
+          "base": "http://localhost:8000", "methods": ["GET"], "projects": ["MyProject"], "allowHeaders": ["accept"], "maxResponseBytes": "512KB", "timeoutMs": 15000,
+          "auth": {
+            "inject": { "header": "Authorization", "format": "Bearer {token}" },
+            "refreshOn401": true,
+            "source": {
+              "type": "http",
+              "url": "http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake-api-key",
+              "method": "POST",
+              "json": { "email": "dev@example.local", "password": "${env:EXAMPLE_DEV_PASSWORD}", "returnSecureToken": true },
+              "tokenPath": "idToken", "expiryPath": "expiresIn", "ttlSec": 3600
+            }
+          }
+        }
       }
     }
   },

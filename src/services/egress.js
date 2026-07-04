@@ -6,6 +6,8 @@
 // isn't opened can't be attacked.
 import { projKey } from '../lib/keys.js'
 import { parseSize } from '../facets/persistence/file.js'
+import { envResolver } from '../lib/secret-resolver.js'
+import { createAuthProvider } from '../lib/egress-auth.js'
 
 export const meta = { service: 'egress' }
 
@@ -22,6 +24,7 @@ function normalize(rawBackends) {
       timeoutMs: Number(b.timeoutMs) > 0 ? Number(b.timeoutMs) : 15000,
       maxResponseBytes: parseSize(b.maxResponseBytes) ?? 8 * 1024 * 1024,
       followRedirects: !!b.followRedirects,
+      auth: (b.auth && typeof b.auth === 'object') ? b.auth : null,   // #36: server-side token mint/inject (kept raw; secrets resolved lazily at mint)
     }
   }
   return out
@@ -29,11 +32,19 @@ function normalize(rawBackends) {
 
 const TEXTY = /^(text\/|application\/(json|xml|.*\+json|.*\+xml|javascript|x-www-form-urlencoded|graphql))/i
 
-/** @param {{ config?: any, log?: Function, trace?: Function, fetchImpl?: Function }} [ctx] */
-export function create({ config, log, trace, fetchImpl } = {}) {
+/** @param {{ config?: any, log?: Function, trace?: Function, fetchImpl?: Function, resolveSecret?: (v:any)=>any }} [ctx] */
+export function create({ config, log, trace, fetchImpl, resolveSecret } = {}) {
   const doFetch = fetchImpl || globalThis.fetch
-  let backends = normalize(config && config.backends)
-  const setConfig = cfg => { backends = normalize(cfg && cfg.backends) }
+  const resolve = resolveSecret || envResolver()
+  let backends = {}, authProviders = {}
+  // #36: build a stateful auth provider per backend that declares `auth` (mint/cache/refresh the token).
+  const rebuild = cfg => {
+    backends = normalize(cfg && cfg.backends)
+    authProviders = {}
+    for (const [name, b] of Object.entries(backends)) if (b.auth) authProviders[name] = createAuthProvider(b.auth, { fetchImpl: doFetch, resolveSecret: resolve, log })
+  }
+  rebuild(config)
+  const setConfig = cfg => rebuild(cfg)
 
   const tools = [{
     name: 'http_request',
@@ -83,18 +94,35 @@ export function create({ config, log, trace, fetchImpl } = {}) {
     if (a.json !== undefined) { body = JSON.stringify(a.json); if (!Object.keys(headers).some(h => h.toLowerCase() === 'content-type')) headers['content-type'] = 'application/json' }
     for (const [k, v] of Object.entries(b.headers)) headers[k] = String(v)
 
-    // --- perform with timeout ---
-    const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), b.timeoutMs)
+    // --- #36: server-side auth — mint + inject the token; the caller can never set or override the inject header ---
+    const authp = authProviders[bname]
+    const applyAuth = async () => {
+      if (!authp) return
+      for (const k of Object.keys(headers)) if (k.toLowerCase() === authp.headerName.toLowerCase()) delete headers[k]
+      const { name: hn, value } = await authp.header()
+      headers[hn] = value
+    }
+    try { await applyAuth() }
+    catch (e) {
+      trace && trace({ dir: 'send', verb: 'http_request', from: caller && caller.holder, from_name: caller && caller.name, to: bname, to_kind: 'backend', size: 0, note: `${method} ${bname}${url.pathname} -> auth ${(e && e.code) || 'failed'}` })
+      return { ok: false, code: 'auth-failed', reason: (e && e.code) || 'mint-failed', backend: bname }   // never leak the credential/token
+    }
+
+    // --- perform with timeout (retry once on a 401 by re-minting the token) ---
     const noBody = method === 'GET' || method === 'HEAD'
+    const perform = async () => {
+      const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), b.timeoutMs)
+      try { return await doFetch(url.href, { method, headers, body: noBody ? undefined : body, redirect: b.followRedirects ? 'follow' : 'manual', signal: ctrl.signal }) }
+      finally { clearTimeout(timer) }
+    }
     let res
     try {
-      res = await doFetch(url.href, { method, headers, body: noBody ? undefined : body, redirect: b.followRedirects ? 'follow' : 'manual', signal: ctrl.signal })
+      res = await perform()
+      if (res.status === 401 && authp && authp.refreshOn401) { authp.invalidate(); await applyAuth(); res = await perform() }
     } catch (e) {
-      clearTimeout(timer)
       trace && trace({ dir: 'send', verb: 'http_request', from: caller && caller.holder, from_name: caller && caller.name, to: bname, to_kind: 'backend', size: 0, note: `${method} ${bname}${url.pathname} -> ${e && e.name === 'AbortError' ? 'timeout' : 'failed'}` })
       return { ok: false, code: (e && e.name === 'AbortError') ? 'timeout' : 'request-failed', reason: String((e && e.message) || e), backend: bname }
     }
-    clearTimeout(timer)
 
     // --- read body up to the cap; text vs base64 by content-type ---
     let buf

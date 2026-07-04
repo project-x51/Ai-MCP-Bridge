@@ -711,6 +711,23 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.0):** *egress server-side auth token sources (#36)* — extends #33 so an egress backend can
+  declare `auth`: the bridge **mints, caches, refreshes, and injects** a bearer token, and the caller never
+  supplies, sees, or can override the credential or the token ("approach A"). `auth.source.type` is pluggable —
+  **`static`** (the token *is* a resolved secret) or **`http`** (mint via a request: `url`/`method`/`json`|`body`,
+  read the token at `tokenPath`, TTL from `expiryPath` seconds or `ttlSec`; re-mint on expiry and, unless
+  `refreshOn401:false`, on a 401 from the backend). Mints are **single-flighted** and cached with a refresh
+  skew; the injected header is stripped from any caller-supplied headers first; the token/credential are
+  **never logged, traced, or returned**. Secrets in the config are **references, not literals**: a new pluggable
+  resolver (`lib/secret-resolver.js`) expands `${env:VAR}` from the bridge's environment today, with
+  `${vault:…}`/`${service:…}` as explicit seams (an unwired scheme throws). This is a deliberate perspective
+  call: an env var is **not** hidden from a local shell-capable process running as the same user — it prevents
+  the *durable / off-machine* leaks (repo, Dropbox-synced `config.json`, transcripts, other-project callers) and
+  lets a stronger boundary (TPM vault #21, or an out-of-process/other-user minter #24) drop in later **without a
+  schema change**. Token logic lives in `lib/egress-auth.js`; `services/egress.js` builds one provider per
+  auth-declaring backend. Verified by `test_lib_unit` (secret-resolver: env/embedded/deep/missing/unwired-scheme;
+  egress auth: mint+inject, credential-into-mint-only, token-absent-from-response, caching, caller-can't-override,
+  401→re-mint→retry, expiry re-mint, mint-failure→structured error, static source). Suite 490 across 22.
 - **Built (v1.23.2):** *fix: cross-host mesh splits when a hub starts before Tailscale is ready (#35)* — the
   advertise host (the one per-machine value that can't live in a shared config) auto-derives from the discovery
   backend (`tailscale status` Self). It was derived **once, at gateway startup**; a hub that started before
