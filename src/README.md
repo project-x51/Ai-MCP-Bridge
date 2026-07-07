@@ -20,17 +20,24 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 - `bridge.mjs` — the mesh node + gateway/WS/trace roles + MCP stdio server (realm-agnostic core).
 - `lib/` — logic factored out of `bridge.mjs` so it's reasoned-about + unit-tested in isolation (no spawn —
   `tests/test_lib_unit.mjs`). **Pure** helpers: `topics.js` (path matching / `parseTopicRef`), `envelope.js`
-  (`envelopeId`), `keys.js` (`lc` / `projKey` canonicalisers), `tool-schemas.js` (the `tools/list` payload).
-  **Encapsulated stateful modules** that OWN their data behind an API (bridge.mjs calls the API, never the
-  Maps): `consent.js` (runtime grants + pending requests; `mayInitiate`/`allow`/`revoke`/…), `reminders.js`
-  (#29 per-session behaviours; `remindersFor`/`set`/`clear`/…), and `traces.js` (the observation-plane ring
-  buffer + dashboard fan-out; `collect`/`history`). The bridge core (handlers, routing, delivery, gateway)
-  deliberately stays in `bridge.mjs`.
+  (`envelopeId`), `keys.js` (`lc` / `projKey` canonicalisers), `tool-schemas.js` (the `tools/list` payload),
+  and `secret-resolver.js` (expand `${scheme:key}` secret references — `${env:…}` today, `${vault:…}` /
+  `${service:…}` as explicit seams). **Encapsulated stateful modules** that OWN their data behind an API
+  (bridge.mjs calls the API, never the Maps): `consent.js` (runtime grants + pending requests;
+  `mayInitiate`/`allow`/`revoke`/…), `reminders.js` (#29 per-session behaviours; `remindersFor`/`set`/`clear`/…),
+  `traces.js` (the observation-plane ring buffer + dashboard fan-out; `collect`/`history`), and `egress-auth.js`
+  (#36 server-side auth token sources — mint/cache/refresh a bearer token for an egress backend). `win-env.js`
+  rehydrates environment variables that an MCP host stripped at launch (Windows registry) so `${env:…}` secret
+  refs resolve. The bridge core (handlers, routing, delivery, gateway) deliberately stays in `bridge.mjs`.
 - `types.d.ts` — shared shapes for JSDoc + `checkJs` (see Type-checking below).
 - `facets/` — the pluggable realm profile: `auth/ cipher/ capsigner/ identity/ config/ transport/
-  discovery/ persistence/ authorizer/`, each with a `_template.js` + impl files, assembled by
+  discovery/ persistence/ authorizer/ vault/`, each with a `_template.js` + impl files, assembled by
   `facets/index.js`. Copy a file to add one. (`discovery` = §7 cross-host, `persistence` = §12 durable
-  state, `authorizer` = §16 presence-gated confirmation.)
+  state, `authorizer` = §16 presence-gated confirmation, `vault` = §21 secret recovery — seal each
+  session's secret so a session that lost it can recover via `recover_secret` + a presence check.)
+- `services/` — opt-in **in-process capability modules** (see "Services" below), loaded only when
+  `config.services.<name>` is present, so an unopened capability has no surface. First inhabitant:
+  `egress.js` (the `http_request` proxy + server-side auth token sources).
 - `config.json` — `port`, `wsPort`, `token`, `realm`, optional `projects` policy / `profile` / `tray`.
 - `tools/` — embeddable client tools (consumers inline / inject these):
   - `tools/aimb-page-bridge.js` — leaf client embedded by page renderers (`window.AIMB_BRIDGE_CFG` + `aimbBridge.send`).
@@ -83,7 +90,16 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `test_retain_live.mjs` — retained values (§12): `publish {retain:true}` → a later/wildcard subscriber is
   caught up on subscribe, survives a restart, last-value-wins (4); `test_vault_live.mjs` — secret recovery
   (§21): a sealed secret is recovered via the vault (presence-gated) + reattaches with resync, deny path
-  leaks nothing, unknown/unsupported handled (5). Tests run in
+  leaks nothing, unknown/unsupported handled (5); `test_parked_live.mjs` — out-of-band parked mail surfaces
+  on a plain poll and on reattach, and is **acked on serve** so a re-register never redelivers it (#23/#34, 8);
+  `test_keepalive_live.mjs` — `release_topic {keep_alive}` keeps an ownerless topic alive, parks directed
+  sends, and a re-claim drains them (#26, 10); `test_behaviors_live.mjs` — scoped behaviour reminders across
+  all five scopes + validation + resync + cross-handoff inheritance (#29, 14); `test_default_behavior_live.mjs`
+  — the bridge-wide default reminder attaches to a session with none of its own and is overridable (#32, 3);
+  `test_http_egress_live.mjs` — real MCP → bridge → echo-server egress: backend/project/method gates, origin
+  containment, header filter + server-side inject (#33, 9); and `test_lib_unit.mjs` — the fast pure-`lib/` +
+  services units (topics/envelope/refs/consent/reminders/traces, egress incl. server-side auth mint/refresh/
+  inject and the secret-resolver, `win-env` reg-parsing, tailscale `hostOf`) (#31/#35/#36, 88). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -114,13 +130,17 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
    ("Scout"); Cowork conversations `register_self` instead (set_name renames the shared process node).
 
 ## MCP tools
-`my_identity` • `set_name {name}` • `list_sessions` • `register_self {name, secret, parent?, mode?, ttl_minutes?}`
-• `deregister {peer_id, secret}` • `send_to_peer {target, subject, message, verb?, reply_to?, park?, as?, secret?}`
-(target = session/sub-peer id, unique friendly name, or `topic:<topic>`) • `publish {topic, subject, message, verb?, retain?, as?, secret?}`
-• `inbox {cursor?, for?, secret?}` • `claim_topic {topic, description?, exclusive?, icon?, persistent?, force?, as?, secret?}`
-• `release_topic {topic, as?, secret?}` • `subscribe {pattern, as?, secret?}` • `unsubscribe {pattern, as?, secret?}`
-• `allow_project {project, mode?, as?, secret?}` • `revoke_project {project, as?, secret?}`
-• `request_project_access {to, reason?, as?, secret?}` • `set_wake {…}` (reserved — unsupported).
+`my_identity` • `set_name {name}` • `list_sessions` • `register_self {name, secret, project?, user?, parent?, client?, mode?, ttl_minutes?}`
+• `deregister {peer_id, secret}` • `recover_secret {name, project?}` (§21 vault — recover a lost secret, presence-gated)
+• `send_to_peer {target, subject, message, verb?, reply_to?, park?, as?, secret?}`
+(target = session/sub-peer id, unique friendly name, or `topic:<topic>` — a bare topic auto-routes cross-project when granted; `topic:@project/…` targets a specific one) • `publish {topic, subject, message, verb?, retain?, as?, secret?}`
+• `inbox {cursor?, for?, secret?}` • `claim_topic {topic, description?, exclusive?, icon?, persistent?, keep_alive?, grace_minutes?, allow_other_user?, force?, as?, secret?}`
+• `release_topic {topic, keep_alive?, as?, secret?}` (#26 `keep_alive`: keep an ownerless topic alive so directed sends park during a handoff)
+• `subscribe {pattern, as?, secret?}` • `unsubscribe {pattern, as?, secret?}`
+• `set_behavior {behavior, scope, match?, as?, secret?}` • `list_behaviors {as?, secret?}` • `clear_behavior {scope, match?, as?, secret?}` (#29/#32 per-session behaviour reminders)
+• `allow_project {project, mode?, as?, secret?}` • `revoke_project {project, as?, secret?}` • `request_project_access {to, reason?, as?, secret?}`
+• `http_request {backend, method?, path?, query?, headers?, body?, json?, as?, secret?}` (#33/#36 egress — present only when a backend is configured)
+• `set_wake {…}` (reserved — unsupported).
 
 ## Realms, identity, consent & the profile seam (v1.6.0)
 A **realm** is one trust+policy domain — all bridges sharing a config file (`realm`, `token`, policy).
@@ -244,8 +264,36 @@ shown, targets `topic:<topic>`, one option per topic with a ×N owner count), an
 A typical page wires action buttons (e.g. per-row "Discuss") to send an app-defined verb +
 payload to the session picked in its dropdown. Pages appear on the roster and the dashboard.
 
+## Services (in-process capabilities) — HTTP egress + server-side auth
+Opt-in capability modules under `services/`, loaded only when `config.services.<name>` is present (an
+unopened capability has no surface). Each contributes MCP tool(s) and is live-reloadable via `setConfig`.
+
+- **egress (#33)** — an `http_request` tool that proxies to **operator-declared backends only** (no
+  arbitrary URLs): you name a configured backend + a path and the bridge joins them, **containing the final
+  URL to the backend's origin** (SSRF-safe — `//host`, absolute URLs and `..` escapes are rejected). Each
+  backend declares `base`, allowed `methods`, a REQUIRED `projects` allowlist (no `*`), `allowHeaders`
+  (request headers a caller may set), static `headers` (injected server-side, never returned), `timeoutMs`,
+  `maxResponseBytes`, `followRedirects`. The caller's project must be in the allowlist. Purpose: let a
+  sandboxed/cowork session reach a local dev API it otherwise can't. Runs in the bridge process the caller is
+  attached to (no port). Live-reloadable; env `AI_BRIDGE_EGRESS_BACKENDS` overrides for automation.
+- **Server-side auth (#36)** — a backend may add `auth` so the bridge **mints / caches / refreshes / injects**
+  a bearer token; the caller never supplies, sees, or can override the credential or token. `auth.source.type`
+  is `static` (token = a resolved secret) or `http` (mint via a request, read the token at `tokenPath`, TTL
+  from `expiryPath` seconds or `ttlSec`; re-mint on expiry and, unless `refreshOn401:false`, on a 401). Secrets
+  are **references, not literals**: `${env:VAR}` via `lib/secret-resolver.js`, with `${vault:…}` /
+  `${service:…}` as future seams. On Windows the bridge rehydrates launcher-stripped env vars from the registry
+  (`lib/win-env.js`) so `${env:…}` resolves even under an MCP host that hands its child a curated environment.
+  See `config.example.json` (`example-authed`) for the shape.
+
+## Behaviour reminders (#29 / #32)
+A session can register scoped "how to behave when a message arrives" reminders: `set_behavior {behavior,
+scope, match?}` (scopes `topic` / `host` / `project` / `subscription` / `all`), `list_behaviors`,
+`clear_behavior`. Matching reminders ride along on delivered messages, so a session relearns its standing
+instructions across a compaction. A bridge-wide **default** (`config.behaviors.default`, tagged
+`default:true`) applies to every session unless that session sets its own for the same scope+match.
+
 ## Notes / current limits
-- 224 checks across 9 suites (2026-06-14).
+- 493 checks across 22 suites (see the per-suite descriptions above).
 - **Cross-host mesh (§7) — one realm across machines, no central node.** Co-equal per-host hubs
   (port-bind elected) find each other through the **discovery facet** and gossip rosters peer-to-peer;
   remote sessions land in the roster tagged with their owning gateway's address, so the existing
