@@ -118,8 +118,8 @@ check('topic claimed', claim.ok === true, JSON.stringify(claim))
 await sleep(900)  // roster gossip reaches the page
 const tgroup = [...sel.querySelectorAll('optgroup')].find(g => g.label === 'Ai Topics')
 check('Ai Topics group renders', !!tgroup, [...sel.querySelectorAll('optgroup')].map(g => g.label).join('|'))
-const topt = tgroup && [...tgroup.children].find(o => o.dataset.name === 'topic:demo/claims')
-check('claimed topic listed', !!topt && topt.textContent.includes('demo/claims'), topt && topt.textContent)
+const topt = tgroup && [...tgroup.children].find(o => o.dataset.name === 'topic:demo/claims')   // value/name stay raw
+check('claimed topic listed, display-cased (demo/claims -> Demo/Claims)', !!topt && topt.textContent.includes('Demo/Claims'), topt && topt.textContent)
 topt.selected = true; change()
 btn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }))
 await sleep(800)
@@ -155,7 +155,7 @@ const sel3 = dom3.window.document.getElementById('aimb-target')
 const cur3 = sel3.selectedOptions[0]
 check('mixed-case ?session matches the live topic case-insensitively', cur3 && cur3.dataset.name === 'topic:demo/claims' && cur3.value === 'topic:demo/claims', sel3.innerHTML)
 check('no dangling offline entry for the matched target', ![...sel3.options].some(o => o.className === 'aimb-offline'), sel3.innerHTML)
-check('display keeps the canonical case (demo/claims, not Demo/Claims)', cur3 && cur3.textContent.includes('demo/claims') && !cur3.textContent.includes('Demo/Claims'), cur3 && cur3.textContent)
+check('#38: display is Title-cased (Demo/Claims) while value/name stay raw (topic:demo/claims)', cur3 && cur3.textContent.includes('Demo/Claims') && cur3.value === 'topic:demo/claims', cur3 && cur3.textContent + ' | ' + (cur3 && cur3.value))
 dom3.window.close()
 
 // --- pip goes grey, controls disabled, when the bridge dies

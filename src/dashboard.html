@@ -120,13 +120,19 @@
   // these entities are ephemeral, so the set is rebuilt naturally as you click; it just survives re-renders.
   var openRows={};
   function esc(s){ var d=document.createElement('span'); d.textContent=s==null?'—':String(s); return d.innerHTML; }
+  // #38 display-case: compare lower-case, DISPLAY Title — upper-case the first letter of every word (start or
+  // after a non-alphanumeric separator like / - space), keeping any EXISTING upper-case. "online-tool/analysis"
+  // -> "Online-Tool/Analysis"; "OnlineTool/Analysis" stays; digits don't start a word ("2degrees" stays).
+  function tc(s){ return String(s==null?'':s).replace(/(^|[^A-Za-z0-9])([a-z])/g,function(m,p,c){return p+c.toUpperCase();}); }
+  // names: same, but a bare hex slug (an unnamed session's id shown as its name) is left untouched.
+  function nm(s){ s=String(s==null?'':s); return /^[0-9a-f]{6,}$/i.test(s)?s:tc(s); }
   function row(tb,cells){ var tr=document.createElement('tr'); tr.innerHTML=cells.map(function(c){return '<td>'+c+'</td>';}).join(''); tb.insertBefore(tr, tb.firstChild); }
 
   // ------------------------------------------------ tables
   // topics of one holder: comma-separated names on the row (exclusive bold, icon first)
   function topicNames(list,holder){
     return (list||[]).filter(function(r){return r.holder===holder&&r.role==='owner';}).map(function(r){
-      var t=(r.icon?esc(r.icon)+' ':'')+esc(r.pattern);
+      var t=(r.icon?esc(r.icon)+' ':'')+esc(tc(r.pattern));
       return r.exclusive?('<b>'+t+'</b>'):t;
     }).join(', ');
   }
@@ -135,7 +141,7 @@
     var mine=(list||[]).filter(function(r){return r.holder===holder;});
     if(!mine.length) return '<span class="kv"><b>topics</b> none</span>';
     return mine.map(function(r){
-      var t=(r.icon?esc(r.icon)+' ':'')+(r.exclusive?'<b>'+esc(r.pattern)+'</b>':esc(r.pattern));
+      var t=(r.icon?esc(r.icon)+' ':'')+(r.exclusive?'<b>'+esc(tc(r.pattern))+'</b>':esc(tc(r.pattern)));
       return '<div class="kv">'+t+' <b>'+esc(r.role)+(r.exclusive?' · exclusive':'')+'</b> '+esc(r.description||'')+
         (r.claimed_at?' <span class="mono">'+esc(String(r.claimed_at).replace('T',' ').slice(0,19))+'</span>':'')+'</div>';
     }).join('');
@@ -155,7 +161,7 @@
   function caps(c){ if(!c) return '?'; var on=Object.keys(c).filter(function(k){return c[k];}); return on.length?on.join(', '):'none'; }
   // project · user badge (the mandatory classification); blank for unclassified infrastructure
   function pu(proj,user){ if(!proj || proj==='unclassified') return '<span class="kv" style="color:#9CA3AF">infra</span>';
-    return '<span class="bub b-pu">'+esc(proj)+(user?' · '+esc(user):'')+'</span>'; }
+    return '<span class="bub b-pu">'+esc(tc(proj))+(user?' · '+esc(tc(user)):'')+'</span>'; }
   function machineOf(s){ return s.host_label || String(s.session).split('/')[0]; }
   // badge colour by role: gateway green, code orange, everything else blue
   function sessClass(s){ return s.is_gateway ? 'b-gw' : (s.client_kind==='code' ? 'b-code' : 'b-sess'); }
@@ -189,7 +195,7 @@
       // web sessions hang off the gateway (they connect to its ws), so list them indented under it
       var renderPage=function(p){
         expandable(sb,[
-          '<span style="padding-left:18px">↳</span> <span class="bub b-page">'+esc(p.title||p.page_kind)+'</span>',
+          '<span style="padding-left:18px">↳</span> <span class="bub b-page">'+esc(nm(p.title||p.page_kind))+'</span>',
           '<span class="mono">page:'+esc(p.instance)+'</span>',
           '<span class="mono">'+esc(p.page_kind)+' (web)</span>',
           pu(p.project,p.user),
@@ -204,7 +210,7 @@
       var hasGw=sess.some(function(s){ return s.is_gateway; });
       sess.forEach(function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
         expandable(sb,[
-          '<span class="bub '+sessClass(s)+'">'+esc(s.name)+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
+          '<span class="bub '+sessClass(s)+'">'+esc(nm(s.name))+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
           '<span class="mono">'+esc(s.session)+'</span>',
           '<span class="mono">'+esc(s.client||'')+'</span>',
           pu(s.project,s.user),
@@ -212,7 +218,7 @@
           sessDetail(s,tops),null,'sess/'+s.session);
         (s.subpeers||[]).forEach(function(sp){
           expandable(sb,[
-            '<span style="padding-left:18px">↳</span> <span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(sp.name)+'</span>',
+            '<span style="padding-left:18px">↳</span> <span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(nm(sp.name))+'</span>',
             '<span class="mono">'+esc(sp.id)+'</span>',
             '<span class="mono">'+esc((sp.client_kind||sp.client||'')+(sp.mode==='push'?' · streaming':''))+'</span>',
             pu(sp.project,sp.user),
@@ -240,26 +246,26 @@
     return '<table class="pers"><tr>'+cols.map(function(c){return '<th>'+c[0]+'</th>';}).join('')+'</tr>'+
       rows.map(function(r){return '<tr>'+cols.map(function(c){return '<td>'+c[1](r)+'</td>';}).join('')+'</tr>';}).join('')+'</table>';
   }
-  var PROJU=function(r){ return '<span class="bub b-pu">'+esc(r.project||'?')+(r.user?' · '+esc(r.user):'')+'</span>'; };
+  var PROJU=function(r){ return '<span class="bub b-pu">'+esc(tc(r.project||'?'))+(r.user?' · '+esc(tc(r.user)):'')+'</span>'; };
   var STORES=[
     {key:'mailboxes',icon:'📨',name:'Mailboxes — parked mail',badge:'b-info',
       cols:[['recipient',function(r){return mono(r.who)}],['msgs',function(r){return r.count}],['size',function(r){return bytes(r.bytes)}],['oldest',function(r){return tsf(r.oldest)}]]},
     {key:'claims',icon:'🏷',name:'Claims — durable responsibilities',badge:'b-resp',
-      cols:[['topic',function(r){return r.exclusive?'<b>'+esc(r.topic)+'</b>':esc(r.topic)}],['owner',function(r){return esc(r.holder_name)}],['project · user',PROJU],['flags',function(r){var f=[];if(r.exclusive)f.push('exclusive');if(r.announce_offline)f.push('announce-offline');return f.join(' · ')||'—'}],['refreshed',function(r){return tsf(r.refreshed_at)}]]},
+      cols:[['topic',function(r){return r.exclusive?'<b>'+esc(tc(r.topic))+'</b>':esc(tc(r.topic))}],['owner',function(r){return esc(nm(r.holder_name))}],['project · user',PROJU],['flags',function(r){var f=[];if(r.exclusive)f.push('exclusive');if(r.announce_offline)f.push('announce-offline');return f.join(' · ')||'—'}],['refreshed',function(r){return tsf(r.refreshed_at)}]]},
     {key:'grants',icon:'🔑',name:'Grants — cross-project consent',badge:'b-con',
-      cols:[['edge',function(r){return '<b>'+esc(r.from)+'</b> → <b>'+esc(r.to)+'</b>'}],['mode',function(r){return esc(r.mode)}],['expires',function(r){return r.exp?tsf(new Date(r.exp).toISOString()):'<span class="empty">forever</span>'}],['granted',function(r){return tsf(r.granted_at)}]]},
+      cols:[['edge',function(r){return '<b>'+esc(tc(r.from))+'</b> → <b>'+esc(tc(r.to))+'</b>'}],['mode',function(r){return esc(r.mode)}],['expires',function(r){return r.exp?tsf(new Date(r.exp).toISOString()):'<span class="empty">forever</span>'}],['granted',function(r){return tsf(r.granted_at)}]]},
     {key:'registrations',icon:'📇',name:'Registrations — name → identity',badge:'b-pu',
-      cols:[['name',function(r){return '<b>'+esc(r.name)+'</b>'}],['project · user',PROJU],['kind',function(r){return esc(r.client_kind||'?')}],['last seen',function(r){return tsf(r.last_seen)}]]},
+      cols:[['name',function(r){return '<b>'+esc(nm(r.name))+'</b>'}],['project · user',PROJU],['kind',function(r){return esc(r.client_kind||'?')}],['last seen',function(r){return tsf(r.last_seen)}]]},
     {key:'subscriptions',icon:'👂',name:'Subscriptions — interest',badge:'b-subp',
-      cols:[['pattern',function(r){return esc(r.pattern)}],['who',function(r){return esc(r.name)}],['project · user',PROJU]]},
+      cols:[['pattern',function(r){return esc(tc(r.pattern))}],['who',function(r){return esc(nm(r.name))}],['project · user',PROJU]]},
     {key:'vault',icon:'🔐',name:'Vault — recoverable secrets',badge:'b-resp',
-      cols:[['session',function(r){return '<b>'+esc(r.name)+'</b>'}],['project · user',PROJU],['sealed',function(r){return tsf(r.sealed_at)}]]},
+      cols:[['session',function(r){return '<b>'+esc(nm(r.name))+'</b>'}],['project · user',PROJU],['sealed',function(r){return tsf(r.sealed_at)}]]},
     {key:'retained',icon:'📌',name:'Retained — last value per topic',badge:'b-pub',
-      cols:[['topic',function(r){return esc(r.topic)}],['project',function(r){return esc(r.project)}],['updated',function(r){return tsf(r.ts)}]]},
+      cols:[['topic',function(r){return esc(tc(r.topic))}],['project',function(r){return esc(tc(r.project))}],['updated',function(r){return tsf(r.ts)}]]},
     {key:'kept',icon:'🪧',name:'Kept-alive — ownerless topics (sends park until reclaimed)',badge:'b-resp',
-      cols:[['topic',function(r){return (r.icon?esc(r.icon)+' ':'')+(r.exclusive?'<b>'+esc(r.topic)+'</b>':esc(r.topic))}],['project',function(r){return esc(r.project)}],['ownerless since',function(r){return tsf(r.ownerless_since)}]]},
+      cols:[['topic',function(r){return (r.icon?esc(r.icon)+' ':'')+(r.exclusive?'<b>'+esc(tc(r.topic))+'</b>':esc(tc(r.topic)))}],['project',function(r){return esc(tc(r.project))}],['ownerless since',function(r){return tsf(r.ownerless_since)}]]},
     {key:'behaviors',icon:'🧭',name:'Behaviours — per-session reminders on delivery',badge:'b-info',
-      cols:[['who',function(r){return '<b>'+esc(r.name)+'</b>'}],['scope',function(r){return esc(r.scope)+(r.match?' · '+esc(r.match):'')}],['reminder',function(r){return esc(r.behavior)}]]}
+      cols:[['who',function(r){return '<b>'+esc(nm(r.name))+'</b>'}],['scope',function(r){return esc(r.scope)+(r.match?' · '+esc(tc(r.match)):'')}],['reminder',function(r){return esc(r.behavior)}]]}
   ];
   function setPersistence(snap){
     if(!snap || !snap.enabled) return;   // "off" is shown via the profile on welcome
@@ -342,9 +348,9 @@
         var x=off+lx[s.session], isGw=s.is_gateway;
         var g=el('g',{'class':'n-sess'+(isGw?' gw':'')+(s.client_kind==='code'?' code':''),id:'n-'+s.session},gNode);
         el('circle',{cx:x,cy:y1,r:22},g);
-        var lbl=el('text',{x:x,y:y1+40,'class':'n-label'},g); lbl.textContent=s.name;
+        var lbl=el('text',{x:x,y:y1+40,'class':'n-label'},g); lbl.textContent=nm(s.name);
         var sub=el('text',{x:x,y:y1+52,'class':'n-sub'},g); sub.textContent=s.session.split('/')[1];
-        var ptag=(s.project&&s.project!=='unclassified')?(s.project+(s.user?' · '+s.user:'')):s.client;
+        var ptag=(s.project&&s.project!=='unclassified')?(tc(s.project)+(s.user?' · '+tc(s.user):'')):s.client;
         if(ptag){ var cl=el('text',{x:x,y:y1+63,'class':'n-client'},g); cl.textContent=ptag; }
         if(isGw){ var t=el('text',{x:x,y:y1+4,'class':'n-tag'},g); t.textContent='GATEWAY'; gwCenters.push({x:x,y:y1,host:h}); }
         g.addEventListener('click',function(){ alias('session',s.session,s.name); });
@@ -376,9 +382,9 @@
             var x=off+lx[sp.id];
             var g=el('g',{'class':'n-subp'+(sp.client_kind==='code'?' code':''),id:'n-'+sp.id},gNode);
             el('circle',{cx:x,cy:ySub,r:14},g);
-            var lbl=el('text',{x:x,y:ySub+30,'class':'n-label'},g); lbl.textContent=sp.name;
+            var lbl=el('text',{x:x,y:ySub+30,'class':'n-label'},g); lbl.textContent=nm(sp.name);
             var hsub=el('text',{x:x,y:ySub+42,'class':'n-sub'},g); hsub.textContent=sp.id.split('/').pop();
-            var sptag=(sp.project&&sp.project!=='unclassified')?(sp.project+(sp.user?' · '+sp.user:'')):(sp.client_kind+(sp.mode==='push'?' · streaming':''));
+            var sptag=(sp.project&&sp.project!=='unclassified')?(tc(sp.project)+(sp.user?' · '+tc(sp.user):'')):(sp.client_kind+(sp.mode==='push'?' · streaming':''));
             if(sptag){ var ck=el('text',{x:x,y:ySub+53,'class':'n-client'},g); ck.textContent=sptag; }
             el('line',{x1:x,y1:ySub-14,x2:anchor.x,y2:anchor.y+(anchor===sp0?22:14),'class':'edge subp',id:'e-'+sp.id},gEdge);
             nodePos[sp.id]={x:x,y:ySub,el:g};
@@ -391,7 +397,7 @@
         var x=off+lx['page:'+p.instance];
         var g=el('g',{'class':'n-page',id:'n-page:'+p.instance},gNode);
         el('rect',{x:x-58,y:y2-16,width:116,height:32,rx:8},g);
-        var lbl=el('text',{x:x,y:y2+4,'class':'n-label'},g); lbl.textContent=p.title||p.page_kind;
+        var lbl=el('text',{x:x,y:y2+4,'class':'n-label'},g); lbl.textContent=nm(p.title||p.page_kind);
         var sub=el('text',{x:x,y:y2+30,'class':'n-sub'},g); sub.textContent=p.page_kind+' · '+p.instance;
         if(gwc){ el('line',{x1:x,y1:y2-16,x2:gwc.x,y2:gwc.y+22,'class':'edge page',id:'e-page:'+p.instance},gEdge); }
         g.addEventListener('click',function(){ alias('page',p.instance,p.title); });
@@ -419,9 +425,9 @@
   // The "to" shows the addressed TOPIC (claim icon or #) when topic-routed, else the session/page
   // name with a kind marker.
   function toLabel(t){
-    if(t.topic) return esc(t.topic_icon||'#')+' '+esc(t.topic);
+    if(t.topic) return esc(t.topic_icon||'#')+' '+esc(tc(t.topic));
     var icon = t.to_kind==='page' ? '[pg]' : '@';
-    return icon+' '+esc(t.to_name||t.to);
+    return icon+' '+esc(t.to_name?nm(t.to_name):t.to);
   }
   function addTrace(t){
     var tb=document.getElementById('traces');
@@ -430,12 +436,12 @@
     var subj=t.subject?('<span class="subj">'+esc(t.subject)+'</span>'):('<span class="subj none">'+esc(t.note||'')+'</span>');
     var tr=document.createElement('tr'); tr.className='x-row';
     tr.innerHTML='<td><span class="x-chev">▸</span></td><td>'+esc((t.ts||'').replace('T',' ').slice(0,19))+'</td><td>'+dirBub+'</td>'+
-      '<td>'+esc(t.from_name||t.from)+' → '+toLabel(t)+'</td><td>'+subj+'</td>';
+      '<td>'+esc(t.from_name?nm(t.from_name):t.from)+' → '+toLabel(t)+'</td><td>'+subj+'</td>';
     var det=document.createElement('tr'); det.className='x-det'; det.style.display='none';
     det.innerHTML='<td colspan="5">'+
       '<span class="kv"><b>from</b> <span class="mono">'+esc(t.from)+'</span></span>'+
-      '<span class="kv"><b>to</b> <span class="mono">'+esc(t.to)+'</span>'+(t.to_name?' ('+esc(t.to_name)+')':'')+'</span>'+
-      (t.topic?'<span class="kv"><b>topic</b> '+esc(t.topic)+'</span>':'')+
+      '<span class="kv"><b>to</b> <span class="mono">'+esc(t.to)+'</span>'+(t.to_name?' ('+esc(nm(t.to_name))+')':'')+'</span>'+
+      (t.topic?'<span class="kv"><b>topic</b> '+esc(tc(t.topic))+'</span>':'')+
       '<span class="kv"><b>verb</b> '+esc(t.verb)+'</span>'+
       '<span class="kv"><b>pattern</b> '+esc(t.pattern||'send')+'</span>'+
       '<span class="kv"><b>envelope</b> <span class="mono">'+esc(t.envelope_id)+'</span></span>'+

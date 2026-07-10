@@ -711,6 +711,17 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.3):** *display-case rule for the dashboard + page widget (#38)* — the standing case rule is
+  **compare lower-case, display Title**: upper-case the first letter of every word (start, or after a
+  non-alphanumeric separator like `/` `-` space), keeping any **existing** upper-case; digits don't start a word.
+  `online-tool/analysis` → `Online-Tool/Analysis`; `OnlineTool/Analysis` stays; `2degrees` stays; and the same
+  human shown as both `robin` and `Robin` now both render `Robin`. Applied via pure display helpers (`tc` for
+  topics/projects/users, `nm` for names — `nm` leaves a bare hex slug, an unnamed session's id, untouched) to
+  the Sessions table, persistence tables, the SVG map, and traces in `dashboard.html`, and to the option/pip
+  text in `tools/aimb-bridge-ui.js`. **Display-only** — storage, routing, option `value`/`dataset.name`, and the
+  (already case-insensitive, #37) matching are unchanged. Verified by `test_dashboard_persistence`
+  (`builds`→`Builds`, `alerts/#`→`Alerts/#`, `online-tool/analysis`→`Online-Tool/Analysis`) and `test_page_e2e`
+  (display Title-cased while `value` stays raw). Suite 497 across 22.
 - **Built (v1.24.2):** *fix: page UI matched a target by exact case (#37)* — the bridge-UI widget
   (`tools/aimb-bridge-ui.js`) matched its persisted target against live options with `name === want`
   (case‑sensitive). A page whose target was e.g. `Bills` never matched the live `bills` topic, so the widget

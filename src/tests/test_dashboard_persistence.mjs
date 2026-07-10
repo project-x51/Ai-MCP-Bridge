@@ -28,6 +28,7 @@ await sleep(500)
 // lay down some durable state before the dashboard connects: a registration, a claim, and a subscription
 await call('register_self', { name: 'Worker', secret: 'sw', project: 'ops' })
 await call('claim_topic', { topic: 'builds', as: 'Worker', secret: 'sw', exclusive: true, announce_offline: true })
+await call('claim_topic', { topic: 'online-tool/analysis', as: 'Worker', secret: 'sw', description: 'hyphen+slash display-case' })
 await call('subscribe', { pattern: 'alerts/#', as: 'Worker', secret: 'sw' })
 await sleep(300)
 
@@ -41,9 +42,11 @@ check('profile line shows version + persistence=file', /persistence=/.test(doc.g
 check('Persistence section is visible', doc.getElementById('perssec').style.display !== 'none')
 check('summary chips rendered', /claim/.test(doc.getElementById('perssum').textContent) && doc.querySelectorAll('#perssum .chip').length >= 5, doc.getElementById('perssum').textContent)
 const persText = doc.getElementById('persistence').textContent
-check('claims store lists the durable claim (builds)', /builds/.test(persText), persText.slice(0, 160))
+// #38 display-case: claimed lower-case ('builds' / 'alerts/#') but DISPLAYED Title-cased (compare lower, show Title)
+check('claims store lists the durable claim, display-cased (builds -> Builds)', /Builds/.test(persText) && !/builds/.test(persText), persText.slice(0, 160))
 check('registrations store lists the peer (Worker)', /Worker/.test(persText))
-check('subscriptions store lists the pattern (alerts/#)', /alerts\/#/.test(persText))
+check('subscriptions store lists the pattern, display-cased (alerts/# -> Alerts/#)', /Alerts\/#/.test(persText) && !/alerts\/#/.test(persText))
+check('#38: hyphen+slash topic Title-cased per word (online-tool/analysis -> Online-Tool/Analysis)', /Online-Tool\/Analysis/.test(persText) && !/online-tool\/analysis/.test(persText), persText.slice(0, 240))
 
 // --- regression: an opened expander must SURVIVE a re-render. roster/persistence pushes rebuild the
 // table (innerHTML=''), which used to snap any open inner expander shut "a moment later". The open state

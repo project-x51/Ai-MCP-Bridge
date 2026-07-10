@@ -26,6 +26,11 @@
 // "topic:<topic>" — delivered to the topic's OWNER(S); shared topics fan out to every co-owner.
 window.aimbBridgeUI = (function () {
   var ON = "🟢", IDLE = "🟠", OFF = "⚪";
+  // #38 display-case: matching is case-INSENSITIVE (see opt() below); DISPLAY is Title — upper-case the first
+  // letter of each word (start or after a non-alphanumeric separator), keeping existing upper-case; digits don't
+  // start a word. "online-tool/analysis" -> "Online-Tool/Analysis"; "OnlineTool/Analysis" stays. Only the visible
+  // TEXT is transformed — option value/dataset.name stay the raw topic/name for routing + matching.
+  function tc(s){ return String(s == null ? "" : s).replace(/(^|[^A-Za-z0-9])([a-z])/g, function (m, p, c) { return p + c.toUpperCase(); }); }
   var CSS = [
     ".aimb-nav { display: inline-flex; align-items: center; gap: 6px; }",
     ".aimb-label { font-size: 11.25px; font-weight: 600; color: #6B7280; }",
@@ -100,7 +105,7 @@ window.aimbBridgeUI = (function () {
           /* truth = client_kind from the bridge roster; fall back to the old structural heuristic */
           var ck = s.client_kind || (s.kind === "subpeer" ? "cowork" : "code");
           var cw = (ck !== "code");
-          opt(g1, s.session, s.name, ON + " " + s.name + "  — " + (cw ? "Coworker" : "Coder"), cw ? "aimb-cw" : "aimb-code");
+          opt(g1, s.session, s.name, ON + " " + tc(s.name) + "  — " + (cw ? "Coworker" : "Coder"), cw ? "aimb-cw" : "aimb-code");
         });
       }
       /* topics dedupe by path: one option per topic, owner fan-out handled bridge-side */
@@ -117,7 +122,7 @@ window.aimbBridgeUI = (function () {
         Object.keys(byTopic).forEach(function (k) {
           var r = byTopic[k];
           var nm = "topic:" + r.topic;
-          opt(grp, nm, nm, (r.icon || ON) + " " + r.topic + "  — " + (r.exclusive ? "Topic" : "Topic ×" + r.holders.length),
+          opt(grp, nm, nm, (r.icon || ON) + " " + tc(r.topic) + "  — " + (r.exclusive ? "Topic" : "Topic ×" + r.holders.length),
               "aimb-resp" + (r.exclusive ? " aimb-excl" : ""));   /* exclusive topics render bold */
         });
       }
@@ -125,14 +130,14 @@ window.aimbBridgeUI = (function () {
       if (groups.indexOf("browser-sessions") >= 0 && pagesL.length) {
         var g3 = addGroup("Browser Sessions");
         pagesL.forEach(function (p) {
-          opt(g3, "page:" + p.instance, p.title, ON + " " + p.title + "  — Browser", "aimb-page");
+          opt(g3, "page:" + p.instance, p.title, ON + " " + tc(p.title) + "  — Browser", "aimb-page");
         });
       }
       if (groups.indexOf("browser-topics") >= 0 && topicsL.some(function (r) { return r.source === "browser"; })) topicOpts(addGroup("Browser Topics"), "browser");
       if (found) want = found.dataset.name;   /* snap to the live entry's canonical case once matched */
       if (want && !found) {
         var off = document.createElement("option"); off.value = ""; off.dataset.name = want;
-        off.textContent = OFF + " " + want.replace(/^topic:/, "") + "  — offline"; off.className = "aimb-offline";
+        off.textContent = OFF + " " + tc(want.replace(/^topic:/, "")) + "  — offline"; off.className = "aimb-offline";
         sel.appendChild(off); off.selected = true;
       } else if (found) { found.selected = true; } else { ph.selected = true; }
       var liveSel = !!found && bridgeOn;
@@ -141,7 +146,7 @@ window.aimbBridgeUI = (function () {
       pip.textContent = !bridgeOn ? OFF : (roster.length ? ON : IDLE);
       pip.title = !bridgeOn ? "Bridge offline"
         : (!roster.length ? "Bridge online — no conversations"
-        : (want ? ((want.indexOf("topic:") === 0 ? "Topic " : "Session ") + want.replace(/^topic:/, "") + (liveSel ? " online" : " offline")) : "Bridge online — select a target"));
+        : (want ? ((want.indexOf("topic:") === 0 ? "Topic " : "Session ") + tc(want.replace(/^topic:/, "")) + (liveSel ? " online" : " offline")) : "Bridge online — select a target"));
       sel.disabled = !bridgeOn;
       btns.forEach(function (b) { b.disabled = !liveSel; });
     }
