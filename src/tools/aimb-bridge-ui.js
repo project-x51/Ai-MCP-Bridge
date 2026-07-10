@@ -89,7 +89,9 @@ window.aimbBridgeUI = (function () {
         var o = document.createElement("option");
         o.value = value; o.dataset.name = name; o.textContent = text; o.className = cls;
         grp.appendChild(o);
-        if (name === want && !found) found = o;
+        /* names/topics compare case-INSENSITIVELY (display keeps original case): a persisted target like
+           "topic:Bills" matches the live "topic:bills" instead of dangling as a separate offline entry */
+        if (!found && String(name).toLowerCase() === String(want).toLowerCase()) found = o;
         return o;
       }
       if (groups.indexOf("ai-sessions") >= 0 && roster.length) {
@@ -127,6 +129,7 @@ window.aimbBridgeUI = (function () {
         });
       }
       if (groups.indexOf("browser-topics") >= 0 && topicsL.some(function (r) { return r.source === "browser"; })) topicOpts(addGroup("Browser Topics"), "browser");
+      if (found) want = found.dataset.name;   /* snap to the live entry's canonical case once matched */
       if (want && !found) {
         var off = document.createElement("option"); off.value = ""; off.dataset.name = want;
         off.textContent = OFF + " " + want.replace(/^topic:/, "") + "  — offline"; off.className = "aimb-offline";

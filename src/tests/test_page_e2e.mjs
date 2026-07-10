@@ -148,6 +148,16 @@ check('reload auto-selects persisted session', cur2 && cur2.dataset.name === 'Wo
 check('reloaded page button enabled', dom2.window.document.querySelector('button.aimb-discuss').disabled === false)
 dom2.window.close()
 
+// --- #37: a persisted MIXED-CASE target matches the live (canonical-case) entry (compare lowercase, display original)
+const dom3 = new JSDOM(html, { runScripts: 'dangerously', url: PAGE_URL + '#session=topic:Demo/Claims' })
+await sleep(1200)
+const sel3 = dom3.window.document.getElementById('aimb-target')
+const cur3 = sel3.selectedOptions[0]
+check('mixed-case ?session matches the live topic case-insensitively', cur3 && cur3.dataset.name === 'topic:demo/claims' && cur3.value === 'topic:demo/claims', sel3.innerHTML)
+check('no dangling offline entry for the matched target', ![...sel3.options].some(o => o.className === 'aimb-offline'), sel3.innerHTML)
+check('display keeps the canonical case (demo/claims, not Demo/Claims)', cur3 && cur3.textContent.includes('demo/claims') && !cur3.textContent.includes('Demo/Claims'), cur3 && cur3.textContent)
+dom3.window.close()
+
 // --- pip goes grey, controls disabled, when the bridge dies
 await transport.close()
 await sleep(600)

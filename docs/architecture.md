@@ -711,6 +711,13 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.2):** *fix: page UI matched a target by exact case (#37)* — the bridge-UI widget
+  (`tools/aimb-bridge-ui.js`) matched its persisted target against live options with `name === want`
+  (case‑sensitive). A page whose target was e.g. `Bills` never matched the live `bills` topic, so the widget
+  showed a dangling `Bills — offline` entry beside the online `bills — Topic ×1`. Fix: compare
+  case‑INSENSITIVELY and snap the selection to the live entry's **canonical case** once matched — the standing
+  rule is *compare lowercase, display original case*. Verified by `test_page_e2e` (a fresh page with a
+  mixed‑case `?session` selects the live topic, no offline dangler, display stays canonical). Suite 496 across 22.
 - **Built (v1.24.1):** *rehydrate launcher-stripped env so `${env:…}` secret refs resolve (#36 follow-up)* —
   some MCP hosts (Claude Desktop among them) spawn a server with a **curated, minimal environment**: arbitrary
   user variables aren't forwarded unless named in the server's `env` block. That silently broke egress‑auth
