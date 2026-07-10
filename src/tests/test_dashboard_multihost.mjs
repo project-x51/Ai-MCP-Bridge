@@ -23,7 +23,7 @@ const roster = {
       subpeers: [{ id: 'ROBIN-Z790/bbb/robin-1', name: 'ROBIN-1', client_kind: 'agent', project: 'AIMB', user: 'Robin', realm: 'default' }] },
     { session: 'VOLT-001/ccc', name: 'ccc', host_label: 'VOLT-001', is_gateway: true, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
     { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
-      subpeers: [{ id: 'VOLT-001/ddd/volt-1', name: 'VOLT-1', client_kind: 'code', mode: 'push', project: 'AIMB', user: 'Robin', realm: 'default' }] },
+      subpeers: [{ id: 'VOLT-001/ddd/volt-1', name: 'VOLT-1', client_kind: 'code', mode: 'push', channel_capable: true, project: 'AIMB', user: 'Robin', realm: 'default' }] },
   ],
   pages: [{ instance: 'pg1', page_kind: 'chat', title: 'Chat — Robin', project: 'AIMB', user: 'Robin', host_label: 'ROBIN-Z790' }],
 }
@@ -47,6 +47,9 @@ const codeBadge = [...sb.querySelectorAll('.b-code')].find(e => e.textContent.in
 check('code sub-peer VOLT-1 uses orange b-code badge', !!codeBadge)
 const robinBadge = [...sb.querySelectorAll('.b-subp')].find(e => e.textContent.includes('ROBIN-1'))
 check('non-code (agent) sub-peer ROBIN-1 uses yellow b-subp badge', !!robinBadge)
+// #2/push-honesty: a channel-capable push sub-peer shows "· push" (renamed from "streaming"); it is NOT
+// shown for a mode:push sub-peer that lacks channel capability (so it doesn't claim an unimplemented push)
+check('channel-capable push sub-peer shows "· push" not "streaming"', sb.textContent.includes('· push') && !sb.textContent.includes('streaming'))
 check('agent client-kind surfaced (not lumped as cowork)', sb.textContent.includes('agent') && !sb.textContent.includes('cowork'))
 
 // web session folded into its machine group

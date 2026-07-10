@@ -70,7 +70,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.24.3'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.24.4'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -360,7 +360,11 @@ function inboxHint(spId) {
   return { unread: Math.max(0, end - (q.served || 0)), next_cursor: end, queue_epoch: q.epoch }
 }
 function announceSubpeers() {
-  const list = [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, kind: 'subpeer', client: s.client || null, client_kind: s.client_kind || null, mode: s.mode || null, project: s.identity?.project || null, user: s.identity?.user || null, realm: s.identity?.realm || REALM }))
+  // channel_capable = does THIS process's MCP client actually declare the claude/channel capability (i.e. can it
+  // really receive push notifications). Attached per sub-peer so the dashboard shows "push" only when push is
+  // genuinely live, not merely because the mode was optimistically set to push by the code-name heuristic (#2).
+  const chan = !!(CLIENT && CLIENT.channel_capable)
+  const list = [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, kind: 'subpeer', client: s.client || null, client_kind: s.client_kind || null, mode: s.mode || null, channel_capable: chan, project: s.identity?.project || null, user: s.identity?.user || null, realm: s.identity?.realm || REALM }))
   if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.subpeers = list }; broadcastRoster() }
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'SUBPEERS', session: SESSION, subpeers: list })
 }

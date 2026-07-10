@@ -220,7 +220,7 @@
           expandable(sb,[
             '<span style="padding-left:18px">↳</span> <span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(nm(sp.name))+'</span>',
             '<span class="mono">'+esc(sp.id)+'</span>',
-            '<span class="mono">'+esc((sp.client_kind||sp.client||'')+(sp.mode==='push'?' · streaming':''))+'</span>',
+            '<span class="mono">'+esc((sp.client_kind||sp.client||'')+((sp.channel_capable&&sp.mode==='push')?' · push':''))+'</span>',
             pu(sp.project,sp.user),
             topicNames(tops,sp.id)],
             '<span class="kv"><b>realm</b> '+esc(sp.realm||'?')+'</span>'+
@@ -384,7 +384,7 @@
             el('circle',{cx:x,cy:ySub,r:14},g);
             var lbl=el('text',{x:x,y:ySub+30,'class':'n-label'},g); lbl.textContent=nm(sp.name);
             var hsub=el('text',{x:x,y:ySub+42,'class':'n-sub'},g); hsub.textContent=sp.id.split('/').pop();
-            var sptag=(sp.project&&sp.project!=='unclassified')?(tc(sp.project)+(sp.user?' · '+tc(sp.user):'')):(sp.client_kind+(sp.mode==='push'?' · streaming':''));
+            var sptag=(sp.project&&sp.project!=='unclassified')?(tc(sp.project)+(sp.user?' · '+tc(sp.user):'')):(sp.client_kind+((sp.channel_capable&&sp.mode==='push')?' · push':''));
             if(sptag){ var ck=el('text',{x:x,y:ySub+53,'class':'n-client'},g); ck.textContent=sptag; }
             el('line',{x1:x,y1:ySub-14,x2:anchor.x,y2:anchor.y+(anchor===sp0?22:14),'class':'edge subp',id:'e-'+sp.id},gEdge);
             nodePos[sp.id]={x:x,y:ySub,el:g};

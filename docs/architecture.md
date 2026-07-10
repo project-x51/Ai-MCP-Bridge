@@ -711,6 +711,16 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.4):** *dashboard "streaming" → "push", shown only when push is genuinely live* — the
+  sub-peer badge read `· streaming` whenever `mode==='push'`, but a Code session is marked push by a
+  **code-name heuristic** even when its MCP client never declared the `claude/channel` capability — i.e. it
+  isn't actually receiving channel pushes (that's the still-pending #2, gated behind a dev flag). Showing
+  "streaming" there over-claimed an unimplemented capability. Fix: renamed the badge to **`· push`** and gate it
+  on **real channel capability** — `announceSubpeers` now attaches `channel_capable` (the hosting process's
+  `CLIENT.channel_capable`) to each gossiped sub-peer, and the dashboard/map render `· push` only when
+  `channel_capable && mode==='push'`. The optimistic push *mode* + `detected_mode` heuristic (and its
+  `test_subpeers` contract) are unchanged — this is purely honest **display**. Verified by
+  `test_dashboard_multihost` (a channel-capable push sub-peer shows `· push`, no `streaming`). Suite 498 across 22.
 - **Built (v1.24.3):** *display-case rule for the dashboard + page widget (#38)* — the standing case rule is
   **compare lower-case, display Title**: upper-case the first letter of every word (start, or after a
   non-alphanumeric separator like `/` `-` space), keeping any **existing** upper-case; digits don't start a word.
