@@ -70,7 +70,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.24.4'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.24.5'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -110,6 +110,12 @@ const persistence = profile.persistence          // Persistence facet (§12): du
 const authorizer = profile.authorizer            // Authorizer facet (§16): human-in-the-loop confirmation (none/script/hello)
 const vault = profile.vault                       // Vault facet (§21): seal/unseal a session's secret for presence-gated recovery (none/script/tpm)
 const VAULT = profile.names.vault !== 'none'
+// §21: when a caller presents a wrong/lost secret and the vault is on, point them at recover_secret — a
+// presence check (Windows Hello in the tpm impl) returns their ORIGINAL sealed secret so they can retry.
+// Empty when there's no vault (recovery is impossible, so the hint would be misleading).
+const recoverHint = (name, project) => VAULT
+  ? { recoverable: true, hint: `lost this secret (e.g. a compaction dropped it)? recover it — recover_secret { name: ${JSON.stringify(name || '')}${project ? `, project: ${JSON.stringify(project)}` : ''} } runs a presence check and returns the original secret; then retry with it` }
+  : {}
 const ALLOW_CROSS_USER = CFG.allowCrossUserTakeover === true   // §16 global: may a DIFFERENT user take over a dormant topic after grace?
 const PERSIST = profile.names.persistence !== 'none'
 const PERSIST_SUBS = PERSIST && ((CFG.persistence && CFG.persistence.persistSubscriptions) !== false)   // §20: durable subscriptions (default on; opt out with persistSubscriptions:false)
@@ -1341,7 +1347,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const authSub = (ref, secret) => {
     const sp = resolveLocalSub(ref)
     if (!sp) return { err: { ok: false, code: 'unknown-subpeer', ref } }
-    if (sp.secretHash !== sha(secret || '')) return { err: { ok: false, code: 'bad-secret', ref: sp.id } }
+    if (sp.secretHash !== sha(secret || '')) return { err: { ok: false, code: 'bad-secret', ref: sp.id, ...recoverHint(sp.name, sp.identity?.project) } }
     sp.last_seen = Date.now()
     return { sp }
   }
@@ -1362,7 +1368,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (!name || !secret) return ok({ ok: false, code: 'name-and-secret-required' })
       const existing = [...subpeers.values()].find(s => ciEq(s.name, name))
       if (existing) {
-        if (existing.secretHash !== sha(secret)) return ok({ ok: false, code: 'name-taken', name })
+        if (existing.secretHash !== sha(secret)) return ok({ ok: false, code: 'name-taken', name, ...recoverHint(name, existing.identity?.project) })
         existing.last_seen = Date.now()
         const q = subQueues.get(existing.id)
         await syncDurableMailbox(existing)   // §23: a returning peer also picks up out-of-band parked mail

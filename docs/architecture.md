@@ -711,6 +711,15 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.5):** *lost-secret rejections hint at recover_secret (§21)* — when a session loses its bearer
+  secret (e.g. a compaction drops it) and its live sub-peer still holds the name, `register_self` with the wrong
+  secret returns `name-taken` and a tool call with a wrong `as`/`secret` returns `bad-secret` — dead ends unless
+  the caller knows about recovery. Now, **when the vault is on**, both responses carry `recoverable: true` and a
+  `hint` naming `recover_secret { name, project }` (a presence check returns the original sealed secret, then
+  retry). Gated on the vault being present so the hint is never shown when recovery is impossible; the
+  create-path (expired peer) still rehydrates by identity, so only these two live-peer rejections needed it.
+  Verified by `test_vault_live` (hint on `name-taken` + `bad-secret` with a vault; absent with vault `none`).
+  Suite 501 across 22.
 - **Built (v1.24.4):** *dashboard "streaming" → "push", shown only when push is genuinely live* — the
   sub-peer badge read `· streaming` whenever `mode==='push'`, but a Code session is marked push by a
   **code-name heuristic** even when its MCP client never declared the `claude/channel` capability — i.e. it
