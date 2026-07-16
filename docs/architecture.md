@@ -711,6 +711,12 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.9):** *fix: group-by-user keyed on case-sensitive user → duplicate "Robin" groups* — the
+  grouping key used the raw user string, so `robin` (sub-peers) and `Robin` (pages) fell into two groups that
+  both *displayed* as "Robin". Per the standing rule (compare lower / display Title), the user key is now
+  lower-cased so case-variants collapse into one group (header still Title-cased). PC keys stay as-is —
+  hostnames are case-stable and the `m.hosts[k]` alias lookup needs the original case. Verified by
+  `test_dashboard_multihost` (`robin` + `Robin` → one group). Suite 506 across 22.
 - **Built (v1.24.8):** *dashboard Sessions grouping dropdown (PC / user / none)* — a `group by` select in the
   Sessions header groups the **connections** view (show-bridges off) by **PC** (machine, default), **user** (the
   human), or **none** (one flat list). Within every group the code → cowork → browser order holds; PC groups

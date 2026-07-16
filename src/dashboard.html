@@ -259,7 +259,9 @@
       if(groupBy==='none'){
         items.slice().sort(function(a,b){ return a.r-b.r; }).forEach(function(it){ it.f(); });   // one flat list, code/cowork/browser
       } else {
-        var groups={}, gorder=[], keyOf=function(it){ return groupBy==='user'?(it.user||'(no user)'):it.pc; };
+        // user key is case-INSENSITIVE (compare lower, display Title) so "robin" + "Robin" are ONE group; PC keys
+        // are hostnames (already case-stable, and the alias lookup m.hosts[k] needs the original case) so kept as-is
+        var groups={}, gorder=[], keyOf=function(it){ return groupBy==='user'?(it.user?it.user.toLowerCase():'(no user)'):it.pc; };
         items.forEach(function(it){ var k=keyOf(it); if(!groups[k]){ groups[k]=[]; gorder.push(k); } groups[k].push(it); });
         if(groupBy==='pc') gorder.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });                 // this machine first
         else gorder.sort(function(a,b){ return String(a).toLowerCase()<String(b).toLowerCase()?-1:1; });            // users A→Z

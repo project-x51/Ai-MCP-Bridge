@@ -22,7 +22,7 @@ const roster = {
     { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', is_gateway: false, client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
       subpeers: [{ id: 'ROBIN-Z790/bbb/robin-1', name: 'ROBIN-1', client_kind: 'agent', project: 'AIMB', user: 'Robin', realm: 'default' },
         { id: 'ROBIN-Z790/bbb/cow-1', name: 'Cowork-Conn', client_kind: 'cowork', project: 'AIMB', user: 'Robin', realm: 'default' },
-        { id: 'ROBIN-Z790/bbb/cod-1', name: 'Coder-Conn', client_kind: 'code', project: 'AIMB', user: 'Robin', realm: 'default' }] },
+        { id: 'ROBIN-Z790/bbb/cod-1', name: 'Coder-Conn', client_kind: 'code', project: 'AIMB', user: 'robin', realm: 'default' }] },
     { session: 'VOLT-001/ccc', name: 'ccc', host_label: 'VOLT-001', is_gateway: true, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
     { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
       subpeers: [{ id: 'VOLT-001/ddd/volt-1', name: 'VOLT-1', client_kind: 'code', mode: 'push', channel_capable: true, project: 'AIMB', user: 'Alex', realm: 'default' }] },
@@ -44,6 +44,8 @@ check('connections ordered code -> cowork -> browser', rIdx('Coder-Conn') >= 0 &
 const gb = doc.getElementById('groupBy'); gb.value = 'user'; gb.dispatchEvent(new dom.window.Event('change'))
 const heads = () => [...sb.querySelectorAll('.b-mach')].map(e => e.textContent)
 check('group-by-user makes a header per user (Alex + Robin), not by PC', heads().some(t => /👤.*Alex/.test(t)) && heads().some(t => /👤.*Robin/.test(t)) && !heads().some(t => t.includes('Lab PC')), JSON.stringify(heads()))
+// case-insensitive: Coder-Conn is user "robin", the rest "Robin" — they must collapse to ONE Robin group
+check('group-by-user merges case-variant users (robin + Robin -> one group)', heads().filter(t => /👤.*Robin/i.test(t)).length === 1, JSON.stringify(heads()))
 check('group-by-user places VOLT-1 under the Alex header (users A->Z)', (function(){ var rows=[...sb.querySelectorAll('tr')], f=t=>rows.findIndex(r=>r.textContent.includes(t)); var alex=rows.findIndex(r=>/👤.*Alex/.test(r.textContent)); var robin=rows.findIndex(r=>/👤.*Robin/.test(r.textContent)); return alex>=0 && robin>=0 && alex<f('VOLT-1') && f('VOLT-1')<robin; })())
 gb.value = 'pc'; gb.dispatchEvent(new dom.window.Event('change'))   // reset to PC grouping for the checks below
 // enable "show bridges" for the full nested view asserted below
