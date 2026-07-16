@@ -711,6 +711,14 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.8):** *dashboard Sessions grouping dropdown (PC / user / none)* — a `group by` select in the
+  Sessions header groups the **connections** view (show-bridges off) by **PC** (machine, default), **user** (the
+  human), or **none** (one flat list). Within every group the code → cowork → browser order holds; PC groups
+  put this machine first, user groups sort A→Z. Grouping only applies to the connections view — when "show
+  bridges" is on the nested process view is inherently per‑PC, so the dropdown is **disabled** and grouping is
+  forced to PC. Persisted in `localStorage`; clicks don't toggle the section collapse. Verified by
+  `test_dashboard_multihost` (group‑by‑user makes a header per human, not per PC, and places each connection
+  under its user). Suite 505 across 22.
 - **Built (v1.24.7):** *connections-only view orders code → cowork → browser* — the "show bridges"-off view
   now groups the flattened connections in a fixed order (**code**, then **cowork**, then **browser** pages;
   other kinds fall just before browser), stable within each group. Verified by `test_dashboard_multihost`

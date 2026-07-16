@@ -84,7 +84,7 @@
   </div>
 </section>
 <section class="sec" data-sec="sessions">
-  <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span><label id="showBridgesLbl" style="float:right;font-weight:400;font-size:12px;color:#6B7280;cursor:pointer;user-select:none"><input type="checkbox" id="showBridges" style="vertical-align:middle;margin-right:4px"> show bridges</label></h2>
+  <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span><span style="float:right;font-weight:400;font-size:12px;color:#6B7280"><select id="groupBy" title="Group sessions by" style="font-size:11px;vertical-align:middle;margin-right:10px;padding:1px 3px"><option value="pc">group: PC</option><option value="user">group: user</option><option value="none">group: none</option></select><label id="showBridgesLbl" style="cursor:pointer;user-select:none"><input type="checkbox" id="showBridges" style="vertical-align:middle;margin-right:4px"> show bridges</label></span></h2>
   <div class="secb">
     <table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
   </div>
@@ -179,83 +179,97 @@
   function setTables(m){
     var rt=document.getElementById('realmtag'); if(rt) rt.textContent=(m.sessions&&m.sessions[0]&&m.sessions[0].realm)?('realm: '+m.sessions[0].realm):'';
     var sb=document.getElementById('sessions'); sb.innerHTML='';
-    // group sessions + pages (web sessions) by MACHINE; gateway-first within each; local machine first
-    var mach={}, order=[];
-    function ensure(h){ if(!mach[h]){ mach[h]={sessions:[],pages:[]}; order.push(h); } return mach[h]; }
-    (m.sessions||[]).forEach(function(s){ ensure(machineOf(s)).sessions.push(s); });
     var gwHost=(m.gateway||'').split('/')[0];
-    (m.pages||[]).forEach(function(p){ ensure(p.host_label||gwHost||order[0]||'?').pages.push(p); });
-    order.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });   // this machine (the local gateway's host) first
     // "show bridges" (default OFF): a BRIDGE is an infrastructure process (gateway/host/tray — no project); the
     // CONNECTIONS that ride it are browser (pages), code + cowork (sub-peers, and any project-bearing code/cowork
     // session). OFF flattens to just the connections; ON shows the full nested view (bridge rows + their leaves).
     var showBridges=!!(document.getElementById('showBridges')&&document.getElementById('showBridges').checked);
+    // grouping (Sessions dropdown): pc | user | none. Only meaningful for the connections view — when "show
+    // bridges" is on the nested process view is inherently per-PC, so grouping is forced to pc (dropdown disabled).
+    var gsel=document.getElementById('groupBy');
+    var groupBy=showBridges?'pc':((gsel&&gsel.value)||'pc');
     var isConn=function(s){ return (s.client_kind==='code'||s.client_kind==='cowork') && s.project && s.project!=='unclassified'; };
     var connRank=function(kind){ return kind==='code'?0 : kind==='cowork'?1 : kind==='browser'?3 : 2; };   // order: code, cowork, (other), browser
-    order.forEach(function(h){
-      var box=mach[h];
-      var label=(m.hosts&&m.hosts[h])?(m.hosts[h]+' ('+h+')'):h;
-      var hdr=document.createElement('tr'); hdr.className='mach-row';
-      hdr.innerHTML='<td colspan="6"><span class="b-mach">🖥 '+esc(label)+'</span></td>';
-      sb.appendChild(hdr);
-      var renderPage=function(p,flat){
-        expandable(sb,[
-          (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub b-page">'+esc(nm(p.title||p.page_kind))+'</span>',
-          '<span class="mono">page:'+esc(p.instance)+'</span>',
-          '<span class="mono">'+esc(p.page_kind)+' (web)</span>',
-          pu(p.project,p.user),
-          (p.subject?'<span class="bub b-resp">'+(p.icon?esc(p.icon)+' ':'')+esc(p.subject)+'</span>':'')],
-          '<span class="kv"><b>kind</b> web page</span>'+
-          '<span class="kv"><b>instance</b> <span class="mono">'+esc(p.instance)+'</span></span>'+
-          (p.subject?'<span class="kv"><b>subject</b> '+esc(p.subject)+'</span>':'')+
-          '<span class="kv"><b>project</b> '+esc(p.project||'(infra)')+'</span>'+
-          '<span class="kv"><b>user</b> '+esc(p.user||'—')+'</span>',null,'page/'+p.instance);
-      };
-      var renderSub=function(sp,tops,flat){
-        expandable(sb,[
-          (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(nm(sp.name))+'</span>',
-          '<span class="mono">'+esc(sp.id)+'</span>',
-          '<span class="mono">'+esc((sp.client_kind||sp.client||'')+((sp.channel_capable&&sp.mode==='push')?' · push':''))+'</span>',
-          pu(sp.project,sp.user),
-          topicNames(tops,sp.id)],
-          '<span class="kv"><b>realm</b> '+esc(sp.realm||'?')+'</span>'+
-          '<span class="kv"><b>project</b> '+esc(sp.project||'(infra)')+'</span>'+
-          '<span class="kv"><b>user</b> '+esc(sp.user||'—')+'</span>'+
-          '<span class="kv"><b>parent</b> '+(sp.parent?esc(sp.parent.split('/').pop()):'—')+'</span>'+
-          '<span class="kv"><b>client</b> '+esc(sp.client||'?')+'</span>'+
-          '<span class="kv"><b>mode</b> '+esc(sp.mode||'poll')+'</span>'+
-          '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>',null,'sp/'+sp.id);
-      };
-      var renderSess=function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
-        expandable(sb,[
-          '<span class="bub '+sessClass(s)+'">'+esc(nm(s.name))+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
-          '<span class="mono">'+esc(s.session)+'</span>',
-          '<span class="mono">'+esc(s.client||'')+'</span>',
-          pu(s.project,s.user),
-          topicNames(tops,s.session)],
-          sessDetail(s,tops),null,'sess/'+s.session);
-      };
-      var sess=box.sessions.slice().sort(function(a,b){ return (b.is_gateway?1:0)-(a.is_gateway?1:0); });   // gateway first
-      if(showBridges){
+    var userOf=function(x){ return (x&&x.user&&x.user!=='unknown')?x.user:null; };
+    var groupHeader=function(icon,label){ var hdr=document.createElement('tr'); hdr.className='mach-row'; hdr.innerHTML='<td colspan="6"><span class="b-mach">'+icon+' '+esc(label)+'</span></td>'; sb.appendChild(hdr); };
+    // --- row renderers (flat vs nested via the `flat` flag) ---
+    var renderPage=function(p,flat){
+      expandable(sb,[
+        (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub b-page">'+esc(nm(p.title||p.page_kind))+'</span>',
+        '<span class="mono">page:'+esc(p.instance)+'</span>',
+        '<span class="mono">'+esc(p.page_kind)+' (web)</span>',
+        pu(p.project,p.user),
+        (p.subject?'<span class="bub b-resp">'+(p.icon?esc(p.icon)+' ':'')+esc(p.subject)+'</span>':'')],
+        '<span class="kv"><b>kind</b> web page</span>'+
+        '<span class="kv"><b>instance</b> <span class="mono">'+esc(p.instance)+'</span></span>'+
+        (p.subject?'<span class="kv"><b>subject</b> '+esc(p.subject)+'</span>':'')+
+        '<span class="kv"><b>project</b> '+esc(p.project||'(infra)')+'</span>'+
+        '<span class="kv"><b>user</b> '+esc(p.user||'—')+'</span>',null,'page/'+p.instance);
+    };
+    var renderSub=function(sp,tops,flat){
+      expandable(sb,[
+        (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(nm(sp.name))+'</span>',
+        '<span class="mono">'+esc(sp.id)+'</span>',
+        '<span class="mono">'+esc((sp.client_kind||sp.client||'')+((sp.channel_capable&&sp.mode==='push')?' · push':''))+'</span>',
+        pu(sp.project,sp.user),
+        topicNames(tops,sp.id)],
+        '<span class="kv"><b>realm</b> '+esc(sp.realm||'?')+'</span>'+
+        '<span class="kv"><b>project</b> '+esc(sp.project||'(infra)')+'</span>'+
+        '<span class="kv"><b>user</b> '+esc(sp.user||'—')+'</span>'+
+        '<span class="kv"><b>parent</b> '+(sp.parent?esc(sp.parent.split('/').pop()):'—')+'</span>'+
+        '<span class="kv"><b>client</b> '+esc(sp.client||'?')+'</span>'+
+        '<span class="kv"><b>mode</b> '+esc(sp.mode||'poll')+'</span>'+
+        '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>',null,'sp/'+sp.id);
+    };
+    var renderSess=function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
+      expandable(sb,[
+        '<span class="bub '+sessClass(s)+'">'+esc(nm(s.name))+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
+        '<span class="mono">'+esc(s.session)+'</span>',
+        '<span class="mono">'+esc(s.client||'')+'</span>',
+        pu(s.project,s.user),
+        topicNames(tops,s.session)],
+        sessDetail(s,tops),null,'sess/'+s.session);
+    };
+    if(showBridges){
+      // full nested view, always grouped by MACHINE (gateway-first within each, local machine first)
+      var mach={}, order=[];
+      function ensure(h){ if(!mach[h]){ mach[h]={sessions:[],pages:[]}; order.push(h); } return mach[h]; }
+      (m.sessions||[]).forEach(function(s){ ensure(machineOf(s)).sessions.push(s); });
+      (m.pages||[]).forEach(function(p){ ensure(p.host_label||gwHost||order[0]||'?').pages.push(p); });
+      order.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });
+      order.forEach(function(h){
+        var box=mach[h];
+        groupHeader('🖥',(m.hosts&&m.hosts[h])?(m.hosts[h]+' ('+h+')'):h);
+        var sess=box.sessions.slice().sort(function(a,b){ return (b.is_gateway?1:0)-(a.is_gateway?1:0); });
         var hasGw=sess.some(function(s){ return s.is_gateway; });
         sess.forEach(function(s){ renderSess(s);
           (s.subpeers||[]).forEach(function(sp){ renderSub(sp,s.topics||[],false); });
           if(s.is_gateway) box.pages.forEach(function(p){ renderPage(p,false); });   // pages hang off the gateway
         });
         if(!hasGw) box.pages.forEach(function(p){ renderPage(p,false); });
+      });
+    } else {
+      // connections view: flatten to the participants, group by pc/user/none, order code/cowork/browser in each
+      var items=[];
+      (m.sessions||[]).forEach(function(s){
+        if(isConn(s)) items.push({ pc:machineOf(s), user:userOf(s), r:connRank(s.client_kind), f:function(){ renderSess(s); } });
+        (s.subpeers||[]).forEach(function(sp){ items.push({ pc:machineOf(s), user:userOf(sp), r:connRank(sp.client_kind), f:function(){ renderSub(sp,s.topics||[],true); } }); });
+      });
+      (m.pages||[]).forEach(function(p){ items.push({ pc:(p.host_label||gwHost||'?'), user:userOf(p), r:connRank('browser'), f:function(){ renderPage(p,true); } }); });
+      if(groupBy==='none'){
+        items.slice().sort(function(a,b){ return a.r-b.r; }).forEach(function(it){ it.f(); });   // one flat list, code/cowork/browser
       } else {
-        // connections only — bridge/host/gateway processes hidden; their leaves promoted flat and ordered
-        // code, cowork, then browser (stable within each group)
-        var conns=[];
-        sess.forEach(function(s){
-          if(isConn(s)) conns.push({ r:connRank(s.client_kind), f:function(){ renderSess(s); } });
-          (s.subpeers||[]).forEach(function(sp){ conns.push({ r:connRank(sp.client_kind), f:function(){ renderSub(sp,s.topics||[],true); } }); });
+        var groups={}, gorder=[], keyOf=function(it){ return groupBy==='user'?(it.user||'(no user)'):it.pc; };
+        items.forEach(function(it){ var k=keyOf(it); if(!groups[k]){ groups[k]=[]; gorder.push(k); } groups[k].push(it); });
+        if(groupBy==='pc') gorder.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });                 // this machine first
+        else gorder.sort(function(a,b){ return String(a).toLowerCase()<String(b).toLowerCase()?-1:1; });            // users A→Z
+        gorder.forEach(function(k){
+          if(groupBy==='pc') groupHeader('🖥',(m.hosts&&m.hosts[k])?(m.hosts[k]+' ('+k+')'):k);
+          else groupHeader('👤',nm(k));
+          groups[k].slice().sort(function(a,b){ return a.r-b.r; }).forEach(function(it){ it.f(); });
         });
-        box.pages.forEach(function(p){ conns.push({ r:connRank('browser'), f:function(){ renderPage(p,true); } }); });
-        conns.sort(function(a,b){ return a.r-b.r; });   // Array.sort is stable: preserves order within each group
-        conns.forEach(function(c){ c.f(); });
       }
-    });
+    }
   }
 
   // ------------------------------------------------ persistence (durable-state view)
@@ -505,11 +519,17 @@
   }
   wireSections();
   function wireShowBridges(){
-    var cb=document.getElementById('showBridges'), lbl=document.getElementById('showBridgesLbl');
+    var cb=document.getElementById('showBridges'), lbl=document.getElementById('showBridgesLbl'), gb=document.getElementById('groupBy');
     if(!cb) return;
+    function syncGroup(){ if(gb) gb.disabled=cb.checked; }   // grouping only applies to the connections view (show bridges OFF)
     try{ cb.checked = localStorage.getItem('aimb.showBridges')==='1'; }catch(e){}   // default OFF (connections only)
-    cb.addEventListener('change',function(){ try{ localStorage.setItem('aimb.showBridges', cb.checked?'1':'0'); }catch(e){} setTables(last); });
-    if(lbl) lbl.addEventListener('click',function(e){ e.stopPropagation(); });        // don't toggle the section collapse
+    if(gb){ try{ var g=localStorage.getItem('aimb.groupBy'); if(g) gb.value=g; }catch(e){} }   // default 'pc'
+    syncGroup();
+    cb.addEventListener('change',function(){ try{ localStorage.setItem('aimb.showBridges', cb.checked?'1':'0'); }catch(e){} syncGroup(); setTables(last); });
+    if(gb) gb.addEventListener('change',function(){ try{ localStorage.setItem('aimb.groupBy', gb.value); }catch(e){} setTables(last); });
+    // clicking the controls must not toggle the section collapse
+    if(lbl) lbl.addEventListener('click',function(e){ e.stopPropagation(); });
+    if(gb){ gb.addEventListener('click',function(e){ e.stopPropagation(); }); gb.addEventListener('mousedown',function(e){ e.stopPropagation(); }); }
   }
   wireShowBridges();
   connect();
