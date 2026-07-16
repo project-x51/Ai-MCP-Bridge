@@ -70,7 +70,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.24.12'          // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.24.13'          // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`

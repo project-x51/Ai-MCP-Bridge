@@ -711,6 +711,8 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.13):** *dashboard: move Mesh map below Sessions* — section order is now Computers → Sessions →
+  Mesh map → Persistence → Traces. Pure markup reorder (sections are keyed by id/data-sec, no logic change).
 - **Built (v1.24.12):** *dashboard "Computers" section + Mesh map collapsed by default* — a new **Computers**
   expander (open by default, top of the page) lists one row per machine on the mesh — this machine first, the
   local one flagged "this machine", the tailnet advertise address for remotes, and per-machine session +

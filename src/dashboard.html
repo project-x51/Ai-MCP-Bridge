@@ -82,17 +82,17 @@
     <table><thead><tr><th>Computer</th><th>Address</th><th>Sessions</th><th>Connections</th></tr></thead><tbody id="computers"></tbody></table>
   </div>
 </section>
+<section class="sec" data-sec="sessions">
+  <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span><span style="float:right;font-weight:400;font-size:12px;color:#6B7280"><select id="groupBy" title="Group sessions by" style="font-size:11px;vertical-align:middle;margin-right:10px;padding:1px 3px"><option value="pc">group: PC</option><option value="project" selected>group: project</option><option value="user">group: user</option><option value="none">group: none</option></select><label id="showBridgesLbl" style="cursor:pointer;user-select:none"><input type="checkbox" id="showBridges" style="vertical-align:middle;margin-right:4px"> show bridges</label></span></h2>
+  <div class="secb">
+    <table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
+  </div>
+</section>
 <section class="sec" data-sec="map">
   <h2 class="sech"><span class="chev">▾</span>Mesh map</h2>
   <div class="secb">
     <svg id="map" height="10"></svg>
     <div class="hint">Click a node to set its alias (sessions/pages rename live; host aliases persist in config.json). Amber flash = message activity.</div>
-  </div>
-</section>
-<section class="sec" data-sec="sessions">
-  <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span><span style="float:right;font-weight:400;font-size:12px;color:#6B7280"><select id="groupBy" title="Group sessions by" style="font-size:11px;vertical-align:middle;margin-right:10px;padding:1px 3px"><option value="pc">group: PC</option><option value="project" selected>group: project</option><option value="user">group: user</option><option value="none">group: none</option></select><label id="showBridgesLbl" style="cursor:pointer;user-select:none"><input type="checkbox" id="showBridges" style="vertical-align:middle;margin-right:4px"> show bridges</label></span></h2>
-  <div class="secb">
-    <table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
   </div>
 </section>
 <section class="sec" data-sec="persist">
