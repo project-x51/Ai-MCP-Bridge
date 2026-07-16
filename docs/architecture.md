@@ -711,6 +711,13 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.12):** *dashboard "Computers" section + Mesh map collapsed by default* — a new **Computers**
+  expander (open by default, top of the page) lists one row per machine on the mesh — this machine first, the
+  local one flagged "this machine", the tailnet advertise address for remotes, and per-machine session +
+  connection counts. The **Mesh map** now starts **collapsed** (per-section defaults via a `DEFAULT_COLLAPSED`
+  map in `wireSections`; a user's saved preference still wins). Verified by `test_dashboard` (five sections) and
+  `test_dashboard_multihost` (a row per machine, this-machine flag, remote address; map collapsed / Computers
+  open by default). Suite 514 across 22.
 - **Built (v1.24.11):** *dashboard Sessions default grouping is now "project"* — the connections view opens
   grouped by project (was PC); PC/user/none remain selectable and a chosen value still persists. Verified by
   `test_dashboard_multihost` (default render shows 📁 project headers, no 🖥 PC headers). Suite 509 across 22.

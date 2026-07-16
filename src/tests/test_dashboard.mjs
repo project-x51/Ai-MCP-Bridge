@@ -123,7 +123,7 @@ const agSp=(await call(A,'list_sessions')).sessions.flatMap(s=>s.subpeers||[]).f
 check('local-agent client classified as agent kind', agSp && agSp.client_kind==='agent', JSON.stringify(agSp))
 
 // collapsible top-level sections (Mesh map | Sessions | Persistence | Traces)
-check('four collapsible sections present', doc.querySelectorAll('section.sec').length === 4, ''+doc.querySelectorAll('section.sec').length)
+check('five collapsible sections present (Computers, Mesh map, Sessions, Persistence, Traces)', doc.querySelectorAll('section.sec').length === 5, ''+doc.querySelectorAll('section.sec').length)
 const psec = doc.querySelector('section.sec[data-sec="persist"]')
 const was = psec.classList.contains('collapsed')
 psec.querySelector('.sech').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))

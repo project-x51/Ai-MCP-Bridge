@@ -35,6 +35,15 @@ ws.onmessage({ data: JSON.stringify(roster) })
 
 const sb = doc.getElementById('sessions'), map = doc.getElementById('map')
 
+// Computers section: one row per machine (this machine flagged, remote tailnet address shown)
+const compRows = [...doc.querySelectorAll('#computers tr')]
+check('Computers section lists one row per machine', compRows.length === 2, 'rows=' + compRows.length)
+check('Computers flags the local machine "this machine"', compRows.some(r => r.textContent.includes('ROBIN-Z790') && r.textContent.includes('this machine')))
+check('Computers shows the remote machine tailnet address', compRows.some(r => r.textContent.includes('VOLT-001') && r.textContent.includes('100.115.125.90')))
+// default expander state: Computers open, Mesh map collapsed
+check('Computers section open by default', !doc.querySelector('section[data-sec="computers"]').classList.contains('collapsed'))
+check('Mesh map section collapsed by default', doc.querySelector('section[data-sec="map"]').classList.contains('collapsed'))
+
 // default view is CONNECTIONS-ONLY: bridge/gateway process rows are hidden; their sub-peers/pages are promoted
 check('default hides bridge rows (no GATEWAY badge) but keeps connections', !sb.textContent.includes('GATEWAY') && sb.textContent.includes('VOLT-1') && sb.textContent.includes('ROBIN-1'), sb.textContent.slice(0, 140))
 // default grouping is by PROJECT (📁 headers), not by PC (🖥)

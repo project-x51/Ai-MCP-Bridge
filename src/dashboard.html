@@ -76,6 +76,12 @@
 <div class="sub" id="gw">connecting…</div>
 <div id="prof"></div>
 <div class="sub" style="font-size:11px;color:#9CA3AF;margin-top:2px">Names &amp; topics are shown as entered; matching is <b>case-insensitive</b> (stored &amp; compared lower-case).</div>
+<section class="sec" data-sec="computers">
+  <h2 class="sech"><span class="chev">▾</span>Computers <span id="comptag" class="bub b-info" style="font-weight:600"></span></h2>
+  <div class="secb">
+    <table><thead><tr><th>Computer</th><th>Address</th><th>Sessions</th><th>Connections</th></tr></thead><tbody id="computers"></tbody></table>
+  </div>
+</section>
 <section class="sec" data-sec="map">
   <h2 class="sech"><span class="chev">▾</span>Mesh map</h2>
   <div class="secb">
@@ -163,6 +169,28 @@
   function pu(proj,user){ if(!proj || proj==='unclassified') return '<span class="kv" style="color:#9CA3AF">infra</span>';
     return '<span class="bub b-pu">'+esc(tc(proj))+(user?' · '+esc(tc(user)):'')+'</span>'; }
   function machineOf(s){ return s.host_label || String(s.session).split('/')[0]; }
+  // Computers: one row per machine on the mesh (this machine first). Address = the tailnet advertise host
+  // gossiped on that machine's sessions (— / "local" when none). Sessions = bridge processes; Connections =
+  // sub-peers + pages riding them.
+  function setComputers(m){
+    var cb=document.getElementById('computers'); if(!cb) return; cb.innerHTML='';
+    var gwHost=(m.gateway||'').split('/')[0];
+    var mach={}, order=[];
+    function ens(h){ if(!mach[h]){ mach[h]={ sessions:0, conns:0, addr:null }; order.push(h); } return mach[h]; }
+    (m.sessions||[]).forEach(function(s){ var e=ens(machineOf(s)); e.sessions++; e.conns+=(s.subpeers||[]).length; if(s.host) e.addr=e.addr||s.host; });
+    (m.pages||[]).forEach(function(p){ ens(p.host_label||gwHost||order[0]||'?').conns++; });
+    order.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });   // this machine (local gateway's host) first
+    var ct=document.getElementById('comptag'); if(ct) ct.textContent=order.length+(order.length===1?' computer':' computers');
+    order.forEach(function(h){
+      var e=mach[h], isThis=(h===gwHost);
+      var label=(m.hosts&&m.hosts[h])?(m.hosts[h]+' ('+h+')'):h;
+      var tr=document.createElement('tr');
+      tr.innerHTML='<td><span class="b-mach">🖥 '+esc(label)+'</span>'+(isThis?' <span class="bub b-gw">this machine</span>':'')+'</td>'+
+        '<td><span class="mono">'+esc(e.addr||(isThis?'local':'—'))+'</span></td>'+
+        '<td>'+e.sessions+'</td><td>'+e.conns+'</td>';
+      cb.appendChild(tr);
+    });
+  }
   // badge colour by role: gateway green, code orange, everything else blue
   function sessClass(s){ return s.is_gateway ? 'b-gw' : (s.client_kind==='code' ? 'b-code' : 'b-sess'); }
   function sessDetail(s,tops){
@@ -502,8 +530,8 @@
     sock=ws;
     ws.onopen=function(){ ws.send(JSON.stringify({type:'hello',kind:'dashboard',instance:'dash-'+Math.random().toString(16).slice(2,8),token:token})); };
     ws.onmessage=function(ev){ var m; try{ m=JSON.parse(ev.data);}catch(e){return;}
-      if(m.type==='welcome'){ pip.classList.add('on'); backoff=1000; gw.textContent='gateway: '+m.gateway; renderProf(m); last=m; setTables(m); drawMap(m); }
-      else if(m.type==='roster'){ last.sessions=m.sessions; last.pages=m.pages; last.hosts=m.hosts||last.hosts; last.gateway=m.gateway||last.gateway; setTables(last); drawMap(last); }
+      if(m.type==='welcome'){ pip.classList.add('on'); backoff=1000; gw.textContent='gateway: '+m.gateway; renderProf(m); last=m; setComputers(m); setTables(m); drawMap(m); }
+      else if(m.type==='roster'){ last.sessions=m.sessions; last.pages=m.pages; last.hosts=m.hosts||last.hosts; last.gateway=m.gateway||last.gateway; setComputers(last); setTables(last); drawMap(last); }
       else if(m.type==='persistence'){ setPersistence(m.snapshot); }
       else if(m.type==='trace'){ addTrace(m.trace); }
       else if(m.type==='trace_history'){ (m.traces||[]).forEach(addTrace); } };
@@ -512,11 +540,13 @@
     function retry(){ setTimeout(connect, backoff); backoff=Math.min(backoff*2,15000); }
   }
   // collapsible top-level sections — click a header to show/hide; the choice persists per section.
+  var DEFAULT_COLLAPSED={ map:1 };   // sections collapsed by default (until the user sets a preference)
   function wireSections(){
     var secs=document.querySelectorAll('section.sec');
     for(var i=0;i<secs.length;i++){ (function(sec){
-      var h=sec.querySelector('.sech'), chev=h.querySelector('.chev'), key='aimb.sec.'+sec.getAttribute('data-sec');
-      try{ if(localStorage.getItem(key)==='1') sec.classList.add('collapsed'); }catch(e){}
+      var h=sec.querySelector('.sech'), chev=h.querySelector('.chev'), ds=sec.getAttribute('data-sec'), key='aimb.sec.'+ds;
+      var stored=null; try{ stored=localStorage.getItem(key); }catch(e){}
+      if(stored===null ? !!DEFAULT_COLLAPSED[ds] : stored==='1') sec.classList.add('collapsed');
       chev.textContent=sec.classList.contains('collapsed')?'▸':'▾';
       h.addEventListener('click',function(){
         var c=sec.classList.toggle('collapsed'); chev.textContent=c?'▸':'▾';
