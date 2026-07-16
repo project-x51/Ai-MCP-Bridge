@@ -79,7 +79,7 @@
 <section class="sec" data-sec="computers">
   <h2 class="sech"><span class="chev">▾</span>Computers <span id="comptag" class="bub b-info" style="font-weight:600"></span></h2>
   <div class="secb">
-    <table><thead><tr><th>Computer</th><th>Address</th><th>Sessions</th><th>Connections</th></tr></thead><tbody id="computers"></tbody></table>
+    <table><thead><tr><th></th><th>Computer</th><th>Address</th><th>Sessions</th><th>Connections</th></tr></thead><tbody id="computers"></tbody></table>
   </div>
 </section>
 <section class="sec" data-sec="sessions">
@@ -185,7 +185,8 @@
       var e=mach[h], isThis=(h===gwHost);
       var label=(m.hosts&&m.hosts[h])?(m.hosts[h]+' ('+h+')'):h;
       var tr=document.createElement('tr');
-      tr.innerHTML='<td><span class="b-mach">🖥 '+esc(label)+'</span>'+(isThis?' <span class="bub b-gw">this machine</span>':'')+'</td>'+
+      tr.innerHTML='<td><span class="x-chev"></span></td>'+   // spacer to align the Computer column with the Sessions Name column
+        '<td><span class="b-mach">🖥 '+esc(label)+'</span>'+(isThis?' <span class="bub b-gw">this machine</span>':'')+'</td>'+
         '<td><span class="mono">'+esc(e.addr||(isThis?'local':'—'))+'</span></td>'+
         '<td>'+e.sessions+'</td><td>'+e.conns+'</td>';
       cb.appendChild(tr);
