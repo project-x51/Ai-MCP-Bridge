@@ -25,9 +25,9 @@ const roster = {
         { id: 'ROBIN-Z790/bbb/cod-1', name: 'Coder-Conn', client_kind: 'code', project: 'AIMB', user: 'robin', realm: 'default' }] },
     { session: 'VOLT-001/ccc', name: 'ccc', host_label: 'VOLT-001', is_gateway: true, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
     { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
-      subpeers: [{ id: 'VOLT-001/ddd/volt-1', name: 'VOLT-1', client_kind: 'code', mode: 'push', channel_capable: true, project: 'AIMB', user: 'Alex', realm: 'default' }] },
+      subpeers: [{ id: 'VOLT-001/ddd/volt-1', name: 'VOLT-1', client_kind: 'code', mode: 'push', channel_capable: true, project: 'CamelCo', user: 'Alex', realm: 'default' }] },
   ],
-  pages: [{ instance: 'pg1', page_kind: 'chat', title: 'Chat — Robin', project: 'AIMB', user: 'Robin', host_label: 'ROBIN-Z790' }],
+  pages: [{ instance: 'pg1', page_kind: 'chat', title: 'Chat — Robin', project: 'camelco', user: 'Robin', host_label: 'ROBIN-Z790' }],
 }
 const ws = FakeWS.last
 ws.readyState = 1; ws.onopen && ws.onopen()
@@ -47,6 +47,10 @@ check('group-by-user makes a header per user (Alex + Robin), not by PC', heads()
 // case-insensitive: Coder-Conn is user "robin", the rest "Robin" — they must collapse to ONE Robin group
 check('group-by-user merges case-variant users (robin + Robin -> one group)', heads().filter(t => /👤.*Robin/i.test(t)).length === 1, JSON.stringify(heads()))
 check('group-by-user places VOLT-1 under the Alex header (users A->Z)', (function(){ var rows=[...sb.querySelectorAll('tr')], f=t=>rows.findIndex(r=>r.textContent.includes(t)); var alex=rows.findIndex(r=>/👤.*Alex/.test(r.textContent)); var robin=rows.findIndex(r=>/👤.*Robin/.test(r.textContent)); return alex>=0 && robin>=0 && alex<f('VOLT-1') && f('VOLT-1')<robin; })())
+// group by PROJECT: a header per project; case-variant projects merge (VOLT-1 "CamelCo" + page "camelco" -> one)
+gb.value = 'project'; gb.dispatchEvent(new dom.window.Event('change'))
+check('group-by-project makes a header per project (AIMB + CamelCo)', heads().some(t => /📁.*AIMB/.test(t)) && heads().some(t => /📁.*CamelCo/i.test(t)) && !heads().some(t => t.includes('Lab PC')), JSON.stringify(heads()))
+check('group-by-project merges case-variant projects (CamelCo + camelco -> one), display keeps CamelCo', heads().filter(t => /📁.*camelco/i.test(t)).length === 1 && heads().some(t => t.includes('CamelCo')), JSON.stringify(heads()))
 gb.value = 'pc'; gb.dispatchEvent(new dom.window.Event('change'))   // reset to PC grouping for the checks below
 // enable "show bridges" for the full nested view asserted below
 const bridgesCb = doc.getElementById('showBridges'); bridgesCb.checked = true; bridgesCb.dispatchEvent(new dom.window.Event('change'))

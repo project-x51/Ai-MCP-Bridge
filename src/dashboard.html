@@ -84,7 +84,7 @@
   </div>
 </section>
 <section class="sec" data-sec="sessions">
-  <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span><span style="float:right;font-weight:400;font-size:12px;color:#6B7280"><select id="groupBy" title="Group sessions by" style="font-size:11px;vertical-align:middle;margin-right:10px;padding:1px 3px"><option value="pc">group: PC</option><option value="user">group: user</option><option value="none">group: none</option></select><label id="showBridgesLbl" style="cursor:pointer;user-select:none"><input type="checkbox" id="showBridges" style="vertical-align:middle;margin-right:4px"> show bridges</label></span></h2>
+  <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span><span style="float:right;font-weight:400;font-size:12px;color:#6B7280"><select id="groupBy" title="Group sessions by" style="font-size:11px;vertical-align:middle;margin-right:10px;padding:1px 3px"><option value="pc">group: PC</option><option value="project">group: project</option><option value="user">group: user</option><option value="none">group: none</option></select><label id="showBridgesLbl" style="cursor:pointer;user-select:none"><input type="checkbox" id="showBridges" style="vertical-align:middle;margin-right:4px"> show bridges</label></span></h2>
   <div class="secb">
     <table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
   </div>
@@ -250,24 +250,29 @@
       });
     } else {
       // connections view: flatten to the participants, group by pc/user/none, order code/cowork/browser in each
+      var projOf=function(x){ return (x&&x.project&&x.project!=='unclassified')?x.project:null; };
       var items=[];
       (m.sessions||[]).forEach(function(s){
-        if(isConn(s)) items.push({ pc:machineOf(s), user:userOf(s), r:connRank(s.client_kind), f:function(){ renderSess(s); } });
-        (s.subpeers||[]).forEach(function(sp){ items.push({ pc:machineOf(s), user:userOf(sp), r:connRank(sp.client_kind), f:function(){ renderSub(sp,s.topics||[],true); } }); });
+        if(isConn(s)) items.push({ pc:machineOf(s), user:userOf(s), project:projOf(s), r:connRank(s.client_kind), f:function(){ renderSess(s); } });
+        (s.subpeers||[]).forEach(function(sp){ items.push({ pc:machineOf(s), user:userOf(sp), project:projOf(sp), r:connRank(sp.client_kind), f:function(){ renderSub(sp,s.topics||[],true); } }); });
       });
-      (m.pages||[]).forEach(function(p){ items.push({ pc:(p.host_label||gwHost||'?'), user:userOf(p), r:connRank('browser'), f:function(){ renderPage(p,true); } }); });
+      (m.pages||[]).forEach(function(p){ items.push({ pc:(p.host_label||gwHost||'?'), user:userOf(p), project:projOf(p), r:connRank('browser'), f:function(){ renderPage(p,true); } }); });
       if(groupBy==='none'){
         items.slice().sort(function(a,b){ return a.r-b.r; }).forEach(function(it){ it.f(); });   // one flat list, code/cowork/browser
       } else {
-        // user key is case-INSENSITIVE (compare lower, display Title) so "robin" + "Robin" are ONE group; PC keys
-        // are hostnames (already case-stable, and the alias lookup m.hosts[k] needs the original case) so kept as-is
-        var groups={}, gorder=[], keyOf=function(it){ return groupBy==='user'?(it.user?it.user.toLowerCase():'(no user)'):it.pc; };
-        items.forEach(function(it){ var k=keyOf(it); if(!groups[k]){ groups[k]=[]; gorder.push(k); } groups[k].push(it); });
-        if(groupBy==='pc') gorder.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });                 // this machine first
-        else gorder.sort(function(a,b){ return String(a).toLowerCase()<String(b).toLowerCase()?-1:1; });            // users A→Z
+        // user/project keys are case-INSENSITIVE (compare lower, display Title) so "robin"+"Robin" (and
+        // "acme"+"Acme") collapse into one group; a display LABEL preserves the first-seen case. PC keys
+        // are hostnames (already case-stable, and the alias lookup m.hosts[k] needs the original case) so kept as-is.
+        var groups={}, labels={}, gorder=[];
+        var valOf=function(it){ return groupBy==='user'?(it.user||'(no user)') : groupBy==='project'?(it.project||'(no project)') : it.pc; };
+        var keyOf=function(it){ var v=valOf(it); return groupBy==='pc'?v:String(v).toLowerCase(); };
+        items.forEach(function(it){ var k=keyOf(it); if(!groups[k]){ groups[k]=[]; labels[k]=valOf(it); gorder.push(k); } groups[k].push(it); });
+        if(groupBy==='pc') gorder.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });                          // this machine first
+        else gorder.sort(function(a,b){ return String(labels[a]).toLowerCase()<String(labels[b]).toLowerCase()?-1:1; });     // A→Z
         gorder.forEach(function(k){
           if(groupBy==='pc') groupHeader('🖥',(m.hosts&&m.hosts[k])?(m.hosts[k]+' ('+k+')'):k);
-          else groupHeader('👤',nm(k));
+          else if(groupBy==='project') groupHeader('📁',nm(labels[k]));
+          else groupHeader('👤',nm(labels[k]));
           groups[k].slice().sort(function(a,b){ return a.r-b.r; }).forEach(function(it){ it.f(); });
         });
       }
