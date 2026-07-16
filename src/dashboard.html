@@ -84,7 +84,7 @@
   </div>
 </section>
 <section class="sec" data-sec="sessions">
-  <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span></h2>
+  <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span><label id="showBridgesLbl" style="float:right;font-weight:400;font-size:12px;color:#6B7280;cursor:pointer;user-select:none"><input type="checkbox" id="showBridges" style="vertical-align:middle;margin-right:4px"> show bridges</label></h2>
   <div class="secb">
     <table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
   </div>
@@ -186,16 +186,20 @@
     var gwHost=(m.gateway||'').split('/')[0];
     (m.pages||[]).forEach(function(p){ ensure(p.host_label||gwHost||order[0]||'?').pages.push(p); });
     order.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });   // this machine (the local gateway's host) first
+    // "show bridges" (default OFF): a BRIDGE is an infrastructure process (gateway/host/tray — no project); the
+    // CONNECTIONS that ride it are browser (pages), code + cowork (sub-peers, and any project-bearing code/cowork
+    // session). OFF flattens to just the connections; ON shows the full nested view (bridge rows + their leaves).
+    var showBridges=!!(document.getElementById('showBridges')&&document.getElementById('showBridges').checked);
+    var isConn=function(s){ return (s.client_kind==='code'||s.client_kind==='cowork') && s.project && s.project!=='unclassified'; };
     order.forEach(function(h){
       var box=mach[h];
       var label=(m.hosts&&m.hosts[h])?(m.hosts[h]+' ('+h+')'):h;
       var hdr=document.createElement('tr'); hdr.className='mach-row';
       hdr.innerHTML='<td colspan="6"><span class="b-mach">🖥 '+esc(label)+'</span></td>';
       sb.appendChild(hdr);
-      // web sessions hang off the gateway (they connect to its ws), so list them indented under it
-      var renderPage=function(p){
+      var renderPage=function(p,flat){
         expandable(sb,[
-          '<span style="padding-left:18px">↳</span> <span class="bub b-page">'+esc(nm(p.title||p.page_kind))+'</span>',
+          (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub b-page">'+esc(nm(p.title||p.page_kind))+'</span>',
           '<span class="mono">page:'+esc(p.instance)+'</span>',
           '<span class="mono">'+esc(p.page_kind)+' (web)</span>',
           pu(p.project,p.user),
@@ -206,9 +210,22 @@
           '<span class="kv"><b>project</b> '+esc(p.project||'(infra)')+'</span>'+
           '<span class="kv"><b>user</b> '+esc(p.user||'—')+'</span>',null,'page/'+p.instance);
       };
-      var sess=box.sessions.slice().sort(function(a,b){ return (b.is_gateway?1:0)-(a.is_gateway?1:0); });   // gateway first
-      var hasGw=sess.some(function(s){ return s.is_gateway; });
-      sess.forEach(function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
+      var renderSub=function(sp,tops,flat){
+        expandable(sb,[
+          (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(nm(sp.name))+'</span>',
+          '<span class="mono">'+esc(sp.id)+'</span>',
+          '<span class="mono">'+esc((sp.client_kind||sp.client||'')+((sp.channel_capable&&sp.mode==='push')?' · push':''))+'</span>',
+          pu(sp.project,sp.user),
+          topicNames(tops,sp.id)],
+          '<span class="kv"><b>realm</b> '+esc(sp.realm||'?')+'</span>'+
+          '<span class="kv"><b>project</b> '+esc(sp.project||'(infra)')+'</span>'+
+          '<span class="kv"><b>user</b> '+esc(sp.user||'—')+'</span>'+
+          '<span class="kv"><b>parent</b> '+(sp.parent?esc(sp.parent.split('/').pop()):'—')+'</span>'+
+          '<span class="kv"><b>client</b> '+esc(sp.client||'?')+'</span>'+
+          '<span class="kv"><b>mode</b> '+esc(sp.mode||'poll')+'</span>'+
+          '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>',null,'sp/'+sp.id);
+      };
+      var renderSess=function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
         expandable(sb,[
           '<span class="bub '+sessClass(s)+'">'+esc(nm(s.name))+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
           '<span class="mono">'+esc(s.session)+'</span>',
@@ -216,24 +233,22 @@
           pu(s.project,s.user),
           topicNames(tops,s.session)],
           sessDetail(s,tops),null,'sess/'+s.session);
-        (s.subpeers||[]).forEach(function(sp){
-          expandable(sb,[
-            '<span style="padding-left:18px">↳</span> <span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(nm(sp.name))+'</span>',
-            '<span class="mono">'+esc(sp.id)+'</span>',
-            '<span class="mono">'+esc((sp.client_kind||sp.client||'')+((sp.channel_capable&&sp.mode==='push')?' · push':''))+'</span>',
-            pu(sp.project,sp.user),
-            topicNames(tops,sp.id)],
-            '<span class="kv"><b>realm</b> '+esc(sp.realm||'?')+'</span>'+
-            '<span class="kv"><b>project</b> '+esc(sp.project||'(infra)')+'</span>'+
-            '<span class="kv"><b>user</b> '+esc(sp.user||'—')+'</span>'+
-            '<span class="kv"><b>parent</b> '+(sp.parent?esc(sp.parent.split('/').pop()):'—')+'</span>'+
-            '<span class="kv"><b>client</b> '+esc(sp.client||'?')+'</span>'+
-            '<span class="kv"><b>mode</b> '+esc(sp.mode||'poll')+'</span>'+
-            '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>',null,'sp/'+sp.id);
+      };
+      var sess=box.sessions.slice().sort(function(a,b){ return (b.is_gateway?1:0)-(a.is_gateway?1:0); });   // gateway first
+      if(showBridges){
+        var hasGw=sess.some(function(s){ return s.is_gateway; });
+        sess.forEach(function(s){ renderSess(s);
+          (s.subpeers||[]).forEach(function(sp){ renderSub(sp,s.topics||[],false); });
+          if(s.is_gateway) box.pages.forEach(function(p){ renderPage(p,false); });   // pages hang off the gateway
         });
-        if(isGw) box.pages.forEach(renderPage);   // pages belong to the gateway
-      });
-      if(!hasGw) box.pages.forEach(renderPage);   // fallback: machine with pages but no visible gateway
+        if(!hasGw) box.pages.forEach(function(p){ renderPage(p,false); });
+      } else {
+        // connections only — bridge/host/gateway processes hidden; their leaves promoted flat under the machine
+        box.pages.forEach(function(p){ renderPage(p,true); });                       // browser
+        sess.forEach(function(s){ if(isConn(s)) renderSess(s);                       // code/cowork session that IS a connection
+          (s.subpeers||[]).forEach(function(sp){ renderSub(sp,s.topics||[],true); }); // code/cowork sub-peers
+        });
+      }
     });
   }
 
@@ -483,6 +498,14 @@
     })(secs[i]); }
   }
   wireSections();
+  function wireShowBridges(){
+    var cb=document.getElementById('showBridges'), lbl=document.getElementById('showBridgesLbl');
+    if(!cb) return;
+    try{ cb.checked = localStorage.getItem('aimb.showBridges')==='1'; }catch(e){}   // default OFF (connections only)
+    cb.addEventListener('change',function(){ try{ localStorage.setItem('aimb.showBridges', cb.checked?'1':'0'); }catch(e){} setTables(last); });
+    if(lbl) lbl.addEventListener('click',function(e){ e.stopPropagation(); });        // don't toggle the section collapse
+  }
+  wireShowBridges();
   connect();
 })();
 </script>

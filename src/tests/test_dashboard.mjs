@@ -97,8 +97,11 @@ await sleep(700)
 check('sub-peer node drawn', !!doc.getElementById('n-'+reg.peer_id), reg.peer_id)
 check('sub-peer edge drawn', !!doc.getElementById('e-'+reg.peer_id))
 check('child sub-peer node drawn', !!doc.getElementById('n-'+regC.peer_id))
-check('sub-peer in sessions table', doc.getElementById('sessions').textContent.includes('cowork-conv1'))
-check('client badge in table', doc.getElementById('sessions').textContent.includes('t-Alpha'))
+check('sub-peer in sessions table', doc.getElementById('sessions').textContent.includes('cowork-conv1'))   // connection: shown even in the default connections-only view
+// 't-Alpha' is the bridge (session/process) client — the session row is hidden by default (connections-only);
+// enable "show bridges" for the full nested view
+const bcb=doc.getElementById('showBridges'); bcb.checked=true; bcb.dispatchEvent(new dom.window.Event('change'))
+check('client badge in table (show-bridges on)', doc.getElementById('sessions').textContent.includes('t-Alpha'))
 await call(B,'deregister',{peer_id:regC.peer_id,secret:'dash-sec2'})
 await sleep(600)
 check('deregistered sub-peer removed from map', !doc.getElementById('n-'+regC.peer_id))

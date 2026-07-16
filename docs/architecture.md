@@ -711,6 +711,14 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.6):** *dashboard Sessions "show bridges" toggle (default off)* — a checkbox in the Sessions
+  header, **unchecked by default**, controls whether the infrastructure **bridge processes** (gateway / host /
+  tray — the no-project session rows) are shown. Off (default): a **connections-only** view — just the
+  participants that ride the bridges (browser = pages, code + cowork = sub-peers, plus any project-bearing
+  code/cowork session), flattened under each machine. On: the current full nested view (bridge rows + their
+  leaves). Display-only, persisted in `localStorage`; the click doesn't toggle the section collapse; the Mesh
+  map is unaffected. Verified by `test_dashboard`/`test_dashboard_multihost` (default hides GATEWAY/bridge rows
+  but keeps sub-peers; toggling on restores the full view). Suite 502 across 22.
 - **Built (v1.24.5):** *lost-secret rejections hint at recover_secret (§21)* — when a session loses its bearer
   secret (e.g. a compaction drops it) and its live sub-peer still holds the name, `register_self` with the wrong
   secret returns `name-taken` and a tool call with a wrong `as`/`secret` returns `bad-secret` — dead ends unless

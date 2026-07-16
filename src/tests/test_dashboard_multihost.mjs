@@ -33,6 +33,11 @@ ws.onmessage({ data: JSON.stringify(roster) })
 
 const sb = doc.getElementById('sessions'), map = doc.getElementById('map')
 
+// default view is CONNECTIONS-ONLY: bridge/gateway process rows are hidden; their sub-peers/pages are promoted
+check('default hides bridge rows (no GATEWAY badge) but keeps connections', !sb.textContent.includes('GATEWAY') && sb.textContent.includes('VOLT-1') && sb.textContent.includes('ROBIN-1'), sb.textContent.slice(0, 140))
+// enable "show bridges" for the full nested view asserted below
+const bridgesCb = doc.getElementById('showBridges'); bridgesCb.checked = true; bridgesCb.dispatchEvent(new dom.window.Event('change'))
+
 // by-machine grouping: a header row per machine, both hostnames present
 const machRows = [...sb.querySelectorAll('tr.mach-row')]
 check('one header row per machine', machRows.length === 2, 'rows=' + machRows.length)
