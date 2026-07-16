@@ -711,6 +711,9 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.11):** *dashboard Sessions default grouping is now "project"* — the connections view opens
+  grouped by project (was PC); PC/user/none remain selectable and a chosen value still persists. Verified by
+  `test_dashboard_multihost` (default render shows 📁 project headers, no 🖥 PC headers). Suite 509 across 22.
 - **Built (v1.24.10):** *dashboard Sessions grouping adds "project"* — the `group by` dropdown now offers
   **PC / project / user / none**. Project (and user) keys are case-insensitive (compare lower / display Title)
   with a first-seen label, so case-variants (e.g. `CamelCo`+`camelco`) collapse into one group whose header keeps

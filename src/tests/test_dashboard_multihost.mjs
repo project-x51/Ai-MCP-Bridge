@@ -37,6 +37,8 @@ const sb = doc.getElementById('sessions'), map = doc.getElementById('map')
 
 // default view is CONNECTIONS-ONLY: bridge/gateway process rows are hidden; their sub-peers/pages are promoted
 check('default hides bridge rows (no GATEWAY badge) but keeps connections', !sb.textContent.includes('GATEWAY') && sb.textContent.includes('VOLT-1') && sb.textContent.includes('ROBIN-1'), sb.textContent.slice(0, 140))
+// default grouping is by PROJECT (📁 headers), not by PC (🖥)
+check('default grouping is project (📁 headers, no 🖥 PC headers)', [...sb.querySelectorAll('.b-mach')].some(e => /📁/.test(e.textContent)) && ![...sb.querySelectorAll('.b-mach')].some(e => /🖥/.test(e.textContent)), JSON.stringify([...sb.querySelectorAll('.b-mach')].map(e => e.textContent)))
 // connections ordered code, cowork, then browser (registered cowork before code, so the sort must reorder)
 const rIdx = t => [...sb.querySelectorAll('tr')].findIndex(r => r.textContent.includes(t))
 check('connections ordered code -> cowork -> browser', rIdx('Coder-Conn') >= 0 && rIdx('Coder-Conn') < rIdx('Cowork-Conn') && rIdx('Cowork-Conn') < rIdx('Chat'), [rIdx('Coder-Conn'), rIdx('Cowork-Conn'), rIdx('Chat')].join(','))
