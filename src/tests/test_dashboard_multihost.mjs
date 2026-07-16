@@ -20,7 +20,9 @@ const roster = {
   sessions: [
     { session: 'ROBIN-Z790/aaa', name: 'aaa', host_label: 'ROBIN-Z790', is_gateway: true, client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
     { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', is_gateway: false, client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
-      subpeers: [{ id: 'ROBIN-Z790/bbb/robin-1', name: 'ROBIN-1', client_kind: 'agent', project: 'AIMB', user: 'Robin', realm: 'default' }] },
+      subpeers: [{ id: 'ROBIN-Z790/bbb/robin-1', name: 'ROBIN-1', client_kind: 'agent', project: 'AIMB', user: 'Robin', realm: 'default' },
+        { id: 'ROBIN-Z790/bbb/cow-1', name: 'Cowork-Conn', client_kind: 'cowork', project: 'AIMB', user: 'Robin', realm: 'default' },
+        { id: 'ROBIN-Z790/bbb/cod-1', name: 'Coder-Conn', client_kind: 'code', project: 'AIMB', user: 'Robin', realm: 'default' }] },
     { session: 'VOLT-001/ccc', name: 'ccc', host_label: 'VOLT-001', is_gateway: true, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
     { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
       subpeers: [{ id: 'VOLT-001/ddd/volt-1', name: 'VOLT-1', client_kind: 'code', mode: 'push', channel_capable: true, project: 'AIMB', user: 'Robin', realm: 'default' }] },
@@ -35,6 +37,9 @@ const sb = doc.getElementById('sessions'), map = doc.getElementById('map')
 
 // default view is CONNECTIONS-ONLY: bridge/gateway process rows are hidden; their sub-peers/pages are promoted
 check('default hides bridge rows (no GATEWAY badge) but keeps connections', !sb.textContent.includes('GATEWAY') && sb.textContent.includes('VOLT-1') && sb.textContent.includes('ROBIN-1'), sb.textContent.slice(0, 140))
+// connections ordered code, cowork, then browser (registered cowork before code, so the sort must reorder)
+const rIdx = t => [...sb.querySelectorAll('tr')].findIndex(r => r.textContent.includes(t))
+check('connections ordered code -> cowork -> browser', rIdx('Coder-Conn') >= 0 && rIdx('Coder-Conn') < rIdx('Cowork-Conn') && rIdx('Cowork-Conn') < rIdx('Chat'), [rIdx('Coder-Conn'), rIdx('Cowork-Conn'), rIdx('Chat')].join(','))
 // enable "show bridges" for the full nested view asserted below
 const bridgesCb = doc.getElementById('showBridges'); bridgesCb.checked = true; bridgesCb.dispatchEvent(new dom.window.Event('change'))
 
@@ -55,7 +60,8 @@ check('non-code (agent) sub-peer ROBIN-1 uses yellow b-subp badge', !!robinBadge
 // #2/push-honesty: a channel-capable push sub-peer shows "· push" (renamed from "streaming"); it is NOT
 // shown for a mode:push sub-peer that lacks channel capability (so it doesn't claim an unimplemented push)
 check('channel-capable push sub-peer shows "· push" not "streaming"', sb.textContent.includes('· push') && !sb.textContent.includes('streaming'))
-check('agent client-kind surfaced (not lumped as cowork)', sb.textContent.includes('agent') && !sb.textContent.includes('cowork'))
+const robinRow = [...sb.querySelectorAll('tr')].find(r => r.textContent.includes('ROBIN-1'))
+check('agent client-kind surfaced on the agent sub-peer (not lumped as cowork)', !!robinRow && robinRow.textContent.includes('agent'), robinRow && robinRow.textContent)
 
 // web session folded into its machine group
 check('web page listed under its machine', [...sb.querySelectorAll('.b-page')].some(e => e.textContent.includes('Chat')))

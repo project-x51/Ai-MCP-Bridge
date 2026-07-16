@@ -191,6 +191,7 @@
     // session). OFF flattens to just the connections; ON shows the full nested view (bridge rows + their leaves).
     var showBridges=!!(document.getElementById('showBridges')&&document.getElementById('showBridges').checked);
     var isConn=function(s){ return (s.client_kind==='code'||s.client_kind==='cowork') && s.project && s.project!=='unclassified'; };
+    var connRank=function(kind){ return kind==='code'?0 : kind==='cowork'?1 : kind==='browser'?3 : 2; };   // order: code, cowork, (other), browser
     order.forEach(function(h){
       var box=mach[h];
       var label=(m.hosts&&m.hosts[h])?(m.hosts[h]+' ('+h+')'):h;
@@ -243,11 +244,16 @@
         });
         if(!hasGw) box.pages.forEach(function(p){ renderPage(p,false); });
       } else {
-        // connections only — bridge/host/gateway processes hidden; their leaves promoted flat under the machine
-        box.pages.forEach(function(p){ renderPage(p,true); });                       // browser
-        sess.forEach(function(s){ if(isConn(s)) renderSess(s);                       // code/cowork session that IS a connection
-          (s.subpeers||[]).forEach(function(sp){ renderSub(sp,s.topics||[],true); }); // code/cowork sub-peers
+        // connections only — bridge/host/gateway processes hidden; their leaves promoted flat and ordered
+        // code, cowork, then browser (stable within each group)
+        var conns=[];
+        sess.forEach(function(s){
+          if(isConn(s)) conns.push({ r:connRank(s.client_kind), f:function(){ renderSess(s); } });
+          (s.subpeers||[]).forEach(function(sp){ conns.push({ r:connRank(sp.client_kind), f:function(){ renderSub(sp,s.topics||[],true); } }); });
         });
+        box.pages.forEach(function(p){ conns.push({ r:connRank('browser'), f:function(){ renderPage(p,true); } }); });
+        conns.sort(function(a,b){ return a.r-b.r; });   // Array.sort is stable: preserves order within each group
+        conns.forEach(function(c){ c.f(); });
       }
     });
   }
