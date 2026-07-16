@@ -711,8 +711,15 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.15):** *dashboard: actually align the Computers column with the Sessions Name column* — the
+  v1.24.14 spacer cell alone didn't line up: the Computers and Sessions tables size their columns
+  independently, so the leading spacer column came out wider than the Sessions chevron column. Fix: force the
+  leading chevron/spacer column of every main table to shrink to its content
+  (`table:not(.pers) th:first-child, td:first-child { width:1%; white-space:nowrap }`), so the second column
+  (Name / Computer / Time) starts at the same x in all of them. Cosmetic.
 - **Built (v1.24.14):** *dashboard: indent the Computers column to align with the Sessions Name column* — a
   leading `.x-chev`-width spacer cell so the Computer name lines up under the Sessions name. Cosmetic.
+  (Superseded by v1.24.15 — the spacer alone did not align the independent tables.)
 - **Built (v1.24.13):** *dashboard: move Mesh map below Sessions* — section order is now Computers → Sessions →
   Mesh map → Persistence → Traces. Pure markup reorder (sections are keyed by id/data-sec, no logic change).
 - **Built (v1.24.12):** *dashboard "Computers" section + Mesh map collapsed by default* — a new **Computers**

@@ -46,6 +46,10 @@
   tr.x-row:hover td { background:#F8FAFC; }
   tr.x-det td { background:#FAFAFA; font-size:11.5px; padding:7px 12px 9px 28px; }
   .x-chev { display:inline-block; width:12px; color:#9CA3AF; font-size:10px; }
+  /* Shrink the leading chevron/spacer column to its content in every main table so the
+     second column (Name / Computer / Time) starts at the same x across the independent
+     tables — this is what lines the Computers list up with the Sessions Name column. */
+  table:not(.pers) th:first-child, table:not(.pers) td:first-child { width:1%; white-space:nowrap; }
   .kv { display:inline-block; margin-right:16px; white-space:nowrap; }
   .kv b { color:#6B7280; font-weight:600; font-size:10.5px; margin-right:4px; }
   .subj { color:#1F2937; }
