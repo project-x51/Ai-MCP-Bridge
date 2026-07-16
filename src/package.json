@@ -1,6 +1,6 @@
 {
   "name": "ai-mcp-bridge",
-  "version": "1.24.15",
+  "version": "1.24.16",
   "description": "Peer-to-peer mesh for AI sessions and web pages over MCP (stdio) — gateway election, sub-peers, hierarchical topics, publish/send, encrypted bodies.",
   "type": "module",
   "license": "MIT",

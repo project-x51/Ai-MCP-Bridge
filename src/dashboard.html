@@ -383,7 +383,7 @@
     (m.pages||[]).forEach(function(p){ var h=p.host_label||gwHost||Object.keys(hosts)[0]; if(!hosts[h]) hosts[h]={sessions:[],pages:[]}; hosts[h].pages.push(p); });
     var names=Object.keys(hosts);
     if(!names.length){ svg.setAttribute('height',40); el('text',{x:20,y:25,'class':'n-sub','text-anchor':'start'},svg).textContent='no nodes connected'; return; }
-    var X=14, boxTops=60, maxBottom=0, gwCenters=[];
+    var X=14, boxTops=20, maxBottom=0, gwCenters=[];  // top margin == bottom margin (viewBox = maxBottom+20)
     names.forEach(function(h){
       var hh=hosts[h];
       var nSess=hh.sessions.length, nPage=hh.pages.length;

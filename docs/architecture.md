@@ -711,6 +711,10 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.16):** *mesh map: balance top/bottom margin* — the host boxes started at `boxTops=60` (60px
+  of empty space above them) while the viewBox left only `+20` below, so the map looked top-heavy inside its
+  panel. Dropped `boxTops` to 20 to match the bottom margin. Nothing draws above `boxTops` (the cross-host edge
+  sits at `y1-30 = boxTops+40`, the follower arc peak at `boxTops+16` — both stay inside the box). Cosmetic.
 - **Built (v1.24.15):** *dashboard: actually align the Computers column with the Sessions Name column* — the
   v1.24.14 spacer cell alone didn't line up: the Computers and Sessions tables size their columns
   independently, so the leading spacer column came out wider than the Sessions chevron column. Fix: force the
