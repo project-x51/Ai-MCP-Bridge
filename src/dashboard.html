@@ -17,6 +17,7 @@
   .bub { display:inline-block; border-radius:10px; padding:1px 9px; font-size:11px; font-weight:600; }
   .b-send { background:#DBEAFE; color:#1E40AF; } .b-recv { background:#DCFCE7; color:#14532D; }
   .b-page { background:#FCE7F3; color:#9D174D; } .b-sess { background:#E0F2FE; color:#075985; }
+  .wait { color:#B45309; font-weight:700; font-size:11px; }   /* uncollected-mail count next to a session/topic */
   #traces tr:first-child td { background:#FEFCE8; }
   #map { width: 100%; background: #F8FAFC; border: 1px solid #E5E7EB; border-radius: 10px; }
   .hint { color:#9CA3AF; font-size:11.5px; margin: 4px 0 0 2px; }
@@ -139,11 +140,14 @@
   function row(tb,cells){ var tr=document.createElement('tr'); tr.innerHTML=cells.map(function(c){return '<td>'+c+'</td>';}).join(''); tb.insertBefore(tr, tb.firstChild); }
 
   // ------------------------------------------------ tables
-  // topics of one holder: comma-separated names on the row (exclusive bold, icon first)
+  // a small "(n)" waiting-mail badge — uncollected messages waiting for the owner to pick up. Shown only
+  // when >0. Sessions/sub-peers badge DIRECT sends; topics badge sends addressed to that topic.
+  function waitBadge(n){ return (n>0)?(' <span class="wait" title="'+n+' message'+(n===1?'':'s')+' waiting to be collected">('+n+')</span>'):''; }
+  // topics of one holder: comma-separated names on the row (exclusive bold, icon first, waiting count last)
   function topicNames(list,holder){
     return (list||[]).filter(function(r){return r.holder===holder&&r.role==='owner';}).map(function(r){
       var t=(r.icon?esc(r.icon)+' ':'')+esc(tc(r.pattern));
-      return r.exclusive?('<b>'+t+'</b>'):t;
+      return (r.exclusive?('<b>'+t+'</b>'):t)+waitBadge(r.waiting||0);
     }).join(', ');
   }
   // full topic detail for the expander: role, exclusivity, description, claimed_at
@@ -241,7 +245,7 @@
     };
     var renderSub=function(sp,tops,flat){
       expandable(sb,[
-        (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(nm(sp.name))+'</span>',
+        (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(nm(sp.name))+'</span>'+waitBadge(sp.unread_direct||0),
         '<span class="mono">'+esc(sp.id)+'</span>',
         '<span class="mono">'+esc((sp.client_kind||sp.client||'')+((sp.channel_capable&&sp.mode==='push')?' · push':''))+'</span>',
         pu(sp.project,sp.user),

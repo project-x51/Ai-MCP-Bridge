@@ -711,6 +711,23 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.24.17):** *dashboard: waiting-mail counts next to sessions + topics* — a small `(n)` badge shows
+  **uncollected** mail (queue items past the served high-water — what the next poll would return). The counts are
+  kept **separate by how each message was addressed** so the UI decides presentation independently: a **session /
+  sub-peer** badge counts **direct** sends only (`env.topic` null → `unread_direct` on each roster sub-peer entry);
+  a **topic** badge counts sends addressed to **that topic** only (`env.topic` matched against the owner's claim
+  pattern → `waiting` on each topic entry). Both are computed in the holder's own process from its live queue (no
+  double-count, no cross-host snapshot dependency) and gossip on the existing SUBPEERS/TOPICS frames; a 250ms-
+  coalesced `scheduleCounts()` re-gossips on delivery, on poll (served advances → badge drops), and on out-of-band
+  rehydrate, so badges update live. Semantics note: the bridge has no *answered* state (verbs are advisory), so
+  `(n)` means "waiting to be collected" and clears when the owner polls; purely-offline owners' parked mail remains
+  in the Persistence → 📨 Mailboxes / 🪧 Kept views. Dashboard-only render + two additive roster fields; backward-
+  compatible (older peers simply omit the fields → badge 0, so a peer on an older bridge never badges at all).
+  **Known limitation (accepted):** the two counts are independently *displayed* but not independently *clearable* —
+  a peer queue has ONE `served` high-water (and `inbox`'s `cursor` only selects what is RETURNED, never what is
+  marked served), so any poll collects everything and both badges drop together. Per-topic acking would need a
+  per-topic cursor set or an explicit `ack {envelope_ids|topic}`; the durable mailbox already acks per envelope id,
+  so the in-RAM single `served` scalar is the only blocker.
 - **Built (v1.24.16):** *mesh map: balance top/bottom margin* — the host boxes started at `boxTops=60` (60px
   of empty space above them) while the viewBox left only `+20` below, so the map looked top-heavy inside its
   panel. Dropped `boxTops` to 20 to match the bottom margin. Nothing draws above `boxTops` (the cross-host edge

@@ -70,7 +70,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.24.16'          // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.24.17'          // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
@@ -365,19 +365,39 @@ function inboxHint(spId) {
   const end = q.base + q.items.length
   return { unread: Math.max(0, end - (q.served || 0)), next_cursor: end, queue_epoch: q.epoch }
 }
+// --- waiting-mail counts. "Uncollected" = queue items past the served high-water (what a poll would
+// return next). Split by how each message was ADDRESSED so the dashboard can badge sessions and topics
+// independently: a DIRECT send (env.topic null) counts for the recipient sub-peer only; a TOPIC send
+// (env.topic set) counts for that topic only. Both are computed from the holder's own live queue, so a
+// message never double-counts and the numbers stay in the process that owns the truth.
+function unreadItems(spId) {
+  const q = subQueues.get(spId); if (!q) return []
+  const start = Math.min(Math.max((q.served || 0) - q.base, 0), q.items.length)
+  return q.items.slice(start)
+}
+function unreadDirect(spId) { let n = 0; for (const e of unreadItems(spId)) if (!(e && e.topic)) n++; return n }
+function topicWaiting(holderId, pattern) { let n = 0; for (const e of unreadItems(holderId)) if (e && e.topic && topicMatch(pattern, e.topic)) n++; return n }
 function announceSubpeers() {
   // channel_capable = does THIS process's MCP client actually declare the claude/channel capability (i.e. can it
   // really receive push notifications). Attached per sub-peer so the dashboard shows "push" only when push is
   // genuinely live, not merely because the mode was optimistically set to push by the code-name heuristic (#2).
   const chan = !!(CLIENT && CLIENT.channel_capable)
-  const list = [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, kind: 'subpeer', client: s.client || null, client_kind: s.client_kind || null, mode: s.mode || null, channel_capable: chan, project: s.identity?.project || null, user: s.identity?.user || null, realm: s.identity?.realm || REALM }))
+  const list = [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, kind: 'subpeer', client: s.client || null, client_kind: s.client_kind || null, mode: s.mode || null, channel_capable: chan, project: s.identity?.project || null, user: s.identity?.user || null, realm: s.identity?.realm || REALM, unread_direct: unreadDirect(s.id) }))
   if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.subpeers = list }; broadcastRoster() }
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'SUBPEERS', session: SESSION, subpeers: list })
 }
-function topicList() { return [...myTopics.values()] }
+function topicList() { return [...myTopics.values()].map(t => ({ ...t, waiting: topicWaiting(t.holder, t.pattern) })) }
 function announceTopics() {
   if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.topics = topicList() }; broadcastRoster() }
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'TOPICS', session: SESSION, topics: topicList() })
+}
+// Waiting counts change on delivery + on poll, not just on register/claim — coalesce a roster re-gossip
+// (250ms) so the dashboard badges update live without emitting a frame per message.
+let countsTimer = null
+function scheduleCounts() {
+  if (countsTimer) return
+  countsTimer = setTimeout(() => { countsTimer = null; announceSubpeers(); announceTopics() }, 250)
+  if (countsTimer.unref) countsTimer.unref()
 }
 // every topic relationship visible from this bridge: roster (all sessions) + page leaves + local
 // not-yet-round-tripped entries. Page subject = shared claim + subscription (T12).
@@ -532,6 +552,7 @@ function deliverSub(id, env) {
                 for: sp.id, for_name: sp.name, ...(rems.length ? { reminders: rems } : {}) } },
     }).catch(() => {})
   }
+  scheduleCounts()   // waiting-mail badge went up
   return { ok: true }
 }
 // §23: pull durably-parked messages that AREN'T already in the live queue into it. Live delivery writes both
@@ -553,7 +574,7 @@ async function syncDurableMailbox(sp) {
     q.items.push(rec); have.add(rec.id); added++
     if (q.items.length > SUBQ_CAP) { q.items.shift(); q.base++ }
   }
-  if (added) emitTraceRaw({ dir: 'recv', verb: 'rehydrate', from: sp.id, from_name: sp.name, to: SESSION, size: added, note: `${added} out-of-band parked message(s) surfaced on poll/reattach`, envelope_id: null })
+  if (added) { emitTraceRaw({ dir: 'recv', verb: 'rehydrate', from: sp.id, from_name: sp.name, to: SESSION, size: added, note: `${added} out-of-band parked message(s) surfaced on poll/reattach`, envelope_id: null }); scheduleCounts() }
   return added
 }
 function deadLetterStrays(sp) {
@@ -1752,6 +1773,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // advance — else a session that reads-then-reattaches (or a fresh register after a restart, which starts
         // a queue at base 0) re-drains the still-undeleted copies and the same mail is redelivered every time.
         if (PERSIST && sp.identity) { const pid = pIdent(sp.identity, sp.name); for (const m of q.items.slice(start)) persistence.mailbox.ack(pid, m.id).catch(() => {}) }
+        if (start < q.items.length) scheduleCounts()   // served advanced → waiting-mail badge went down
         return ok({ peer_id: sp.id, queue_epoch: q.epoch, next_cursor: next,
           messages: q.items.slice(start).map(e => { const v = decryptedView(e), r = reminders.remindersFor(sp.id, e); return r.length ? { ...v, reminders: r } : v }) })   // #29: attach scoped behaviour reminders
       }
