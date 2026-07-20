@@ -124,6 +124,10 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   [`../tray/README.md`](../tray/README.md).
 
 ## Setup (per machine)
+> **Linux / headless box?** See [`../docs/linux-setup.md`](../docs/linux-setup.md) — turn off the `tpm`/`hello`
+> facets, run the gateway as a `systemd --user` service (`loginctl enable-linger` is **required**), and deliver
+> the realm token out of band.
+
 1. Install Node 20+. In this folder: `npm install`.
 2. `config.json`: set a long random `token` (already generated on first install).
 3. Add the MCP entry (`claude_code_mcp.example.json`) to your Claude config and restart:

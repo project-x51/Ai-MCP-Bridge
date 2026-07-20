@@ -31,6 +31,9 @@ follower or a sub-peer.
 - **[`docs/architecture.md`](docs/architecture.md)** — design rationale (realms, pluggable facets, consent,
   cross-host mesh, persistence, vault) plus the numbered **version history** (§13) that serves as the
   changelog.
+- **[`docs/linux-setup.md`](docs/linux-setup.md)** — Linux / headless setup: which facets to turn off, a
+  `systemd --user` gateway (incl. the mandatory `enable-linger`), out-of-band token delivery, and what must
+  stay identical across machines vs what is meant to differ.
 - **[`docs/web-edge-node.md`](docs/web-edge-node.md)** — the "web edge node" roadmap; the in-process HTTP
   egress service is step 1.
 
