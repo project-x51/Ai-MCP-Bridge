@@ -33,7 +33,7 @@ const parkOutOfBand = (id, body) => store.mailbox.put(ownerIdentity, id, {
 // --- register a live Owner + a Probe sender
 const ow = await call('register_self', { name: 'Owner', secret: 'os', project: PROJECT })
 await call('register_self', { name: 'Probe', secret: 'ps', project: PROJECT })
-check('Owner registered live', ow.ok === true && /^peer:owner-[0-9a-f]{8}$/.test(ow.peer_id), ow.peer_id)   // #40 stable id
+check('Owner registered live', ow.ok === true && /\/owner-[0-9a-f]+$/.test(ow.peer_id), ow.peer_id)
 
 // --- baseline: a normal live send is delivered exactly once and the drain does NOT duplicate it
 await call('send_to_peer', { subject: 'live', target: 'Owner', verb: 'note', message: 'live-one', as: 'Probe', secret: 'ps' })

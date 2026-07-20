@@ -327,7 +327,7 @@ instructions across a compaction. A bridge-wide **default** (`config.behaviors.d
 `default:true`) applies to every session unless that session sets its own for the same scope+match.
 
 ## Notes / current limits
-- 547 checks across 23 suites (see the per-suite descriptions above).
+- 560 checks across 24 suites (see the per-suite descriptions above).
 - **Cross-host mesh (§7) — one realm across machines, no central node.** Co-equal per-host hubs
   (port-bind elected) find each other through the **discovery facet** and gossip rosters peer-to-peer;
   remote sessions land in the roster tagged with their owning gateway's address, so the existing

@@ -164,10 +164,17 @@ Split configuration three ways and never sync them the same way:
 `vault: tpm` + `authorizer: hello` on Windows versus `none` on Linux is **correct divergence**, not drift to
 be eliminated. The only value that must be identical everywhere is the token.
 
-## 9. Peer ids (fixed in v1.26.0)
+## 9. Peer ids (stable ids land in v1.26.0, in two phases)
 
-**On v1.26.0+** a peer id is `peer:<slug>-<hash>`, derived from the peer's identity `(realm, project, user,
-name)` rather than the process that minted it — so it is **stable across restarts** and no longer rotates.
+**v1.26.0 ships phase 1: it READS stable ids but still MINTS the old form.** That is deliberate — it makes the
+upgrade safe to do **one machine at a time, at any pace, with no coordinated restart**. Just `git pull` and
+restart each host whenever suits.
+
+**Phase 2 turns minting on** (`AI_BRIDGE_STABLE_IDS=1`, or `"stableIds": true` in `config.json`), giving ids of
+the form `peer:<slug>-<hash>` derived from `(realm, project, user, name)` rather than the minting process — so
+they are **stable across restarts** and stop rotating. Only enable it once **every** host in the realm is on
+1.26.0+; check `my_identity` → `capabilities.stable_ids_read === true` on each. Flipping it also needs no
+coordination: a host still minting old ids and one minting stable ids interoperate.
 
 **Before v1.26.0** the id was `HOST/<session>/<name>-<rand>` with a random per-process session, and because a
 bridge's lifetime is its MCP client's, ids rotated **between turns** (observed: `virtualguy-16c4 → -c892 →
@@ -179,7 +186,7 @@ targeting resolves the live peer and parks durably if it is offline, and it is t
 a version-mixed mesh. The doorbell's exit code `3` exists for this — it tells a watcher to re-register rather
 than block forever.
 
-> **Upgrade order matters for v1.26.0.** Compatibility is one-way: a 1.26.0 bridge still understands old-format
-> ids, but an older bridge **cannot parse a `peer:` id**. Upgrade every host in the realm before running 1.26.0
-> anywhere — the dashboard's **Computers → Bridge** column shows each machine's version so you can confirm the
-> mesh is uniform first.
+> **Why two phases?** Compatibility is one-way: a 1.26.0 bridge understands old-format ids, but an older bridge
+> **cannot parse a `peer:` id**. Shipping the reader first (phase 1) means no host ever meets an id it can't
+> handle, so the rollout needs no synchronised restart. The dashboard's **Computers → Bridge** column shows each
+> machine's version, so you can confirm the mesh is uniform before flipping phase 2.

@@ -46,6 +46,11 @@ const DISCOVERY_MS = Number(process.env.AI_BRIDGE_DISCOVERY_MS || 5000)   // cro
 const VER = 1
 const MODE_OVERRIDE = (process.env.AI_BRIDGE_MODE || CFG.mode || '') || null   // 'push' | 'poll' | null
 const SWEEP_MS = Number(process.env.AI_BRIDGE_SWEEP_MS || 60000)
+// #40 two-phase rollout. This bridge ALWAYS *reads* stable `peer:` ids; whether it *mints* them is opt-in.
+// Compatibility is one-way — a pre-1.26 bridge cannot parse a `peer:` id — so phase 1 (default) ships the
+// reader everywhere with zero coordination, and phase 2 flips minting on once every host is on 1.26+.
+// Never enable this while any host in the realm is older than 1.26.0.
+const STABLE_IDS = process.env.AI_BRIDGE_STABLE_IDS === '1' || CFG.stableIds === true
 const SUB_TTL_MIN = Number(CFG.subpeerTtlMinutes || 720)
 const CHILD_TTL_MIN = Number(CFG.subagentTtlMinutes || 60)
 
@@ -74,7 +79,11 @@ const BRIDGE_VERSION = '1.26.0'           // bump on every behavioural change; s
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
-const CAPS = { wake: false, doorbell: true, park: false, retain: false, persistent_claims: false }
+// `stable_ids_read` is true on every 1.26+ bridge (it can RESOLVE a `peer:` id); `stable_ids_write` says
+// whether it MINTS them. The split is the rollout gate: confirm read===true on every host in the realm
+// (the dashboard surfaces it) BEFORE enabling write anywhere. #40.
+const CAPS = { wake: false, doorbell: true, park: false, retain: false, persistent_claims: false,
+  stable_ids_read: true, stable_ids_write: STABLE_IDS }
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
 let NAME = process.env.AI_BRIDGE_NAME || CFG.defaultName || SESSION.split('/')[1]
 // a headless bridge (e.g. launched by the tray) has no MCP client to detect, so it can declare one
@@ -1497,7 +1506,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const ident = profile.identity.classify({
         project: a.project || (parentSp && parentSp.identity.project) || PROC_PROJECT,
         user: (parentSp && parentSp.identity.user) || PROC_USER, realm: REALM })
-      const id = stablePeerId(ident, name)   // #40: derived from identity, so it survives a process restart
+      // #40: identity-derived (survives a process restart) once minting is enabled; legacy process-scoped
+      // form until then, so a mesh containing pre-1.26 bridges never sees an id it cannot parse.
+      const id = STABLE_IDS ? stablePeerId(ident, name)
+        : `${SESSION}/${slugOf(name)}-${crypto.randomBytes(2).toString('hex')}`
       subpeers.set(id, { id, name, secretHash: sha(secret), parent, kind: 'subpeer',
         created: Date.now(), last_seen: Date.now(), ttl_ms: ttl * 60000, mode,
         client: declaredClient, client_kind: ckind,

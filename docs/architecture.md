@@ -727,11 +727,21 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   where "don't add myself when delivering to my own sub-peer" was also a prefix test, so a process publishing to
   its own sub-peer added itself to `hops` and its own loop guard then bounced the delivery (caught by
   `test_topics`' wildcard-subscriber check, not by the routing tests). All three now use an ownership test with
-  the legacy prefix retained as a fallback, so **old-format ids still resolve** on a new bridge. **Compatibility
-  is one-way**: a new bridge understands old ids, but a bridge older than 1.26.0 cannot parse a `peer:` id — so
-  every host must be upgraded before the mesh mints them. Verified by `test_persist_live` (the id is IDENTICAL
-  across a real bridge restart on a new port/session) + `test_subpeers` (form, no embedded session). Suite 547
-  across 23.
+  the legacy prefix retained as a fallback, so **old-format ids still resolve** on a new bridge.
+  **Rolled out in two phases, because compatibility is one-way** (a 1.26 bridge reads old ids; a pre-1.26 bridge
+  cannot parse a `peer:` id — so minting them anywhere requires *every* host to already read them, which would
+  otherwise mean a synchronised restart of the whole realm):
+  **Phase 1 — the default, and what this version ships:** the bridge READS stable ids but still MINTS the legacy
+  process-scoped form. It is therefore compatible in *both* directions and can be rolled out **one host at a
+  time, at any pace, with no coordination** — an older bridge never sees an id it cannot parse.
+  **Phase 2 — opt in with `AI_BRIDGE_STABLE_IDS=1` / `config.stableIds`:** the bridge MINTS stable ids. Safe once
+  every host reads them; that flip needs no coordination either, since a host still minting legacy ids and one
+  minting stable ids interoperate freely. `capabilities.stable_ids_read` (always true on 1.26+) vs
+  `stable_ids_write` (minting) is the gate: confirm **read** on every host before enabling **write** anywhere.
+  Verified by `test_stable_ids_live` (16 checks: both phases' capability bits and minted forms, the id is
+  IDENTICAL across a real restart on a new port/session, distinct peers don't collide, legacy ids still route on
+  a 1.26 bridge, and — the load-bearing one — a **reader-only bridge resolves and delivers to a `peer:` id it
+  would never have minted**, which is what makes the uncoordinated rollout safe). Suite 560 across 24.
 - **Built (v1.25.1):** *dashboard: bridge version per computer* — the Computers table gains a **Bridge** column
   next to Connections, showing the `bridge_version` gossiped on that machine's sessions. A machine running
   several bridges lists **every distinct version**, flagged amber (`.mixed`) — version skew on one box, or across
