@@ -1062,8 +1062,11 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   reporting flaw, not a facet flaw. **Fix:** probe each facet at startup and degrade the REPORTED profile to
   `none` when the platform cannot back it (and surface the degradation on the dashboard), so feature detection
   tells the truth. Until then, the honest fallback when a vault is unavailable is the session transcript — see
-  `docs/linux-setup.md` §2. NB the host-side remedy (enabling fTPM) is a firmware change that can invalidate
-  BitLocker protectors, so it is an operator decision, not a step to automate.
+  `docs/linux-setup.md` §2. NB on the host-side remedy: enabling fTPM where **no** TPM currently exists cannot
+  invalidate anything (nothing is sealed yet) — the hazard is **downstream**. On a machine signed in with a
+  Microsoft account, a newly-present TPM can cause Windows to enable Device Encryption, and it is a *later*
+  firmware change that then strands the disk behind a recovery key. So it stays an operator decision (know the
+  account type and hold the recovery key), but for the right reason.
 - **Designed — pending:** `set_wake` (the tool half of T14 — the WS `listener` half shipped as the doorbell,
   v1.25.0 #39); durable reply-caps; mutual peer **presence/liveness** (a secret-authenticated doorbell variant
   exchanging keep-alives between two sessions/topics, so each knows the other is up — distinct from

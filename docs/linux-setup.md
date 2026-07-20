@@ -120,6 +120,17 @@ cd ~/Ai-MCP-Bridge && git pull && cd src && npm install
 systemctl --user restart aimb-bridge.service
 ```
 
+> **"Restart the bridge" is not the same operation on every host — check which owns the process.**
+> Where a lingering `systemd --user` unit owns it (as here), a restart is **invisible to everything else**:
+> no session is disturbed. Where **Claude Code** owns the bridge process (the default on a machine with no
+> such service, e.g. a Windows box driven from the tray/Code), restarting the bridge means restarting Code —
+> which **ends every session on that host** and the gateway they attach to. That is a session-ending action
+> that belongs to the human at a natural break, not to an agent mid-task. Say which one you mean when asking
+> someone else to do it.
+>
+> Also **verify the checkout is actually on the new commit before restarting.** If the code hasn't reached the
+> box yet (e.g. a shared-folder sync still pending), the restart is a no-op that looks like a success.
+
 ## 6. Firewall (only if you actually run one)
 
 Cross-host federation needs the control port reachable **on the tailnet interface**:
