@@ -29,7 +29,9 @@ check('B detected push (code-like name)', idB.client.detected_mode === 'push', J
 
 // --- registration
 const r1 = await call(A, 'register_self', { name: 'cowork1', secret: 's1-secret' })
-check('register ok with 3-segment id', r1.ok === true && r1.peer_id.split('/').length === 3, JSON.stringify(r1))
+// id FORM (legacy vs stable #40) is owned by test_stable_ids_live, which pins the mode explicitly.
+// Asserting a shape here would make this suite depend on the operator's config.json.
+check('register ok with a usable peer_id', r1.ok === true && typeof r1.peer_id === 'string' && r1.peer_id.length > 0, JSON.stringify(r1))
 check('fresh queue: epoch + cursor 0', typeof r1.queue_epoch === 'string' && r1.next_cursor === 0)
 const taken = await call(A, 'register_self', { name: 'cowork1', secret: 'WRONG' })
 check('name-taken on wrong secret', taken.ok === false && taken.code === 'name-taken')

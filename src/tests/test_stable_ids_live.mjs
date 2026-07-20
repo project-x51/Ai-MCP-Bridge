@@ -33,7 +33,7 @@ async function spawnBridge(port, extraEnv = {}) {
 const call = async (b, n, a = {}) => JSON.parse((await b.client.callTool({ name: n, arguments: a })).content[0].text)
 
 // ================= PHASE 1 (default): reads stable ids, still mints legacy =================
-let A = await spawnBridge(7920); await sleep(700)
+let A = await spawnBridge(7920, { AI_BRIDGE_STABLE_IDS: '0' }); await sleep(700)   // pin phase 1 (don't inherit config.json)
 const idA = await call(A, 'my_identity')
 check('phase 1: advertises stable_ids_read', idA.capabilities.stable_ids_read === true, JSON.stringify(idA.capabilities))
 check('phase 1: does NOT advertise stable_ids_write', idA.capabilities.stable_ids_write === false, JSON.stringify(idA.capabilities))
@@ -81,7 +81,7 @@ check('stable-id send was delivered', inStable.messages.some(m => m.body === 'to
 // ============ TOLERANCE: a READER-ONLY bridge routes to a `peer:` id it would never mint ============
 // This is what makes the uncoordinated rollout safe. R joins the SAME gateway as S (same port/token), so its
 // roster carries S's stable-id sub-peer; R must resolve and deliver to it despite minting legacy ids itself.
-const R = await spawnBridge(7928, { AI_BRIDGE_PORT: '7926' }); await sleep(900)   // 7926 = the gateway S is on
+const R = await spawnBridge(7928, { AI_BRIDGE_PORT: '7926', AI_BRIDGE_STABLE_IDS: '0' }); await sleep(900)   // reader-only: pin phase 1; 7926 = S's gateway
 const idR = await call(R, 'my_identity')
 check('reader-only bridge: read yes, write no', idR.capabilities.stable_ids_read === true && idR.capabilities.stable_ids_write === false, JSON.stringify(idR.capabilities))
 const rProbe = await call(R, 'register_self', { name: 'ReaderProbe', secret: 'srp', project: 'idtest' })

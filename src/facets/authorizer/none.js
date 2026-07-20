@@ -3,5 +3,5 @@
 // here; opt in to 'script' (tests/headless) or 'hello' (Windows presence) to enable it.
 export const meta = { facet: 'authorizer', name: 'none' }
 export function create() {
-  return { meta, async confirm() { return { approved: false, reason: 'no-authorizer', by: 'none' } } }
+  return { meta, async probe() { return { ok: false, reason: 'no-authorizer' } }, async confirm() { return { approved: false, reason: 'no-authorizer', by: 'none' } } }
 }

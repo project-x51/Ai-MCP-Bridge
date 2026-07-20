@@ -1052,7 +1052,28 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   projects it may reach) + the inbox hint, so a reconnecting/compacted session relearns its responsibilities
   in one call, no re-claim/re-subscribe. Backing this: **durable subscriptions** (a 6th persistence store;
   default-on `persistSubscriptions`, opt-out) that rehydrate like owned claims. Additive + backward-compatible.
-- **Defect — open (#41): `profile` advertises INTENT, not CAPABILITY.** A bridge reports
+- **Built (v1.26.1):** *facet capability probe — stop advertising what the host can't do (#41 FIXED)* — a
+  bridge reported `profile.vault = "tpm"` because that is what it was *configured* with, whether or not the
+  platform could back it, so a peer concluded secret recovery was available and `recover_secret` only failed at
+  the moment of need. Fixed by separating the two ideas along the seam the codebase already had:
+  **`profile.names` = intent** (what the operator asked for, unchanged), **`capabilities` = verified truth**.
+  Facet impls may now export **`probe() -> {ok, reason}`** (absent ⇒ assumed backed, so every other facet is
+  untouched); the bridge probes `vault` + `authorizer` shortly after startup, sets the new
+  **`capabilities.recover_secret`** / **`presence_confirm`**, and re-broadcasts so the roster carries the honest
+  answer. Both bits start **false** and are raised only on a successful probe — never claim an unverified
+  capability. Configured-but-unbacked also logs a startup **WARN**, and the dashboard profile line flags the
+  facet **⚠ unavailable**. The `tpm` probe deliberately *exercises* the TPM (asks for the public key) rather
+  than checking the helper exists, because the field case had `Tpm.exe` present and no TPM at all; the `hello`
+  probe checks platform + helper only, since enrolment cannot be tested without raising a prompt — a documented
+  limit, and `confirm()` still fails closed. Neither probe calls `ensureExe()`, which would try to *build* a
+  helper during startup. Verified by `test_facet_probe_live` (11 checks incl. the field case reproduced
+  portably: configured `tpm`/`hello` with absent helpers ⇒ `profile` still reports the intent while the
+  capability bits are false, `recover_secret` still fails closed, and the honest bits are gossiped on the
+  roster). Suite 571 across 25. *Also hardened on the way:* `AI_BRIDGE_STABLE_IDS` now wins **both** ways
+  (`'0'` forces off), and three suites stopped asserting a peer-id *shape* — the id form is owned by
+  `test_stable_ids_live`, which pins the mode explicitly, so the suite no longer depends on the operator's
+  `config.json`. (Caught because enabling phase 2 on the dev box made the suite fail.)
+- **Superseded — was open (#41): `profile` advertises INTENT, not CAPABILITY.** A bridge reports
   `profile.vault = "tpm"` / `profile.authorizer = "hello"` because that is what it is *configured* with, whether
   or not the platform can actually back it. Found in the field on a box where `Win32_Tpm` returns **no instance
   at all** (AMD fTPM disabled in firmware; Windows 11 installed with the TPM requirement bypassed): the roster

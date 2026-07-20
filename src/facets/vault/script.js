@@ -6,6 +6,7 @@ export function create(ctx) {
   const env = (ctx && ctx.env) || {}
   return {
     meta, enabled: true,
+    async probe() { return { ok: true } },   // #41: the test double is always backed
     async seal(plaintext) { return 'b64:' + Buffer.from(String(plaintext), 'utf8').toString('base64') },
     async unseal(ct, _opts) {
       if (env.AI_BRIDGE_VAULT_DENY === '1') return { ok: false, reason: 'script-deny', by: 'script' }

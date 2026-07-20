@@ -10,6 +10,7 @@ export function create(ctx) {
   const env = (ctx && ctx.env) || {}
   const isYes = s => ['approve', 'allow', 'yes', 'y', '1', 'true'].includes(String(s || '').trim().toLowerCase())
   return {
+    async probe() { return { ok: true } },   // #41: the test double is always backed
     meta,
     async confirm() {
       let d = env.AI_BRIDGE_AUTHORIZER_DECISION

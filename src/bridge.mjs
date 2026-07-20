@@ -50,7 +50,11 @@ const SWEEP_MS = Number(process.env.AI_BRIDGE_SWEEP_MS || 60000)
 // Compatibility is one-way — a pre-1.26 bridge cannot parse a `peer:` id — so phase 1 (default) ships the
 // reader everywhere with zero coordination, and phase 2 flips minting on once every host is on 1.26+.
 // Never enable this while any host in the realm is older than 1.26.0.
-const STABLE_IDS = process.env.AI_BRIDGE_STABLE_IDS === '1' || CFG.stableIds === true
+// env wins BOTH ways ('1' forces on, '0' forces off) so a test or a one-off run is deterministic regardless
+// of what the operator's config.json happens to say; config is the fallback.
+const STABLE_IDS = process.env.AI_BRIDGE_STABLE_IDS === '1' ? true
+  : process.env.AI_BRIDGE_STABLE_IDS === '0' ? false
+  : CFG.stableIds === true
 const SUB_TTL_MIN = Number(CFG.subpeerTtlMinutes || 720)
 const CHILD_TTL_MIN = Number(CFG.subagentTtlMinutes || 60)
 
@@ -75,15 +79,20 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.26.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.26.1'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
 // `stable_ids_read` is true on every 1.26+ bridge (it can RESOLVE a `peer:` id); `stable_ids_write` says
 // whether it MINTS them. The split is the rollout gate: confirm read===true on every host in the realm
 // (the dashboard surfaces it) BEFORE enabling write anywhere. #40.
+// `recover_secret` / `presence_confirm` (#41) report VERIFIED capability, not configuration: `profile.names`
+// says which facet the operator asked for, these say whether the platform can actually back it. They start
+// FALSE and are raised only once a startup probe succeeds — never claim a capability we haven't checked,
+// because the failure mode being fixed is a peer trusting `profile.vault = "tpm"` on a box with no TPM and
+// only finding out when recovery is needed.
 const CAPS = { wake: false, doorbell: true, park: false, retain: false, persistent_claims: false,
-  stable_ids_read: true, stable_ids_write: STABLE_IDS }
+  stable_ids_read: true, stable_ids_write: STABLE_IDS, recover_secret: false, presence_confirm: false }
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
 let NAME = process.env.AI_BRIDGE_NAME || CFG.defaultName || SESSION.split('/')[1]
 // a headless bridge (e.g. launched by the tray) has no MCP client to detect, so it can declare one
@@ -1065,6 +1074,26 @@ async function pushPersistence(target) {
 }
 setInterval(() => { for (const ws of leaves) { if (ws.kind === 'dashboard' && ws.readyState === 1) { pushPersistence(); break } } },
   Number(process.env.AI_BRIDGE_DASH_PERSIST_MS) || 5000).unref()   // live-refresh the persistence view while a dashboard watches
+// #41: verify the CONFIGURED facets are actually backed by this platform and report the truth in CAPS.
+// `profile.names` is what the operator asked for (intent); CAPS.recover_secret / presence_confirm are what
+// this host can really do. Runs async so a missing/slow helper never blocks startup, and re-broadcasts once
+// known so the roster and dashboard stop advertising a capability that isn't there.
+async function probeFacet(f) {
+  try {
+    if (!f || typeof f.probe !== 'function') return { ok: true }   // un-probed facets are assumed backed
+    return (await f.probe()) || { ok: false, reason: 'no-result' }
+  } catch (e) { return { ok: false, reason: 'probe-error:' + ((e && e.message) || e) } }
+}
+async function probeFacets() {
+  const v = await probeFacet(profile.vault), a = await probeFacet(profile.authorizer)
+  CAPS.recover_secret = !!v.ok
+  CAPS.presence_confirm = !!a.ok
+  // configured-but-unbacked is the case worth shouting about: it only bites at the moment of need
+  if (profile.names.vault !== 'none' && !v.ok) log(`WARN vault="${profile.names.vault}" is NOT backed on this host (${v.reason}) — recover_secret will fail; capabilities.recover_secret=false`)
+  if (profile.names.authorizer !== 'none' && !a.ok) log(`WARN authorizer="${profile.names.authorizer}" is NOT backed on this host (${a.reason}) — presence confirmation will deny; capabilities.presence_confirm=false`)
+  if (role === 'gateway') broadcastRoster()
+}
+setTimeout(() => { probeFacets().catch(() => {}) }, 50).unref()
 // doorbell heartbeat (#39): a watcher that may block for an hour needs to know the link is still alive
 // (and to notice a dead bridge) without polling anything.
 setInterval(() => {

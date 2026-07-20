@@ -3,5 +3,6 @@
 // TPM) for real recovery, or 'script' for headless tests.
 export const meta = { facet: 'vault', name: 'none' }
 export function create() {
-  return { meta, enabled: false, async seal() { return null }, async unseal() { return { ok: false, reason: 'no-vault' } } }
+  return { meta, enabled: false, async probe() { return { ok: false, reason: 'no-vault' } },
+    async seal() { return null }, async unseal() { return { ok: false, reason: 'no-vault' } } }
 }

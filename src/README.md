@@ -154,6 +154,13 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 • `http_request {backend, method?, path?, query?, headers?, body?, json?, as?, secret?}` (#33/#36 egress — present only when a backend is configured)
 • `set_wake {…}` (reserved — unsupported).
 
+**Feature detection (#41):** `profile.names` says which facet the operator CONFIGURED; `capabilities` says
+what this host can actually DO. `capabilities.recover_secret` / `presence_confirm` are set by a startup
+probe of the `vault` / `authorizer` facets and start FALSE until verified — so a box configured
+`vault: "tpm"` with no TPM advertises `recover_secret: false` instead of failing only when recovery is
+needed. Key off `capabilities`, never off `profile`. A facet impl opts in by exporting
+`probe() -> {ok, reason}` (absent ⇒ assumed backed).
+
 ## Realms, identity, consent & the profile seam (v1.6.0)
 A **realm** is one trust+policy domain — all bridges sharing a config file (`realm`, `token`, policy).
 Set per machine via `AI_BRIDGE_REALM` / config `realm` (default `"default"`). Every **participant**
@@ -327,7 +334,7 @@ instructions across a compaction. A bridge-wide **default** (`config.behaviors.d
 `default:true`) applies to every session unless that session sets its own for the same scope+match.
 
 ## Notes / current limits
-- 560 checks across 24 suites (see the per-suite descriptions above).
+- 571 checks across 25 suites (see the per-suite descriptions above).
 - **Cross-host mesh (§7) — one realm across machines, no central node.** Co-equal per-host hubs
   (port-bind elected) find each other through the **discovery facet** and gossip rosters peer-to-peer;
   remote sessions land in the roster tagged with their owning gateway's address, so the existing

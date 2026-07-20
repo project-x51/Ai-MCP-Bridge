@@ -374,8 +374,15 @@
   }
   function renderProf(m){
     var el=document.getElementById('prof'); if(!el||!m) return;
-    var p=m.profile||{}, parts=['<b>v'+esc(m.bridge_version||'?')+'</b>'];
-    Object.keys(p).forEach(function(k){ parts.push('<span class="fk">'+esc(k)+'</span>=<b>'+esc(p[k])+'</b>'); });
+    var p=m.profile||{}, caps=m.capabilities||{}, parts=['<b>v'+esc(m.bridge_version||'?')+'</b>'];
+    // #41: a facet can be CONFIGURED but not backed by this platform (e.g. vault=tpm on a box with no TPM).
+    // profile shows intent; the capability bit is the verified truth — flag the gap, since it otherwise only
+    // surfaces at the moment someone needs the feature.
+    var unbacked={ vault:(p.vault&&p.vault!=='none'&&caps.recover_secret===false),
+                   authorizer:(p.authorizer&&p.authorizer!=='none'&&caps.presence_confirm===false) };
+    Object.keys(p).forEach(function(k){
+      var warn=unbacked[k]?' <span class="mixed" title="configured but NOT backed on this host — the capability bit is false">⚠ unavailable</span>':'';
+      parts.push('<span class="fk">'+esc(k)+'</span>=<b>'+esc(p[k])+'</b>'+warn); });
     var cps=m.capabilities?Object.keys(m.capabilities).filter(function(k){return m.capabilities[k];}):[];
     el.innerHTML=parts.join(' · ')+(cps.length?(' · <span class="fk">caps</span> '+cps.map(esc).join(', ')):'');
     if(p.persistence==='none'){ document.getElementById('perssec').style.display='none'; document.getElementById('persoff').style.display=''; }

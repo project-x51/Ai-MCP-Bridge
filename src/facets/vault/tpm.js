@@ -26,6 +26,15 @@ export function create(ctx) {
   const b64url = s => s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')   // standard base64 -> base64url (for JWK n/e)
   return {
     meta, enabled: true,
+    /** #41: can this platform ACTUALLY back the configured vault? Deliberately exercises the TPM (asks for the
+     *  public key) rather than just checking the helper exists — a machine can have Tpm.exe present and no TPM
+     *  at all (fTPM disabled in firmware), which is the exact case that made `recover_secret` fail only at the
+     *  moment of need. Never calls ensureExe(), which would try to BUILD the helper (slow) during startup. */
+    async probe() {
+      if (process.platform !== 'win32') return { ok: false, reason: 'tpm-unavailable-platform' }
+      if (!fs.existsSync(exe)) return { ok: false, reason: 'tpm-helper-missing' }
+      return pubKey() ? { ok: true } : { ok: false, reason: 'tpm-unavailable' }
+    },
     async seal(plaintext) {
       const pub = pubKey(); if (!pub) return null
       try {

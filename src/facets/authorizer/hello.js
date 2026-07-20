@@ -23,6 +23,14 @@ export function create(ctx) {
   }
   return {
     meta,
+    /** #41: is the presence mechanism actually installed here? Checks platform + helper WITHOUT calling
+     *  ensureExe() (which would try to BUILD it during startup). Deliberate limit: whether a human is
+     *  actually ENROLLED in Windows Hello cannot be tested without raising a prompt, so a true here means
+     *  "the mechanism is present", not "a human will answer". `confirm()` still fails closed either way. */
+    async probe() {
+      if (process.platform !== 'win32') return { ok: false, reason: 'hello-unavailable-platform' }
+      return fs.existsSync(exe) ? { ok: true } : { ok: false, reason: 'hello-helper-missing' }
+    },
     /** @param {import('../../types').AuthorizerConfirmOpts} [opts] */
     async confirm({ subject, details } = {}) {
       if (process.platform !== 'win32') return { approved: false, reason: 'hello-unavailable-platform', by: 'hello' }
