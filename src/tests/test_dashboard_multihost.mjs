@@ -18,13 +18,13 @@ const doc = dom.window.document
 const roster = {
   type: 'welcome', gateway: 'ROBIN-Z790/aaa', hosts: { 'ROBIN-Z790': 'Lab PC' },
   sessions: [
-    { session: 'ROBIN-Z790/aaa', name: 'aaa', host_label: 'ROBIN-Z790', is_gateway: true, client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
-    { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', is_gateway: false, client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
+    { session: 'ROBIN-Z790/aaa', name: 'aaa', host_label: 'ROBIN-Z790', bridge_version: '1.25.0', is_gateway: true, client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
+    { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', bridge_version: '1.25.0', is_gateway: false, client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
       subpeers: [{ id: 'ROBIN-Z790/bbb/robin-1', name: 'ROBIN-1', client_kind: 'agent', project: 'AIMB', user: 'Robin', realm: 'default' },
         { id: 'ROBIN-Z790/bbb/cow-1', name: 'Cowork-Conn', client_kind: 'cowork', project: 'AIMB', user: 'Robin', realm: 'default' },
         { id: 'ROBIN-Z790/bbb/cod-1', name: 'Coder-Conn', client_kind: 'code', project: 'AIMB', user: 'robin', realm: 'default' }] },
-    { session: 'VOLT-001/ccc', name: 'ccc', host_label: 'VOLT-001', is_gateway: true, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
-    { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
+    { session: 'VOLT-001/ccc', name: 'ccc', host_label: 'VOLT-001', bridge_version: '1.24.17', is_gateway: true, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
+    { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', bridge_version: '1.25.0', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
       subpeers: [{ id: 'VOLT-001/ddd/volt-1', name: 'VOLT-1', client_kind: 'code', mode: 'push', channel_capable: true, project: 'CamelCo', user: 'Alex', realm: 'default' }] },
   ],
   pages: [{ instance: 'pg1', page_kind: 'chat', title: 'Chat — Robin', project: 'camelco', user: 'Robin', host_label: 'ROBIN-Z790' }],
@@ -41,6 +41,12 @@ check('Computers section lists one row per machine', compRows.length === 2, 'row
 check('Computers flags the local machine "this machine"', compRows.some(r => r.textContent.includes('ROBIN-Z790') && r.textContent.includes('this machine')))
 check('Computers shows the remote machine tailnet address', compRows.some(r => r.textContent.includes('VOLT-001') && r.textContent.includes('100.115.125.90')))
 // default expander state: Computers open, Mesh map collapsed
+// bridge version per computer (next to Connections) — single vs skewed
+const rowFor = h => compRows.find(r => r.textContent.includes(h))
+check('Computers shows the bridge version for a machine', !!(rowFor('ROBIN-Z790') && rowFor('ROBIN-Z790').textContent.includes('v1.25.0')), rowFor('ROBIN-Z790') && rowFor('ROBIN-Z790').textContent)
+check('single-version machine is not flagged mixed', !!(rowFor('ROBIN-Z790') && !rowFor('ROBIN-Z790').querySelector('.mixed')))
+check('a version-skewed machine lists BOTH versions', !!(rowFor('VOLT-001') && rowFor('VOLT-001').textContent.includes('v1.24.17') && rowFor('VOLT-001').textContent.includes('v1.25.0')), rowFor('VOLT-001') && rowFor('VOLT-001').textContent)
+check('version-skewed machine is flagged mixed', !!(rowFor('VOLT-001') && rowFor('VOLT-001').querySelector('.mixed')))
 check('Computers section open by default', !doc.querySelector('section[data-sec="computers"]').classList.contains('collapsed'))
 check('Mesh map section collapsed by default', doc.querySelector('section[data-sec="map"]').classList.contains('collapsed'))
 

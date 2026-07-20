@@ -711,6 +711,13 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.25.1):** *dashboard: bridge version per computer* — the Computers table gains a **Bridge** column
+  next to Connections, showing the `bridge_version` gossiped on that machine's sessions. A machine running
+  several bridges lists **every distinct version**, flagged amber (`.mixed`) — version skew on one box, or across
+  the mesh, is exactly what explains "why doesn't feature X work over there" (it immediately surfaced that
+  `phub-lnx-gold` was on 1.24.17 with no doorbell while the other hosts were on 1.25.0). Dashboard-only; no
+  protocol change. Verified by `test_dashboard_multihost` (4 checks: version shown, single-version not flagged,
+  a skewed machine lists both, skewed machine flagged).
 - **Built (v1.25.0):** *the doorbell — WS `listener` attach point, so an idle session stops polling (#39)* —
   implements the long-reserved T14 `kind:"listener"` half. **The problem:** two AI sessions collaborating each
   polled `inbox` every ~10s, which is a MODEL TURN per poll (~8,600/day/session) almost always returning

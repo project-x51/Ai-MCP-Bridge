@@ -18,6 +18,7 @@
   .b-send { background:#DBEAFE; color:#1E40AF; } .b-recv { background:#DCFCE7; color:#14532D; }
   .b-page { background:#FCE7F3; color:#9D174D; } .b-sess { background:#E0F2FE; color:#075985; }
   .wait { color:#B45309; font-weight:700; font-size:11px; }   /* uncollected-mail count next to a session/topic */
+  .mono.mixed { color:#B45309; font-weight:600; }             /* a computer running more than one bridge version */
   #traces tr:first-child td { background:#FEFCE8; }
   #map { width: 100%; background: #F8FAFC; border: 1px solid #E5E7EB; border-radius: 10px; }
   .hint { color:#9CA3AF; font-size:11.5px; margin: 4px 0 0 2px; }
@@ -84,7 +85,7 @@
 <section class="sec" data-sec="computers">
   <h2 class="sech"><span class="chev">▾</span>Computers <span id="comptag" class="bub b-info" style="font-weight:600"></span></h2>
   <div class="secb">
-    <table><thead><tr><th></th><th>Computer</th><th>Address</th><th>Sessions</th><th>Connections</th></tr></thead><tbody id="computers"></tbody></table>
+    <table><thead><tr><th></th><th>Computer</th><th>Address</th><th>Sessions</th><th>Connections</th><th>Bridge</th></tr></thead><tbody id="computers"></tbody></table>
   </div>
 </section>
 <section class="sec" data-sec="sessions">
@@ -177,6 +178,15 @@
   function pu(proj,user){ if(!proj || proj==='unclassified') return '<span class="kv" style="color:#9CA3AF">infra</span>';
     return '<span class="bub b-pu">'+esc(tc(proj))+(user?' · '+esc(tc(user)):'')+'</span>'; }
   function machineOf(s){ return s.host_label || String(s.session).split('/')[0]; }
+  // Bridge version(s) running on one computer. Normally one; a machine mid-upgrade (or running an old tray
+  // beside a new session) shows several — flagged amber, because a mixed mesh is exactly when version skew
+  // starts explaining "why doesn't feature X work over there".
+  function verCell(vers){
+    var vs=Object.keys(vers||{}).sort();
+    if(!vs.length) return '<span class="mono" style="color:#9CA3AF">—</span>';
+    if(vs.length===1) return '<span class="mono">v'+esc(vs[0])+'</span>';
+    return '<span class="mono mixed" title="mixed bridge versions on this computer">v'+esc(vs.join(', v'))+'</span>';
+  }
   // Computers: one row per machine on the mesh (this machine first). Address = the tailnet advertise host
   // gossiped on that machine's sessions (— / "local" when none). Sessions = bridge processes; Connections =
   // sub-peers + pages riding them.
@@ -184,8 +194,9 @@
     var cb=document.getElementById('computers'); if(!cb) return; cb.innerHTML='';
     var gwHost=(m.gateway||'').split('/')[0];
     var mach={}, order=[];
-    function ens(h){ if(!mach[h]){ mach[h]={ sessions:0, conns:0, addr:null }; order.push(h); } return mach[h]; }
-    (m.sessions||[]).forEach(function(s){ var e=ens(machineOf(s)); e.sessions++; e.conns+=(s.subpeers||[]).length; if(s.host) e.addr=e.addr||s.host; });
+    function ens(h){ if(!mach[h]){ mach[h]={ sessions:0, conns:0, addr:null, vers:{} }; order.push(h); } return mach[h]; }
+    (m.sessions||[]).forEach(function(s){ var e=ens(machineOf(s)); e.sessions++; e.conns+=(s.subpeers||[]).length; if(s.host) e.addr=e.addr||s.host;
+      if(s.bridge_version) e.vers[s.bridge_version]=1; });   // a machine CAN run several bridges — keep every distinct version
     (m.pages||[]).forEach(function(p){ ens(p.host_label||gwHost||order[0]||'?').conns++; });
     order.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });   // this machine (local gateway's host) first
     var ct=document.getElementById('comptag'); if(ct) ct.textContent=order.length+(order.length===1?' computer':' computers');
@@ -196,7 +207,8 @@
       tr.innerHTML='<td><span class="x-chev"></span></td>'+   // spacer to align the Computer column with the Sessions Name column
         '<td><span class="b-mach">🖥 '+esc(label)+'</span>'+(isThis?' <span class="bub b-gw">this machine</span>':'')+'</td>'+
         '<td><span class="mono">'+esc(e.addr||(isThis?'local':'—'))+'</span></td>'+
-        '<td>'+e.sessions+'</td><td>'+e.conns+'</td>';
+        '<td>'+e.sessions+'</td><td>'+e.conns+'</td>'+
+        '<td>'+verCell(e.vers)+'</td>';
       cb.appendChild(tr);
     });
   }
