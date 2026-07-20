@@ -711,6 +711,27 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.25.0):** *the doorbell — WS `listener` attach point, so an idle session stops polling (#39)* —
+  implements the long-reserved T14 `kind:"listener"` half. **The problem:** two AI sessions collaborating each
+  polled `inbox` every ~10s, which is a MODEL TURN per poll (~8,600/day/session) almost always returning
+  "nothing" — real token cost, no benefit. **The shape:** a listener leaf declares `watch {name?, project?,
+  topic?}` and is pushed `{type:"mail", peer, unread_direct, topics{}, total}` the moment the v1.24.17 waiting
+  counts go above zero for what it watches; `{type:"gone"}` if the watched name leaves the roster (registrations
+  lapse routinely, and a doorbell must not wait forever on a peer that needs re-registering); `{type:"ping"}`
+  heartbeats so a watcher blocked for an hour can tell the link is alive. Arming **fires immediately** if mail is
+  already waiting — otherwise a doorbell armed after the fact silently misses it. **Deliberately counts-only** —
+  no roster (listeners are excluded from the roster fan-out), no traces, no persistence, no sender identities —
+  which is why it needs **no per-peer secret**: these are the same integers already gossiped to every dashboard,
+  and the realm token already gates the socket. "How to act" needs nothing new either: the woken session polls
+  its own inbox over MCP, where behaviour reminders (#29/#32) already ride along on each message. Ships with
+  `tools/aimb-doorbell.mjs`, which blocks on the socket and exits with a code that tells the caller its next
+  move — `0` mail (JSON summary on stdout) / `2` timeout, re-arm / `3` peer gone, re-register / `4` link lost —
+  plus an optional `--status` heartbeat file so liveness is inspectable at zero token cost. Backgrounded, it
+  turns ~8,600 wake-ups a day into roughly one per actual message. `capabilities.doorbell` is the feature bit;
+  **`wake` stays false** — `set_wake` is still unimplemented and saying otherwise would be a lie to feature
+  detection. Verified by `test_doorbell_live` (25 checks: frame shape, counts split, isolation from
+  roster/traces/persistence/sender, heartbeat, arm-after-the-fact, gone, watch-required, and the real script's
+  exit codes + status file).
 - **Built (v1.24.17):** *dashboard: waiting-mail counts next to sessions + topics* — a small `(n)` badge shows
   **uncollected** mail (queue items past the served high-water — what the next poll would return). The counts are
   kept **separate by how each message was addressed** so the UI decides presentation independently: a **session /
@@ -993,8 +1014,10 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   projects it may reach) + the inbox hint, so a reconnecting/compacted session relearns its responsibilities
   in one call, no re-claim/re-subscribe. Backing this: **durable subscriptions** (a 6th persistence store;
   default-on `persistSubscriptions`, opt-out) that rehydrate like owned claims. Additive + backward-compatible.
-- **Designed — pending:** the `wake`/doorbell (overlaps the push fallback); durable reply-caps; the
-  Hello-vault inbox-secret-unlock (a further use of the authorizer).
+- **Designed — pending:** `set_wake` (the tool half of T14 — the WS `listener` half shipped as the doorbell,
+  v1.25.0 #39); durable reply-caps; mutual peer **presence/liveness** (a secret-authenticated doorbell variant
+  exchanging keep-alives between two sessions/topics, so each knows the other is up — distinct from
+  mail-waiting, and the one case that DOES need the secret).
 - **Reserved — later:** federation + translator bridges (§8); alternate realm profiles (`tailnet`,
   `oidc`, `mtls`, `spiffe`, `mapped`); per-user *access enforcement* (§9); `force` operator-takeover of
   an offline holder.

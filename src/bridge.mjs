@@ -70,9 +70,11 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.24.17'          // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.25.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
-const CAPS = { wake: false, park: false, retain: false, persistent_claims: false }   // T14 feature detection
+// T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
+// the WS `listener` attach point, which IS implemented and needs nothing durable to work.
+const CAPS = { wake: false, doorbell: true, park: false, retain: false, persistent_claims: false }
 const SESSION = `${os.hostname()}/${crypto.randomBytes(4).toString('hex')}`
 let NAME = process.env.AI_BRIDGE_NAME || CFG.defaultName || SESSION.split('/')[1]
 // a headless bridge (e.g. launched by the tray) has no MCP client to detect, so it can declare one
@@ -976,9 +978,42 @@ function rosterFor(ws) {
 function broadcastRoster() {
   const frame = { type: 'ROSTER', ...rosterPayload() }
   for (const sock of followers.values()) sendFrame(sock, frame)   // bridges get full; each filters its own leaves
-  for (const ws of leaves) if (ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'roster', ...rosterFor(ws) })) } catch {} }
+  // listeners are deliberately EXCLUDED from the roster fan-out — a doorbell gets counts, not the mesh (see below)
+  for (const ws of leaves) if (ws.readyState === 1 && ws.kind !== 'listener') { try { ws.send(JSON.stringify({ type: 'roster', ...rosterFor(ws) })) } catch {} }
+  notifyListeners()
   gossipToPeers()   // §7: push my local slice to peer hubs (no-op unless it actually changed)
 }
+// --- doorbell (#39). A `listener` leaf watches ONE peer (and/or one topic) and is pushed a compact frame
+// the moment mail is WAITING for it, so an idle AI session can block on a script instead of polling every
+// few seconds. Deliberately COUNTS ONLY — no sender identities, no roster, no traces, no persistence — which
+// is why it needs no per-peer secret (the realm token already gates the socket, and these integers are the
+// same ones already gossiped to every dashboard). The woken session then polls its own inbox over MCP, where
+// behaviour reminders (#29/#32) ride along on the messages as usual — so "how to act" needs nothing new here.
+function listenerState(watch) {
+  const nameLc = watch && watch.name ? lc(watch.name) : null
+  const projK = watch && watch.project ? projKey(watch.project) : null
+  const topicK = watch && watch.topic ? patternKey(watch.topic) : null
+  let found = null, direct = 0
+  if (nameLc) for (const s of roster.values()) for (const sp of (s.subpeers || [])) {
+    if (lc(sp.name) === nameLc && (!projK || projKey(sp.project || '') === projK)) { found = sp.id; direct += Number(sp.unread_direct || 0) }
+  }
+  const topics = {}
+  for (const s of roster.values()) for (const t of (s.topics || [])) {
+    const w = Number(t.waiting || 0); if (!w) continue
+    if (topicK && patternKey(t.pattern) === topicK) topics[t.pattern] = w
+    else if (found && t.holder === found) topics[t.pattern] = w
+  }
+  return { found, direct, topics }
+}
+function notifyOne(ws) {
+  if (!ws || ws.readyState !== 1 || ws.kind !== 'listener') return
+  const st = listenerState(ws.watch || {})
+  // a watched NAME that is no longer on the roster: say so, so the caller re-registers instead of waiting forever
+  if (ws.watch && ws.watch.name && !st.found) { try { ws.send(JSON.stringify({ type: 'gone', watch: ws.watch })) } catch {} ; return }
+  const total = st.direct + Object.values(st.topics).reduce((a, b) => a + b, 0)
+  if (total > 0) { try { ws.send(JSON.stringify({ type: 'mail', peer: st.found, unread_direct: st.direct, topics: st.topics, total })) } catch {} }
+}
+function notifyListeners() { for (const ws of leaves) if (ws.kind === 'listener') notifyOne(ws) }
 // push the durable-state snapshot to dashboard(s) (the Persistence view). `target` = one ws, else all.
 async function pushPersistence(target) {
   if (!PERSIST) return
@@ -989,6 +1024,12 @@ async function pushPersistence(target) {
 }
 setInterval(() => { for (const ws of leaves) { if (ws.kind === 'dashboard' && ws.readyState === 1) { pushPersistence(); break } } },
   Number(process.env.AI_BRIDGE_DASH_PERSIST_MS) || 5000).unref()   // live-refresh the persistence view while a dashboard watches
+// doorbell heartbeat (#39): a watcher that may block for an hour needs to know the link is still alive
+// (and to notice a dead bridge) without polling anything.
+setInterval(() => {
+  const p = JSON.stringify({ type: 'ping', ts: Date.now() })
+  for (const ws of leaves) if (ws.kind === 'listener' && ws.readyState === 1) { try { ws.send(p) } catch {} }
+}, Number(process.env.AI_BRIDGE_DOORBELL_PING_MS) || 30000).unref()
 
 // ---------------------------------------------------------------- cross-host federation (§7)
 // Co-equal per-host hubs find each other through the discovery facet and gossip their LOCAL roster slice
@@ -1194,9 +1235,20 @@ function becomeGateway(server) {
         let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
         if (m.type === 'hello') {
           if (!profile.auth.verify(m.token)) { ws.close(); return }
-          if (m.kind === 'listener') {     // T14 wake attach point — reserved, not implemented
-            try { ws.send(JSON.stringify({ type: 'error', code: 'unsupported', what: 'listener' })) } catch {}
-            ws.close(); return
+          if (m.kind === 'listener') {     // T14 wake attach point — the doorbell (#39). Counts-only, no secret.
+            ws.kind = 'listener'
+            ws.instance = m.instance || crypto.randomBytes(4).toString('hex')
+            const w = m.watch || {}
+            ws.watch = { name: w.name || m.name || null, project: w.project || m.project || null, topic: w.topic || null }
+            if (!ws.watch.name && !ws.watch.topic) {
+              try { ws.send(JSON.stringify({ type: 'error', code: 'watch-required', what: 'listener needs watch.name and/or watch.topic' })) } catch {}
+              ws.close(); return
+            }
+            leaves.add(ws)
+            log(`listener connected: watch=${JSON.stringify(ws.watch)} (${ws.instance})`)
+            try { ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, capabilities: CAPS, realm: REALM, watch: ws.watch })) } catch {}
+            notifyOne(ws)   // fire IMMEDIATELY if mail is already waiting — arming must not miss what's already there
+            return
           }
           ws.kind = m.kind === 'dashboard' ? 'dashboard' : 'page'
           ws.instance = m.instance || crypto.randomBytes(4).toString('hex')

@@ -28,7 +28,10 @@ const idA = await call(A, 'my_identity'), idB = await call(B, 'my_identity')
 
 // --- version + capabilities (T14)
 check('bridge_version present', /^\d+\.\d+\.\d+$/.test(idA.bridge_version || ''), JSON.stringify(idA.bridge_version))
-check('capabilities all false', idA.capabilities && Object.values(idA.capabilities).every(v => v === false), JSON.stringify(idA.capabilities))
+// persistence-gated bits are false with persistence off, and `wake` stays false while set_wake is unimplemented;
+// `doorbell` (#39, the WS listener) needs nothing durable, so it is true even here.
+check('persistence-gated + wake capabilities false', idA.capabilities && ['wake', 'park', 'retain', 'persistent_claims'].every(k => idA.capabilities[k] === false), JSON.stringify(idA.capabilities))
+check('doorbell capability true (needs nothing durable)', idA.capabilities && idA.capabilities.doorbell === true, JSON.stringify(idA.capabilities))
 
 // --- mandatory subject (T7)
 const noSub = await call(B, 'send_to_peer', { target: idA.session, message: 'no subject' })

@@ -44,6 +44,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   - `tools/aimb-bridge-ui.js` — reusable bridge UI widget: pip + session/topic dropdown + send-button wiring,
     injects its own CSS, no framework. Any renderer inlines it after `aimb-page-bridge.js` and calls
     `aimbBridgeUI.init({mount, buttons, verb, subject, payload})`. See "Pages".
+  - `tools/aimb-doorbell.mjs` — **the doorbell (#39)**: a node CLI that blocks until mail is waiting for a peer
+    (or topic) and then exits, so an idle AI session can be woken instead of polling `inbox` every few seconds.
+    See "Doorbell" below.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -90,7 +93,12 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `test_retain_live.mjs` — retained values (§12): `publish {retain:true}` → a later/wildcard subscriber is
   caught up on subscribe, survives a restart, last-value-wins (4); `test_vault_live.mjs` — secret recovery
   (§21): a sealed secret is recovered via the vault (presence-gated) + reattaches with resync, deny path
-  leaks nothing, unknown/unsupported handled (5); `test_parked_live.mjs` — out-of-band parked mail surfaces
+  leaks nothing, unknown/unsupported handled (5); `test_doorbell_live.mjs` — the doorbell (#39): a `listener`
+  leaf is pushed `mail` on a direct send and on a topic send (counts kept separate), gets `gone` for an unknown
+  peer and `watch-required` with no watch, heartbeats, fires immediately when armed with mail already waiting,
+  and is proven ISOLATED (never sees roster/traces/persistence/sender) — plus the shipped
+  `tools/aimb-doorbell.mjs` exit codes (0 mail / 2 timeout) and its status file (25);
+  `test_parked_live.mjs` — out-of-band parked mail surfaces
   on a plain poll and on reattach, and is **acked on serve** so a re-register never redelivers it (#23/#34, 8);
   `test_keepalive_live.mjs` — `release_topic {keep_alive}` keeps an ownerless topic alive, parks directed
   sends, and a re-claim drains them (#26, 10); `test_behaviors_live.mjs` — scoped behaviour reminders across
@@ -204,9 +212,11 @@ topic **vanishes with its holder**; with persistence on (§12, v1.9) a claim is 
   **grants** (durable cross-project consent + TTL, §14), **registrations** (a send to an offline peer by
   name parks, §19), and **retained** (`publish {retain:true}` keeps the last value per topic; a new
   subscriber gets it on subscribe). Records are self-describing; bodies stay encrypted at rest. Still
-  **reserved** (`unsupported`): explicit `park` to a *never-registered* identity, `force` claim takeover,
-  `set_wake` + WS `kind:"listener"` (wake/doorbell). `capabilities{}` on my_identity/roster is the
-  feature-detection surface (its `park`/`retain`/`persistent_claims` bits flip true when persistence is active).
+  **reserved** (`unsupported`): explicit `park` to a *never-registered* identity, `force` claim takeover, and
+  the `set_wake` tool. The WS `kind:"listener"` half of wake/doorbell is **BUILT** (v1.25.0 — see Doorbell
+  below). `capabilities{}` on my_identity/roster is the feature-detection surface (its
+  `park`/`retain`/`persistent_claims` bits flip true when persistence is active; `doorbell` is always true,
+  `wake` stays false until `set_wake` exists).
 - **Pages:** `AIMB_BRIDGE_CFG.subject` (a topic path) is auto-claimed (shared) + auto-subscribed;
   `AIMB_BRIDGE_CFG.subscribe: [patterns]` adds subscriptions; `aimbBridge.publish({topic, subject, …})`
   publishes; page sends require `subject` like everyone else (aimb-bridge-ui `opts.subject`).
@@ -285,6 +295,26 @@ unopened capability has no surface). Each contributes MCP tool(s) and is live-re
   (`lib/win-env.js`) so `${env:…}` resolves even under an MCP host that hands its child a curated environment.
   See `config.example.json` (`example-authed`) for the shape.
 
+## Doorbell (#39) — stop polling, get woken
+An idle session that polls `inbox` every ~10s spends a **model turn per poll** (~8,600/day) to be told
+"nothing arrived". Instead, attach a **`listener`** leaf and block:
+
+```bash
+node tools/aimb-doorbell.mjs --name Bridget --project AIMB --timeout 1800 --status /tmp/db.json
+```
+
+Run it **backgrounded**; it costs no tokens and ~no CPU while waiting, and exits the moment there is
+something to collect — the caller wakes, polls `inbox` **once**, and re-arms. Exit codes say what to do next:
+**0** mail (JSON summary on stdout) · **2** timeout, re-arm · **3** watched peer left the roster, `register_self`
+again · **4** link lost. `--status` writes a heartbeat file so you can confirm it is alive without spending a turn.
+
+Protocol: `hello {kind:"listener", token, watch:{name?, project?, topic?}}` → `welcome`, then
+`{type:"mail", peer, unread_direct, topics{}, total}` when the v1.24.17 waiting counts rise above zero,
+`{type:"gone"}` if the watched name disappears, `{type:"ping"}` heartbeats. It is **counts-only** — no roster,
+traces, persistence or sender identities — so it needs **no per-peer secret** (the realm token gates the socket,
+and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
+the messages when the woken session polls its inbox.
+
 ## Behaviour reminders (#29 / #32)
 A session can register scoped "how to behave when a message arrives" reminders: `set_behavior {behavior,
 scope, match?}` (scopes `topic` / `host` / `project` / `subscription` / `all`), `list_behaviors`,
@@ -293,7 +323,7 @@ instructions across a compaction. A bridge-wide **default** (`config.behaviors.d
 `default:true`) applies to every session unless that session sets its own for the same scope+match.
 
 ## Notes / current limits
-- 493 checks across 22 suites (see the per-suite descriptions above).
+- 540 checks across 23 suites (see the per-suite descriptions above).
 - **Cross-host mesh (§7) — one realm across machines, no central node.** Co-equal per-host hubs
   (port-bind elected) find each other through the **discovery facet** and gossip rosters peer-to-peer;
   remote sessions land in the roster tagged with their owning gateway's address, so the existing
