@@ -1106,8 +1106,12 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   **Honest scope:** this raises the bar from *anyone who can read the roster* to *a realm member* — it is
   defence in depth, NOT a defence against a hostile realm member, because the realm is one trust domain by
   design (members already share the token-derived body-encryption key). **Coverage gap:** the cross-restart
-  durability is proven at the derivation level, not end-to-end; a live test would need a cross-project thread
-  opened, granted, revoked, and then replied to across a bridge restart. Suite 578 across 25.
+  durability is now proven END-TO-END by `test_capkey_restart_live` (v1.26.3): a cross-project thread is
+  opened under a one-way grant, the bridge is RESTARTED as a genuinely new process, and the reply carrying
+  the pre-restart cap is still accepted and delivered — with a negative control asserting a fresh
+  (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
+  through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
+  regression guard rather than a tautology. Suite 587 across 26.
 - **Defect — open (#42): the #41 probe gives a FALSE POSITIVE on some hosts.** Field evidence: two v1.26.1
   bridges on the SAME machine (no TPM — `Win32_Tpm` returns no instance) report OPPOSITE answers — the
   tray-launched gateway advertises `recover_secret: true` / `presence_confirm: true`, while the
