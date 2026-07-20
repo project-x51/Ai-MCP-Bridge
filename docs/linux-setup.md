@@ -164,14 +164,22 @@ Split configuration three ways and never sync them the same way:
 `vault: tpm` + `authorizer: hello` on Windows versus `none` on Linux is **correct divergence**, not drift to
 be eliminated. The only value that must be identical everywhere is the token.
 
-## 9. Known friction: peer ids rotate
+## 9. Peer ids (fixed in v1.26.0)
 
-A bridge process mints a **random session id at startup**, and sub-peer ids are `HOST/<session>/<name>-<rand>`
-held in memory. Because the bridge is an MCP stdio server, its lifetime is the MCP client's — and in agent
-mode that restarts often, so **a peer id can change between turns** (observed: `virtualguy-16c4 → -c892 →
--ce45 → -3581` over ~2 days). A session that comes back as `unknown-subpeer` simply needs `register_self`
-again; topics and parked mail rehydrate.
+**On v1.26.0+** a peer id is `peer:<slug>-<hash>`, derived from the peer's identity `(realm, project, user,
+name)` rather than the process that minted it — so it is **stable across restarts** and no longer rotates.
 
-**Practical rule: address peers by NAME (or by `topic:`), never by a stored peer id.** Name targeting resolves
-the live peer and parks durably if it is offline; an id captured earlier is likely already stale. The
-doorbell's exit code `3` exists for this — it tells a watcher to re-register rather than block forever.
+**Before v1.26.0** the id was `HOST/<session>/<name>-<rand>` with a random per-process session, and because a
+bridge's lifetime is its MCP client's, ids rotated **between turns** (observed: `virtualguy-16c4 → -c892 →
+-ce45 → -3581` over ~2 days). A session returning as `unknown-subpeer` just needs `register_self` again;
+topics and parked mail rehydrate either way.
+
+**The rule still holds on any version: address peers by NAME (or by `topic:`), not by a stored peer id.** Name
+targeting resolves the live peer and parks durably if it is offline, and it is the only form that works across
+a version-mixed mesh. The doorbell's exit code `3` exists for this — it tells a watcher to re-register rather
+than block forever.
+
+> **Upgrade order matters for v1.26.0.** Compatibility is one-way: a 1.26.0 bridge still understands old-format
+> ids, but an older bridge **cannot parse a `peer:` id**. Upgrade every host in the realm before running 1.26.0
+> anywhere — the dashboard's **Computers → Bridge** column shows each machine's version so you can confirm the
+> mesh is uniform first.

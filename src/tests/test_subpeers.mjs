@@ -29,7 +29,10 @@ check('B detected push (code-like name)', idB.client.detected_mode === 'push', J
 
 // --- registration
 const r1 = await call(A, 'register_self', { name: 'cowork1', secret: 's1-secret' })
-check('register ok with 3-segment id', r1.ok === true && r1.peer_id.split('/').length === 3, JSON.stringify(r1))
+// #40: the id is derived from IDENTITY (realm|project|user|name), not the minting process, so it carries no
+// session segment and does not rotate when the bridge restarts.
+check('register ok with a stable peer: id', r1.ok === true && /^peer:cowork1-[0-9a-f]{8}$/.test(r1.peer_id), JSON.stringify(r1))
+check('stable id embeds no session/process', r1.ok === true && !r1.peer_id.includes('/'), r1.peer_id)
 check('fresh queue: epoch + cursor 0', typeof r1.queue_epoch === 'string' && r1.next_cursor === 0)
 const taken = await call(A, 'register_self', { name: 'cowork1', secret: 'WRONG' })
 check('name-taken on wrong secret', taken.ok === false && taken.code === 'name-taken')

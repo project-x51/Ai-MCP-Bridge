@@ -711,6 +711,27 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   sub-peer (`as`/`secret`) carries `inbox: { unread, next_cursor, queue_epoch }`, so a session learns it
   has mail waiting without a dedicated poll (and a returning peer sees its rehydrated count on
   `register_self`). Additive + backward-compatible; un-attributed calls carry no hint.
+- **Built (v1.26.0):** *stable peer ids — an id is derived from identity, not from the minting process (#40)* —
+  **The problem:** a sub-peer id was `HOST/<session>/<name>-<rand>` with `session = randomBytes(4)` minted at
+  process start, so the id embedded *which process hosts me*. Because a bridge is an MCP stdio server its
+  lifetime is its CLIENT's, and in agent mode that restarts constantly — so ids rotated **between turns**
+  (observed in the field: `virtualguy-16c4 → -c892 → -ce45 → -3581` in ~2 days). Any stored id went stale and
+  id-addressed sends bounced `unknown-target`; only name/`topic:` addressing was reliable. **The fix:** the id is
+  now `peer:<slug>-<sha256(realm|project|user|name)[0..8]>` — derived from the SAME identity tuple the durable
+  layer already keys by, which is why topics and parked mail always rehydrated correctly while the live id did
+  not. WHICH process hosts a peer became a **roster lookup** (`rosterSub()`) instead of a substring of the id, so
+  a peer can move process — or machine — without changing identity. The `peer:` prefix follows the existing
+  `page:` convention, keeping `kindOf()` a prefix test. **Three sites encoded the old assumption**, and only the
+  first is obvious: `ownerOf()` (routing), `isLocalSubId()` (which decided local vs network delivery, and whose
+  prefix test silently pushed local deliveries onto the wire), and — subtlest — `makeEnvelope()`'s **hop chain**,
+  where "don't add myself when delivering to my own sub-peer" was also a prefix test, so a process publishing to
+  its own sub-peer added itself to `hops` and its own loop guard then bounced the delivery (caught by
+  `test_topics`' wildcard-subscriber check, not by the routing tests). All three now use an ownership test with
+  the legacy prefix retained as a fallback, so **old-format ids still resolve** on a new bridge. **Compatibility
+  is one-way**: a new bridge understands old ids, but a bridge older than 1.26.0 cannot parse a `peer:` id — so
+  every host must be upgraded before the mesh mints them. Verified by `test_persist_live` (the id is IDENTICAL
+  across a real bridge restart on a new port/session) + `test_subpeers` (form, no embedded session). Suite 547
+  across 23.
 - **Built (v1.25.1):** *dashboard: bridge version per computer* — the Computers table gains a **Bridge** column
   next to Connections, showing the `bridge_version` gossiped on that machine's sessions. A machine running
   several bridges lists **every distinct version**, flagged amber (`.mixed`) — version skew on one box, or across

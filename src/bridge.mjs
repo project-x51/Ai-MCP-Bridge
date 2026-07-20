@@ -70,7 +70,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.25.1'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.26.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -183,7 +183,8 @@ function projectOfTarget(to) {                     // resolve a target id's proj
   if (subpeers.has(to)) return subpeers.get(to).identity?.project || 'unclassified'
   if (String(to).startsWith('page:')) { const p = pages.get(String(to).slice(5)); return p?.identity?.project || 'unclassified' }
   if (roster.has(to)) return roster.get(to).project || 'unclassified'
-  const owner = roster.get(String(to).split('/').slice(0, 2).join('/'))
+  if (String(to).startsWith('peer:')) { const hit = rosterSub(to); return hit ? (hit.sp.project || 'unclassified') : null }
+  const owner = roster.get(String(to).split('/').slice(0, 2).join('/'))   // legacy id: session is embedded
   if (owner) { const sp = (owner.subpeers || []).find(x => x.id === to); if (sp) return sp.project || 'unclassified' }
   return null
 }
@@ -308,11 +309,35 @@ function nameOf(id) {                       // best-effort display name for a me
   if (s.startsWith('page:')) { const p = pages.get(s.slice(5)); return p ? (p.title || p.page_kind) : s }
   if (roster.has(s)) return roster.get(s).name
   if (subpeers.has(s)) return subpeers.get(s).name
-  const owner = roster.get(s.split('/').slice(0, 2).join('/'))
+  if (s.startsWith('peer:')) { const hit = rosterSub(s); return hit ? hit.sp.name : s.slice(5).replace(/-[0-9a-f]{8}$/, '') }
+  const owner = roster.get(s.split('/').slice(0, 2).join('/'))   // legacy id: session is embedded
   if (owner) { const sp = (owner.subpeers || []).find(x => x.id === s); if (sp) return sp.name }
   return s.split('/').pop()
 }
-function kindOf(id) { const s = String(id || ''); return s.startsWith('page:') ? 'page' : (s.split('/').length >= 3 ? 'subpeer' : 'session') }
+function kindOf(id) {
+  const s = String(id || '')
+  if (s.startsWith('page:')) return 'page'
+  return (s.startsWith('peer:') || s.split('/').length >= 3) ? 'subpeer' : 'session'   // peer: = stable id, 3-segment = legacy
+}
+// --- stable peer ids (#40). A sub-peer id used to embed the MINTING PROCESS (`HOST/<session>/<name>-<rand>`,
+// session = randomBytes at startup), so the id died with that process: it rotated on every restart and, because
+// a bridge's lifetime is its MCP client's, often BETWEEN TURNS — any stored id went stale and id-addressed sends
+// failed. The id is now derived from the peer's IDENTITY — the same (realm, project, user, name) tuple the
+// DURABLE layer already keys by, which is why topics and parked mail always rehydrated correctly while the live
+// id did not. WHICH process currently hosts a peer becomes a roster lookup instead of a substring of the id, so
+// the peer can move process (or machine) without changing identity. The `peer:` prefix follows the existing
+// `page:` convention, keeping kindOf a prefix test rather than segment-counting.
+const slugOf = n => String(n || '').toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'peer'
+function stablePeerId(ident, name) {
+  const key = `${ident?.realm || REALM}|${projKey(ident?.project || '')}|${lc(ident?.user || '')}|${lc(name || '')}`
+  return `peer:${slugOf(name)}-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 8)}`
+}
+/** Locate a sub-peer anywhere on the roster by id — stable ids carry no routing info BY DESIGN, so the
+ *  owning session is looked up rather than parsed out. Returns {session, sp} or null. */
+function rosterSub(id) {
+  for (const s of roster.values()) { const sp = (s.subpeers || []).find(x => x.id === id); if (sp) return { session: s, sp } }
+  return null
+}
 function emitTrace(dir, env, note) {
   emitTraceRaw({ envelope_id: env.id, from: env.from?.session, from_name: env.from?.name,
     to: env.to, to_name: nameOf(env.to), to_kind: kindOf(env.to),
@@ -349,7 +374,9 @@ loadService(egress)
 if (egress) profile.config.watch(c => egress.setConfig(egressConfig(c)))   // live-reload backends
 
 // ---------------------------------------------------------------- sub-peer machinery
-function isLocalSubId(id) { return typeof id === 'string' && id.startsWith(SESSION + '/') }
+// "is this one of MY sub-peers?" — authoritative via the local map. The legacy prefix test is kept as a
+// fallback for old `HOST/<session>/<name>` ids; a stable `peer:` id (#40) carries no session, by design.
+function isLocalSubId(id) { return typeof id === 'string' && (subpeers.has(id) || id.startsWith(SESSION + '/')) }
 function resolveLocalSub(ref) {
   if (!ref) return null
   if (subpeers.has(ref)) return subpeers.get(ref)
@@ -694,8 +721,10 @@ function resolvePageTarget(target) {
 // ---------------------------------------------------------------- outbound routing
 function ownerOf(target) {
   if (roster.has(target)) return roster.get(target)
+  // stable id (#40): the hosting session is looked up on the roster, not parsed out of the id
+  if (String(target).startsWith('peer:')) { const hit = rosterSub(target); return hit ? hit.session : null }
   const parts = String(target).split('/')
-  if (parts.length >= 3) return roster.get(parts.slice(0, 2).join('/')) || null
+  if (parts.length >= 3) return roster.get(parts.slice(0, 2).join('/')) || null   // legacy id: session is embedded
   return null
 }
 function knownIds() {
@@ -798,8 +827,11 @@ function makeEnvelope({ to, verb, body, reply_to, from, subject, pattern, topic 
   const f = base.project ? base : { ...base, ...senderIdent(base) }
   const hops = [...(from?.hops || [])]
   // sender joins the chain unless delivering within its own process (itself, or its own sub-peer —
-  // otherwise the loop guard in deliverSub would reject a process publishing to its own conversations)
-  if (f.session !== to && !String(to).startsWith(`${f.session}/`)) hops.push(f.session)
+  // otherwise the loop guard in deliverSub would reject a process publishing to its own conversations).
+  // "its own sub-peer" must be an OWNERSHIP test, not a prefix test: a stable id (#40) carries no session,
+  // so the legacy `to.startsWith(session + '/')` form is kept only for old ids.
+  const toOwnSub = (f.session === SESSION && isLocalSubId(to)) || String(to).startsWith(`${f.session}/`)
+  if (f.session !== to && !toOwnSub) hops.push(f.session)
   const env = { ts: new Date().toISOString(), from: f,
     to, verb: verb || 'message', subject: String(subject || ''),
     pattern: pattern || 'send', topic: topic || null,
@@ -1455,8 +1487,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (!p) return ok({ ok: false, code: 'unknown-parent', parent: a.parent })
         parent = p.id
       }
-      const slug = name.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'peer'
-      const id = `${SESSION}/${slug}-${crypto.randomBytes(2).toString('hex')}`
       const ttl = Math.max(Number(a.ttl_minutes) > 0 ? Number(a.ttl_minutes) : (parent ? CHILD_TTL_MIN : SUB_TTL_MIN), 0.01)
       const declaredClient = String(a.client || '').trim() || (CLIENT ? CLIENT.name : null)
       const ckind = clientKind(declaredClient)
@@ -1467,6 +1497,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const ident = profile.identity.classify({
         project: a.project || (parentSp && parentSp.identity.project) || PROC_PROJECT,
         user: (parentSp && parentSp.identity.user) || PROC_USER, realm: REALM })
+      const id = stablePeerId(ident, name)   // #40: derived from identity, so it survives a process restart
       subpeers.set(id, { id, name, secretHash: sha(secret), parent, kind: 'subpeer',
         created: Date.now(), last_seen: Date.now(), ttl_ms: ttl * 60000, mode,
         client: declaredClient, client_kind: ckind,
