@@ -35,7 +35,12 @@ This file is **gitignored** — create it locally. Do **NOT** copy a Windows mac
 
 - `advertiseHost` **auto-derives** from `tailscale status`, so this file needs no per-machine address.
 - `vault: "none"` means a session that loses its `register_self` secret cannot recover it (no TPM/Hello here),
-  so keep sub-peer secrets somewhere retrievable.
+  so keep sub-peer secrets somewhere retrievable. **Be concrete about what "retrievable" means:** with no vault,
+  the practical fallback is the session transcript (which holds the secret in the original `register_self` call)
+  — i.e. the secret's real durability is *whatever the transcript retains*. Don't assume `recover_secret` is
+  there as a backstop. **This applies to a Windows box too if its TPM is absent or disabled** — `profile`
+  advertises the vault it is *configured* with, not one the platform can actually back, so a `vault: "tpm"`
+  machine with fTPM off fails `recover_secret` with `tpm-unavailable` at the exact moment recovery is needed.
 - Leave `token` out of this file and supply it via `AI_BRIDGE_TOKEN` (below) — cleaner, and keeps the realm
   secret out of the repo tree entirely.
 
@@ -133,7 +138,12 @@ conclude your firewall is misconfigured when it appears to do nothing.
 tailscale status            # the node must be up; advertiseHost derives from this
 ```
 
-Then from a Claude Code session on the box, call `my_identity` and check:
+> **Verify ON the box, not from another machine.** `my_identity` reports the bridge your session is
+> **attached to** — so running it from a session on a *different* host confirms the wrong machine and looks
+> like a pass. For a remote host, check on the box itself (`git log --oneline -1`, `src/package.json`,
+> `systemctl --user status aimb-bridge.service`); use `my_identity` only for the machine you are attached to.
+
+Then from a Claude Code session **on that machine**, call `my_identity` and check:
 
 - `bridge_version` — matches the other machines (the dashboard's **Computers → Bridge** column shows every
   machine's version, so skew is visible at a glance)

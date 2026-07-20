@@ -1052,6 +1052,18 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   projects it may reach) + the inbox hint, so a reconnecting/compacted session relearns its responsibilities
   in one call, no re-claim/re-subscribe. Backing this: **durable subscriptions** (a 6th persistence store;
   default-on `persistSubscriptions`, opt-out) that rehydrate like owned claims. Additive + backward-compatible.
+- **Defect — open (#41): `profile` advertises INTENT, not CAPABILITY.** A bridge reports
+  `profile.vault = "tpm"` / `profile.authorizer = "hello"` because that is what it is *configured* with, whether
+  or not the platform can actually back it. Found in the field on a box where `Win32_Tpm` returns **no instance
+  at all** (AMD fTPM disabled in firmware; Windows 11 installed with the TPM requirement bypassed): the roster
+  advertised `vault: "tpm"`, so a peer would reasonably conclude secret recovery was available — and
+  `recover_secret` then failed `recovery-denied / tpm-unavailable` at the *exact moment* a compacted session
+  needed it, which is the worst possible time to discover it. The facets are otherwise a clean seam; this is a
+  reporting flaw, not a facet flaw. **Fix:** probe each facet at startup and degrade the REPORTED profile to
+  `none` when the platform cannot back it (and surface the degradation on the dashboard), so feature detection
+  tells the truth. Until then, the honest fallback when a vault is unavailable is the session transcript — see
+  `docs/linux-setup.md` §2. NB the host-side remedy (enabling fTPM) is a firmware change that can invalidate
+  BitLocker protectors, so it is an operator decision, not a step to automate.
 - **Designed — pending:** `set_wake` (the tool half of T14 — the WS `listener` half shipped as the doorbell,
   v1.25.0 #39); durable reply-caps; mutual peer **presence/liveness** (a secret-authenticated doorbell variant
   exchanging keep-alives between two sessions/topics, so each knows the other is up — distinct from
