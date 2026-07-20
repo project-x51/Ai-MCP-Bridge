@@ -182,6 +182,14 @@ Split configuration three ways and never sync them the same way:
 | **Realm token** | one canonical value, delivered out of band | **Yes, byte-identical** — it gates membership and decrypts bodies |
 | **Profile / paths** (`vault`, `authorizer`, `persistence.dir`, `bind`) | each machine's own `config.json` | **No — these are *meant* to differ** |
 
+> **Check whether `config.json` is actually machine-local before you rely on it.** "Gitignored" means *not in
+> git* — it says nothing about a file-sync tool. If a host runs the bridge out of a **synced folder** (Dropbox,
+> OneDrive, an SMB share), its `config.json` is the *same file* as every other host doing the same, and the
+> "per-machine" leg of the table above silently collapses: setting `stableIds`, a `profile` entry, or even the
+> realm token on one box applies to all of them, invisibly. Verified in this realm — two Windows hosts running
+> from a Dropbox checkout share one `config.json`, while a Linux host with a plain `$HOME` checkout is genuinely
+> independent. Before treating a config edit as local, confirm the path is not inside a synced folder.
+
 `vault: tpm` + `authorizer: hello` on Windows versus `none` on Linux is **correct divergence**, not drift to
 be eliminated. The only value that must be identical everywhere is the token.
 

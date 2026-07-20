@@ -1088,6 +1088,17 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   Microsoft account, a newly-present TPM can cause Windows to enable Device Encryption, and it is a *later*
   firmware change that then strands the disk behind a recovery key. So it stays an operator decision (know the
   account type and hold the recovery key), but for the right reason.
+- **Defect — open (#42): the #41 probe gives a FALSE POSITIVE on some hosts.** Field evidence: two v1.26.1
+  bridges on the SAME machine (no TPM — `Win32_Tpm` returns no instance) report OPPOSITE answers — the
+  tray-launched gateway advertises `recover_secret: true` / `presence_confirm: true`, while the
+  Code-launched session correctly reports both false. So the probe is not deterministic per host, which
+  defeats #41 in exactly the case it was built for. Leading hypotheses, in order: (a) `Tpm.exe --pubkey`
+  *succeeds* without a TPM (falling back to a software key store), in which case the probe is asking the
+  wrong question and must verify the key is genuinely TPM-backed; (b) the two processes resolve DIFFERENT
+  helper paths via `AI_BRIDGE_TPM_HELPER` / `AI_BRIDGE_HELLO_HELPER` or a different `HERE`, so one finds a
+  helper and the other doesn't; (c) the `hello` probe is too weak by construction — it only checks platform +
+  file existence, so a present-but-unusable helper reads as backed. Diagnostics requested from the affected
+  host. Until resolved, treat `recover_secret` as advisory rather than authoritative.
 - **Designed — pending:** `set_wake` (the tool half of T14 — the WS `listener` half shipped as the doorbell,
   v1.25.0 #39); durable reply-caps; mutual peer **presence/liveness** (a secret-authenticated doorbell variant
   exchanging keep-alives between two sessions/topics, so each knows the other is up — distinct from
