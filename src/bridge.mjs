@@ -26,6 +26,7 @@ import { envelopeId } from './lib/envelope.js'
 import { TOOLS } from './lib/tool-schemas.js'
 import { lc, projKey } from './lib/keys.js'
 import { hydrateEnvFromRegistry } from './lib/win-env.js'
+import { procCapKeyInput, pageCapKeyInput } from './lib/capkeys.js'
 import { createConsent, parseTtlMin } from './lib/consent.js'
 import { createReminders } from './lib/reminders.js'
 import { createTraces } from './lib/traces.js'
@@ -79,7 +80,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.26.1'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.26.2'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -189,7 +190,11 @@ profile.config.watch(c => {
 await consent.rehydrate()   // §14: durable grants survive a restart
 setInterval(() => consent.gc(), Number(process.env.AI_BRIDGE_GRANT_GC_MS) || 600000).unref()   // §14: sweep expired grants + stale pending requests
 const CAP_TTL_MS = Number(process.env.AI_BRIDGE_CAP_TTL_MS) || 30 * 60000   // reply_exp stamp horizon (informational since Decision B; no longer gates delivery — see verifyReplyCap). Env-overridable for tests.
-const PROC_CAPKEY = capKeyFrom(SESSION)    // process reply-cap key (rotates per process = correct for Code)
+// #43: was capKeyFrom(SESSION) — SESSION is RANDOM per process (so a reply-cap died on restart, breaking
+// Decision B's "a valid cap always gets through") and PUBLIC (published in the roster and every envelope,
+// so anyone who could read the roster could recompute this key and mint a cap that bypasses the consent
+// check). Now derived from the process IDENTITY + the realm token. See lib/capkeys.js.
+const PROC_CAPKEY = capKeyFrom(procCapKeyInput({ token: TOKEN, realm: REALM, project: PROC_PROJECT, user: PROC_USER, host: HOSTNAME }))
 function localCapKey(sessionId) {                  // reply-cap signing key for a LOCAL participant
   if (sessionId === SESSION) return PROC_CAPKEY
   const sp = subpeers.get(sessionId); if (sp) return sp.capKey
@@ -1331,7 +1336,7 @@ function becomeGateway(server) {
             if (m.subject && !pSubject) log(`page ${ws.instance}: wildcard subject "${m.subject}" not auto-claimed (responsibilities are concrete); subscribe patterns stay wildcard-OK`)
             pages.set(ws.instance, { instance: ws.instance, page_kind: m.page_kind || 'page', title: m.title || '',
               subject: pSubject, subscriptions: Array.isArray(m.subscribe) ? m.subscribe.slice(0, 32) : [],
-              icon: m.icon || null, kind: 'page', capKey: capKeyFrom(ws.instance),
+              icon: m.icon || null, kind: 'page', capKey: capKeyFrom(pageCapKeyInput({ token: TOKEN, instance: ws.instance })),   // #43: not derivable from the published instance
               identity: pident, project: pident.project, user: pident.user })
             ws.project = pident.project; ws.realm = pident.realm; ws.seeAll = !!m.seeAll   // visibility scope (§4)
           }

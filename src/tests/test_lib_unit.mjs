@@ -11,6 +11,7 @@ import { create as createEgress } from '../services/egress.js'
 import { hostOf } from '../facets/discovery/tailscale.js'
 import { makeResolver, envResolver } from '../lib/secret-resolver.js'
 import { parseRegQuery } from '../lib/win-env.js'
+import { procCapKeyInput, pageCapKeyInput } from '../lib/capkeys.js'
 let pass = 0, fail = 0
 const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
 
@@ -253,6 +254,26 @@ check('hostOf prefers the tailnet IP', hostOf({ TailscaleIPs: ['100.64.0.1'], DN
 check('hostOf falls back to MagicDNS FQDN (trailing dot stripped)', hostOf({ TailscaleIPs: [], DNSName: 'little-001.tail.ts.net.', HostName: 'LITTLE-001' }) === 'little-001.tail.ts.net')
 check('hostOf returns null on a partial status (HostName only) — no bare-hostname latch (#35)', hostOf({ TailscaleIPs: [], DNSName: '', HostName: 'ROBIN-Z790' }) === null)
 check('hostOf null for empty/absent node', hostOf(null) === null && hostOf({}) === null)
+
+// ---- reply-cap key material (#43). The CapSigner mixes in NO other entropy - deriveKey is HKDF over this
+// string alone - so these inputs decide both the key's stability and its secrecy.
+const capBase = { token: 'tok-abc', realm: 'default', project: 'AIMB', user: 'Robin', host: 'ROBIN-Z790' }
+check('#43 proc cap input is DETERMINISTIC (same identity -> same key material across restarts)',
+  procCapKeyInput(capBase) === procCapKeyInput({ ...capBase }))
+check('#43 proc cap input has NO random/per-process component (exactly what rotated before)',
+  !/[0-9a-f]{8}/.test(procCapKeyInput(capBase)) && procCapKeyInput(capBase).indexOf('/') === -1, procCapKeyInput(capBase))
+check('#43 proc cap input is TOKEN-gated (not computable from public roster data alone)',
+  procCapKeyInput(capBase) !== procCapKeyInput({ ...capBase, token: 'different' }))
+check('#43 proc cap input separates distinct identities',
+  procCapKeyInput(capBase) !== procCapKeyInput({ ...capBase, project: 'PowerHub' }) &&
+  procCapKeyInput(capBase) !== procCapKeyInput({ ...capBase, user: 'someone-else' }) &&
+  procCapKeyInput(capBase) !== procCapKeyInput({ ...capBase, host: 'LITTLE-001' }))
+check('#43 proc cap input is case-insensitive on identity (matches identity comparison elsewhere)',
+  procCapKeyInput(capBase) === procCapKeyInput({ ...capBase, project: 'aimb', user: 'robin', host: 'robin-z790' }))
+check('#43 page cap input still rotates per instance (a browser tab IS ephemeral)',
+  pageCapKeyInput({ token: 't', instance: 'a1' }) !== pageCapKeyInput({ token: 't', instance: 'b2' }))
+check('#43 page cap input is token-gated too',
+  pageCapKeyInput({ token: 't', instance: 'a1' }) !== pageCapKeyInput({ token: 'other', instance: 'a1' }))
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

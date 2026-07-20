@@ -1088,6 +1088,26 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   Microsoft account, a newly-present TPM can cause Windows to enable Device Encryption, and it is a *later*
   firmware change that then strands the disk behind a recovery key. So it stays an operator decision (know the
   account type and hold the recovery key), but for the right reason.
+- **Built (v1.26.2):** *durable + non-public reply-cap keys (#43)* — the CapSigner mixes in **no** entropy of
+  its own (`deriveKey = HKDF(input, salt='aimb-reply-cap')`), so the input alone decides a cap key's stability
+  AND its secrecy. Two problems followed, and only the first was the one being hunted. **(1) Not durable:**
+  a process key came from the random per-process `SESSION`, so it rotated on every restart — silently breaking
+  Decision B's promise that a valid reply-cap *always* gets through. Since a bridge's lifetime is its MCP
+  client's, that window was far shorter than the design assumed. **(2) Publicly derivable:** `SESSION` and a
+  page `instance` are **published** (`list_sessions` returns every session id; envelopes carry `from.session`;
+  the roster carries page instances), so anyone able to read the roster could recompute the key and mint a
+  valid cap — and a valid cap is an *independent allow* OR'd after the consent check, so that bypassed
+  cross-project isolation. Fixed by deriving the process key from the process **identity** (stable across a
+  restart) mixed with the realm **token**, and the page key from the token + instance (still per-instance —
+  a browser tab genuinely is ephemeral — but no longer computable from the published id). Sub-peer keys were
+  always fine: they derive from the peer's own self-invented secret, which is both unguessable and stable.
+  Inputs live in `lib/capkeys.js` so the properties are unit-testable (7 checks: deterministic, no random
+  component, token-gated, identity-separating, case-insensitive, page rotation, page token-gating).
+  **Honest scope:** this raises the bar from *anyone who can read the roster* to *a realm member* — it is
+  defence in depth, NOT a defence against a hostile realm member, because the realm is one trust domain by
+  design (members already share the token-derived body-encryption key). **Coverage gap:** the cross-restart
+  durability is proven at the derivation level, not end-to-end; a live test would need a cross-project thread
+  opened, granted, revoked, and then replied to across a bridge restart. Suite 578 across 25.
 - **Defect — open (#42): the #41 probe gives a FALSE POSITIVE on some hosts.** Field evidence: two v1.26.1
   bridges on the SAME machine (no TPM — `Win32_Tpm` returns no instance) report OPPOSITE answers — the
   tray-launched gateway advertises `recover_secret: true` / `presence_confirm: true`, while the
