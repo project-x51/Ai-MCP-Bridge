@@ -80,7 +80,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.26.3'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.26.4'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -439,6 +439,15 @@ function announceSubpeers() {
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'SUBPEERS', session: SESSION, subpeers: list })
 }
 function topicList() { return [...myTopics.values()].map(t => ({ ...t, waiting: topicWaiting(t.holder, t.pattern) })) }
+// #41(c): CAPS is mutated AFTER connect (the facet probe runs ~50ms in), but a follower only sent its
+// capabilities once, in the REGISTER frame — so the gateway roster kept every follower's stale pre-probe
+// value while only the gateway itself re-broadcast. Push an update the same way SUBPEERS/TOPICS do. (If the
+// probe finishes before this follower has connected, the REGISTER frame already carries the post-probe CAPS,
+// so the two paths together close the window either way.)
+function announceCaps() {
+  if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.capabilities = { ...CAPS } }; broadcastRoster() }
+  else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'CAPS', session: SESSION, capabilities: CAPS })
+}
 function announceTopics() {
   if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.topics = topicList() }; broadcastRoster() }
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'TOPICS', session: SESSION, topics: topicList() })
@@ -1096,9 +1105,9 @@ async function probeFacets() {
   // configured-but-unbacked is the case worth shouting about: it only bites at the moment of need
   if (profile.names.vault !== 'none' && !v.ok) log(`WARN vault="${profile.names.vault}" is NOT backed on this host (${v.reason}) — recover_secret will fail; capabilities.recover_secret=false`)
   if (profile.names.authorizer !== 'none' && !a.ok) log(`WARN authorizer="${profile.names.authorizer}" is NOT backed on this host (${a.reason}) — presence confirmation will deny; capabilities.presence_confirm=false`)
-  if (role === 'gateway') broadcastRoster()
+  announceCaps()   // #41(c): propagate the probed result — a follower must not leave its stale REGISTER-time caps on the gateway roster
 }
-setTimeout(() => { probeFacets().catch(() => {}) }, 50).unref()
+setTimeout(() => { probeFacets().catch(() => {}) }, Number(process.env.AI_BRIDGE_PROBE_MS || 50)).unref()   // delay env-tunable so a test can force the register-before-probe ordering (#41c)
 // doorbell heartbeat (#39): a watcher that may block for an hour needs to know the link is still alive
 // (and to notice a dead bridge) without polling anything.
 setInterval(() => {
@@ -1253,6 +1262,8 @@ function becomeGateway(server) {
         broadcastRoster()
       } else if (f.t === 'SET_NAME') {
         const r = roster.get(f.session); if (r) { r.name = f.name; broadcastRoster() }
+      } else if (f.t === 'CAPS') {                          // #41(c): a follower's capabilities changed post-connect (facet probe)
+        const r = roster.get(f.session); if (r) { r.capabilities = f.capabilities || r.capabilities; broadcastRoster() }
       } else if (f.t === 'SUBPEERS') {
         const r = roster.get(f.session); if (r) { r.subpeers = f.subpeers || []; broadcastRoster() }
       } else if (f.t === 'TOPICS') {

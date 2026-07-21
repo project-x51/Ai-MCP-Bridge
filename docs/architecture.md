@@ -1112,7 +1112,30 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
-- **Defect — open (#42): the #41 probe gives a FALSE POSITIVE on some hosts.** Field evidence: two v1.26.1
+- **Built (v1.26.4):** *#41(c) — followers now re-announce probed capabilities.* The #41 probe mutates `CAPS`
+  ~50ms after startup, but a follower had only ever sent its capabilities once, in the REGISTER frame at
+  connect — so if REGISTER preceded the probe, the gateway roster kept the follower's stale pre-probe values
+  forever while the gateway's own entry re-broadcast correctly. That is why two same-version sessions on one
+  TPM-less host showed OPPOSITE `recover_secret` bits: not two probe results, one propagated result and one
+  stale REGISTER value. Fixed with a `CAPS` update frame (mirrors SUBPEERS/TOPICS): `announceCaps()` runs when
+  the probe completes, the gateway applies it to the roster and re-broadcasts. The probe delay is now
+  env-tunable (`AI_BRIDGE_PROBE_MS`) so a test can force the register-before-probe ordering. Verified by
+  `test_caps_propagate_live` (5 checks: a follower's roster entry goes false→true as its late probe lands),
+  proven sensitive by reverting the re-announce (the follower's roster bit stays stale while its self-report
+  is correct — the exact split-brain reported from the field). Suite 592 across 27.
+- **Defect — OPEN (#42): the #41 probe's PREMISE is false — `Tpm.exe --pubkey` succeeds without a TPM.**
+  Distinct from #41(c) above (that was propagation; this is the probe asking the wrong question). Field-
+  confirmed on a host with **no TPM at all** (`Win32_Tpm` returns no instance; fTPM disabled in firmware):
+  `Tpm.exe --pubkey` still returns **exit 0 and a valid RSA key**, because the helper falls back to a
+  software KSP instead of the Platform Crypto Provider. So `probe()`'s test — "exit 0 AND a PUBKEY match" —
+  cannot tell hardware-backed from software-backed, and reports `recover_secret: true` on a machine that has
+  no TPM. **Worse than a wrong bit:** `seal()` also SUCCEEDS against that software key, so a secret would be
+  sealed to something that is not the TPM, silently, and unseal would work — nothing fails at the moment of
+  need, which is the whole failure mode #41 set out to remove. **Fix (a `tray/windows/Tpm.exe` C# change, not
+  JS):** have the helper report WHICH provider backed the key and exit non-zero when it is not the Platform
+  Crypto Provider — a probe that asks "did I get bytes" cannot answer "was it hardware". Until then, treat
+  `recover_secret: true` as "a vault answered", not "a TPM answered".
+- **Superseded note (old #42 text kept for history): the #41 probe gives a FALSE POSITIVE on some hosts.** Field evidence: two v1.26.1
   bridges on the SAME machine (no TPM — `Win32_Tpm` returns no instance) report OPPOSITE answers — the
   tray-launched gateway advertises `recover_secret: true` / `presence_confirm: true`, while the
   Code-launched session correctly reports both false. So the probe is not deterministic per host, which

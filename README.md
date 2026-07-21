@@ -47,7 +47,7 @@ follower or a sub-peer.
     persistence, authorizer, vault) — one file per implementation, "copy a file to add one".
   - `services/` — opt-in **in-process capability modules**, loaded only when configured. First inhabitant:
     **egress** (an `http_request` tool proxying to operator-declared backends, with optional server-side auth).
-  - `tests/` — the suites; `npm test` runs them all (587 checks across 26 suites) behind a `checkJs`
+  - `tests/` — the suites; `npm test` runs them all (592 checks across 27 suites) behind a `checkJs`
     typecheck gate. `dashboard.html` / `chat.html` / `tools/*` are the bundled web clients.
 - **`tray/`** — optional Windows system-tray supervisor (Open Dashboard / Quit; can auto-launch the bridge).
 - **`docs/`** — architecture + roadmap.
