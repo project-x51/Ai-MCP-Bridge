@@ -149,7 +149,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 • `inbox {cursor?, for?, secret?}` • `claim_topic {topic, description?, exclusive?, icon?, persistent?, keep_alive?, grace_minutes?, allow_other_user?, force?, as?, secret?}`
 • `release_topic {topic, keep_alive?, as?, secret?}` (#26 `keep_alive`: keep an ownerless topic alive so directed sends park during a handoff)
 • `subscribe {pattern, as?, secret?}` • `unsubscribe {pattern, as?, secret?}`
-• `set_behavior {behavior, scope, match?, as?, secret?}` • `list_behaviors {as?, secret?}` • `clear_behavior {scope, match?, as?, secret?}` (#29/#32 per-session behaviour reminders)
+• `set_behavior {behavior, operation?, scope, match?, as?, secret?}` • `list_behaviors {as?, secret?}` • `clear_behavior {operation?, scope?, match?, as?, secret?}` (#29/#32/#44 per-operation behaviour reminders)
 • `allow_project {project, mode?, as?, secret?}` • `revoke_project {project, as?, secret?}` • `request_project_access {to, reason?, as?, secret?}`
 • `http_request {backend, method?, path?, query?, headers?, body?, json?, as?, secret?}` (#33/#36 egress — present only when a backend is configured)
 • `set_wake {…}` (reserved — unsupported).
@@ -326,15 +326,23 @@ traces, persistence or sender identities — so it needs **no per-peer secret** 
 and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Behaviour reminders (#29 / #32)
-A session can register scoped "how to behave when a message arrives" reminders: `set_behavior {behavior,
-scope, match?}` (scopes `topic` / `host` / `project` / `subscription` / `all`), `list_behaviors`,
-`clear_behavior`. Matching reminders ride along on delivered messages, so a session relearns its standing
-instructions across a compaction. A bridge-wide **default** (`config.behaviors.default`, tagged
-`default:true`) applies to every session unless that session sets its own for the same scope+match.
+## Behaviour reminders (#29 / #32 / #44)
+A session registers "how to behave" reminders: `set_behavior {behavior, operation?, scope, match?}`
+(`list_behaviors`, `clear_behavior`). A reminder is bound to an **`operation`** (which bridge action fires it)
+plus a **`scope`+`match`** (which instances). `operation` defaults to **`deliver`** (a message arrives) — those
+ride the delivered message, so a session relearns its standing instructions across a compaction. Other
+operations — `send`, `publish`, `claim_topic`, `release_topic`, `subscribe`, `allow_project`, `revoke_project`,
+`request_project_access` — instead **echo the matching reminders in that tool's response** (post-hoc for the
+message content, but in time for the transcript line / follow-up the agent composes next). For `deliver` the
+scope matches the **sender**; for outbound operations it matches the **target**. Scopes: `topic` / `host` /
+`project` / `subscription` / `all`. A bridge-wide **default** (`config.behaviors.default`, tagged `default:true`;
+may itself name an `operation`) applies to every session unless that session sets its own for the same
+`operation`+`scope`+`match`. **No reminder and no default for an operation ⇒ it is silent** — so an operation
+costs nothing until opted into. A `send` reminder never fires on `deliver` (or vice-versa); to cover both
+directions register one per operation.
 
 ## Notes / current limits
-- 592 checks across 27 suites (see the per-suite descriptions above).
+- 612 checks across 28 suites (see the per-suite descriptions above).
 - **Cross-host mesh (§7) — one realm across machines, no central node.** Co-equal per-host hubs
   (port-bind elected) find each other through the **discovery facet** and gossip rosters peer-to-peer;
   remote sessions land in the roster tagged with their owning gateway's address, so the existing

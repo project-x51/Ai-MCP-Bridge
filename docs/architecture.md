@@ -1112,6 +1112,29 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.27.0):** *behaviour reminders generalized to OPERATIONS (#44).* Reminders were receive-only —
+  every scope was defined over an incoming message, so a convention governing an OUTBOUND action (a reporting
+  glyph, a consent habit) had no hook and fired too late or not at all. A reminder now carries an **`operation`**
+  (which bridge action fires the check) alongside its scope+match; omitting it defaults to **`deliver`**, so every
+  pre-#44 behaviour and the operator default keep working unchanged (no migration; old durable `.beh` files load
+  as `deliver`). Supported operations: `deliver` (on-message, as before) plus `send`, `publish`, `claim_topic`,
+  `release_topic`, `subscribe`, `allow_project`, `revoke_project`, `request_project_access` — each **echoes the
+  matching reminders in that TOOL'S RESPONSE**. That is post-hoc for the message CONTENT (too late to change the
+  body) but lands exactly when the agent composes its transcript line / follow-up / report — where reporting and
+  consent conventions live. **Subject:** `deliver` matches the SENDER (its project/host, the arrival topic);
+  outbound operations match the TARGET (the project/topic/host the action concerns). **The design property:** no
+  session reminder AND no operator default for an operation ⇒ it is silent, so supporting an operation costs
+  nothing until someone opts in — which is the noise control, with no separate mechanism. `operation` was chosen
+  over a bolt-on `send` scope precisely so a reminder cannot leak across directions: a `send` reminder never
+  fires on `deliver` and vice-versa, and the same scope+match can carry different reminders per operation. (An
+  `operation:"*"` any-op sentinel was considered and deliberately NOT built — it would attach reminders to
+  operations a session never reasons about, polluting context; a both-direction convention registers two
+  reminders instead.) `set_behavior`/`clear_behavior` gain an optional `operation`; the persisted `.beh` file
+  name is now operation-prefixed so the same scope+match on two operations don't collide. Verified by
+  `test_lib_unit` (operation validation, cross-operation isolation, coexistence, deliver-only inheritance) +
+  `test_op_reminders_live` (11 checks driving the real send/claim_topic/publish responses: the reminder rides
+  the right response, does not leak across operations, and an un-opted operation omits the field). Suite 612
+  across 28.
 - **Built (v1.26.4):** *#41(c) — followers now re-announce probed capabilities.* The #41 probe mutates `CAPS`
   ~50ms after startup, but a follower had only ever sent its capabilities once, in the REGISTER frame at
   connect — so if REGISTER preceded the probe, the gateway roster kept the follower's stale pre-probe values

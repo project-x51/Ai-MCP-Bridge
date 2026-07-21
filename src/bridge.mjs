@@ -80,7 +80,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.26.4'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.27.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -287,10 +287,23 @@ const reminders = createReminders({ persistence, persist: PERSIST })
 // reminder for the same scope+match, tagged `default:true` on delivery. Live-reloadable; env override for tests.
 function defaultBehaviors(cfg) {
   const out = [], d = cfg && cfg.behaviors && cfg.behaviors.default
-  if (typeof d === 'string') out.push({ scope: 'all', match: null, behavior: d })
-  else if (Array.isArray(d)) for (const x of d) if (x && x.behavior) out.push({ scope: x.scope, match: x.match, behavior: x.behavior })
-  if (process.env.AI_BRIDGE_DEFAULT_BEHAVIOR) out.push({ scope: 'all', match: null, behavior: process.env.AI_BRIDGE_DEFAULT_BEHAVIOR })
+  if (typeof d === 'string') out.push({ operation: 'deliver', scope: 'all', match: null, behavior: d })
+  else if (Array.isArray(d)) for (const x of d) if (x && x.behavior) out.push({ operation: x.operation || 'deliver', scope: x.scope, match: x.match, behavior: x.behavior })   // #44: config default may name an operation
+  if (process.env.AI_BRIDGE_DEFAULT_BEHAVIOR) out.push({ operation: 'deliver', scope: 'all', match: null, behavior: process.env.AI_BRIDGE_DEFAULT_BEHAVIOR })
   return out
+}
+// #44: the reminders whose OPERATION+subject match a bridge action, attached to that action's RESPONSE. `subject`
+// carries the fields a scope can test — { project?, topic?, host? }. Returns undefined when there's nothing (so a
+// caller can `...(opReminders(...) ? {reminders} : {})`). `deliver` reminders ride the message itself, not this.
+function opReminders(holderId, operation, subject) {
+  if (!holderId) return undefined
+  const rems = reminders.remindersFor(holderId, { operation, ...(subject || {}) })
+  return rems.length ? rems : undefined
+}
+// the context a DELIVERED message presents to the reminder matcher (operation 'deliver' — matches the SENDER).
+function deliverCtx(id, env) {
+  return { operation: 'deliver', project: env.from?.project, host: String(env.from?.session || '').split('/')[0],
+    topic: env.topic, fromSelf: env.from?.session === id, system: !!env.system }
 }
 reminders.setDefaults(defaultBehaviors(CFG))
 
@@ -603,7 +616,7 @@ function deliverSub(id, env) {
   if (q.items.length > SUBQ_CAP) { q.items.shift(); q.base++ }
   emitTrace('recv', env, `subpeer:${id.split('/').pop()}`)
   if (MODE_OVERRIDE !== 'poll' && sp && sp.mode === 'push') {      // streaming sub-peer (e.g. code session sharing this bridge)
-    const rems = reminders.remindersFor(sp.id, env)   // #29: scoped 'how to behave' prompts for this message
+    const rems = reminders.remindersFor(sp.id, deliverCtx(sp.id, env))   // #29/#44: 'deliver' reminders for this message
     mcp.notification({
       method: 'notifications/claude/channel',
       params: { content: plainBody(env),
@@ -1706,7 +1719,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       announceTopics()
       emitTraceRaw({ dir: 'con', verb: 'claim', from: holder, from_name: holderName, to: SESSION, size: 0,
         note: `${reclaim ? 're-claimed' : 'claimed'} "${topic}"${exclusive ? ' (exclusive)' : ''}${persistent ? ' [durable]' : ''}${keep_alive ? ' [keep-alive]' : ''}${eIcon ? ' ' + eIcon : ''}`, envelope_id: null })
-      return ok({ ok: true, topic, holder, exclusive, icon: eIcon, persistent: persistent || undefined, keep_alive: keep_alive || undefined, reclaimed: reclaim || undefined, ...(drained ? { drained } : {}) })
+      return ok({ ok: true, topic, holder, exclusive, icon: eIcon, persistent: persistent || undefined, keep_alive: keep_alive || undefined, reclaimed: reclaim || undefined, ...(drained ? { drained } : {}), reminders: opReminders(holder, 'claim_topic', { topic, project: holderProject }) })
     }
     case 'release_topic': {
       const topic = String(a.topic || '').trim()
@@ -1737,7 +1750,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       announceTopics()
       emitTraceRaw({ dir: 'con', verb: 'release', from: holder, from_name: holderName, to: SESSION, size: 0,
         note: `released "${topic}"${keepAlive ? ' [kept alive — sends park until reclaimed]' : ''}`, envelope_id: null })
-      return ok({ ok: true, topic, holder, ...(keepAlive ? { kept_alive: true } : {}) })
+      return ok({ ok: true, topic, holder, ...(keepAlive ? { kept_alive: true } : {}), reminders: opReminders(holder, 'release_topic', { topic, project: holderProject }) })
     }
     case 'subscribe': {
       const pattern = String(a.pattern || '').trim()
@@ -1770,7 +1783,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           if (n) emitTraceRaw({ dir: 'send', verb: 'message', from: SESSION, from_name: NAME, to: holder, to_name: holderName, to_kind: 'subpeer', subject: `retained catch-up (${n})`, pattern: 'publish', size: 0, note: `${n} retained value(s) delivered on subscribe`, envelope_id: null })
         } catch { }
       }
-      return ok({ ok: true, pattern, holder, resubscribed: existed || undefined })
+      return ok({ ok: true, pattern, holder, resubscribed: existed || undefined, reminders: opReminders(holder, 'subscribe', { topic: pattern, project: holderProject }) })
     }
     case 'unsubscribe': {
       const pattern = String(a.pattern || '').trim()
@@ -1807,11 +1820,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           persistence.retained.put(project, path, fromIdentity, { ts: env.ts, env }).catch(() => {})
         }
       }
-      return ok({ ...r, retained: retain || undefined, as: from ? from.session : SESSION })
+      return ok({ ...r, retained: retain || undefined, as: from ? from.session : SESSION, reminders: opReminders(from ? from.session : SESSION, 'publish', { topic: r.topic, project: r.project }) })
     }
     case 'allow_project': {
-      let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }
-      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user } }
+      let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }, holderId = SESSION
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user }; holderId = sp.id }
       if (!me0.project || me0.project === 'unclassified') return ok({ ok: false, code: 'caller-unclassified' })
       if (!a.project) return ok({ ok: false, code: 'project-required' })
       const from = projKey(a.project), to = projKey(me0.project)
@@ -1835,15 +1848,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         consent.deletePending(p.reqId)
         deliverSystemTo(p.requester, 'project_access_granted', JSON.stringify({ to: me0.project, from, mode, request_id: p.reqId, ttl_minutes: effTtl, expires_at: exp ? new Date(exp).toISOString() : null }), `project access granted: ${from} -> ${me0.project}`).catch(() => {})
       }
-      return ok({ ok: true, allow: { from, to: me0.project, mode, ttl_minutes: effTtl, expires_at: exp ? new Date(exp).toISOString() : null }, notified: pend.length })
+      return ok({ ok: true, allow: { from, to: me0.project, mode, ttl_minutes: effTtl, expires_at: exp ? new Date(exp).toISOString() : null }, notified: pend.length, reminders: opReminders(holderId, 'allow_project', { project: a.project }) })
     }
     case 'revoke_project': {
-      let myProj = PROC_IDENT?.project
-      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); myProj = sp.identity?.project }
+      let myProj = PROC_IDENT?.project, holderId = SESSION
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); myProj = sp.identity?.project; holderId = sp.id }
       const from = projKey(a.project), to = projKey(myProj)
       const had = consent.revoke(from, to)   // §14: drop the runtime grant + its durable edge
       if (had) broadcastRoster()
-      return ok({ ok: true, revoked: had, from, to: myProj })
+      return ok({ ok: true, revoked: had, from, to: myProj, reminders: opReminders(holderId, 'revoke_project', { project: a.project }) })
     }
     case 'request_project_access': {
       let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }, requester = SESSION
@@ -1856,7 +1869,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       consent.addPending(reqId, { reqId, from: fromProj, to, requester, requesterName: me0.user || NAME, ttlMin, ts: Date.now() })
       const payload = JSON.stringify({ from_project: me0.project || 'unclassified', from_user: me0.user || 'unknown', reason: String(a.reason || ''), request_id: reqId, ttl_minutes: ttlMin })
       const reached = await deliverSystemToProject(to, 'project_access_request', payload)
-      return ok({ ok: true, request_id: reqId, to, ttl_minutes: ttlMin, delivered_to: reached })
+      return ok({ ok: true, request_id: reqId, to, ttl_minutes: ttlMin, delivered_to: reached, reminders: opReminders(requester, 'request_project_access', { project: to }) })
     }
     case 'set_wake': return ok({ ok: false, code: 'unsupported', what: 'wake (T14 — reserved for the watcher/doorbell feature)' })
     case 'send_to_peer': {
@@ -1872,7 +1885,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       let target = String(a.target || '')
       if (target.startsWith('topic:')) {                 // topic targeting (T3): explicit prefix only -> owners
         const r = await routeToTopicOwners(from, target.slice(6).trim(), a.verb, a.message, a.reply_to, subject, askerProjectOf(from))
-        return ok({ ...r, as: from ? from.session : SESSION })
+        return ok({ ...r, as: from ? from.session : SESSION, reminders: opReminders(from ? from.session : SESSION, 'send', { topic: r.topic || target.slice(6).trim(), project: r.project }) })
       }
       if (!roster.has(target) && !ownerOf(target)) {
         const pt = resolvePageTarget(target)
@@ -1897,7 +1910,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       const env = makeEnvelope({ to: target, verb: a.verb, body: a.message, reply_to: a.reply_to, from, subject })
       const r = await routeEnvelope(env)
-      return ok({ ...r, envelope_id: env.id, to: target, as: from ? from.session : SESSION })
+      const tOwner = ownerOf(target)   // #44: 'send' reminders match the TARGET's project/host
+      return ok({ ...r, envelope_id: env.id, to: target, as: from ? from.session : SESSION,
+        reminders: opReminders(from ? from.session : SESSION, 'send', { project: projectOfTarget(target), host: tOwner ? tOwner.host_label : undefined }) })
     }
     case 'inbox': {
       if (a.for) {
@@ -1915,7 +1930,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (PERSIST && sp.identity) { const pid = pIdent(sp.identity, sp.name); for (const m of q.items.slice(start)) persistence.mailbox.ack(pid, m.id).catch(() => {}) }
         if (start < q.items.length) scheduleCounts()   // served advanced → waiting-mail badge went down
         return ok({ peer_id: sp.id, queue_epoch: q.epoch, next_cursor: next,
-          messages: q.items.slice(start).map(e => { const v = decryptedView(e), r = reminders.remindersFor(sp.id, e); return r.length ? { ...v, reminders: r } : v }) })   // #29: attach scoped behaviour reminders
+          messages: q.items.slice(start).map(e => { const v = decryptedView(e), r = reminders.remindersFor(sp.id, deliverCtx(sp.id, e)); return r.length ? { ...v, reminders: r } : v }) })   // #29/#44: attach 'deliver' reminders
       }
       const cur = Number(a.cursor || 0)
       return ok({ messages: inbox.slice(cur).map(decryptedView), next_cursor: inbox.length })
@@ -1923,7 +1938,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     case 'set_behavior': {   // #29: register a 'how to behave when a message arrives' reminder for a scope
       let holder = SESSION, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); holder = sp.id; holderIdentity = pIdent(sp.identity, sp.name) }
-      return ok(reminders.set(holder, holderIdentity, a.scope, a.match, a.behavior))
+      return ok(reminders.set(holder, holderIdentity, a.operation, a.scope, a.match, a.behavior))
     }
     case 'list_behaviors': {
       let holder = SESSION
@@ -1933,7 +1948,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     case 'clear_behavior': {   // omit scope to clear ALL; else clear the one (scope + match)
       let holder = SESSION, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); holder = sp.id; holderIdentity = pIdent(sp.identity, sp.name) }
-      return ok(reminders.clear(holder, holderIdentity, a.scope, a.match))
+      return ok(reminders.clear(holder, holderIdentity, a.operation, a.scope, a.match))
     }
     default: {
       // #33 services layer: route a service-contributed tool to its handle(), with the caller's resolved

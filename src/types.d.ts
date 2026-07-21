@@ -70,7 +70,7 @@ export interface Grant { from: string; to: string; mode: 'send' | 'bidirectional
 /** A kept-alive (ownerless) topic marker — sends park against it until reclaimed (#26). */
 export interface KeptTopic { realm?: string; project: string; topic: string; description?: string; icon?: string | null; exclusive?: boolean; announce_offline?: boolean; keep_alive?: boolean; behaviors?: string[]; ownerless_since?: string }
 /** A per-session behaviour reminder (#29). */
-export interface Behavior { scope: 'topic' | 'host' | 'project' | 'subscription' | 'all'; match: string | null; behavior: string; set_at?: string }
+export interface Behavior { operation?: string; scope: 'topic' | 'host' | 'project' | 'subscription' | 'all'; match: string | null; behavior: string; set_at?: string }
 /** The per-sub-peer in-RAM delivery queue. */
 export interface SubQueue { epoch: string; base: number; items: Envelope[]; served?: number }
 

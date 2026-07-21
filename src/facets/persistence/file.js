@@ -363,11 +363,15 @@ export function create(ctx) {
   // ---- behaviors (#29): a session's own 'how to behave when a message arrives' reminders, scoped to a topic it
   // owns / a host / a project / a subscription pattern / all. Durable per-identity (rehydrated on resync), one
   // file per (scope, match). Self-describing. The bridge returns the matching ones alongside each delivered message. ----
+  // #44: a reminder is keyed by (operation, scope, match). Older files were named `<scope>__<match>.beh` with
+  // no operation; those load as operation 'deliver' (the reminders module normalizes a missing operation), and
+  // the new name prefixes the operation so the same scope+match on different operations don't collide.
+  const behFile = (operation, scope, match) => `${slug(operation || 'deliver', 16)}__${slug(scope, 16)}__${lslug(match || '', 80)}.beh`
   const behaviors = {
-    async put(identity, scope, match, behavior) {
-      await writeAtomic(dir('behaviors', identityKeys(identity, readable).primary, `${slug(scope, 16)}__${lslug(match || '', 80)}.beh`),
+    async put(identity, operation, scope, match, behavior) {
+      await writeAtomic(dir('behaviors', identityKeys(identity, readable).primary, behFile(operation, scope, match)),
         JSON.stringify({ realm: identity.realm, project: identity.project, user: identity.user, name: identity.name,
-          scope, match: match || null, behavior: String(behavior || ''), set_at: new Date().toISOString() }))
+          operation: operation || 'deliver', scope, match: match || null, behavior: String(behavior || ''), set_at: new Date().toISOString() }))
     },
     async byHolder(identity) {
       const { both } = identityKeys(identity, readable), out = []
@@ -377,9 +381,9 @@ export function create(ctx) {
       }
       return out
     },
-    async remove(identity, scope, match) {
+    async remove(identity, operation, scope, match) {
       const { both } = identityKeys(identity, readable)
-      for (const key of new Set(both)) { try { await fsp.unlink(dir('behaviors', key, `${slug(scope, 16)}__${lslug(match || '', 80)}.beh`)) } catch {} }
+      for (const key of new Set(both)) { try { await fsp.unlink(dir('behaviors', key, behFile(operation, scope, match))) } catch {} }
     },
     async clear(identity) {   // drop ALL of an identity's behaviors
       const { both } = identityKeys(identity, readable)
@@ -422,7 +426,7 @@ export function create(ctx) {
     const retained = await readAll('retained', '.val', j => ({ project: j.project, topic: j.topic, ts: j.ts }))
     const vaults = await readAll('vault', '.vault', j => ({ name: j.name, project: j.project, user: j.user, sealed_at: j.sealed_at }))   // identities only — never the sealed value
     const kept = await readAll('kept', '.kept', j => ({ project: j.project, topic: j.topic, icon: j.icon, exclusive: !!j.exclusive, ownerless_since: j.ownerless_since }))
-    const behaviors = await readAll('behaviors', '.beh', j => ({ name: j.name, project: j.project, user: j.user, scope: j.scope, match: j.match, behavior: j.behavior }))
+    const behaviors = await readAll('behaviors', '.beh', j => ({ name: j.name, project: j.project, user: j.user, operation: j.operation || 'deliver', scope: j.scope, match: j.match, behavior: j.behavior }))
     return {
       enabled: true, readable, dir: root,
       counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.length, registrations: registrations.length, subscriptions: subscriptions.length, vault: vaults.length, retained: retained.length, kept: kept.length, behaviors: behaviors.length },
