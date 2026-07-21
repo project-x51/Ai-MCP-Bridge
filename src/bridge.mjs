@@ -80,7 +80,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.27.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.28.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1474,7 +1474,7 @@ function election() {
 const mcp = new Server(
   { name: 'ai-mcp-bridge', version: BRIDGE_VERSION },
   {
-    capabilities: { experimental: { 'claude/channel': {} }, tools: {} },
+    capabilities: { experimental: { 'claude/channel': {} }, tools: { listChanged: true } },   // #45: we notify tools/list_changed so an upgraded bridge refreshes a running client's cached schema
     instructions:
       'Ai MCP Bridge: peer messages from other AI sessions and web pages arrive as ' +
       '<channel source="ai-mcp-bridge" from="..." from_name="..." verb="..." subject="...">body</channel>. ' +
@@ -1985,6 +1985,13 @@ mcp.oninitialized = () => {
         if (n) { announceTopics(); emitTraceRaw({ dir: 'con', verb: 'rehydrate', from: SESSION, from_name: NAME, to: SESSION, size: n, note: `${n} responsibility(ies) restored`, envelope_id: null }) }
       }).catch(() => {})
     }
+    // #45: nudge the client to re-fetch tools/list. A client that connected to an OLDER bridge caches the
+    // tool schema at initialize and STRIPS unknown args — so after a bridge upgrade UNDER a running client
+    // (the common case here: the tray/stdio bridge is replaced but the client session lives on), a new tool
+    // PARAMETER (e.g. #44's set_behavior `operation`) never reaches the bridge until the client refreshes.
+    // Emitting tools/list_changed right after `initialized` prompts that refresh without a full client restart.
+    // A bridge restart alone did NOT refresh it (observed in the field); this is the missing signal.
+    setTimeout(() => { try { mcp.sendToolListChanged() } catch {} }, 300).unref()
   } catch (e) { log('client-detect failed', e.message) }
 }
 

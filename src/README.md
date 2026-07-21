@@ -342,7 +342,7 @@ costs nothing until opted into. A `send` reminder never fires on `deliver` (or v
 directions register one per operation.
 
 ## Notes / current limits
-- 612 checks across 28 suites (see the per-suite descriptions above).
+- 616 checks across 29 suites (see the per-suite descriptions above).
 - **Cross-host mesh (§7) — one realm across machines, no central node.** Co-equal per-host hubs
   (port-bind elected) find each other through the **discovery facet** and gossip rosters peer-to-peer;
   remote sessions land in the roster tagged with their owning gateway's address, so the existing

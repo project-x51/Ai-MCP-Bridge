@@ -1112,6 +1112,22 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.28.0):** *notify `tools/list_changed` so an upgraded bridge refreshes a running client's cached
+  schema (#45).* v1.27.0 (#44) added the `operation` param to `set_behavior`, and the bridge advertised it
+  correctly — but a peer testing it in the field found the param was silently STRIPPED before the call left the
+  client. Cause: an MCP client caches `tools/list` at initialize; when the bridge is upgraded UNDER a running
+  client (the normal case here — the stdio/tray bridge is replaced but the client session lives on), the client
+  keeps the OLD schema and drops any argument the old schema didn't declare. A bridge restart alone did **not**
+  refresh it (confirmed on two independent clients). The bridge now declares `capabilities.tools.listChanged`
+  and calls `sendToolListChanged()` shortly after each client's `initialized`, prompting the client to re-fetch
+  `tools/list` and pick up new params without a full session restart. **Scope of the claim:** the automated
+  test (`test_toollist_changed_live`) proves the BRIDGE's half — it advertises the capability, emits the
+  notification post-initialize, and the re-fetched `set_behavior` schema carries `operation`. Whether a given
+  client actually re-fetches on the notification is client-specific and is verified live against a real Claude
+  Code client, not asserted by a test double. Also surfaced: `set_behavior` silently defaults a stripped
+  `operation` to `deliver` — the response echoes the stored value (`operation:"deliver"`), which is how the
+  field tester caught it; the bridge cannot warn about a parameter a client never sends, so the refresh is the
+  real fix. Suite 616 across 29.
 - **Built (v1.27.0):** *behaviour reminders generalized to OPERATIONS (#44).* Reminders were receive-only —
   every scope was defined over an incoming message, so a convention governing an OUTBOUND action (a reporting
   glyph, a consent habit) had no hook and fired too late or not at all. A reminder now carries an **`operation`**
