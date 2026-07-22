@@ -1112,6 +1112,26 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.30.0):** *the incoming behaviour operation renamed `deliver` → `receive` (#47).* #44 named the
+  operation that fires when a message ARRIVES `deliver`, but from the recipient's seat the message is *received*,
+  not delivered — and "deliver" reads as an outbound verb, which is exactly the confusion `send` sits opposite.
+  Robin's call: name it `receive`, and make `receive` the omitted-operation default (so every pre-#44 behaviour,
+  which all fired on inbound mail, keeps working unchanged). **Rename is total but back-compatible via an alias,
+  not a migration:** `OP_ALIASES = {deliver:'receive'}` folds the old name to the canonical one at every entry
+  point — a stale client that still sends `operation:'deliver'` (tool schemas cache across a version bump, #45),
+  a config default that names `deliver`, and — the durable one — existing `.beh` files written under the old
+  name. Nothing on disk is renamed: the persistence layer keeps READING legacy-named files (`deliver__…​.beh`
+  and pre-#44 unprefixed `<scope>__<match>.beh`), folds their operation to `receive` on load, and — so a cleared
+  reminder can't be resurrected by a stale filename — `remove()` deletes by CONTENT match (operation/scope/match)
+  rather than by a reconstructed name. Deliberately no file-rename migration: the persistence dir is a
+  Dropbox-shared checkout with a still-older host on it, and renaming would churn files across versions; alias-on-
+  read is inert for the old code (it reads `receive`, its own unknown-op fold maps it back to `deliver` — same
+  semantics). `#48` (make `operation` MANDATORY, dropping the silent default) waits on a full client-restart
+  cycle. Verified by `test_receive_rename_live` (12 checks): two real legacy flavours pre-seeded into a hashed
+  holder dir — a #44-era `operation:"deliver"` file and a pre-#44 no-operation file — both rehydrate as
+  `receive`, fire on a live delivered message most-specific-first, and (the subtle part) are physically removed
+  on clear so nothing resurrects across a genuine bridge restart; plus the alias accepted + folded live in
+  `test_op_reminders_live` and at the unit layer. Suite 636 across 31.
 - **Built (v1.29.0):** *realm token from a file — keep it out of argv (#46).* A peer found the realm token in
   **plaintext in the process command line** on a host whose MCP client inlines `env:{AI_BRIDGE_TOKEN:"…"}` into
   an inline `--mcp-config` (Claude Code on Linux). argv is world-readable via `ps` and captured by crash dumps /

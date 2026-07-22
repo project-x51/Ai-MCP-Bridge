@@ -82,56 +82,58 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
 {
   const r = createReminders({ persistence: {}, persist: false })
   const ME = 'peer:me', id = { realm: 'default', project: 'P', user: 'u', name: 'Me' }
-  // delivery context (operation 'deliver', matches the SENDER); send/others match the TARGET
-  const dctx = (from, topic) => ({ operation: 'deliver', project: from && from.project, host: String((from && from.session) || '').split('/')[0], topic, fromSelf: from && from.session === ME, system: false })
-  check('reminders: set ok + count (operation defaults to deliver)', r.set(ME, id, undefined, 'topic', 'a/b', 'do x').count === 1)
-  check('reminders: a set with no operation stores deliver', r.list(ME)[0].operation === 'deliver')
-  check('reminders: bad scope rejected', r.set(ME, id, 'deliver', 'nope', 'do').code === 'bad-scope')
+  // receive context (operation 'receive', matches the SENDER); send/others match the TARGET
+  const dctx = (from, topic) => ({ operation: 'receive', project: from && from.project, host: String((from && from.session) || '').split('/')[0], topic, fromSelf: from && from.session === ME, system: false })
+  check('reminders: set ok + count (operation defaults to receive)', r.set(ME, id, undefined, 'topic', 'a/b', 'do x').count === 1)
+  check('reminders: a set with no operation stores receive', r.list(ME)[0].operation === 'receive')
+  // #47: 'deliver' is a legacy alias — accepted on input, folded to the canonical 'receive'
+  check("#47: operation 'deliver' is accepted and folded to 'receive'", r.set(ME, id, 'deliver', 'topic', 'a/b', 'do x2').operation === 'receive' && r.list(ME)[0].operation === 'receive')
+  check('reminders: bad scope rejected', r.set(ME, id, 'receive', 'nope', 'do').code === 'bad-scope')
   check('reminders: bad OPERATION rejected (#44)', r.set(ME, id, 'nonsense-op', 'all', null, 'x').code === 'bad-operation')
-  check('reminders: over-long rejected', r.set(ME, id, 'deliver', 'all', null, 'x'.repeat(400)).code === 'behavior-too-long')
-  check('reminders: match required for non-all', r.set(ME, id, 'deliver', 'topic', '', 'x').code === 'match-required')
-  r.set(ME, id, 'deliver', 'project', 'Acme', 'ack ops'); r.set(ME, id, 'deliver', 'all', null, 'be brief')
+  check('reminders: over-long rejected', r.set(ME, id, 'receive', 'all', null, 'x'.repeat(400)).code === 'behavior-too-long')
+  check('reminders: match required for non-all', r.set(ME, id, 'receive', 'topic', '', 'x').code === 'match-required')
+  r.set(ME, id, 'receive', 'project', 'Acme', 'ack ops'); r.set(ME, id, 'receive', 'all', null, 'be brief')
   const rs = r.remindersFor(ME, dctx({ session: 'peer:sender', project: 'Acme', name: 'S' }, 'a/b'))
   check('reminders: matches topic + project + all (most-specific first)', rs.length === 3 && rs.map(x => x.scope).join(',') === 'topic,project,all')
   check("reminders: 'all' skips self-sent", r.remindersFor(ME, dctx({ session: ME }, null)).length === 0)
   check('reminders: list returns all three', r.list(ME).length === 3)
-  // #44: an outbound (send) reminder is a DIFFERENT key from the same scope+match on deliver, and they don't cross
+  // #44: an outbound (send) reminder is a DIFFERENT key from the same scope+match on receive, and they don't cross
   r.set(ME, id, 'send', 'project', 'Acme', 'use the SENT glyph')
   const onSend = r.remindersFor(ME, { operation: 'send', project: 'Acme' })
   check('#44: send-op reminder fires on the send operation', onSend.length === 1 && onSend[0].behavior === 'use the SENT glyph' && onSend[0].operation === 'send')
-  check('#44: send reminder does NOT leak onto deliver', !r.remindersFor(ME, dctx({ session: 'peer:x', project: 'Acme' }, null)).some(x => x.operation === 'send'))
-  check('#44: deliver reminder does NOT leak onto send', !r.remindersFor(ME, { operation: 'send', project: 'Acme' }).some(x => x.scope === 'all'))
+  check('#44: send reminder does NOT leak onto receive', !r.remindersFor(ME, dctx({ session: 'peer:x', project: 'Acme' }, null)).some(x => x.operation === 'send'))
+  check('#44: receive reminder does NOT leak onto send', !r.remindersFor(ME, { operation: 'send', project: 'Acme' }).some(x => x.scope === 'all'))
   check('#44: same scope+match on two operations COEXIST', r.list(ME).filter(b => b.scope === 'project' && b.match === 'Acme').length === 2)
   check('#44: clear targets ONE operation only', r.clear(ME, id, 'send', 'project', 'Acme').cleared === 1 && r.list(ME).filter(b => b.match === 'Acme').length === 1)
-  check('reminders: clear one (deliver)', r.clear(ME, id, 'deliver', 'project', 'Acme').cleared === 1 && r.list(ME).length === 2)
+  check('reminders: clear one (receive)', r.clear(ME, id, 'receive', 'project', 'Acme').cleared === 1 && r.list(ME).length === 2)
   check('reminders: clear all', r.clear(ME, id).cleared === 2 && r.list(ME).length === 0)
-  // #26 x #29 inheritance: only DELIVER topic reminders ride a kept-alive handoff
-  r.set(ME, id, 'deliver', 'topic', 'reviews/api', 'review in 1 day')
+  // #26 x #29 inheritance: only RECEIVE topic reminders ride a kept-alive handoff
+  r.set(ME, id, 'receive', 'topic', 'reviews/api', 'review in 1 day')
   r.set(ME, id, 'send', 'topic', 'reviews/api', 'outbound-only, must NOT be inherited')
   const carried = r.topicBehaviors(ME, 'reviews/api')
-  check('reminders: topicBehaviors carries only the DELIVER topic reminder', carried.length === 1 && /review in 1 day/.test(carried[0]))
+  check('reminders: topicBehaviors carries only the RECEIVE topic reminder', carried.length === 1 && /review in 1 day/.test(carried[0]))
   const HEIR = 'peer:heir'
   r.inherit(HEIR, { ...id, name: 'Heir' }, 'reviews/api', carried)
-  check('reminders: inherit lands a deliver topic reminder on the heir', r.list(HEIR).some(b => b.scope === 'topic' && b.match === 'reviews/api' && b.operation === 'deliver'))
+  check('reminders: inherit lands a receive topic reminder on the heir', r.list(HEIR).some(b => b.scope === 'topic' && b.match === 'reviews/api' && b.operation === 'receive'))
 }
 // #32 config DEFAULT behaviours (now operation-aware, #44)
 {
   const r = createReminders({ persistence: {}, persist: false })
-  const dctx = (from, topic) => ({ operation: 'deliver', project: from && from.project, host: String((from && from.session) || '').split('/')[0], topic, fromSelf: false, system: false })
+  const dctx = (from, topic) => ({ operation: 'receive', project: from && from.project, host: String((from && from.session) || '').split('/')[0], topic, fromSelf: false, system: false })
   r.setDefaults([{ scope: 'all', match: null, behavior: 'Summarize; ask first' }])
-  check('default: defaultList returns the configured default (operation deliver)', r.defaultList().length === 1 && /Summarize/.test(r.defaultList()[0].behavior) && r.defaultList()[0].operation === 'deliver')
+  check('default: defaultList returns the configured default (operation receive)', r.defaultList().length === 1 && /Summarize/.test(r.defaultList()[0].behavior) && r.defaultList()[0].operation === 'receive')
   const ds = r.remindersFor('peer:fresh', dctx({ session: 'peer:sender', project: 'P' }, 'a/b'))
   check('default: fires for a session with none of its own, tagged default:true', ds.length === 1 && ds[0].default === true && ds[0].scope === 'all')
-  r.set('peer:own', { realm: 'default', project: 'P', user: 'u', name: 'O' }, 'deliver', 'all', null, 'my own rule')
+  r.set('peer:own', { realm: 'default', project: 'P', user: 'u', name: 'O' }, 'receive', 'all', null, 'my own rule')
   const os = r.remindersFor('peer:own', dctx({ session: 'peer:sender', project: 'P' }, 'a/b'))
   check('default: a session OWN all-scope overrides the default', os.length === 1 && os[0].default === undefined && /my own rule/.test(os[0].behavior))
-  check('default: default all-scope still skips self-sent', r.remindersFor('peer:fresh', { operation: 'deliver', fromSelf: true, topic: null }).length === 0)
+  check('default: default all-scope still skips self-sent', r.remindersFor('peer:fresh', { operation: 'receive', fromSelf: true, topic: null }).length === 0)
   r.setDefaults([{ scope: 'all', behavior: 'one' }, { scope: 'all', behavior: 'two' }])
   check('default: setDefaults dedupes by operation+scope+match (last wins)', r.defaultList().length === 1 && r.defaultList()[0].behavior === 'two')
   // #44: an operator default can target an OUTBOUND operation
   r.setDefaults([{ operation: 'send', scope: 'all', behavior: 'log every send' }])
   check('#44: a send-operation default fires on send', r.remindersFor('peer:any', { operation: 'send', project: 'Z' }).some(x => x.operation === 'send' && x.default === true))
-  check('#44: that send default does NOT fire on deliver', r.remindersFor('peer:any', dctx({ session: 'peer:s', project: 'Z' }, null)).length === 0)
+  check('#44: that send default does NOT fire on receive', r.remindersFor('peer:any', dctx({ session: 'peer:s', project: 'Z' }, null)).length === 0)
 }
 
 // ---- traces module (owns the ring buffer + dashboard fan-out) ----

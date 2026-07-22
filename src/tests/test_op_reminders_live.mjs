@@ -30,26 +30,28 @@ await sleep(400)
 await call('register_self', { name: 'Talker', secret: 'st', project: 'PowerHub', user: 'robin' })
 await call('register_self', { name: 'Owner', secret: 'so', project: 'PowerHub', user: 'robin' })
 
-// ---- set a SEND-operation reminder (all sends) + a DELIVER one, so we can prove they don't cross ----
+// ---- set a SEND-operation reminder (all sends) + a RECEIVE one, so we can prove they don't cross ----
 const setSend = await call('set_behavior', { operation: 'send', scope: 'all', behavior: 'Report as 📨 to <peer>', as: 'Talker', secret: 'st' })
 check('set_behavior accepts an operation', setSend.ok === true && setSend.operation === 'send', JSON.stringify(setSend))
-await call('set_behavior', { operation: 'deliver', scope: 'all', behavior: 'Report as 🖂 from <peer>', as: 'Talker', secret: 'st' })
+// #47: pass the LEGACY 'deliver' alias on input — the bridge must fold it to the canonical 'receive'
+const setRecv = await call('set_behavior', { operation: 'deliver', scope: 'all', behavior: 'Report as 🖂 from <peer>', as: 'Talker', secret: 'st' })
+check("#47: legacy 'deliver' input folds to canonical 'receive'", setRecv.operation === 'receive', JSON.stringify(setRecv))
 const listed = await call('list_behaviors', { as: 'Talker', secret: 'st' })
-check('list_behaviors round-trips the operation', (listed.behaviors || []).some(b => b.operation === 'send') && (listed.behaviors || []).some(b => b.operation === 'deliver'), JSON.stringify(listed.behaviors))
+check('list_behaviors round-trips the operation', (listed.behaviors || []).some(b => b.operation === 'send') && (listed.behaviors || []).some(b => b.operation === 'receive'), JSON.stringify(listed.behaviors))
 
 // ---- a direct send: the SEND reminder must ride the RESPONSE ----
 const sendResp = await call('send_to_peer', { target: 'Owner', subject: 'hi', message: 'hello', as: 'Talker', secret: 'st' })
 check('send_to_peer response carries reminders', Array.isArray(sendResp.reminders), JSON.stringify(sendResp).slice(0, 200))
 check('the SEND reminder fired on the send', (sendResp.reminders || []).some(r => r.operation === 'send' && /📨 to/.test(r.behavior)))
-check('the DELIVER reminder did NOT leak onto the send', !(sendResp.reminders || []).some(r => r.operation === 'deliver'))
+check('the RECEIVE reminder did NOT leak onto the send', !(sendResp.reminders || []).some(r => r.operation === 'receive'))
 
-// ---- and the DELIVER reminder rides the delivered message, not the send ----
+// ---- and the RECEIVE reminder rides the delivered message, not the send ----
 const inbox = await call('inbox', { for: 'Owner', secret: 'so', cursor: 0 })   // Owner has none of its own — nothing here
 const talkerSelf = await call('send_to_peer', { target: 'Talker', subject: 'echo', message: 'to self-ish', as: 'Owner', secret: 'so' })
 await sleep(200)
 const talkerIn = await call('inbox', { for: 'Talker', secret: 'st', cursor: 0 })
 const msg = (talkerIn.messages || []).find(m => m.body === 'to self-ish')
-check('the DELIVER reminder rides the delivered message', !!msg && (msg.reminders || []).some(r => (r.operation || 'deliver') === 'deliver' && /🖂 from/.test(r.behavior)), JSON.stringify(msg && msg.reminders))
+check('the RECEIVE reminder rides the delivered message', !!msg && (msg.reminders || []).some(r => (r.operation || 'receive') === 'receive' && /🖂 from/.test(r.behavior)), JSON.stringify(msg && msg.reminders))
 check('the SEND reminder did NOT leak onto the delivered message', !!msg && !(msg.reminders || []).some(r => r.operation === 'send'))
 
 // ---- a scoped operation: claim_topic reminder only for a matching project ----

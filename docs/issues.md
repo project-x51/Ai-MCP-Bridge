@@ -17,22 +17,17 @@ bare-token file or a `KEY=VALUE` env file (e.g. `bridge.env`). Linux guide updat
 *Follow-up:* switch phub-lnx-gold's MCP config from inline `AI_BRIDGE_TOKEN` to `AI_BRIDGE_TOKEN_FILE`
 pointing at `~/.aimb/bridge.env` (0600), so the token leaves its argv.
 
-## #47 — rename operation `deliver` → `receive`; `receive` is the default
-Robin's call: the incoming operation should be named **`receive`**, not `deliver`, and `receive` is the
-default when `operation` is omitted (this preserves pre-#44 reminders, which all fired on incoming mail).
-**Files to change:**
-- `lib/reminders.js` — `BEHAVIOR_OPERATIONS` (`'deliver'`→`'receive'`), `op0()` default, `matches()` self/system
-  guard (currently keyed on `=== 'deliver'`), all comments.
-- `bridge.mjs` — `deliverCtx()` (`operation:'deliver'`→`'receive'`; consider renaming the fn `receiveCtx`),
-  `defaultBehaviors()` (string-form default → `operation:'receive'`), comments.
-- `lib/tool-schemas.js` — the `operation` enum in `set_behavior` + `clear_behavior`, and descriptions.
-- `facets/persistence/file.js` — `behFile()` default, the snapshot mapper `j.operation || 'deliver'`.
-- Tests — `test_lib_unit` (#44 block), `test_op_reminders_live` (uses `'deliver'`).
-- Docs — `architecture.md` #44 entry, `src/README.md` behaviour section, `config.example.json` if it names ops.
-**Back-compat:** existing durable `.beh` files carry `operation:"deliver"`. The load path (`op0`) must treat
-`"deliver"` as an alias for `"receive"` (or run a one-time migration) so existing reminders survive. Keep
-accepting `"deliver"` as an input alias through the transition. This unblocks the config-default work below
-(those want `operation:"receive"`).
+## #47 — rename operation `deliver` → `receive`; `receive` is the default  ·  **DONE (v1.30.0)**
+Robin's call: the incoming operation is named **`receive`**, not `deliver`, and `receive` is the default when
+`operation` is omitted (preserves pre-#44 reminders, which all fired on incoming mail). **Done** across
+`lib/reminders.js`, `bridge.mjs` (`deliverCtx`→`receiveCtx`), `lib/tool-schemas.js`, `facets/persistence/file.js`,
+`src/README.md`, and the tests. **Back-compat = alias, not migration:** `OP_ALIASES = {deliver:'receive'}` folds
+the old name at every entry point (stale client input, config default, durable `.beh` files). Nothing on disk is
+renamed — the persistence layer still READS legacy-named files (`deliver__…​.beh` + pre-#44 unprefixed) and folds
+them on load; `remove()` deletes by CONTENT match so a cleared reminder can't be resurrected by a stale filename.
+No file-rename migration on purpose: the persistence dir is Dropbox-shared with a still-older host, and alias-on-
+read is inert for old code. New regression test `test_receive_rename_live` (12 checks) covers both legacy flavours
+end-to-end incl. clear-and-restart. This unblocks the config-default work below (those want `operation:"receive"`).
 
 ## #48 — make `operation` MANDATORY (remove the omitted-default)  ·  *depends on #47 + full rollout*
 Once **every** bridge is on the #47 format AND **every** Claude app has restarted (so cached tool schemas
@@ -75,6 +70,39 @@ as examples, project-specific footer clause removed:
 - `send`/`all`: *"Report each message you send as a line — e.g. 📨 to <recipient> · <verb> — \"<subject>\";
   keep the glyph pair consistent. The subject is NOT encrypted — put private detail in the body. Prefer
   addressing a topic over a stored peer id (ids rotate; sends park for offline owners)."*
+
+## #50 — show `bridge_version` on the Mesh Map + flag a non-uniform mesh
+Requested by VirtualGuy (relaying Robin), 2026-07-21. The version is in the **Computers table** but not on
+the **Mesh Map**, so the map — the view you glance at during a rollout — makes a version-skewed mesh look
+healthy. It bit them twice in one day (a host running *two* bridge versions at once because Claude Code
+spawns its own `bridge.mjs` alongside the service's; and a tray-supervised bridge left on an old version
+while its checkout had moved on). Same root class as the [synced-checkout gotcha](#doc-gotchas): **version
+on disk ≠ version running**. **In priority order:**
+- **(a)** render `bridge_version` on each node in the map (data already flows to the Computers table's Bridge
+  column — reuse it).
+- **(b)** a visual mark when the mesh is **not uniform** — a node whose version differs, or a single host
+  running more than one version at once (the phub-lnx-gold case). Uniformity is a whole-mesh property, so the
+  map is the natural place; a table forces an eyeball row-compare.
+- **(c)** *(VirtualGuy's most-valued, but the one that may not be worth the plumbing)* flag when a node's
+  **running** version differs from the version **on its disk** — the exact gap behind both incidents. Needs
+  the bridge to read its own `package.json` **at request time** (the code_version on disk) and report it
+  alongside the loaded `bridge_version`, so the dashboard can show "running older than checked-out". Nothing
+  currently surfaces this.
+Low urgency — matters during rollouts. Pick up after #47. (a)+(b) are cheap; (c) is the extra bridge plumbing.
+
+## #51 — doorbell: self-timestamp the exit output
+Requested by Linux-1 (phub-lnx-gold, relaying Robin), 2026-07-22. `tools/aimb-doorbell.mjs` prints one JSON
+line on exit, but only the **timeout** case carries any time signal (`waited_sec`); mail / gone / error /
+link-closed have none. On a session that has been quiet, there is no way to tell whether the mail fired 2
+minutes ago or 40 without cross-referencing other logs. **Add an absolute stamp to the exit:**
+- add `exited_at` (ISO-8601 **local, with tz offset** — a human reads it at a glance; UTC acceptable if
+  simpler) and optionally `exited_at_unix` to the exit JSON on **every** reason (mail/timeout/gone/error/
+  link-closed).
+- optionally write the same field into the `--status` heartbeat file on the exit write, alongside the
+  existing state/pid/last.
+Purely additive — new fields only, does not change exit codes or the existing contract, so it is safe to
+build independently of #47. Small, no urgency. Pairs with the "doorbell exit codes vs the harness" item under
+Smaller/maybe (both are doorbell-output ergonomics).
 
 ## Doc gotchas to fold into `linux-setup.md` / `architecture.md`
 - **"Synced checkout ≠ running bridge."** A new commit appearing in the Dropbox/git checkout does NOT restart

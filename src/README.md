@@ -329,17 +329,19 @@ the messages when the woken session polls its inbox.
 ## Behaviour reminders (#29 / #32 / #44)
 A session registers "how to behave" reminders: `set_behavior {behavior, operation?, scope, match?}`
 (`list_behaviors`, `clear_behavior`). A reminder is bound to an **`operation`** (which bridge action fires it)
-plus a **`scope`+`match`** (which instances). `operation` defaults to **`deliver`** (a message arrives) — those
-ride the delivered message, so a session relearns its standing instructions across a compaction. Other
+plus a **`scope`+`match`** (which instances). `operation` defaults to **`receive`** (a message arrives) — those
+ride the received message, so a session relearns its standing instructions across a compaction. Other
 operations — `send`, `publish`, `claim_topic`, `release_topic`, `subscribe`, `allow_project`, `revoke_project`,
 `request_project_access` — instead **echo the matching reminders in that tool's response** (post-hoc for the
-message content, but in time for the transcript line / follow-up the agent composes next). For `deliver` the
+message content, but in time for the transcript line / follow-up the agent composes next). For `receive` the
 scope matches the **sender**; for outbound operations it matches the **target**. Scopes: `topic` / `host` /
 `project` / `subscription` / `all`. A bridge-wide **default** (`config.behaviors.default`, tagged `default:true`;
 may itself name an `operation`) applies to every session unless that session sets its own for the same
 `operation`+`scope`+`match`. **No reminder and no default for an operation ⇒ it is silent** — so an operation
-costs nothing until opted into. A `send` reminder never fires on `deliver` (or vice-versa); to cover both
-directions register one per operation.
+costs nothing until opted into. A `send` reminder never fires on `receive` (or vice-versa); to cover both
+directions register one per operation. *(#47: the incoming operation was renamed `deliver`→`receive`; `deliver`
+is still accepted as a legacy alias — from a stale client or an existing durable reminder — and folded to
+`receive`.)*
 
 ## Notes / current limits
 - 622 checks across 30 suites (see the per-suite descriptions above).
