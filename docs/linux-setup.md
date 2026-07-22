@@ -178,7 +178,9 @@ node ~/Ai-MCP-Bridge/src/tools/aimb-doorbell.mjs --name <YourPeerName> --project
 ```
 
 Run it backgrounded; it exits when mail is waiting (`0`), on timeout (`2`), if your peer left the roster
-(`3`), or if the link dropped (`4`). See `src/README.md` → "Doorbell".
+(`3`), or if the link dropped (`4`). Every exit line is self-timestamped — `exited_at` (local ISO-8601 with tz
+offset) + `exited_at_unix`, on stdout and in the `--status` file — so a wake after a quiet stretch tells you
+*when* it fired. See `src/README.md` → "Doorbell".
 
 ## 8. Keeping machines in step (and what may differ)
 

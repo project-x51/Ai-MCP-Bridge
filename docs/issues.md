@@ -90,19 +90,13 @@ on disk ≠ version running**. **In priority order:**
   currently surfaces this.
 Low urgency — matters during rollouts. Pick up after #47. (a)+(b) are cheap; (c) is the extra bridge plumbing.
 
-## #51 — doorbell: self-timestamp the exit output
-Requested by Linux-1 (phub-lnx-gold, relaying Robin), 2026-07-22. `tools/aimb-doorbell.mjs` prints one JSON
-line on exit, but only the **timeout** case carries any time signal (`waited_sec`); mail / gone / error /
-link-closed have none. On a session that has been quiet, there is no way to tell whether the mail fired 2
-minutes ago or 40 without cross-referencing other logs. **Add an absolute stamp to the exit:**
-- add `exited_at` (ISO-8601 **local, with tz offset** — a human reads it at a glance; UTC acceptable if
-  simpler) and optionally `exited_at_unix` to the exit JSON on **every** reason (mail/timeout/gone/error/
-  link-closed).
-- optionally write the same field into the `--status` heartbeat file on the exit write, alongside the
-  existing state/pid/last.
-Purely additive — new fields only, does not change exit codes or the existing contract, so it is safe to
-build independently of #47. Small, no urgency. Pairs with the "doorbell exit codes vs the harness" item under
-Smaller/maybe (both are doorbell-output ergonomics).
+## #51 — doorbell: self-timestamp the exit output  ·  **DONE (v1.31.0)**
+Requested by Linux-1 (phub-lnx-gold, relaying Robin), 2026-07-22. `tools/aimb-doorbell.mjs` printed one JSON
+line on exit, but only the **timeout** case carried a time signal (`waited_sec`); mail / gone / error /
+link-closed had none. **Done:** every exit line now carries `exited_at` (local ISO-8601 with tz offset) +
+`exited_at_unix`, stamped centrally in `done()` so all five reasons get it uniformly, and the same two fields
+land in the `--status` file's exit write. Purely additive — no change to exit codes or the summary shape.
+Verified by new checks in `test_doorbell_live`.
 
 ## Doc gotchas to fold into `linux-setup.md` / `architecture.md`
 - **"Synced checkout ≠ running bridge."** A new commit appearing in the Dropbox/git checkout does NOT restart

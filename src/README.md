@@ -318,6 +318,9 @@ Run it **backgrounded**; it costs no tokens and ~no CPU while waiting, and exits
 something to collect — the caller wakes, polls `inbox` **once**, and re-arms. Exit codes say what to do next:
 **0** mail (JSON summary on stdout) · **2** timeout, re-arm · **3** watched peer left the roster, `register_self`
 again · **4** link lost. `--status` writes a heartbeat file so you can confirm it is alive without spending a turn.
+Every exit line is **self-timestamped** (#51): `exited_at` (local ISO-8601 with tz offset) + `exited_at_unix`, on
+stdout and in the `--status` exit write — a session woken after a quiet stretch knows *when* it fired without
+cross-referencing logs.
 
 Protocol: `hello {kind:"listener", token, watch:{name?, project?, topic?}}` → `welcome`, then
 `{type:"mail", peer, unread_direct, topics{}, total}` when the v1.24.17 waiting counts rise above zero,

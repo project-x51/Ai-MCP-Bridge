@@ -20,7 +20,10 @@
 //   3  watched peer gone  -> register_self again, then re-arm
 //   4  link lost/error    -> bridge restarted or down; re-arm (or investigate)
 //  64  bad usage
-// stdout is a single JSON line describing why it exited.
+// stdout is a single JSON line describing why it exited. Every exit line carries `exited_at` (local ISO-8601
+// with tz offset) and `exited_at_unix` (#51) so the wake is self-timestamped — a caller woken after a quiet
+// stretch knows WHEN it fired without cross-referencing other logs. The same two fields land in the --status
+// file's exit write.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -51,6 +54,15 @@ if (!TOKEN) { console.error('no realm token: pass --token, set AI_BRIDGE_TOKEN, 
 const started = Date.now()
 const watch = { name: NAME || null, project: PROJECT || null, topic: TOPIC || null }
 
+// Local ISO-8601 WITH tz offset (e.g. 2026-07-22T13:52:45.123+12:00) — a human reads the wake time at a glance
+// without doing UTC math. `new Date().toISOString()` is UTC-only, hence the hand-build. (#51)
+function localIso(d = new Date()) {
+  const pad = (n, w = 2) => String(Math.trunc(Math.abs(n))).padStart(w, '0')
+  const off = -d.getTimezoneOffset()   // minutes east of UTC
+  const sign = off >= 0 ? '+' : '-'
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}${sign}${pad(off / 60)}:${pad(off % 60)}`
+}
+
 // heartbeat/state file — lets a human (or the agent, cheaply) confirm the doorbell is still alive
 // WITHOUT spending a turn. Rewritten on connect, on every bridge ping, and on exit.
 function status(state, extra) {
@@ -69,8 +81,11 @@ function done(code, payload) {
   if (finished) return
   finished = true
   clearTimeout(timer)
-  if (payload) console.log(JSON.stringify(payload))
-  status(code === 0 ? 'mail' : code === 2 ? 'timeout' : code === 3 ? 'gone' : 'lost', payload)
+  const now = new Date()
+  // #51: stamp EVERY exit reason centrally, so both the stdout line and the status file's exit write carry it.
+  const stamped = payload ? { ...payload, exited_at: localIso(now), exited_at_unix: Math.floor(now.getTime() / 1000) } : payload
+  if (stamped) console.log(JSON.stringify(stamped))
+  status(code === 0 ? 'mail' : code === 2 ? 'timeout' : code === 3 ? 'gone' : 'lost', stamped)
   try { ws.close() } catch {}
   process.exit(code)
 }

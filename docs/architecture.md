@@ -1112,6 +1112,17 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.31.0):** *the doorbell self-timestamps its exit (#51).* `tools/aimb-doorbell.mjs` printed one
+  JSON line on exit, but only the *timeout* reason carried any time signal (`waited_sec`) — mail / gone / error
+  / link-closed had none, so a session woken after a quiet stretch could not tell whether the wake fired 2
+  minutes ago or 40 without cross-referencing other logs. **Fix (additive):** every exit line now carries
+  `exited_at` (local ISO-8601 **with tz offset**, e.g. `2026-07-22T13:52:45.123+12:00` — a human reads the wake
+  time at a glance, no UTC math) and `exited_at_unix`. Stamped **centrally in `done()`**, so all five exit
+  reasons get it uniformly, and the same two fields land in the `--status` file's exit write. `new Date()` is
+  UTC-only, so the local-with-offset string is hand-built (`localIso()`). Pure new fields — no change to exit
+  codes or the existing summary shape, safe against any caller. Requested by Linux-1 (relaying Robin). Verified
+  by two new checks in `test_doorbell_live` (mail exit + timeout exit both carry a well-formed local-ISO stamp +
+  unix field, and the status file's exit write carries them too). Suite 639 across 31.
 - **Built (v1.30.0):** *the incoming behaviour operation renamed `deliver` → `receive` (#47).* #44 named the
   operation that fires when a message ARRIVES `deliver`, but from the recipient's seat the message is *received*,
   not delivered — and "deliver" reads as an outbound verb, which is exactly the confusion `send` sits opposite.

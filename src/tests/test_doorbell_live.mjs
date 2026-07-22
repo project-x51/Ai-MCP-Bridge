@@ -113,6 +113,12 @@ check('script exits 0 on mail', code === 0, 'exit ' + code)
 let parsed = null; try { parsed = JSON.parse(out.trim().split('\n').pop()) } catch {}
 check('script prints a JSON summary', !!(parsed && parsed.reason === 'mail'), out.trim())
 check('summary carries the direct count', !!(parsed && parsed.unread_direct === 1), parsed && String(parsed.unread_direct))
+// #51: every exit line is self-timestamped — local ISO-8601 with a tz offset + a unix seconds field
+check('mail summary is self-timestamped (exited_at local ISO + exited_at_unix)',
+  !!(parsed && typeof parsed.exited_at === 'string' && /T\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d$/.test(parsed.exited_at) && Number.isInteger(parsed.exited_at_unix)),
+  parsed && JSON.stringify({ exited_at: parsed.exited_at, exited_at_unix: parsed.exited_at_unix }))
+let st = null; try { st = JSON.parse(fs.readFileSync(statusFile, 'utf8')) } catch {}
+check('status file exit write carries the same timestamp', !!(st && st.state === 'mail' && typeof st.exited_at === 'string' && Number.isInteger(st.exited_at_unix)), st && JSON.stringify(st))
 
 // ---- 9. the script exits 2 (re-arm) when nothing arrives before the timeout ----
 await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })
@@ -124,6 +130,10 @@ script2.stdout.on('data', d => { out2 += d.toString() })
 const code2 = await new Promise(r => script2.on('exit', r))
 check('script exits 2 on timeout (re-arm)', code2 === 2, 'exit ' + code2)
 check('timeout summary says so', out2.includes('timeout'), out2.trim())
+let parsed2 = null; try { parsed2 = JSON.parse(out2.trim().split('\n').pop()) } catch {}
+check('timeout summary is self-timestamped too (#51)',
+  !!(parsed2 && parsed2.reason === 'timeout' && /T\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d$/.test(parsed2.exited_at || '') && Number.isInteger(parsed2.exited_at_unix)),
+  out2.trim())
 
 console.log(`\n${pass} passed, ${fail} failed`)
 await c.close()
