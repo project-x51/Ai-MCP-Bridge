@@ -71,24 +71,20 @@ as examples, project-specific footer clause removed:
   keep the glyph pair consistent. The subject is NOT encrypted — put private detail in the body. Prefer
   addressing a topic over a stored peer id (ids rotate; sends park for offline owners)."*
 
-## #50 — show `bridge_version` on the Mesh Map + flag a non-uniform mesh
-Requested by VirtualGuy (relaying Robin), 2026-07-21. The version is in the **Computers table** but not on
-the **Mesh Map**, so the map — the view you glance at during a rollout — makes a version-skewed mesh look
-healthy. It bit them twice in one day (a host running *two* bridge versions at once because Claude Code
-spawns its own `bridge.mjs` alongside the service's; and a tray-supervised bridge left on an old version
-while its checkout had moved on). Same root class as the [synced-checkout gotcha](#doc-gotchas): **version
-on disk ≠ version running**. **In priority order:**
-- **(a)** render `bridge_version` on each node in the map (data already flows to the Computers table's Bridge
-  column — reuse it).
-- **(b)** a visual mark when the mesh is **not uniform** — a node whose version differs, or a single host
-  running more than one version at once (the phub-lnx-gold case). Uniformity is a whole-mesh property, so the
-  map is the natural place; a table forces an eyeball row-compare.
-- **(c)** *(VirtualGuy's most-valued, but the one that may not be worth the plumbing)* flag when a node's
-  **running** version differs from the version **on its disk** — the exact gap behind both incidents. Needs
-  the bridge to read its own `package.json` **at request time** (the code_version on disk) and report it
-  alongside the loaded `bridge_version`, so the dashboard can show "running older than checked-out". Nothing
-  currently surfaces this.
-Low urgency — matters during rollouts. Pick up after #47. (a)+(b) are cheap; (c) is the extra bridge plumbing.
+## #50 — show `bridge_version` on the Mesh Map + flag a non-uniform mesh  ·  **(a)+(b) DONE (v1.32.0); (c) deferred**
+Requested by VirtualGuy (relaying Robin), 2026-07-21. The version was in the **Computers table** but not on
+the **Mesh Map**, so the map — the view you glance at during a rollout — made a version-skewed mesh look
+healthy. **Done (a)+(b):** every session node shows its running `bridge_version`, amber when it isn't the mesh
+MODE; each host box has a version badge (amber when the host runs >1 version, or a single version that isn't
+the mode — the phub-lnx-gold case); and a top banner names the skew when the mesh isn't uniform. All from
+roster data already present (`s.bridge_version`), no bridge change. Verified by six checks in
+`test_dashboard_multihost`.
+- **(c) DEFERRED — needs Robin's call.** Flag when a node's **running** version differs from the version **on
+  its disk** — the exact gap behind both incidents (VirtualGuy's most-valued, but the one that may not be worth
+  the plumbing). Needs the bridge to read its own `package.json` **at request time** (a `code_version`) and
+  thread it through the **gossiped roster** so remote nodes carry it too; then the dashboard flags
+  running≠checked-out. That is real cross-host schema plumbing (roster entry + welcome + my_identity), unlike
+  (a)+(b) which were dashboard-only. Not started — decide whether the payoff justifies the roster change.
 
 ## #51 — doorbell: self-timestamp the exit output  ·  **DONE (v1.31.0)**
 Requested by Linux-1 (phub-lnx-gold, relaying Robin), 2026-07-22. `tools/aimb-doorbell.mjs` printed one JSON

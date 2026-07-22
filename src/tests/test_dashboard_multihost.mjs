@@ -105,6 +105,17 @@ check('two host boxes drawn', map.querySelectorAll('.n-host-label').length === 2
 // remote followers connect to THEIR gateway, not ours
 check('remote follower edge to remote gateway drawn', !!doc.getElementById('e-VOLT-001/ddd'))
 
+// #50: bridge version ON THE MAP — mesh mode is 1.25.0 (x3); VOLT-001/ccc is behind (1.24.17), and VOLT-001
+// runs TWO versions at once. The map must surface all of that (a per-node version, a per-host badge, a banner).
+check('map draws a whole-mesh version-skew banner', !!map.querySelector('.map-skew') && /1\.24\.17/.test(map.querySelector('.map-skew').textContent))
+const hostVers = [...map.querySelectorAll('.n-hostver')]
+check('the version-skewed host box badge is flagged mixed (VOLT-001 runs two)', hostVers.some(e => e.classList.contains('mixed') && /1\.24\.17/.test(e.textContent) && /1\.25\.0/.test(e.textContent)), hostVers.map(e => e.textContent + (e.classList.contains('mixed') ? '*' : '')).join(' | '))
+check('the uniform host box badge is NOT flagged mixed (ROBIN-Z790 = mesh mode)', hostVers.some(e => e.textContent === 'v1.25.0' && !e.classList.contains('mixed')))
+const nver = id => { const n = doc.getElementById(id); return n && n.querySelector('.n-ver') }
+check('a behind node carries an AMBER version (VOLT-001/ccc @1.24.17)', !!nver('n-VOLT-001/ccc') && nver('n-VOLT-001/ccc').classList.contains('odd') && nver('n-VOLT-001/ccc').textContent === 'v1.24.17')
+check('a mode-version node is NOT amber (VOLT-001/ddd @1.25.0)', !!nver('n-VOLT-001/ddd') && !nver('n-VOLT-001/ddd').classList.contains('odd') && nver('n-VOLT-001/ddd').textContent === 'v1.25.0')
+check('the local gateway node shows its version too (ROBIN-Z790/aaa @1.25.0)', !!nver('n-ROBIN-Z790/aaa') && nver('n-ROBIN-Z790/aaa').textContent === 'v1.25.0')
+
 // z-order fix: boxes < edges < nodes, so a second host's opaque box can't paint over its own edges
 const groups = [...map.children].filter(c => c.tagName === 'g')
 check('map uses 3 z-layers (box/edge/node)', groups.length === 3, 'groups=' + groups.length)

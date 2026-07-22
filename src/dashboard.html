@@ -60,6 +60,12 @@
   .n-sess.code circle { fill: #FFEDD5; stroke: #F97316; }   /* code sessions = orange */
   .n-subp.code circle { fill: #FFEDD5; stroke: #F97316; }
   .n-client { font-size: 9px; fill: #94A3B8; text-anchor: middle; pointer-events: none; }
+  /* #50: bridge version on the map. Per-node running version; amber when it differs from the mesh mode. */
+  .n-ver { font-size: 8.5px; fill: #94A3B8; text-anchor: middle; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .n-ver.odd { fill: #B45309; font-weight: 700; }
+  .n-hostver { font-size: 10px; fill: #64748B; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .n-hostver.mixed { fill: #B45309; font-weight: 700; }   /* this host runs >1 version, or differs from the mesh */
+  .map-skew { font-size: 11px; fill: #B45309; font-weight: 700; }   /* whole-mesh version skew banner */
   .edge.subp { stroke-dasharray: 3 3; stroke: #EAB308; }
   .pulse circle, .pulse rect { stroke: #F59E0B !important; stroke-width: 3.5 !important; }
   .edge.pulse-e { stroke: #F59E0B; stroke-width: 3; }
@@ -98,7 +104,7 @@
   <h2 class="sech"><span class="chev">▾</span>Mesh map</h2>
   <div class="secb">
     <svg id="map" height="10"></svg>
-    <div class="hint">Click a node to set its alias (sessions/pages rename live; host aliases persist in config.json). Amber flash = message activity.</div>
+    <div class="hint">Click a node to set its alias (sessions/pages rename live; host aliases persist in config.json). Amber flash = message activity. Each node shows its bridge version; <b style="color:#B45309">amber</b> = out of step with the rest of the mesh (a node behind, or one host running two versions mid-upgrade).</div>
   </div>
 </section>
 <section class="sec" data-sec="persist">
@@ -406,7 +412,18 @@
     (m.pages||[]).forEach(function(p){ var h=p.host_label||gwHost||Object.keys(hosts)[0]; if(!hosts[h]) hosts[h]={sessions:[],pages:[]}; hosts[h].pages.push(p); });
     var names=Object.keys(hosts);
     if(!names.length){ svg.setAttribute('height',40); el('text',{x:20,y:25,'class':'n-sub','text-anchor':'start'},svg).textContent='no nodes connected'; return; }
+    // #50: bridge-version skew is a whole-MESH property, easy to miss on a map that looks healthy node-by-node.
+    // Tally every running version; the MODE is "expected", anything else is amber (a node behind, or a host
+    // running >1 version at once — the phub-lnx-gold case). Surfaced per-node, per-host, and as a top banner.
+    var verCount={}; (m.sessions||[]).forEach(function(s){ if(s.bridge_version) verCount[s.bridge_version]=(verCount[s.bridge_version]||0)+1; });
+    var verKeys=Object.keys(verCount).sort(function(a,b){ return verCount[b]-verCount[a] || (a<b?1:-1); });
+    var modeVer=verKeys[0]||null, meshMixed=verKeys.length>1;
     var X=14, boxTops=20, maxBottom=0, gwCenters=[];  // top margin == bottom margin (viewBox = maxBottom+20)
+    if(meshMixed){
+      var bn=verKeys.slice().sort().map(function(v){return 'v'+v+' ('+verCount[v]+')';}).join('   ');
+      el('text',{x:14,y:15,'class':'map-skew'},gNode).textContent='⚠ mixed bridge versions on the mesh:  '+bn;
+      boxTops=34;   // drop the boxes to make room for the banner
+    }
     names.forEach(function(h){
       var hh=hosts[h];
       var nSess=hh.sessions.length, nPage=hh.pages.length;
@@ -441,6 +458,15 @@
       var hl=el('text',{x:X+14,y:boxTops+22,'class':'n-host-label'},gNode);
       hl.textContent=(m.hosts&&m.hosts[h])?m.hosts[h]+'  ('+h+')':h;
       hl.addEventListener('click',function(){ alias('host',h,m.hosts&&m.hosts[h]); });
+      // #50: the bridge version(s) running on THIS host, top-right of its box. >1 = mid-upgrade skew on one
+      // box (amber); a single version that isn't the mesh mode is also amber (this host is out of step).
+      var hv={}; hh.sessions.forEach(function(s){ if(s.bridge_version) hv[s.bridge_version]=1; });
+      var hvk=Object.keys(hv).sort();
+      if(hvk.length){
+        var hOdd=hvk.length>1 || (meshMixed && hvk[0]!==modeVer);
+        var hb=el('text',{x:X+w-14,y:boxTops+22,'class':'n-hostver'+(hOdd?' mixed':''),'text-anchor':'end'},gNode);
+        hb.textContent='v'+hvk.join(', v');
+      }
       var y1=boxTops+70;
       sess.forEach(function(s,i){
         var x=off+lx[s.session], isGw=s.is_gateway;
@@ -451,6 +477,9 @@
         var ptag=(s.project&&s.project!=='unclassified')?(tc(s.project)+(s.user?' · '+tc(s.user):'')):s.client;
         if(ptag){ var cl=el('text',{x:x,y:y1+63,'class':'n-client'},g); cl.textContent=ptag; }
         if(isGw){ var t=el('text',{x:x,y:y1+4,'class':'n-tag'},g); t.textContent='GATEWAY'; gwCenters.push({x:x,y:y1,host:h}); }
+        // #50: this node's running bridge version, just above the circle. Amber when it isn't the mesh mode —
+        // so a single stale bridge (or the older half of a mixed host) stands out at a glance. (a) + (b).
+        if(s.bridge_version){ var vt=el('text',{x:x,y:y1-27,'class':'n-ver'+((meshMixed&&s.bridge_version!==modeVer)?' odd':'')},g); vt.textContent='v'+s.bridge_version; }
         g.addEventListener('click',function(){ alias('session',s.session,s.name); });
         nodePos[s.session]={x:x,y:y1,el:g};
       });

@@ -1112,6 +1112,24 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.32.0):** *bridge version ON the mesh map + a non-uniform-mesh flag (#50).* The dashboard's
+  **Computers table** already carried each machine's bridge version, but the **mesh map** — the view you glance
+  at during a rollout — did not, so a version-skewed mesh looked healthy on the map. It bit a peer twice in one
+  day: a single host running *two* bridge versions at once (Claude Code spawns its own `bridge.mjs` beside the
+  service's, and the two started across a `git pull`), and a tray-supervised bridge left on an old version while
+  its checkout moved on. Same root class as the "synced checkout ≠ running bridge" gotcha: version-on-disk ≠
+  version-running. **Built (a)+(b):** every session node now shows its running `bridge_version`; the value goes
+  **amber** when it isn't the mesh MODE (the most common version) — so a single stale bridge, or the older half
+  of a mixed host, stands out. Each host box carries a version badge (amber when that host runs >1 version, or a
+  single version that isn't the mesh mode), and a top **banner** names the skew (`⚠ mixed bridge versions on the
+  mesh: v1.30.0 (1) v1.32.0 (3)`) since uniformity is a whole-mesh property a table makes you eyeball row by row.
+  All from data already in the roster (`s.bridge_version` per session), so no bridge change. **(c) deferred** —
+  flagging a node whose *running* version differs from the version *on its disk* (the exact gap behind both
+  incidents) needs the bridge to read its own `package.json` at request time and thread a `code_version` through
+  the gossiped roster; the requester himself flagged it as maybe-not-worth-the-plumbing, so it stays in
+  docs/issues.md #50 pending Robin's call. Verified by six new checks in `test_dashboard_multihost` (skew banner,
+  mixed host badge, non-mixed uniform host, an amber behind-node, a non-amber mode-node, version shown on the
+  gateway node); the uniform-mesh `test_dashboard` shows no banner. Suite 645 across 31.
 - **Built (v1.31.0):** *the doorbell self-timestamps its exit (#51).* `tools/aimb-doorbell.mjs` printed one
   JSON line on exit, but only the *timeout* reason carried any time signal (`waited_sec`) — mail / gone / error
   / link-closed had none, so a session woken after a quiet stretch could not tell whether the wake fired 2
