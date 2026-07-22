@@ -69,9 +69,17 @@ AI_BRIDGE_PROJECT=<YourProject>
 "ai-mcp-bridge": {
   "command": "node",
   "args": ["/home/<you>/Ai-MCP-Bridge/src/bridge.mjs"],
-  "env": { "AI_BRIDGE_TOKEN": "<realm-token>", "AI_BRIDGE_PROJECT": "<YourProject>" }
+  "env": { "AI_BRIDGE_TOKEN_FILE": "/home/<you>/.aimb/bridge.env", "AI_BRIDGE_PROJECT": "<YourProject>" }
 }
 ```
+
+> **Do NOT inline the token as `AI_BRIDGE_TOKEN` in an MCP config that becomes a command line (#46).** Some MCP
+> clients (e.g. Claude Code with an inline `--mcp-config`) put the whole `env` block into the process's argv,
+> where the realm token is **world-readable via `ps`** and captured by crash dumps / monitors / support bundles
+> — and the token is both the membership gate *and* the body-encryption key. Use **`AI_BRIDGE_TOKEN_FILE`**
+> (a path is harmless in argv); the bridge reads the token from it. It accepts a bare-token file or a
+> `KEY=VALUE` env file, so `~/.aimb/bridge.env` (0600, from §3) works directly. Precedence:
+> `AI_BRIDGE_TOKEN` value → `AI_BRIDGE_TOKEN_FILE` contents → `config.json` token.
 
 For channel push (messages arrive without polling) start Code with
 `claude --dangerously-load-development-channels server:ai-mcp-bridge`. Otherwise the session is poll-mode —

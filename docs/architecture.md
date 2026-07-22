@@ -1112,6 +1112,20 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.29.0):** *realm token from a file — keep it out of argv (#46).* A peer found the realm token in
+  **plaintext in the process command line** on a host whose MCP client inlines `env:{AI_BRIDGE_TOKEN:"…"}` into
+  an inline `--mcp-config` (Claude Code on Linux). argv is world-readable via `ps` and captured by crash dumps /
+  monitors / support bundles, and the realm token is BOTH the membership gate AND the body-encryption key — so
+  that one string is the whole mesh, and unlike a file you cannot chmod argv. Ironic on the same box whose Linux
+  guide moves the token stdin-only into a 0600 `bridge.env` specifically to keep it out of `ps`. **Fix:**
+  `bridge.mjs` reads the token from `AI_BRIDGE_TOKEN_FILE` (a PATH — harmless in argv) when set, so an MCP config
+  references a path instead of the secret value. Accepts a bare-token file or a `KEY=VALUE` env file (e.g.
+  `~/.aimb/bridge.env`); `~` expands to home. Precedence: `AI_BRIDGE_TOKEN` value → `AI_BRIDGE_TOKEN_FILE`
+  contents → `config.json` token. Additive, backward-compatible; the exposure is client-config-shaped, not a
+  bridge bug (the tray path never had the token in argv). Verified by `test_token_file_live` (6 checks: bare
+  file + env-file shape both gate realm membership end-to-end, explicit env beats the file, a message routes
+  across the file-token boundary). Token ROTATION is deferred (see docs/issues.md #49); the exposed value is
+  limited to a local `ps` on a single-user dev VM. Suite 622 across 30.
 - **Built (v1.28.0):** *notify `tools/list_changed` so an upgraded bridge refreshes a running client's cached
   schema (#45).* v1.27.0 (#44) added the `operation` param to `set_behavior`, and the bridge advertised it
   correctly — but a peer testing it in the field found the param was silently STRIPPED before the call left the

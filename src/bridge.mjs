@@ -38,7 +38,23 @@ let CFG = {}
 try { CFG = JSON.parse(fs.readFileSync(path.join(HERE, 'config.json'), 'utf8')) } catch {}
 const PORT = Number(process.env.AI_BRIDGE_PORT || CFG.port || 7000)
 const WS_PORT = Number(process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 7001)
-const TOKEN = process.env.AI_BRIDGE_TOKEN || CFG.token || ''
+// #46: read the realm token from a FILE when AI_BRIDGE_TOKEN_FILE is set, so an MCP client config can
+// reference a PATH (harmless in `ps`/argv) instead of inlining the secret VALUE into the command line — argv
+// is world-readable via the process list and captured by crash dumps / monitors / support bundles, and the
+// realm token is both the membership gate AND the body-encryption key. Precedence: an explicit
+// AI_BRIDGE_TOKEN value > AI_BRIDGE_TOKEN_FILE contents > config.json token. The file may be a bare token or a
+// KEY=VALUE env file (e.g. ~/.aimb/bridge.env) — a leading `~` expands to the home dir.
+function readTokenFile(p) {
+  try {
+    const resolved = p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p
+    const raw = fs.readFileSync(resolved, 'utf8')
+    const m = raw.match(/^\s*AI_BRIDGE_TOKEN\s*=\s*(.+?)\s*$/m)   // accept an env-file line, else the whole (trimmed) file
+    return (m ? m[1] : raw).trim()
+  } catch { return '' }
+}
+const TOKEN = process.env.AI_BRIDGE_TOKEN
+  || (process.env.AI_BRIDGE_TOKEN_FILE ? readTokenFile(process.env.AI_BRIDGE_TOKEN_FILE) : '')
+  || CFG.token || ''
 const HOST = '127.0.0.1'                                                  // loopback: same-machine pair-dial + local-gateway connect
 const BIND = process.env.AI_BRIDGE_BIND || CFG.bind || HOST               // interface to LISTEN on (0.0.0.0 / tailnet IP enables cross-host, §7)
 let ADVERTISE = process.env.AI_BRIDGE_ADVERTISE_HOST || CFG.advertiseHost || (BIND && BIND !== '0.0.0.0' ? BIND : HOST)   // address peers DIAL me at (auto-derived from the discovery facet if left as loopback — §7)
@@ -80,7 +96,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.28.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.29.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
