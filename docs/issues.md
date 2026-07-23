@@ -92,6 +92,17 @@ link-closed had none. **Done:** every exit line now carries `exited_at` (local I
 land in the `--status` file's exit write. Purely additive — no change to exit codes or the summary shape.
 Verified by new checks in `test_doorbell_live`.
 
+## #52 — doorbell exit codes = success/failure; built-in silent re-arm guidance  ·  **DONE (v1.34.0)**
+Reported by Analysiz2 (relaying Robin), 2026-07-23, with a real misreport behind it: the doorbell exited **2**
+on a clean timeout, and the Claude Code background-task harness paints any non-zero exit as "failed", so a
+benign 30-min timeout surfaced as a FAILURE and a loop narrated "Quiet re-arm, nothing new" every cycle.
+**Done:** exit code is now success/failure only — **0** once armed and any normal outcome occurs
+(mail/timeout/peer-gone/post-arm link drop), **4** only when it couldn't do its job (never armed / bridge error),
+**64** bad usage; the specific outcome moved to `reason` on stdout + `--status`. Plus a terse built-in
+`guidance:"silent re-arm…"` on routine no-mail wakes so a loop stays quiet (mail exits carry none — that one is
+actionable). This is the same concern as the old Smaller/maybe "doorbell exit codes vs the harness" item, now
+resolved.
+
 ## Doc gotchas to fold into `linux-setup.md` / `architecture.md`
 - **"Synced checkout ≠ running bridge."** A new commit appearing in the Dropbox/git checkout does NOT restart
   the running bridge — the tray only relaunches it if it dies, and the MCP transport doesn't reconnect on its
@@ -106,8 +117,22 @@ Verified by new checks in `test_doorbell_live`.
 
 ## Smaller / maybe
 - **Multiple behaviours per key.** The model allows one reminder per `(operation, scope, match)`; several
-  conventions for the same key must be concatenated into one ≤280 string. Consider allowing an array per key
-  if this gets limiting.
-- **Doorbell exit codes vs the harness.** `tools/aimb-doorbell.mjs` exit 2 (timeout → re-arm) is surfaced by
-  the task runner as "failed" (any nonzero). Consider a mapping so the meaningful re-arm/gone/lost codes don't
-  read as errors.
+  conventions for the same key must be concatenated into one string (≤365 as of v1.33.0). Consider allowing an
+  array per key if this gets limiting.
+
+## Bigger / in-flight
+- **Session ORIGIN detection (cowork vs code, and where code runs).** The `clientKind` regex guesses app
+  identity from a free-text client name and collapses unknowns into a misleading `agent` bucket. Field probes
+  (2026-07-23) established: (a) ONE bridge process serves MIXED origins at once (aa61c969 hosts cowork Bolletta
+  +Retally alongside code Bridget+Analysiz2), so a process-level env sniff can't work — origin must be
+  per-registration; (b) env-in-bash is not universal — a Cowork tool-shell runs in an isolated sandbox where
+  `CLAUDE_CODE_*` come back EMPTY (only `CLAUDE_CODE_HOST_*` proxy plumbing), while Code-in-desktop's bash sees
+  `CLAUDECODE=1`/`ENTRYPOINT=claude-desktop`/`AGENT_SDK`/`CHILD_SESSION`/real `SESSION_ID`; (c) the mislabel's
+  direct cause is that identical Cowork sessions register with DIFFERENT `client` strings (Bolletta "cowork" vs
+  Retally "local-agent-mode"). **Ideal:** a structured `origin` descriptor {product, host, mode, version,
+  source} captured per-registration from the MCP connection layer, stamped by the integration that mounts the
+  bridge (NOT inferred from a name, NOT read from a sandboxed bash). `host` is the axis Robin wants — it
+  separates code-in-terminal from code-in-desktop. Ground truth for the fix: only Retally+Bolletta are Cowork;
+  all other AI peers are Code. **Blocker:** reliably POPULATING origin per-surface on a shared bridge is a
+  product/integration dependency outside this repo — the bridge can define/accept/render the field; the
+  surfaces have to set it. Schema design pending; probe data captured in-session.

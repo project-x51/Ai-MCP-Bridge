@@ -177,10 +177,12 @@ node ~/Ai-MCP-Bridge/src/tools/aimb-doorbell.mjs --name <YourPeerName> --project
      --timeout 1800 --status ~/.aimb/doorbell.json
 ```
 
-Run it backgrounded; it exits when mail is waiting (`0`), on timeout (`2`), if your peer left the roster
-(`3`), or if the link dropped (`4`). Every exit line is self-timestamped — `exited_at` (local ISO-8601 with tz
-offset) + `exited_at_unix`, on stdout and in the `--status` file — so a wake after a quiet stretch tells you
-*when* it fired. See `src/README.md` → "Doorbell".
+Run it backgrounded. The exit code is a success/failure signal for systemd/the harness: **`0`** = did its job
+(mail / timeout / peer-gone / post-arm link drop — re-arm, and poll the inbox first if `reason=="mail"`),
+**`4`** = couldn't (never armed / bridge error — investigate), **`64`** = bad usage. The specific outcome is in
+`reason` on stdout + the `--status` file, and a routine no-mail wake carries `guidance:"silent re-arm…"` so a
+loop stays quiet (#52). Every exit line is self-timestamped — `exited_at` (local ISO-8601 with tz offset) +
+`exited_at_unix` — so a wake after a quiet stretch tells you *when* it fired. See `src/README.md` → "Doorbell".
 
 ## 8. Keeping machines in step (and what may differ)
 

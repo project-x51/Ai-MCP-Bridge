@@ -119,8 +119,10 @@ check('mail summary is self-timestamped (exited_at local ISO + exited_at_unix)',
   parsed && JSON.stringify({ exited_at: parsed.exited_at, exited_at_unix: parsed.exited_at_unix }))
 let st = null; try { st = JSON.parse(fs.readFileSync(statusFile, 'utf8')) } catch {}
 check('status file exit write carries the same timestamp', !!(st && st.state === 'mail' && typeof st.exited_at === 'string' && Number.isInteger(st.exited_at_unix)), st && JSON.stringify(st))
+// #52: mail is actionable, so it must NOT carry the silent-re-arm guidance (the agent should handle it, not go quiet)
+check('mail exit carries NO re-arm guidance', !!(parsed && parsed.guidance === undefined), parsed && parsed.guidance)
 
-// ---- 9. the script exits 2 (re-arm) when nothing arrives before the timeout ----
+// ---- 9. a clean timeout is an EXPECTED termination: exit 0 (not "failed" in the harness), with re-arm guidance (#52) ----
 await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })
 await sleep(400)
 const script2 = spawn('node', [path.join(SRCDIR, 'tools', 'aimb-doorbell.mjs'),
@@ -128,12 +130,14 @@ const script2 = spawn('node', [path.join(SRCDIR, 'tools', 'aimb-doorbell.mjs'),
 let out2 = ''
 script2.stdout.on('data', d => { out2 += d.toString() })
 const code2 = await new Promise(r => script2.on('exit', r))
-check('script exits 2 on timeout (re-arm)', code2 === 2, 'exit ' + code2)
+check('clean timeout exits 0 (expected termination, not a failure)', code2 === 0, 'exit ' + code2)
 check('timeout summary says so', out2.includes('timeout'), out2.trim())
 let parsed2 = null; try { parsed2 = JSON.parse(out2.trim().split('\n').pop()) } catch {}
 check('timeout summary is self-timestamped too (#51)',
   !!(parsed2 && parsed2.reason === 'timeout' && /T\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d$/.test(parsed2.exited_at || '') && Number.isInteger(parsed2.exited_at_unix)),
   out2.trim())
+// #52: a routine no-mail wake carries the brief, built-in re-arm guidance so a doorbell loop stays quiet
+check('timeout carries the silent re-arm guidance', !!(parsed2 && typeof parsed2.guidance === 'string' && /silent re-arm/i.test(parsed2.guidance)), parsed2 && parsed2.guidance)
 
 console.log(`\n${pass} passed, ${fail} failed`)
 await c.close()

@@ -1112,6 +1112,22 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.34.0):** *doorbell exit codes = success/failure; built-in silent re-arm guidance (#52).* A peer
+  (Analysiz2) reported — with a real misreport to Robin behind it — that `aimb-doorbell.mjs` exited **2** on a
+  clean timeout, and the Claude Code background-task harness paints ANY non-zero exit as "failed", so a benign
+  30-min timeout surfaced as a FAILURE (and a doorbell LOOP narrated "Quiet re-arm, nothing new" every cycle).
+  **Fix, two parts:** (1) the exit code is now a pure success/failure signal — **0** once the doorbell has ARMED
+  and any normal outcome occurs (mail / timeout / peer-gone / a post-arm link drop → re-arm), **4** only when it
+  couldn't do its job (never armed / bridge error frame → investigate, don't hot-loop), **64** bad usage. The
+  specific outcome moved entirely into `reason` on stdout + `--status`, so a caller still branches on it (the
+  mail-vs-timeout split Analysiz2 relied on is intact, just not via the numeric code). An `armed` flag draws the
+  line: a link failure BEFORE welcome is real trouble (4), a drop AFTER is a benign re-arm (0). (2) a routine
+  **no-mail** wake now carries a terse built-in `guidance:"silent re-arm — don't mention this wake unless you're
+  stopping the loop"` — kept deliberately short because it rides every idle re-arm and the agent reads it each
+  time — so a loop stops burning tokens narrating uneventful wakes; mail exits carry NO guidance (that one IS
+  actionable). Resolves the "doorbell exit codes vs the harness" item that had sat under Smaller/maybe. Verified
+  by `test_doorbell_live` (timeout now exits 0 with guidance; mail exits 0 without guidance; both self-stamped).
+  Suite 649 across 31.
 - **Built (v1.33.0):** *behaviour-reminder char cap 280 → 365; report each arrival on its own line.* Two
   linked field notes as the receive/send default conventions got adopted across the mesh. (1) A Cowork session
   rendered two arrivals concatenated onto ONE line (`🖂 … · 🖂 …`), because the convention said "open with" a

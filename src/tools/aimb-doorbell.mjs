@@ -14,16 +14,17 @@
 //
 // Token/port default to ../config.json (or AI_BRIDGE_TOKEN / AI_BRIDGE_WS_PORT).
 //
-// Exit codes — each means a DIFFERENT next move for the caller:
-//   0  mail waiting      -> poll the inbox, handle it, re-arm
-//   2  timeout, no mail   -> re-arm (bounded cost; nothing happened)
-//   3  watched peer gone  -> register_self again, then re-arm
-//   4  link lost/error    -> bridge restarted or down; re-arm (or investigate)
+// Exit code is a SUCCESS/FAILURE signal for the harness (which paints any non-zero background exit as "failed",
+// so a benign 30-min timeout used to surface as a FAILURE — #52). The SPECIFIC outcome travels in `reason` on
+// stdout + the --status file, so a caller still branches on it:
+//   0  did its job    -> if reason=="mail" poll the inbox & handle it; then re-arm.
+//                        reason ∈ { mail, timeout, peer-gone, link-closed(after arming) }
+//   4  couldn't do it -> never armed / a bridge error frame; investigate rather than hot-loop
 //  64  bad usage
-// stdout is a single JSON line describing why it exited. Every exit line carries `exited_at` (local ISO-8601
-// with tz offset) and `exited_at_unix` (#51) so the wake is self-timestamped — a caller woken after a quiet
-// stretch knows WHEN it fired without cross-referencing other logs. The same two fields land in the --status
-// file's exit write.
+// A routine NO-MAIL wake (timeout / peer-gone / a post-arm link drop) also carries guidance:"silent re-arm…"
+// so a doorbell LOOP doesn't burn tokens narrating uneventful re-arms — the agent stays quiet unless it STOPS
+// looping (or mail needs handling). stdout is a single JSON line. Every exit carries `exited_at` (local ISO-8601
+// with tz offset) + `exited_at_unix` (#51); the same two fields land in the --status file's exit write.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -76,21 +77,33 @@ function status(state, extra) {
   } catch { /* a doorbell must never die because a status write failed */ }
 }
 
-let finished = false
-function done(code, payload) {
+let finished = false, armed = false   // armed flips true on the bridge's `welcome` — a pre-arm link failure is real trouble, a post-arm one is a benign re-arm
+// A brief, imperative wake-guidance for a routine (no-mail) exit — deliberately terse because it rides EVERY
+// idle re-arm and the agent reads it each time. Tells the loop to stay silent unless it's actually stopping.
+const REARM_GUIDANCE = "silent re-arm — don't mention this wake unless you're stopping the loop"
+function done(reason, extra) {
   if (finished) return
   finished = true
   clearTimeout(timer)
+  // #52: the code is success/failure only. Trouble = a bridge error frame, or a link failure BEFORE we ever
+  // armed (couldn't do the job). Everything post-arm — mail, timeout, peer-gone, a dropped link — is a normal
+  // outcome the caller re-arms from, so exit 0 and let `reason` carry the specifics.
+  const trouble = reason === 'error' || ((reason === 'link-closed' || reason === 'link-error') && !armed)
+  const code = trouble ? 4 : 0
+  const state = reason === 'mail' ? 'mail' : reason === 'timeout' ? 'timeout' : reason === 'peer-gone' ? 'gone' : 'lost'
+  const routineNoMail = !trouble && reason !== 'mail'   // uneventful wake -> tell the agent to re-arm silently
   const now = new Date()
-  // #51: stamp EVERY exit reason centrally, so both the stdout line and the status file's exit write carry it.
-  const stamped = payload ? { ...payload, exited_at: localIso(now), exited_at_unix: Math.floor(now.getTime() / 1000) } : payload
-  if (stamped) console.log(JSON.stringify(stamped))
-  status(code === 0 ? 'mail' : code === 2 ? 'timeout' : code === 3 ? 'gone' : 'lost', stamped)
+  // #51: stamp EVERY exit centrally, so both the stdout line and the status file's exit write carry it.
+  const payload = { reason, ...(extra || {}), watch,
+    exited_at: localIso(now), exited_at_unix: Math.floor(now.getTime() / 1000),
+    ...(routineNoMail ? { guidance: REARM_GUIDANCE } : {}) }
+  console.log(JSON.stringify(payload))
+  status(state, payload)
   try { ws.close() } catch {}
   process.exit(code)
 }
 
-const timer = setTimeout(() => done(2, { reason: 'timeout', waited_sec: Math.round((Date.now() - started) / 1000), watch }), TIMEOUT_MS)
+const timer = setTimeout(() => done('timeout', { waited_sec: Math.round((Date.now() - started) / 1000) }), TIMEOUT_MS)
 
 status('connecting')
 const ws = new WebSocket(URL_)
@@ -103,13 +116,13 @@ ws.on('open', () => {
 ws.on('message', raw => {
   let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
   switch (m.type) {
-    case 'welcome': status('armed', { bridge_version: m.bridge_version, gateway: m.gateway }); break
+    case 'welcome': armed = true; status('armed', { bridge_version: m.bridge_version, gateway: m.gateway }); break
     case 'ping':    status('alive', { pings: true }); break
-    case 'mail':    done(0, { reason: 'mail', peer: m.peer, unread_direct: m.unread_direct, topics: m.topics, total: m.total, watch }); break
-    case 'gone':    done(3, { reason: 'peer-gone', watch }); break
-    case 'error':   done(4, { reason: 'error', code: m.code, what: m.what, watch }); break
+    case 'mail':    done('mail', { peer: m.peer, unread_direct: m.unread_direct, topics: m.topics, total: m.total }); break
+    case 'gone':    done('peer-gone', {}); break
+    case 'error':   done('error', { code: m.code, what: m.what }); break
   }
 })
 
-ws.on('close', () => done(4, { reason: 'link-closed', watch }))
-ws.on('error', e => done(4, { reason: 'link-error', message: String((e && e.message) || e), watch }))
+ws.on('close', () => done('link-closed', {}))
+ws.on('error', e => done('link-error', { message: String((e && e.message) || e) }))
