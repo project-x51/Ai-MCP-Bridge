@@ -1112,6 +1112,18 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.33.0):** *behaviour-reminder char cap 280 → 365; report each arrival on its own line.* Two
+  linked field notes as the receive/send default conventions got adopted across the mesh. (1) A Cowork session
+  rendered two arrivals concatenated onto ONE line (`🖂 … · 🖂 …`), because the convention said "open with" a
+  glyph line without saying each message gets its OWN line — clarified the `receive` default to "Put EACH
+  incoming message on its own blockquote (>) line". (2) That clarification, plus room for conventions to spell
+  out their format, needed headroom: `MAX_LEN` 280 → **365** (~+30%) in `lib/reminders.js`, and the config-
+  default truncation now uses `MAX_LEN` (was a hardcoded 280) so a longer operator default isn't silently
+  clipped on a bridge that's been upgraded. **Rollout note:** the new `receive` default is 270 chars — under
+  the OLD 280 — deliberately, so a not-yet-upgraded 1.32.0 bridge (which still truncates at 280 on live-reload)
+  serves it intact; only reminders/defaults ABOVE 280 require every bridge to be on 1.33.0+ first. tool-schema
+  description updated to "max 365 chars". Config change is live-reloaded (no restart); the `MAX_LEN` bump needs
+  a bridge restart to take effect. Suite 647 across 31 (new boundary checks: 300-char accepted, 365 ok / 366 rejected).
 - **Built (v1.32.0):** *bridge version ON the mesh map + a non-uniform-mesh flag (#50).* The dashboard's
   **Computers table** already carried each machine's bridge version, but the **mesh map** — the view you glance
   at during a rollout — did not, so a version-skewed mesh looked healthy on the map. It bit a peer twice in one

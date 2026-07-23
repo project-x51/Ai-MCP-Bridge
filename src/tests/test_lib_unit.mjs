@@ -91,6 +91,9 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   check('reminders: bad scope rejected', r.set(ME, id, 'receive', 'nope', 'do').code === 'bad-scope')
   check('reminders: bad OPERATION rejected (#44)', r.set(ME, id, 'nonsense-op', 'all', null, 'x').code === 'bad-operation')
   check('reminders: over-long rejected', r.set(ME, id, 'receive', 'all', null, 'x'.repeat(400)).code === 'behavior-too-long')
+  // v1.33: cap raised 280 -> 365. A 300-char reminder (rejected pre-1.33) is now accepted; 365 ok, 366 not. Use a throwaway holder so ME's later count assertions are untouched.
+  check('reminders: 300-char reminder accepted at the raised cap', r.set('peer:lentest', id, 'receive', 'all', null, 'y'.repeat(300)).ok === true)
+  check('reminders: cap boundary is 365 (365 ok, 366 rejected)', r.set('peer:lentest', id, 'receive', 'all', null, 'z'.repeat(365)).ok === true && r.set('peer:lentest', id, 'receive', 'all', null, 'z'.repeat(366)).code === 'behavior-too-long')
   check('reminders: match required for non-all', r.set(ME, id, 'receive', 'topic', '', 'x').code === 'match-required')
   r.set(ME, id, 'receive', 'project', 'Acme', 'ack ops'); r.set(ME, id, 'receive', 'all', null, 'be brief')
   const rs = r.remindersFor(ME, dctx({ session: 'peer:sender', project: 'Acme', name: 'S' }, 'a/b'))

@@ -26,7 +26,7 @@ export const BEHAVIOR_OPERATIONS = ['receive', 'send', 'publish', 'claim_topic',
 // re-anchors: op0 folds it to the canonical name on the way in.
 export const OP_ALIASES = { deliver: 'receive' }
 const ORDER = { topic: 0, subscription: 1, project: 2, host: 3, all: 4 }   // most-specific first in the returned list
-const MAX_LEN = 280, MAX_COUNT = 64
+const MAX_LEN = 365, MAX_COUNT = 64   // per-reminder char cap (raised from 280 ~+30% so a convention can spell out its format)
 const op0 = o => { const x = OP_ALIASES[o] || o; return BEHAVIOR_OPERATIONS.includes(x) ? x : 'receive' }   // normalize: alias/unknown/absent ⇒ canonical, default 'receive'
 // identity key for a (operation, scope, match) so re-registering the same one replaces it (case-insensitive).
 const behKey = (operation, scope, match) => `${op0(operation)}|${scope}|${scope === 'topic' || scope === 'subscription' ? patternKey(match || '') : scope === 'all' ? '' : lc(match || '')}`
@@ -71,7 +71,7 @@ export function createReminders({ persistence, persist }) {
       const operation = op0(d.operation)
       const scope = BEHAVIOR_SCOPES.includes(d.scope) ? d.scope : 'all'
       const match = scope === 'all' ? null : (d.match || null)
-      byKey.set(behKey(operation, scope, match), { operation, scope, match, behavior: String(d.behavior).slice(0, 280) })
+      byKey.set(behKey(operation, scope, match), { operation, scope, match, behavior: String(d.behavior).slice(0, MAX_LEN) })
     }
     defaults = [...byKey.values()]
   }

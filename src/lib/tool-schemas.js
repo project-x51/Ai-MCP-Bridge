@@ -56,7 +56,7 @@ export const TOOLS = [
       operation: { type: 'string', enum: ['receive', 'send', 'publish', 'claim_topic', 'release_topic', 'subscribe', 'allow_project', 'revoke_project', 'request_project_access'], description: 'which bridge action fires the reminder (default "receive" = when a message arrives; legacy alias "deliver" also accepted). Others echo the reminder in that tool\'s response.' },
       scope: { type: 'string', enum: ['topic', 'host', 'project', 'subscription', 'all'], description: 'for receive: topic = a topic you OWN, host/project = messages FROM that host/project, subscription = messages matching your pattern, all = every message. For outbound ops the same scopes match the TARGET instead (project/topic/host the action concerns). all = every instance of the operation.' },
       match: { type: 'string', description: 'the topic / host / project / subscription-pattern this applies to (omit for scope=all)' },
-      behavior: { type: 'string', description: 'the reminder prompt (short; max 280 chars) returned to you when the operation matches' },
+      behavior: { type: 'string', description: 'the reminder prompt (short; max 365 chars) returned to you when the operation matches' },
       as: { type: 'string', description: 'your registered sub-peer handle (id, suffix, or name)' },
       secret: { type: 'string', description: 'the secret used at register_self' } }, required: ['scope', 'behavior'] } },
   { name: 'list_behaviors', description: 'List the behaviour reminders you have registered. Sub-peers pass as + secret.',
