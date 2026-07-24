@@ -18,7 +18,7 @@
 // LIMITS: a tab researches ITS OWN site (one leaf per site, as many tabs as you like);
 // strict-CSP sites may block ws://127.0.0.1 — overlay will show "ws error" (fall back to Chrome-driving).
 (function(){
-  const WSURL = window.__AIMB_WS__ || "ws://127.0.0.1:7001", TOKEN = window.__AIMB_TOKEN__ || "change-me";
+  const WSURL = window.__AIMB_WS__ || "ws://127.0.0.1:12318", TOKEN = window.__AIMB_TOKEN__ || "change-me";
   const WB = /(^|\.)web\.archive\.org$/.test(location.hostname);
   const KIND = WB ? "wayback-research" : "site-research";
   const TITLE = WB ? "Wayback Research" : ("Site Research — " + location.hostname.replace(/^www\./,""));

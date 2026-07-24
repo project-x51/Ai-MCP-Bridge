@@ -5,8 +5,9 @@ One bridge per MCP stdio client — which is one per **Claude Code session**, bu
 **Claude Desktop app instance**: ALL Cowork conversations share that process. Shared conversations
 (and subagents) therefore register as **sub-peers** with their own identity, secret and private
 inbox — see "Sub-peers" below. Port-bind election picks the per-host gateway
-(:7000); followers register over a control connection. Same-host session pairs dial each other's
-loopback ports directly. The gateway is also the WebSocket ingress (:7001) for **page leaves**
+(:12317 by default — moved off :7000, which macOS AirPlay Receiver squats; see config.example.json `_comment_ports`);
+followers register over a control connection. Same-host session pairs dial each other's
+loopback ports directly. The gateway is also the WebSocket ingress (:12318) for **page leaves**
 (any embedding web page, plus the bundled dashboard.html) and the trace collector for the debug dashboard.
 
 Security model: splice-opaque gateway (end-to-end encrypted bodies pass through unread), Tailscale

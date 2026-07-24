@@ -10,7 +10,7 @@
 // Usage:
 //   node tools/aimb-doorbell.mjs --name Bridget [--project AIMB] [--topic virtualization]
 //                                [--timeout 1800] [--status /tmp/doorbell.json]
-//                                [--url ws://127.0.0.1:7001] [--token XXX]
+//                                [--url ws://127.0.0.1:12318] [--token XXX]
 //
 // Token/port default to ../config.json (or AI_BRIDGE_TOKEN / AI_BRIDGE_WS_PORT).
 //
@@ -43,7 +43,7 @@ const arg = (k, d = null) => {
 let CFG = {}
 try { CFG = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'config.json'), 'utf8')) } catch {}
 const TOKEN = arg('token') || process.env.AI_BRIDGE_TOKEN || CFG.token || ''
-const WSPORT = arg('ws-port') || process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 7001
+const WSPORT = arg('ws-port') || process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 12318
 const URL_ = arg('url') || `ws://127.0.0.1:${WSPORT}`
 const NAME = arg('name'), PROJECT = arg('project'), TOPIC = arg('topic')
 const TIMEOUT_MS = Number(arg('timeout', 1800)) * 1000

@@ -36,8 +36,8 @@ import { create as createEgress } from './services/egress.js'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 let CFG = {}
 try { CFG = JSON.parse(fs.readFileSync(path.join(HERE, 'config.json'), 'utf8')) } catch {}
-const PORT = Number(process.env.AI_BRIDGE_PORT || CFG.port || 7000)
-const WS_PORT = Number(process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 7001)
+const PORT = Number(process.env.AI_BRIDGE_PORT || CFG.port || 12317)     // default moved off 7000: macOS Control Center AirPlay Receiver binds *:7000, so bind 0.0.0.0 there fails EADDRINUSE (MacDaddy). 12317/12318 are clear on macOS/Windows/Linux.
+const WS_PORT = Number(process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 12318)
 // #46: read the realm token from a FILE when AI_BRIDGE_TOKEN_FILE is set, so an MCP client config can
 // reference a PATH (harmless in `ps`/argv) instead of inlining the secret VALUE into the command line — argv
 // is world-readable via the process list and captured by crash dumps / monitors / support bundles, and the
@@ -96,7 +96,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.35.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.36.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.

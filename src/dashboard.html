@@ -129,7 +129,7 @@
   var qs = new URLSearchParams(location.search);
   var token = qs.get('token') || '';
   // when served over http://host:port (recommended) derive the ws from the page origin; file:// falls back
-  var wsUrl = qs.get('ws') || ((location.host && location.protocol.indexOf('http') === 0) ? ('ws://' + location.host) : 'ws://127.0.0.1:7001');
+  var wsUrl = qs.get('ws') || ((location.host && location.protocol.indexOf('http') === 0) ? ('ws://' + location.host) : 'ws://127.0.0.1:12318');
   var pip=document.getElementById('pip'), gw=document.getElementById('gw');
   var backoff=1000, sock=null, last={sessions:[],pages:[],hosts:{},gateway:null};
   var nodePos={};   // id -> {x,y,el}

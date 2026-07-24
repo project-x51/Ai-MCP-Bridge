@@ -1112,6 +1112,20 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.36.0):** *default ports 7000/7001 → 12317/12318 (macOS AirPlay clash).* MacDaddy (a new node —
+  Robin's MacBook Pro) hit `EADDRINUSE` binding a `0.0.0.0` gateway on 7000: macOS Control Center's **AirPlay
+  Receiver squats `*:5000` and `*:7000`**, and the workaround (bind a specific IP) then strands loopback clients
+  (the doorbell, dashboard and chat all live on `127.0.0.1`). **12317/12318** bind cleanly on macOS, Windows AND
+  Linux — clear of AirPlay, the Linux ephemeral range (32768+) and the Windows dynamic/Hyper-V range (49152+).
+  Changed the SHIPPED default only: `config.example.json` (with a `_comment_ports` rationale) + the code
+  fallbacks (`bridge.mjs`, the doorbell, page-bridge, research_client, chat/dashboard/test_page HTML) + README
+  and linux-setup docs. **Safe for the running realm:** every live host has an explicit `port` in its own
+  `config.json` that overrides the fallback, so nothing moves until a host opts in; and the gateway port is
+  gossiped (`PEER_ROSTER`/`PEER_HELLO` carry it, verified), so mixed-port hosts keep federating — only same-host
+  sessions must agree. The live Dropbox `config.json` was deliberately NOT flipped (that would arm a same-host
+  split-brain on the next new-session spawn, before a coordinated restart); the whole-realm migration is tracked
+  as #56 (per-host: edit config, restart all same-host bridges together). Derivation for the curious: 12·3·17 =
+  M·C·P (13·3·16 shifted −1/0/+1). No default-dependent tests, so suite unchanged at 653 across 31.
 - **Built (v1.35.0):** *topic emphasis shows DURABILITY and EXCLUSIVITY as separate signals.* Robin read the
   dashboard's bold topics as "durable" and asked why `bills` wasn't — but bold meant **exclusive**, and `bills`
   was durable all along (`persistent:true` on disk, refreshed, with `keep_alive:true` + `announce_offline:true` —

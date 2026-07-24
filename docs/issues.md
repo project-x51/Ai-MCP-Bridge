@@ -153,6 +153,23 @@ that is currently OWNED, so nothing backstops a re-claim. **Fix:** on a re-claim
 to the EXISTING record for any field the caller omitted, so a re-claim is a patch not a replace. Keep an
 explicit `null`/`false` as a real clear. Workaround until then: pass every field you want to keep.
 
+## #56 — migrate the WHOLE REALM to ports 12317/12318  ·  **OPEN** (coordinated, Robin-driven)
+The shipped default moved to 12317/12318 in v1.36.0, but existing hosts keep 7000/7001 via their own
+`config.json` until migrated. Robin wants the whole realm moved eventually. **This is NOT a unilateral config
+edit** — flipping a host's `config.json` while its bridge runs on 7000 arms a **same-host split-brain**: the
+next new session spawns a bridge that reads the new port, finds it free, and binds a SECOND gateway on that host
+(the old one still holds 7000). So config + restart must happen together, per host.
+**Safe per-host procedure:**
+- **Windows (ROBIN-Z790, LITTLE-001)** share the Dropbox `config.json`. Flipping it moves BOTH on their next
+  restarts — so do it when both can restart close together. Change `port`/`wsPort` to 12317/12318, then restart
+  every bridge process on each host (the Claude apps + the Task Tray) so no 7000 gateway lingers. Ending sessions
+  = a human-at-a-natural-break action, not an agent mid-task.
+- **Linux (phub-lnx-*)** each have their own `config.json` (+ `bridge.env`); edit port/wsPort, `git pull`,
+  `systemctl --user restart aimb-bridge.service`, and update the ufw rule (12317).
+- **macOS (MacDaddy)** is already on 12317/12318.
+Cross-host federation survives a mixed-port transition (port is gossiped), so hosts can move one at a time.
+After each host: verify `my_identity → gateway_port` and that the roster still shows every machine.
+
 ## Doc gotchas to fold into `linux-setup.md` / `architecture.md`
 - **"Synced checkout ≠ running bridge."** A new commit appearing in the Dropbox/git checkout does NOT restart
   the running bridge — the tray only relaunches it if it dies, and the MCP transport doesn't reconnect on its

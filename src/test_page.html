@@ -13,7 +13,7 @@
 <body>
   <!--
     Generic demo leaf for the Ai MCP Bridge. Open in a browser with the mesh token:
-      test_page.html?token=<your config.json token>&ws=ws://127.0.0.1:7001
+      test_page.html?token=<your config.json token>&ws=ws://127.0.0.1:12318
     It embeds the reusable page-bridge + UI widget and wires a "Discuss" button to send an
     app-defined verb + subject to the AI session/topic picked in the dropdown. This is also the
     default fixture exercised by test_page_e2e.mjs.
@@ -38,7 +38,7 @@
     (function () {
       var q = new URLSearchParams(location.search);
       window.AIMB_BRIDGE_CFG = {
-        wsUrl: q.get('ws') || 'ws://127.0.0.1:7001',
+        wsUrl: q.get('ws') || 'ws://127.0.0.1:12318',
         token: q.get('token') || '',
         pageKind: 'demo',
         title: 'Demo Page',

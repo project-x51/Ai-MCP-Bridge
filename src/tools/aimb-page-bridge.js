@@ -16,7 +16,7 @@ window.aimbBridge = (function () {
   var instance = (window.crypto && crypto.randomUUID) ? crypto.randomUUID().slice(0, 8) : String(Math.random()).slice(2, 10);
   function notify() { cbs.forEach(function (cb) { try { cb({ status: status, sessions: sessions, pages: pages, topics: topics }); } catch (e) {} }); }
   function connect() {
-    try { ws = new WebSocket(cfg.wsUrl || 'ws://127.0.0.1:7001'); } catch (e) { retry(); return; }
+    try { ws = new WebSocket(cfg.wsUrl || 'ws://127.0.0.1:12318'); } catch (e) { retry(); return; }
     ws.onopen = function () {
       ws.send(JSON.stringify({ type: 'hello', kind: 'page', page_kind: cfg.pageKind || 'page',
         title: cfg.title || document.title, subject: cfg.subject || '', subscribe: cfg.subscribe || [],
