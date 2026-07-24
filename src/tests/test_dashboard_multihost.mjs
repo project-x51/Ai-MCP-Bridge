@@ -19,7 +19,14 @@ const roster = {
   type: 'welcome', gateway: 'ROBIN-Z790/aaa', hosts: { 'ROBIN-Z790': 'Lab PC' },
   sessions: [
     { session: 'ROBIN-Z790/aaa', name: 'aaa', host_label: 'ROBIN-Z790', bridge_version: '1.25.0', is_gateway: true, client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
-    { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', bridge_version: '1.25.0', is_gateway: false, client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
+    { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', bridge_version: '1.25.0', is_gateway: false, client: 'local-agent', client_kind: 'agent', realm: 'default',
+      // topic emphasis fixture: durable(bold) x exclusive(underline) are INDEPENDENT flags — all four combinations
+      topics: [
+        { pattern: 'bothflags', role: 'owner', holder: 'ROBIN-Z790/bbb/robin-1', exclusive: true, persistent: true },
+        { pattern: 'durableonly', role: 'owner', holder: 'ROBIN-Z790/bbb/robin-1', exclusive: false, persistent: true },
+        { pattern: 'exclusiveonly', role: 'owner', holder: 'ROBIN-Z790/bbb/robin-1', exclusive: true, persistent: false },
+        { pattern: 'neitherflag', role: 'owner', holder: 'ROBIN-Z790/bbb/robin-1', exclusive: false, persistent: false },
+      ],
       subpeers: [{ id: 'ROBIN-Z790/bbb/robin-1', name: 'ROBIN-1', client_kind: 'agent', project: 'AIMB', user: 'Robin', realm: 'default' },
         { id: 'ROBIN-Z790/bbb/cow-1', name: 'Cowork-Conn', client_kind: 'cowork', project: 'AIMB', user: 'Robin', realm: 'default' },
         { id: 'ROBIN-Z790/bbb/cod-1', name: 'Coder-Conn', client_kind: 'code', project: 'AIMB', user: 'robin', realm: 'default' }] },
@@ -104,6 +111,14 @@ check('cross-host gateway edge drawn', !!map.querySelector('.edge.xhost'))
 check('two host boxes drawn', map.querySelectorAll('.n-host-label').length === 2)
 // remote followers connect to THEIR gateway, not ours
 check('remote follower edge to remote gateway drawn', !!doc.getElementById('e-VOLT-001/ddd'))
+
+// topic emphasis: BOLD = durable (persistent claim), UNDERLINE = exclusive — independent, so all four combos differ.
+// (Bold used to mean "exclusive", which read as durability and caused a real misdiagnosis of a durable topic.)
+const sbHtml = sb.innerHTML
+check('topic durable+exclusive renders bold AND underlined', /<b><u>[^<]*Bothflags/i.test(sbHtml), sbHtml.slice(0, 200))
+check('topic durable-only renders bold, NOT underlined', /<b>[^<]*Durableonly/i.test(sbHtml) && !/<u>[^<]*Durableonly/i.test(sbHtml))
+check('topic exclusive-only renders underlined, NOT bold', /<u>[^<]*Exclusiveonly/i.test(sbHtml) && !/<b>[^<]*Exclusiveonly/i.test(sbHtml))
+check('topic with neither flag renders plain', !/<b>[^<]*Neitherflag/i.test(sbHtml) && !/<u>[^<]*Neitherflag/i.test(sbHtml))
 
 // #50: bridge version ON THE MAP — mesh mode is 1.25.0 (x3); VOLT-001/ccc is behind (1.24.17), and VOLT-001
 // runs TWO versions at once. The map must surface all of that (a per-node version, a per-host badge, a banner).

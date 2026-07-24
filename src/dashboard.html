@@ -87,7 +87,7 @@
 <h1><span class="pip" id="pip"></span>Ai MCP Bridge — Dashboard</h1>
 <div class="sub" id="gw">connecting…</div>
 <div id="prof"></div>
-<div class="sub" style="font-size:11px;color:#9CA3AF;margin-top:2px">Names &amp; topics are shown as entered; matching is <b>case-insensitive</b> (stored &amp; compared lower-case).</div>
+<div class="sub" style="font-size:11px;color:#9CA3AF;margin-top:2px">Names &amp; topics are shown as entered; matching is <b>case-insensitive</b> (stored &amp; compared lower-case). Topics: <b>bold</b> = durable (survives a restart) · <u>underlined</u> = exclusive (single owner) · plain = neither.</div>
 <section class="sec" data-sec="computers">
   <h2 class="sech"><span class="chev">▾</span>Computers <span id="comptag" class="bub b-info" style="font-weight:600"></span></h2>
   <div class="secb">
@@ -150,20 +150,30 @@
   // a small "(n)" waiting-mail badge — uncollected messages waiting for the owner to pick up. Shown only
   // when >0. Sessions/sub-peers badge DIRECT sends; topics badge sends addressed to that topic.
   function waitBadge(n){ return (n>0)?(' <span class="wait" title="'+n+' message'+(n===1?'':'s')+' waiting to be collected">('+n+')</span>'):''; }
-  // topics of one holder: comma-separated names on the row (exclusive bold, icon first, waiting count last)
+  // Topic emphasis encodes TWO INDEPENDENT flags, so one glance reads both:
+  //   DURABLE (persistent claim — survives a restart, rehydrates on return) = BOLD
+  //   EXCLUSIVE (single-owner; a rival claim gets "held")                   = UNDERLINE
+  // both = bold+underline, neither = plain. (Previously bold meant "exclusive", which read as durability and
+  // caused a real misdiagnosis — a non-exclusive but perfectly durable topic looked undurable.)
+  function topicMark(html,r){
+    if(r&&r.exclusive) html='<u>'+html+'</u>';
+    if(r&&r.persistent) html='<b>'+html+'</b>';
+    return html;
+  }
+  // topics of one holder: comma-separated names on the row (icon first, waiting count last)
   function topicNames(list,holder){
     return (list||[]).filter(function(r){return r.holder===holder&&r.role==='owner';}).map(function(r){
       var t=(r.icon?esc(r.icon)+' ':'')+esc(tc(r.pattern));
-      return (r.exclusive?('<b>'+t+'</b>'):t)+waitBadge(r.waiting||0);
+      return topicMark(t,r)+waitBadge(r.waiting||0);
     }).join(', ');
   }
-  // full topic detail for the expander: role, exclusivity, description, claimed_at
+  // full topic detail for the expander: role, exclusivity, durability, description, claimed_at
   function topicDetail(list,holder){
     var mine=(list||[]).filter(function(r){return r.holder===holder;});
     if(!mine.length) return '<span class="kv"><b>topics</b> none</span>';
     return mine.map(function(r){
-      var t=(r.icon?esc(r.icon)+' ':'')+(r.exclusive?'<b>'+esc(tc(r.pattern))+'</b>':esc(tc(r.pattern)));
-      return '<div class="kv">'+t+' <b>'+esc(r.role)+(r.exclusive?' · exclusive':'')+'</b> '+esc(r.description||'')+
+      var t=(r.icon?esc(r.icon)+' ':'')+topicMark(esc(tc(r.pattern)),r);
+      return '<div class="kv">'+t+' <b>'+esc(r.role)+(r.exclusive?' · exclusive':'')+(r.persistent?' · durable':'')+'</b> '+esc(r.description||'')+
         (r.claimed_at?' <span class="mono">'+esc(String(r.claimed_at).replace('T',' ').slice(0,19))+'</span>':'')+'</div>';
     }).join('');
   }
@@ -348,7 +358,7 @@
     {key:'mailboxes',icon:'📨',name:'Mailboxes — parked mail',badge:'b-info',
       cols:[['recipient',function(r){return mono(r.who)}],['msgs',function(r){return r.count}],['size',function(r){return bytes(r.bytes)}],['oldest',function(r){return tsf(r.oldest)}]]},
     {key:'claims',icon:'🏷',name:'Claims — durable responsibilities',badge:'b-resp',
-      cols:[['topic',function(r){return r.exclusive?'<b>'+esc(tc(r.topic))+'</b>':esc(tc(r.topic))}],['owner',function(r){return esc(nm(r.holder_name))}],['project · user',PROJU],['flags',function(r){var f=[];if(r.exclusive)f.push('exclusive');if(r.announce_offline)f.push('announce-offline');return f.join(' · ')||'—'}],['refreshed',function(r){return tsf(r.refreshed_at)}]]},
+      cols:[['topic',function(r){return topicMark(esc(tc(r.topic)),{exclusive:r.exclusive,persistent:true})}],['owner',function(r){return esc(nm(r.holder_name))}],['project · user',PROJU],['flags',function(r){var f=[];if(r.exclusive)f.push('exclusive');if(r.announce_offline)f.push('announce-offline');return f.join(' · ')||'—'}],['refreshed',function(r){return tsf(r.refreshed_at)}]]},
     {key:'grants',icon:'🔑',name:'Grants — cross-project consent',badge:'b-con',
       cols:[['edge',function(r){return '<b>'+esc(tc(r.from))+'</b> → <b>'+esc(tc(r.to))+'</b>'}],['mode',function(r){return esc(r.mode)}],['expires',function(r){return r.exp?tsf(new Date(r.exp).toISOString()):'<span class="empty">forever</span>'}],['granted',function(r){return tsf(r.granted_at)}]]},
     {key:'registrations',icon:'📇',name:'Registrations — name → identity',badge:'b-pu',
@@ -360,7 +370,7 @@
     {key:'retained',icon:'📌',name:'Retained — last value per topic',badge:'b-pub',
       cols:[['topic',function(r){return esc(tc(r.topic))}],['project',function(r){return esc(tc(r.project))}],['updated',function(r){return tsf(r.ts)}]]},
     {key:'kept',icon:'🪧',name:'Kept-alive — ownerless topics (sends park until reclaimed)',badge:'b-resp',
-      cols:[['topic',function(r){return (r.icon?esc(r.icon)+' ':'')+(r.exclusive?'<b>'+esc(tc(r.topic))+'</b>':esc(tc(r.topic)))}],['project',function(r){return esc(tc(r.project))}],['ownerless since',function(r){return tsf(r.ownerless_since)}]]},
+      cols:[['topic',function(r){return (r.icon?esc(r.icon)+' ':'')+topicMark(esc(tc(r.topic)),{exclusive:r.exclusive,persistent:true})}],['project',function(r){return esc(tc(r.project))}],['ownerless since',function(r){return tsf(r.ownerless_since)}]]},
     {key:'behaviors',icon:'🧭',name:'Behaviours — per-session reminders on delivery',badge:'b-info',
       cols:[['who',function(r){return '<b>'+esc(nm(r.name))+'</b>'}],['scope',function(r){return esc(r.scope)+(r.match?' · '+esc(tc(r.match)):'')}],['reminder',function(r){return esc(r.behavior)}]]}
   ];

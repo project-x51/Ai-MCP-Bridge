@@ -96,7 +96,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.34.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.35.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -594,6 +594,7 @@ function rehydrateClaim(rec, holderId, holderName, identity) {
   myTopics.set(k, { pattern: topic, role: 'owner', description: rec.description || '', exclusive: !!rec.exclusive,
     icon: rec.icon || null, holder: holderId, holder_name: holderName, project: proj,
     announce_offline: !!rec.announce_offline, grace_minutes: rec.grace_minutes ?? null, allow_other_user: rec.allow_other_user ?? null, keep_alive: !!rec.keep_alive,   // #26: keep_alive must survive a restart so a later release still keeps the topic alive
+    persistent: true,   // reached here only by rehydrating a DURABLE claim, so it is durable by construction
     realm: rec.realm || identity.realm || REALM, claimed_at: rec.claimed_at || new Date().toISOString() })
   persistClaim(identity, proj, topic, myTopics.get(k))   // refresh the lease + re-anchor to the live holder
   return true
@@ -1715,7 +1716,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const k = `${holder}|owner|${patternKey(topic)}`
       const reclaim = myTopics.has(k)
       myTopics.set(k, { pattern: topic, role: 'owner', description: eDesc, exclusive, icon: eIcon, holder, holder_name: holderName, project: holderProject, realm: holderRealm,
-        announce_offline: eAnnounce, grace_minutes, allow_other_user, keep_alive,
+        announce_offline: eAnnounce, grace_minutes, allow_other_user, keep_alive, persistent,   // `persistent` rides the roster so the dashboard can show durability (it was only ever written to the .claim file)
         claimed_at: reclaim ? myTopics.get(k).claimed_at : new Date().toISOString() })
       if (persistent) await persistClaim(holderIdentity, holderProject, topic, myTopics.get(k))   // §12: durable responsibility (awaited so a later release reliably sees + removes it)
       // #26: a (re)claim of a kept-alive topic drains its ownerless parked queue to the new owner and clears the marker.

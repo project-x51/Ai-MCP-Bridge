@@ -1112,6 +1112,19 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.35.0):** *topic emphasis shows DURABILITY and EXCLUSIVITY as separate signals.* Robin read the
+  dashboard's bold topics as "durable" and asked why `bills` wasn't — but bold meant **exclusive**, and `bills`
+  was durable all along (`persistent:true` on disk, refreshed, with `keep_alive:true` + `announce_offline:true` —
+  better continuity than most). A non-exclusive-but-durable topic looked undurable, and the misread nearly sent
+  a "fix" instruction to its owner for a non-problem. Two independent facts had been collapsed onto one visual.
+  **Fix:** **bold = durable**, **underline = exclusive**, both = both, plain = neither — applied everywhere
+  topics render (holder rows, the expander detail, and the persistence claims/kept tables), plus a **legend** in
+  the header, which is the piece whose absence caused the misread. The expander detail now also spells out
+  `· durable` alongside `· exclusive`. **Required a bridge change:** `persistent` was only ever written into the
+  `.claim` FILE by `persistClaim` — it was absent from the in-RAM `myTopics` record, so `topicList()` never put
+  it on the roster and the dashboard had no durability signal to render at all. Added at both `myTopics.set`
+  sites (fresh claim, and the durable-claim rehydrate path where it is true by construction). Verified by four
+  new checks in `test_dashboard_multihost` covering all four flag combinations. Suite 653 across 31.
 - **Built (v1.34.0):** *doorbell exit codes = success/failure; built-in silent re-arm guidance (#52).* A peer
   (Analysiz2) reported — with a real misreport to Robin behind it — that `aimb-doorbell.mjs` exited **2** on a
   clean timeout, and the Claude Code background-task harness paints ANY non-zero exit as "failed", so a benign

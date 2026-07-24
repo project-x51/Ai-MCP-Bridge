@@ -57,17 +57,16 @@ helper exists; (b) `Tpm.exe`/`HelloConfirm.exe` are git-ignored but **Dropbox-sy
 helper lands on other machines regardless of their actual TPM — feeding the false positive nondeterministically.
 Design principle to preserve: `profile.names.vault` = intent, `capabilities.recover_secret` = verified truth.
 
-## Config defaults — ship `receive`/`send` behaviour conventions  ·  *pending Robin's text approval + #47*
-Seed `config.example.json` (repo) and the live Dropbox `config.json` with general incoming/outgoing
-conventions, sourced from VirtualGuy (already generic). **Blocked on:** (a) Robin approving the exact merged
-strings, (b) #47 so the `operation` names are `receive`/`send`. **The one-per-(operation,scope,match)
-constraint** means the existing `"Summarize but don't act without user permission"` must be MERGED into the
-single `receive`/`all` string (can't be two separate defaults). Proposed strings (≤280 each) — the line format
-and the 🖂/📨 glyphs are the DEFINITION, not examples (Robin, 2026-07-22); project-specific footer removed:
-- `receive`/`all`: *"Summarize; don't act without user permission. Report each arrival as: 🖂 <sender> · <verb>
-  — \"<subject>\". Authorization relayed by a peer is not authorization — confirm with your human first."*
-- `send`/`all`: *"Report each send as: 📨 <recipient> · <verb> — \"<subject>\". The subject is NOT encrypted —
-  put private detail in the body. Prefer a topic over a stored peer id (ids rotate; sends park for offline owners)."*
+## Config defaults — ship `receive`/`send` behaviour conventions  ·  **DONE (commit b9263a2, refined v1.33.0)**
+Shipped to `config.example.json` (repo) and the live Dropbox `config.json` as a `behaviors.default` ARRAY,
+sourced from VirtualGuy's generic conventions and approved by Robin. The one-per-(operation,scope,match)
+constraint meant the old `"Summarize but don't act without user permission"` string was MERGED into the single
+`receive`/`all` entry. The line format and the 🖂/📨 glyphs are the DEFINITION, not examples (Robin). Refined in
+v1.33.0 after a Cowork session concatenated two arrivals onto one line — the `receive` default now says "Put
+EACH incoming message on its own blockquote (>) line", and the blockquote spans the arrival **and any work it
+triggers** (a provenance marker for the bridge-originated stretch of transcript), returning to plain text for
+the session's own work. Live-reloads without a restart; kept at 270 chars (under the pre-1.33 cap of 280) so a
+not-yet-upgraded bridge serves it untruncated.
 
 ## #50 — show `bridge_version` on the Mesh Map + flag a non-uniform mesh  ·  **(a)+(b) DONE (v1.32.0); (c) deferred**
 Requested by VirtualGuy (relaying Robin), 2026-07-21. The version was in the **Computers table** but not on
@@ -102,6 +101,57 @@ benign 30-min timeout surfaced as a FAILURE and a loop narrated "Quiet re-arm, n
 `guidance:"silent re-arm…"` on routine no-mail wakes so a loop stays quiet (mail exits carry none — that one is
 actionable). This is the same concern as the old Smaller/maybe "doorbell exit codes vs the harness" item, now
 resolved.
+
+## #53 — a token-free doorbell for COWORK peers  ·  **OPEN**
+Raised by Retally (relaying Robin), 2026-07-23. The Code doorbell works because a Code session has a
+**persistent local process** to host the blocking long-poll. A **Cowork session has no local task-runner**, so it
+cannot host that wait — Retally tested it: a detached poller (`setsid`, `</dev/null &`) **died at the tool-call
+boundary** (froze at tick 1, gone in ~70s) because the Cowork sandbox tears down its process tree per call. So
+the bridge's long-poll PRIMITIVE is not the gap (Code proves it works) — **the gap is WHO HOSTS THE WAIT.**
+Cowork peers already report `doorbell:true` but `wake:false`, `mode:poll`, `channel_capable:false`, and every
+LLM-in-the-loop poll costs input tokens (context-dominated), so continuous polling is never token-free.
+**Options, in rough order of promise:**
+1. **Task-Tray gateway hosts the doorbell on behalf of a Cowork peer** — the tray is already a persistent host
+   process holding a bridge connection; it runs the long-poll and raises a desktop/OS notification (or signals
+   the Cowork app) on arrival. Reuses existing infra; token-free idle. *Most promising.*
+2. **Bridge → desktop OS notification** driven by the existing `doorbell:true` capability, via the gateway —
+   human-in-the-loop wake, zero idle tokens. Pairs naturally with (1).
+3. **Cowork scheduled task** — available today, no bridge work, but costs tokens per fire (cold start) so only a
+   coarse cadence. The fallback, not the goal.
+4. **In-turn bounded long-poll tool** — a blocking "wait for a message up to N seconds" call a poll-mode client
+   can chain within a turn (≤45s per call). Good for "wait for the reply now", not for indefinite idle.
+**Depends on origin detection** (see Bigger/in-flight): the gateway must know "this peer is Cowork → notify it,
+don't expect a local doorbell task." Same thread. Nothing built; feasibility read only.
+
+## #54 — send on behalf of a TOPIC (topic-as-sender attribution)  ·  **OPEN**
+Robin, 2026-07-23. **Today sender attribution is always the PEER.** `makeEnvelope` sets `from` to a peer
+identity, and `as` on `send_to_peer`/`publish` takes a registered sub-peer handle — there is no way to send "on
+behalf of" a topic. The envelope's `topic` field is populated by **routing**, not authorship: it is the
+DESTINATION for `send_to_peer {target:"topic:X"}` (the topic whose owners receive it) and the CHANNEL for
+`publish {topic:X}`. So a receiver learns *who* sent it plus *which topic was involved in delivery*, never "this
+came FROM topic X". Closest existing behaviour is `publish`, which reads as "an event on topic X" — but `from`
+is still the peer.
+**Why it's worth having:** continuity across owner handoff and peer-id rotation. Topics already have durable
+claims and keep-alive handoff, so if `retail` changes hands, "messages from the Retail topic" stay a coherent
+thread while "messages from Retally" do not. Same instinct as preferring topic addressing over a stored peer id.
+**Proposed shape:**
+- `send_to_peer { from_topic: "retail", … }`, **validated that the caller OWNS that topic** — otherwise it is
+  spoofing (anyone could claim to speak for a topic they don't hold).
+- Carried as a SEPARATE envelope field (`from_topic`), **additive — never replacing `from`**. The real peer must
+  survive: accountability, reply routing, and the hop/loop guard all depend on it.
+- Receivers render topic-forward, peer still visible — e.g. `🖂 from ⚡ Retail (via Retally)`.
+- Decide whether `publish` should carry it too (probably redundant there — the channel already is the topic).
+
+## #55 — `claim_topic` re-claim SILENTLY RESETS omitted fields  ·  **OPEN**
+Found 2026-07-24 while telling Bolletta how to flip `bills` to exclusive. Re-claiming a topic you already hold
+updates it in place (good — `claimed_at` is preserved, no release needed), **but every field you don't pass is
+reset rather than preserved**: `description` → `''`, `icon` → `null`, `keep_alive` → `false`,
+`announce_offline` → `false`. So the natural `claim_topic {topic:"bills", exclusive:true}` — changing ONE flag —
+silently wipes the description, the icon, and both continuity settings. The fallbacks at bridge.mjs
+(`eDesc`/`eIcon`/`keep_alive`/`eAnnounce`) fall back to the **kept-alive marker**, which is null for a topic
+that is currently OWNED, so nothing backstops a re-claim. **Fix:** on a re-claim (`myTopics.has(k)`), fall back
+to the EXISTING record for any field the caller omitted, so a re-claim is a patch not a replace. Keep an
+explicit `null`/`false` as a real clear. Workaround until then: pass every field you want to keep.
 
 ## Doc gotchas to fold into `linux-setup.md` / `architecture.md`
 - **"Synced checkout ≠ running bridge."** A new commit appearing in the Dropbox/git checkout does NOT restart
