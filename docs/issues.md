@@ -6,6 +6,33 @@ project's `#NN` sequence.
 
 ---
 
+## RESUME STATE (as of 2026-07-25, v1.39.0) — read this first after a compact
+**Current version: v1.39.0.** All work committed + pushed to `main` (latest commit `8becb63`). Everything below
+is durable; nothing important is only in chat.
+
+**Live mesh right now** (from `list_sessions`): 4 hosts, mid port-migration but HEALTHY —
+- ROBIN-Z790 (this machine) — v1.39.0, port **12317**, gateway is the Task Tray bridge; my session (Bridget) is a follower.
+- LITTLE-001 — v1.39.0, **12317** (migrated).
+- Robins-Mac — v1.39.0 (back online; owns topic `mac`).
+- **phub-lnx-01 — still v1.32.0 on port 7000** (the one laggard; compatible via dual-port + gossip). Renda present, Modell was offline.
+
+**The port migration (#56) is IN FLIGHT** and working: default ports moved 7000/7001 → **12317/12318** (macOS
+AirPlay clash). The dual-port compat window (#57, v1.37.0) had a cross-host-DIAL gap that PARTITIONED ROBIN off
+the live mesh — fixed in **v1.38.0** (`connectToPeer` compat-port fallback). Lesson baked into §13: dual-port is
+THREE surfaces (bind, same-host election, cross-host dial). The shared Dropbox `config.json` (gitignored) is
+already flipped to `port 12317, wsPort 12318, compatPorts [7000], compatWsPorts [7001]` + the receive/send
+behaviour defaults. **Restarting a bridge = restart the Claude app or the Task Tray** (`tray/windows/
+AiMcpBridgeTray.exe --root <src>`); the desktop relaunches a dead bridge on next MCP use.
+
+**Immediate pickups:** (a) phub-lnx-01 to pull v1.39.0 + migrate (ping Renda/Modell); (b) an offered resend of
+the `topic:mac` heads-up now that the Mac is back (it failed earlier only because the Mac was offline — the
+`mac` topic is NOT keep_alive, so it doesn't park); (c) once every host shows 12317 on the dashboard Bridge
+column, do #59 (rip out compat ports). **Bridget reconnect ritual:** `register_self` first (name Bridget, secret
+`bridget-aimb-2026`, project AIMB, user Robin), use the returned `peer_id` for inbox/send — the bridge restarts
+often during this migration, so re-register whenever a send returns `unknown-subpeer`.
+
+---
+
 ## #46 — realm token from a FILE (`AI_BRIDGE_TOKEN_FILE`)  ·  **DONE (v1.29.0)**
 The realm token was appearing in **plaintext in the process command line** on any host whose MCP client
 inlines it (phub-lnx-gold uses an inline `--mcp-config` with `env:{AI_BRIDGE_TOKEN:"…"}`). argv is
@@ -153,7 +180,7 @@ that is currently OWNED, so nothing backstops a re-claim. **Fix:** on a re-claim
 to the EXISTING record for any field the caller omitted, so a re-claim is a patch not a replace. Keep an
 explicit `null`/`false` as a real clear. Workaround until then: pass every field you want to keep.
 
-## #56 — migrate the WHOLE REALM to ports 12317/12318  ·  **OPEN** (now de-risked by #57)
+## #56 — migrate the WHOLE REALM to ports 12317/12318  ·  **IN PROGRESS** (3/4 hosts done; phub-lnx-01 remains)
 The shipped default moved to 12317/12318 in v1.36.0, but existing hosts keep 7000/7001 via their own
 `config.json` until migrated. Robin wants the whole realm moved eventually. **#57 (v1.37.0) removes the
 coordinated-restart requirement** that used to make this delicate: a gateway can hold the new AND old port at
