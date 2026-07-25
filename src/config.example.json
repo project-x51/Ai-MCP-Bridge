@@ -1,5 +1,8 @@
 {
   "_comment_ports": "port (gateway TCP) + wsPort (WebSocket ingress for page leaves). Default 12317/12318 — chosen to bind cleanly on macOS, Windows AND Linux with bind:0.0.0.0. AVOID 7000: macOS Control Center's AirPlay Receiver binds *:5000 and *:7000, so a 0.0.0.0 gateway on 7000 fails EADDRINUSE on any Mac (binding a specific IP instead then strands loopback clients — the doorbell/dashboard/chat live on 127.0.0.1). 12317/12318 also sit clear of the Linux ephemeral range (32768+) and the Windows dynamic/Hyper-V range (49152+). The gateway port is gossiped (PEER_ROSTER/PEER_HELLO carry it), so mixed-port hosts still federate during a rolling migration; only SAME-HOST sessions must agree.",
+  "_comment_compat_ports": "compatPorts/compatWsPorts (#57): OLD ports the gateway ALSO listens on during a port migration, so a same-host bridge still configured for an old port JOINS this gateway (its bind fails -> it follows) instead of standing up a rival gateway. Set them in the SAME edit that flips the port — e.g. \"port\": 12317 with \"compatPorts\": [7000] — then a lingering old-port session on this host converges onto the one gateway with no coordinated restart. Default [] (single-port). The primary port is filtered out automatically. Remove them once every host advertises the new port (dashboard Computers/Bridge column).",
+  "compatPorts": [],
+  "compatWsPorts": [],
   "port": 12317,
   "wsPort": 12318,
   "token": "REPLACE-WITH-LONG-RANDOM-STRING",

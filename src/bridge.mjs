@@ -38,6 +38,15 @@ let CFG = {}
 try { CFG = JSON.parse(fs.readFileSync(path.join(HERE, 'config.json'), 'utf8')) } catch {}
 const PORT = Number(process.env.AI_BRIDGE_PORT || CFG.port || 12317)     // default moved off 7000: macOS Control Center AirPlay Receiver binds *:7000, so bind 0.0.0.0 there fails EADDRINUSE (MacDaddy). 12317/12318 are clear on macOS/Windows/Linux.
 const WS_PORT = Number(process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 12318)
+// #57 dual-port: during a port migration a gateway can ALSO listen on the old well-known ports, so a bridge still
+// configured for them JOINS it (its bind fails -> it follows) instead of standing up a rival gateway on a
+// different port. That is what lets the realm move ports with NO coordinated restart. OPT-IN — set it in the SAME
+// config edit that flips the port, e.g. `"port": 12317, "compatPorts": [7000]`. Default off (single-port, exactly
+// as before). The primary port is filtered out automatically, so a host still on 7000 with compatPorts:[7000] is
+// simply single-port. Env AI_BRIDGE_COMPAT_PORTS / AI_BRIDGE_COMPAT_WS_PORTS (comma-separated) override for tests.
+const parsePorts = (v, dflt) => (v != null ? String(v).split(',').map(s => Number(String(s).trim())).filter(Boolean) : (Array.isArray(dflt) ? dflt : []))
+const COMPAT_PORTS = parsePorts(process.env.AI_BRIDGE_COMPAT_PORTS, CFG.compatPorts !== undefined ? CFG.compatPorts : []).filter(p => p !== PORT)
+const COMPAT_WS_PORTS = parsePorts(process.env.AI_BRIDGE_COMPAT_WS_PORTS, CFG.compatWsPorts !== undefined ? CFG.compatWsPorts : []).filter(p => p !== WS_PORT)
 // #46: read the realm token from a FILE when AI_BRIDGE_TOKEN_FILE is set, so an MCP client config can
 // reference a PATH (harmless in `ps`/argv) instead of inlining the secret VALUE into the command line — argv
 // is world-readable via the process list and captured by crash dumps / monitors / support bundles, and the
@@ -96,7 +105,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.36.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.37.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -270,8 +279,8 @@ const ciEq = (a, b) => lc(a) === lc(b)
 let role = 'binding'              // binding | gateway | follower | stopping
 let pairPort = 0                  // this bridge's own listener for inbound pair conns
 let gwSock = null                 // follower: control connection to gateway
-let gwServer = null               // gateway: the :PORT server
-let wss = null                    // gateway: WS leaf server
+let gwServers = []                // gateway: the control servers (primary + #57 compat ports)
+let wssList = []                  // gateway: WS leaf servers, one per ws port (primary + #57 compat)
 let roster = new Map()            // session -> {session, name, port, kind:'session', subpeers:[], client}
 let pages = new Map()             // instance -> {instance, page_kind, title, kind:'page'}  (gateway only)
 let backoff = 200
@@ -1259,9 +1268,9 @@ function teardownPeers() {
 }
 
 // ---------------------------------------------------------------- gateway role
-function becomeGateway(server) {
-  role = 'gateway'; gwServer = server; backoff = 200; gatewayId = SESSION
-  log(`gateway on :${PORT} (session ${SESSION})`)
+function becomeGateway(servers) {
+  role = 'gateway'; gwServers = servers; backoff = 200; gatewayId = SESSION
+  log(`gateway on :${[PORT, ...COMPAT_PORTS].join(',')} (session ${SESSION})`)
   emitTraceRaw({ dir: 'con', verb: 'gateway', from: SESSION, from_name: NAME, to: SESSION, size: 0,
     note: 'promoted to gateway', envelope_id: null })
   roster = new Map([[SESSION, { session: SESSION, name: NAME, port: pairPort, kind: 'session',
@@ -1270,7 +1279,16 @@ function becomeGateway(server) {
     realm: REALM, project: PROC_IDENT?.project || null, user: PROC_IDENT?.user || null,
     client: CLIENT ? CLIENT.name : null, client_kind: CLIENT ? clientKind(CLIENT.name) : null }]])
   flushPendingTraces()
-  server.on('connection', sock => {
+  for (const server of servers) server.on('connection', onControlConn)         // #57: primary + every compat control port share one handler
+  for (const wsPort of [WS_PORT, ...COMPAT_WS_PORTS]) startWsIngress(wsPort)    // #57: WS ingress on primary + every compat ws port
+  broadcastRoster()
+  maybeLaunchTray()
+  startDiscovery()   // §7: begin enumerating + linking peer hubs across machines (no-op for discovery=none)
+}
+
+// A follower/peer control connection. Extracted (#57) so the primary AND each compat-port server share one
+// handler; `who` is per-connection (set by HELLO before any privileged frame is honoured).
+function onControlConn(sock) {
     let who = null
     onFrames(sock, async f => {
       if (f.t === 'HELLO') {
@@ -1327,9 +1345,12 @@ function becomeGateway(server) {
       } else if (f.t === 'PING') sendFrame(sock, { t: 'PONG', seq: f.seq })
     })
     sock.on('error', () => {})
-  })
-  // WS leaf ingress — served on an HTTP server so the dashboard loads from http://127.0.0.1:WS_PORT
-  // (same origin as the WS). file:// pages are blocked from ws://127.0.0.1 by Chrome PNA; http isn't.
+}
+
+// WS leaf ingress on ONE ws port — served on an HTTP server so the dashboard loads from http://127.0.0.1:<port>
+// (same origin as the WS). file:// pages are blocked from ws://127.0.0.1 by Chrome PNA; http isn't. #57 runs one
+// per ws port (primary + compat) so a client on an old ws port still reaches the gateway during a migration.
+function startWsIngress(wsPort) {
   try {
     const httpd = profile.transport.createHttpServer((req, res) => {
       let u = decodeURIComponent(String(req.url || '/').split('?')[0])
@@ -1344,9 +1365,16 @@ function becomeGateway(server) {
       res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('not found')
     })
     httpd.on('error', e => log('http server error', e.code))
-    httpd.listen(WS_PORT, BIND)
-    wss = profile.transport.createWsServer({ server: httpd })
-    wss.on('connection', ws => {
+    httpd.listen(wsPort, BIND)
+    const wss = profile.transport.createWsServer({ server: httpd })
+    wssList.push(wss)
+    wss.on('connection', onWsConnection)
+    wss.on('error', e => log('ws server error', e.code))
+  } catch (e) { log('ws listener failed', e.code) }
+}
+
+// A WS leaf connection (listener / page / dashboard). Extracted (#57) so every ws-port server shares it.
+function onWsConnection(ws) {
       ws.on('message', async raw => {
         let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
         if (m.type === 'hello') {
@@ -1437,19 +1465,13 @@ function becomeGateway(server) {
         leaves.delete(ws); if (ws.kind === 'page') pages.delete(ws.instance); broadcastRoster()
       })
       ws.on('error', () => {})
-    })
-    wss.on('error', e => log('ws server error', e.code))
-  } catch (e) { log('ws listener failed', e.code) }
-  broadcastRoster()
-  maybeLaunchTray()
-  startDiscovery()   // §7: begin enumerating + linking peer hubs across machines (no-op for discovery=none)
 }
 
 // ---------------------------------------------------------------- follower role
-function becomeFollower() {
+function becomeFollower(gwPort = PORT) {   // #57: connect to whichever port the gateway was found on (may be a compat port during a migration)
   role = 'follower'
   teardownPeers()   // §7: a follower reaches remote hubs via its gateway's merged roster, not its own peer links
-  const sock = profile.transport.connect(PORT, HOST)
+  const sock = profile.transport.connect(gwPort, HOST)
   gwSock = sock
   sock.on('connect', () => {
     backoff = 200
@@ -1459,7 +1481,7 @@ function becomeFollower() {
       topics: topicList(), bridge_version: BRIDGE_VERSION, capabilities: CAPS,
       realm: REALM, project: PROC_IDENT?.project || null, user: PROC_IDENT?.user || null,
       client: CLIENT ? CLIENT.name : null })
-    log(`follower registered with gateway on :${PORT}`)
+    log(`follower registered with gateway on :${gwPort}`)
   })
   onFrames(sock, f => {
     if (f.t === 'RENAME') { NAME = f.name }
@@ -1476,15 +1498,26 @@ function becomeFollower() {
 }
 
 // ---------------------------------------------------------------- election (the single retry edge)
+// #57 dual-port invariant: a gateway owns EVERY well-known control port on the host (primary + compat). So
+// "is there already a gateway here?" == "is ANY of those ports already bound?". We try to bind them all; if ANY
+// is already held, an existing gateway is there (possibly an older one on just the old port) and we FOLLOW it on
+// that port rather than standing up a rival. Empty COMPAT_PORTS ⇒ single-port behaviour, identical to before.
 function election() {
   if (role === 'stopping') return
   role = 'binding'
+  bindPorts([PORT, ...COMPAT_PORTS], [], 0)
+}
+function bindPorts(ports, bound, i) {
+  if (role === 'stopping') return
+  if (i >= ports.length) return becomeGateway(bound)   // grabbed them all → we're the gateway
   const server = profile.transport.createServer()
   server.once('error', e => {
-    if (e.code === 'EADDRINUSE') becomeFollower()
-    else { log('bind error', e.code); setTimeout(election, backoff); backoff = Math.min(backoff * 2, 3000) }
+    if (e.code === 'EADDRINUSE') {                      // a gateway already holds this port → drop what we grabbed and follow it there
+      for (const s of bound) { try { s.close() } catch {} }
+      becomeFollower(ports[i])
+    } else { log('bind error', ports[i], e.code); for (const s of bound) { try { s.close() } catch {} } setTimeout(election, backoff); backoff = Math.min(backoff * 2, 3000) }
   })
-  server.listen(PORT, BIND, () => becomeGateway(server))
+  server.listen(ports[i], BIND, () => { bound.push(server); bindPorts(ports, bound, i + 1) })
 }
 
 // ---------------------------------------------------------------- MCP server (the session side)

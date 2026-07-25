@@ -153,22 +153,46 @@ that is currently OWNED, so nothing backstops a re-claim. **Fix:** on a re-claim
 to the EXISTING record for any field the caller omitted, so a re-claim is a patch not a replace. Keep an
 explicit `null`/`false` as a real clear. Workaround until then: pass every field you want to keep.
 
-## #56 — migrate the WHOLE REALM to ports 12317/12318  ·  **OPEN** (coordinated, Robin-driven)
+## #56 — migrate the WHOLE REALM to ports 12317/12318  ·  **OPEN** (now de-risked by #57)
 The shipped default moved to 12317/12318 in v1.36.0, but existing hosts keep 7000/7001 via their own
-`config.json` until migrated. Robin wants the whole realm moved eventually. **This is NOT a unilateral config
-edit** — flipping a host's `config.json` while its bridge runs on 7000 arms a **same-host split-brain**: the
-next new session spawns a bridge that reads the new port, finds it free, and binds a SECOND gateway on that host
-(the old one still holds 7000). So config + restart must happen together, per host.
-**Safe per-host procedure:**
-- **Windows (ROBIN-Z790, LITTLE-001)** share the Dropbox `config.json`. Flipping it moves BOTH on their next
-  restarts — so do it when both can restart close together. Change `port`/`wsPort` to 12317/12318, then restart
-  every bridge process on each host (the Claude apps + the Task Tray) so no 7000 gateway lingers. Ending sessions
-  = a human-at-a-natural-break action, not an agent mid-task.
-- **Linux (phub-lnx-*)** each have their own `config.json` (+ `bridge.env`); edit port/wsPort, `git pull`,
-  `systemctl --user restart aimb-bridge.service`, and update the ufw rule (12317).
-- **macOS (MacDaddy)** is already on 12317/12318.
-Cross-host federation survives a mixed-port transition (port is gossiped), so hosts can move one at a time.
-After each host: verify `my_identity → gateway_port` and that the roster still shows every machine.
+`config.json` until migrated. Robin wants the whole realm moved eventually. **#57 (v1.37.0) removes the
+coordinated-restart requirement** that used to make this delicate: a gateway can hold the new AND old port at
+once (`compatPorts`), so a lingering old-port session on a host JOINS the new gateway instead of splitting.
+**Per-host procedure (no coordination needed):**
+- In ONE edit, set `"port": 12317, "wsPort": 12318, "compatPorts": [7000], "compatWsPorts": [7001]`, then restart
+  the host's bridges whenever suits. During the window a new-code bridge holds both ports; any old-port session
+  converges onto it. Restart each host on its own schedule.
+- **Windows (ROBIN-Z790, LITTLE-001)** share the Dropbox `config.json` — one edit moves both on their next
+  restarts. **Linux (phub-lnx-*)**: edit each `config.json`, `git pull`, `systemctl --user restart`, ufw 12317.
+  **macOS (MacDaddy)** already on 12317/12318 (add `compatPorts` only if it needs to accept old-port peers, which
+  cross-host it does not — the old port matters SAME-host).
+- **Cleanup:** once the dashboard's Computers/Bridge column shows every host advertising 12317, drop `compatPorts`/
+  `compatWsPorts` (back to `[]`) in a final pass.
+Cross-host federation survives a mixed-port transition regardless (the gateway port is gossiped). After each
+host: verify `my_identity → gateway_port` and that the roster still shows every machine.
+
+## #57 — dual-port gateway (compat window for the migration)  ·  **DONE (v1.37.0)**
+A gateway can now hold multiple control ports (+ ws ports): `compatPorts`/`compatWsPorts` (opt-in, default []).
+New election invariant — a gateway owns EVERY well-known port on its host, so a bridge configured for an old port
+finds it held and follows rather than standing up a rival. Extracted `onControlConn`/`onWsConnection`/
+`startWsIngress` so primary + compat listeners share the handlers. Verified by `test_dual_port_live` (6 checks,
+both start orders + ws compat). This is what makes #56 restart-free. Opt-in (not default-on) so loopback-simulated
+multi-host tests don't collide on a shared compat port.
+
+## #58 — code sessions on a CLI host show TWICE (follower-bridge + sub-peer)  ·  **OPEN** (dashboard clarity)
+Robin spotted on phub-lnx-01: each Claude Code CLI session there appears as a full bridge-sized (orange, not
+blue) bubble AND a top-level sessions-list row (`62bd6ec7`, `9e0b6a8d` — bare hex ids, `claude-code` client, no
+topics), while its actual conversation shows separately as a sub-peer (Modell, Renda). Root cause is not a bug in
+routing — it is the two client integrations: the **desktop app shares ONE bridge** across conversations (they
+register as sub-peers, so N conversations = 1 bridge bubble + N sub-peers, and the shared bridge is hidden in the
+default connections view), whereas a **CLI host spawns one bridge PER session** (MCP stdio launches its own
+server), so N conversations = N follower-bridges + N sub-peers. The follower-bridge and its single sub-peer are
+ONE logical thing shown as two. Why the desktop's shared bridge is hidden but these are not: the connections view
+hides the agent/shared bridge rows and promotes sub-peers, but a `claude-code` follower-bridge is classed as a
+real connection and shown — so it leaks in alongside its promoted sub-peer. **Direction (dashboard-only):**
+collapse a FOLLOWER bridge that hosts exactly one sub-peer of its own into that conversation (render one node),
+or extend the hide-bridges rule to code follower-bridges the same way it hides agent ones. Verify it does not
+hide a genuine standalone code session that registered no sub-peer. Not a bridge/protocol change.
 
 ## Doc gotchas to fold into `linux-setup.md` / `architecture.md`
 - **"Synced checkout ≠ running bridge."** A new commit appearing in the Dropbox/git checkout does NOT restart

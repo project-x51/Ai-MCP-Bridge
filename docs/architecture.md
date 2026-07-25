@@ -1112,6 +1112,23 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.37.0):** *dual-port gateway — a compat window for the port migration (#57).* Migrating the realm's
+  ports (#56, from #46/v1.36.0) risked a **same-host split-brain**: flip a host's config to 12317 while a session's
+  bridge still runs on 7000, and the next new session binds 12317 (free) and stands up a SECOND gateway. Fix: a
+  gateway can hold **more than one** control port. New invariant — *a gateway owns every well-known control port on
+  its host*, so "is there already a gateway here?" == "is ANY of those ports bound?". Election (`bindPorts`) now
+  tries `[PORT, ...compatPorts]` in turn; if ANY is already held, an existing gateway is there — including an OLDER
+  one on just the old port — and we drop what we grabbed and **follow it on that port** (`becomeFollower(gwPort)`),
+  never a rival. This required extracting the inline control-connection and WS-leaf handlers into shared
+  `onControlConn`/`onWsConnection`/`startWsIngress` so the primary and each compat listener reuse them; the WS
+  ingress likewise runs once per ws port, so a doorbell/page on an old ws port still reaches the gateway during the
+  move. **Opt-in** (`compatPorts`/`compatWsPorts`, default `[]`): set them in the SAME config edit that flips the
+  port, so a lingering old-port session converges with no coordinated restart; remove them once every host
+  advertises the new port. Opt-in (not default-on) keeps two loopback-simulated *hosts* in the test suite from
+  colliding on a shared compat port — real hosts are separate machines. New `test_dual_port_live` (6 checks) proves
+  an old-port bridge joins a new-port+compat gateway, a message routes across the join, WS compat reaches the
+  gateway, and the reverse start order makes the new-port bridge step down rather than split. #56's migration
+  procedure is rewritten around this. Suite 659 across 32.
 - **Built (v1.36.0):** *default ports 7000/7001 → 12317/12318 (macOS AirPlay clash).* MacDaddy (a new node —
   Robin's MacBook Pro) hit `EADDRINUSE` binding a `0.0.0.0` gateway on 7000: macOS Control Center's **AirPlay
   Receiver squats `*:5000` and `*:7000`**, and the workaround (bind a specific IP) then strands loopback clients
