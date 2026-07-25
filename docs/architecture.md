@@ -1112,6 +1112,20 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.38.0):** *dual-port, the CROSS-HOST dial half (#57 fix — live-mesh incident).* v1.37.0's compat
+  window covered the LISTEN side (a gateway binds new+old ports) and same-host election, but not the OUTBOUND
+  cross-host dial. `facets/discovery/tailscale.js` hands each candidate the DIALER's own port (it assumes a
+  uniform realm port), so when ROBIN-Z790 migrated to 12317 and, by the "smaller IP dials" tie-break, was the
+  designated dialer for the still-on-7000 hosts, it dialed them on 12317, missed, and **partitioned itself off
+  the live mesh** (three isolated segments). The compat LISTENER would have caught an inbound dial, but the
+  tie-break put ROBIN on the outbound side, so that path never ran. **Fix:** `connectToPeer` now falls back
+  through the compat ports — try the primary (advertised) port, then each compat port — with a 4s per-attempt
+  guard; the tie-break still elects one dialer per pair, this only changes which port it succeeds on. A
+  non-migrated node (no compat) is unchanged. Verified by `test_migrate_dial_live`: a migrated dialer handed a
+  WRONG-port candidate (exactly what tailscale produces) falls back to compat and federates with an old-port
+  peer on a second loopback IP, and the peer's sub-peers gossip across the healed link. **Lesson:** "dual-port"
+  is three surfaces — bind, same-host election, AND cross-host dial; v1.37.0 shipped two of three and the third
+  only shows under a real multi-host migration, which the loopback suites don't exercise. Suite 662 across 33.
 - **Built (v1.37.0):** *dual-port gateway — a compat window for the port migration (#57).* Migrating the realm's
   ports (#56, from #46/v1.36.0) risked a **same-host split-brain**: flip a host's config to 12317 while a session's
   bridge still runs on 7000, and the next new session binds 12317 (free) and stands up a SECOND gateway. Fix: a

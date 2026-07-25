@@ -14,7 +14,11 @@ const check = (name, cond, extra = '') => { if (cond) { pass++; console.log('PAS
 
 async function spawnBridge(name, port, seeds) {
   const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR,
+    // #57: force single-port. This test runs two "hosts" on ONE loopback machine, so they'd collide on a shared
+    // compat port. Explicit '' also ISOLATES from the dev config.json (which carries compatPorts during a live
+    // migration) — bridges spawned from src read that file, and its compat would otherwise leak into the test.
     env: { ...process.env, AI_BRIDGE_NAME: name, AI_BRIDGE_PORT: String(port), AI_BRIDGE_WS_PORT: String(port + 1),
+      AI_BRIDGE_COMPAT_PORTS: '', AI_BRIDGE_COMPAT_WS_PORTS: '',
       AI_BRIDGE_TOKEN: TOKEN, AI_BRIDGE_SWEEP_MS: '500', AI_BRIDGE_PERSISTENCE: 'none', AI_BRIDGE_BIND: '127.0.0.1',
       AI_BRIDGE_DISCOVERY: 'seeds', AI_BRIDGE_SEEDS: seeds, AI_BRIDGE_DISCOVERY_MS: '300' }, stderr: 'pipe' })
   const client = new Client({ name: `t-${name}`, version: '0' }, { capabilities: {} })

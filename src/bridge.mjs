@@ -105,7 +105,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.37.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.38.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1210,20 +1210,38 @@ function connectToPeer(host, port) {
   const addr = `${host}:${port}`
   if (peerByAddr.has(addr)) return
   peerByAddr.add(addr)
-  let peerSession = null
-  const sock = profile.transport.connect(port, host)
-  sock.on('connect', () => {
-    sendFrame(sock, { t: 'HELLO', ver: VER, fromBridge: SESSION, fromSession: SESSION, name: NAME, auth: TOKEN })
-    sendFrame(sock, { t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM })
-    sendFrame(sock, gossipFrame())
-  })
-  onFrames(sock, f => {
-    if (f.t === 'PEER_HELLO') { peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || port, f.name) }
-    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages)
-    else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
-  })
-  sock.on('close', () => { peerByAddr.delete(addr); if (peerSession && peerGw.get(peerSession)?.sock === sock) dropPeer(peerSession) })
-  sock.on('error', () => {})
+  // #57 fix: cross-host discovery hands us the candidate on OUR port (tailscale assumes a uniform realm port),
+  // but during a migration a peer may still be on an OLD port. So try the primary port, then fall back through
+  // our compat ports — a MIGRATED dialer still reaches an un-migrated peer. The upstream tie-break still elects a
+  // single dialer per pair; this only changes WHICH port that dialer succeeds on. (The inbound direction already
+  // works: an old-port peer dialing US lands on our compat LISTENER.) A non-migrated node (no compat) is unchanged.
+  const ports = [port, ...COMPAT_PORTS.filter(p => p !== port)]
+  let idx = 0, peerSession = null
+  const attempt = () => {
+    const p = ports[idx++]
+    let linked = false
+    const sock = profile.transport.connect(p, host)
+    const giveUp = setTimeout(() => { if (!linked) { try { sock.destroy() } catch {} } }, 4000)
+    if (giveUp.unref) giveUp.unref()
+    sock.on('connect', () => {
+      sendFrame(sock, { t: 'HELLO', ver: VER, fromBridge: SESSION, fromSession: SESSION, name: NAME, auth: TOKEN })
+      sendFrame(sock, { t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM })
+      sendFrame(sock, gossipFrame())
+    })
+    onFrames(sock, f => {
+      if (f.t === 'PEER_HELLO') { linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || p, f.name) }
+      else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages)
+      else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
+    })
+    sock.on('close', () => {
+      clearTimeout(giveUp)
+      if (linked) { peerByAddr.delete(addr); if (peerSession && peerGw.get(peerSession)?.sock === sock) dropPeer(peerSession) }
+      else if (idx < ports.length) attempt()   // this port yielded no peer link -> try the next compat port
+      else peerByAddr.delete(addr)              // exhausted -> let a later discovery tick retry from the top
+    })
+    sock.on('error', () => {})
+  }
+  attempt()
 }
 // §7/#35: the advertise host is the one per-machine value that can't live in a shared config, so when left
 // auto (no advertiseHost, bind 0.0.0.0 ⇒ ADVERTISE starts as loopback) we derive it from the discovery
