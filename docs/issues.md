@@ -49,6 +49,23 @@ inbox/send — the bridge restarts often during this migration, so re-register w
 
 ---
 
+## #63 — stale cross-host federation state after a peer's port-migration doesn't self-heal  ·  **OPEN (needed a manual restart)**
+After the Mac flipped 7000→12317 (and churned through several restarts), **LITTLE-001 kept stale delivery state for
+the Mac**: Testy (on LITTLE) couldn't reach MacDaddy (on the Mac), while ROBIN-hosted senders (Bridget, Analysiz2)
+could — because ROBIN's link to the Mac was fresh and LITTLE's was not. The Mac↔LITTLE TCP link showed ESTABLISHED
+(verified via SSH: `Mac:49233->100.78.211.46:12317`), so it wasn't a missing link — LITTLE's *roster/routing* entry
+for the Mac was stale (most likely a stale delivery port and/or a federation link that never re-keyed after the
+Mac's restart), and #61 masked the resulting drop as `ok:true`. **It did NOT self-heal** — Robin fixed it by
+**restarting LITTLE-001's bridges from the tray**, which re-established the link with current ports. (NB: MacDaddy's
+"LITTLE↔Mac is healthy, nothing to fix" report was taken AFTER that restart, so it read a healed state as
+never-broken — a good reminder that a post-fix snapshot can hide the fault.) **Investigate:** `mergeRemoteRoster`
+replaces a peer's slice on each gossip, but gossip only re-fires when the *sender's* local slice signature changes
+(`gossipToPeers` / `lastGossip`) — a peer that RESTARTS (new session id, same host) may not trigger a re-gossip to
+already-linked hubs, and/or the old federation link lingers with stale entries. Options: force a full re-gossip to
+all peer hubs on any peer (re)connect; drop+refresh a peer's roster slice when its gateway session id changes;
+heartbeat-expire stale peer sessions. Relates to #57 (migration) and #61 (masking). Distinct from the v1.38.0 dial
+fix, which was about INITIAL cross-port dialing, not refreshing an already-linked peer after it moves.
+
 ## #62 — cross-project consent grants don't federate (per-receiving-host)  ·  **OPEN (root cause of "Mac never receives")**
 `deliveryAllowed` (bridge.mjs) is RECEIVER-side and directional: a PowerHub bridge accepts an AIMB message only
 if THAT bridge has an `AIMB→PowerHub` edge — a static `CFG.projects` edge or a durable runtime grant
