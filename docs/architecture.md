@@ -1112,6 +1112,24 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.40.0):** *pair-listener binds loopback, not the tailnet IP — fixes an inbound-only host (#60).* A
+  host could SEND to the mesh but NOTHING on the mesh could be routed to it: every `send_to_peer` to Robin's Mac
+  came back `target-unreachable`, though the Mac appeared healthy in every roster and its own sends landed fine.
+  Root cause: the `pairServer` — the host-internal splice target every bridge listens on — was bound to `BIND`,
+  but it is only ever DIALED over loopback. Cross-host delivery reaches a host's WELL-KNOWN port, then the
+  gateway re-splices the envelope to the owning local session via `connect(pairPort, peer.host || HOST)` where
+  `HOST` is hard-coded `127.0.0.1` (`mergeRemoteRoster` rewrites a remote session's port to its gateway's PORT,
+  so `pairPort` never crosses a host). When `bind` is `0.0.0.0` (the Windows boxes) loopback is covered and it
+  works; the Mac's `bind` is its specific **tailnet IP**, so `pairServer` listened on that IP only and the
+  gateway's dial to `127.0.0.1:pairPort` for its OWN gateway-hosted sub-peer (MacDaddy) got ECONNREFUSED →
+  `target-unreachable`. It was Mac-only because only the Mac had BOTH a gateway-hosted sub-peer AND a non-`0.0.0.0`
+  bind (the Linux gateways carry no sub-peers; the Windows boxes bind `0.0.0.0`). Fix: `pairServer.listen(0, HOST)`
+  — the pair port is an internal loopback-only listener and should never have been on the tailnet at all (a small
+  attack-surface win too). This is the SAME failure I earlier wrote off in `test_migrate_dial_live` as "a
+  loopback-harness quirk, not a routing bug" (B bound to 127.0.0.2 → self-splice to 127.0.0.1 refused) — it was a
+  real bug; production just needed a host whose bind wasn't `0.0.0.0`. That test now DELIVERS A→B's gateway-hosted
+  sub-peer and asserts receipt; verified it FAILS with the exact `target-unreachable` against the pre-fix bind, so
+  it is a real regression guard. Full suite green.
 - **Built (v1.39.0):** *dashboard version colouring by COMPATIBILITY, not popularity (Robin).* #50 flagged any
   version differing from the mesh MODE (most common) amber — which during a rollout wrongly reddened the NEWEST
   node (the minority) while the old majority looked fine. Replaced with a compatibility tri-state: **green** =

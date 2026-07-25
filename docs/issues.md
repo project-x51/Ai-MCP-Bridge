@@ -6,32 +6,59 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (as of 2026-07-25, v1.39.0) — read this first after a compact
-**Current version: v1.39.0.** All work committed + pushed to `main` (latest commit `8becb63`). Everything below
-is durable; nothing important is only in chat.
+## RESUME STATE (as of 2026-07-25, v1.40.0) — read this first after a compact
+**Current version: v1.40.0.** All work committed + pushed to `main`. Everything below is durable; nothing
+important is only in chat.
 
-**Live mesh right now** (from `list_sessions`): 4 hosts, mid port-migration but HEALTHY —
-- ROBIN-Z790 (this machine) — v1.39.0, port **12317**, gateway is the Task Tray bridge; my session (Bridget) is a follower.
-- LITTLE-001 — v1.39.0, **12317** (migrated).
-- Robins-Mac — v1.39.0 (back online; owns topic `mac`).
-- **phub-lnx-01 — still v1.32.0 on port 7000** (the one laggard; compatible via dual-port + gossip). Renda present, Modell was offline.
+**Live mesh right now** (from `list_sessions`): every host is on **v1.39.0 gateways** (whole realm upgraded) —
+- ROBIN-Z790 (this machine) — port **12317**, gateway is the Task Tray bridge; my session (Bridget) is a follower.
+- LITTLE-001 — **12317** (migrated; reads the shared Dropbox config, no local edit needed).
+- Robins-Mac — still on **7000** (version-migrated, not yet PORT-migrated); owns topic `mac`; runs MacDaddy.
+- phub-lnx-01, phub-lnx-02 — v1.39.0 gateways, still on **7000** (bare gateways, no sub-peers).
+
+So: **all v1.39.0; port-flip still pending on Mac + both Linux boxes** (7000 → 12317). Dual-port keeps the mixed
+realm federated. Once every host shows 12317 on the dashboard Bridge column, do #59 (rip out compat ports).
+
+**⚠ v1.40.0 fix needs DEPLOYING to the Mac (#60).** The Mac could send to the mesh but nothing could be routed to
+MacDaddy (`target-unreachable`) — the `pairServer` was bound to the Mac's tailnet IP so the gateway's loopback
+re-splice to its own sub-peer was refused. Fixed by binding `pairServer` to loopback. **The Mac must pull v1.40.0
++ restart its bridge** for delivery to MacDaddy to work; the port-flip alone won't fix it (though moving off a
+specific bind would). Windows/Linux boxes are unaffected (bind `0.0.0.0` / no sub-peers) but should still upgrade.
 
 **The port migration (#56) is IN FLIGHT** and working: default ports moved 7000/7001 → **12317/12318** (macOS
-AirPlay clash). The dual-port compat window (#57, v1.37.0) had a cross-host-DIAL gap that PARTITIONED ROBIN off
-the live mesh — fixed in **v1.38.0** (`connectToPeer` compat-port fallback). Lesson baked into §13: dual-port is
-THREE surfaces (bind, same-host election, cross-host dial). The shared Dropbox `config.json` (gitignored) is
-already flipped to `port 12317, wsPort 12318, compatPorts [7000], compatWsPorts [7001]` + the receive/send
-behaviour defaults. **Restarting a bridge = restart the Claude app or the Task Tray** (`tray/windows/
-AiMcpBridgeTray.exe --root <src>`); the desktop relaunches a dead bridge on next MCP use.
+AirPlay clash). Dual-port compat (#57) is THREE surfaces (bind, same-host election, cross-host dial — the v1.38.0
+`connectToPeer` fallback). The shared Dropbox `config.json` (gitignored) is already flipped to `port 12317,
+wsPort 12318, compatPorts [7000], compatWsPorts [7001]` + the receive/send behaviour defaults. **Restarting a
+bridge = restart the Claude app or the Task Tray** (`tray/windows/AiMcpBridgeTray.exe --root <src>`); the desktop
+relaunches a dead bridge on next MCP use. **Use the doorbell** (`node tools/aimb-doorbell.mjs --name Bridget
+--project AIMB --status <file>`, backgrounded) to wait for mail instead of manually polling `@` — it wakes on
+real mail only and costs no tokens idle.
 
-**Immediate pickups:** (a) phub-lnx-01 to pull v1.39.0 + migrate (ping Renda/Modell); (b) an offered resend of
-the `topic:mac` heads-up now that the Mac is back (it failed earlier only because the Mac was offline — the
-`mac` topic is NOT keep_alive, so it doesn't park); (c) once every host shows 12317 on the dashboard Bridge
-column, do #59 (rip out compat ports). **Bridget reconnect ritual:** `register_self` first (name Bridget, secret
-`bridget-aimb-2026`, project AIMB, user Robin), use the returned `peer_id` for inbox/send — the bridge restarts
-often during this migration, so re-register whenever a send returns `unknown-subpeer`.
+**Immediate pickups:** (a) get the Mac on v1.40.0 + restart (unblocks MacDaddy delivery — #60); (b) finish the
+port-flip on Mac + both Linux boxes; (c) #59 once all on 12317. **Bridget reconnect ritual:** `register_self`
+first (name Bridget, secret `bridget-aimb-2026`, project AIMB, user Robin), use the returned `peer_id` for
+inbox/send — the bridge restarts often during this migration, so re-register whenever a send returns
+`unknown-subpeer`.
 
 ---
+
+## #60 — inbound-only host: pair-listener bound the tailnet IP, not loopback  ·  **DONE (v1.40.0)**
+Robin's Mac could SEND to the mesh but nothing on the mesh could be routed TO its sub-peer (MacDaddy): every
+`send_to_peer` returned `target-unreachable`, yet the Mac was healthy in every roster and its own sends landed.
+**Root cause:** the `pairServer` — the host-internal splice target every bridge listens on — was bound to `BIND`,
+but it is only ever DIALED over loopback. Cross-host delivery reaches a host's WELL-KNOWN port, then the gateway
+re-splices the envelope to the owning local session via `connect(pairPort, peer.host || HOST)` with `HOST` hard-
+coded `127.0.0.1` (`mergeRemoteRoster` rewrites a remote session's port to its gateway's PORT, so `pairPort`
+never crosses a host). With `bind: "0.0.0.0"` (the Windows boxes) loopback is covered; the Mac's `bind` is its
+specific **tailnet IP**, so `pairServer` listened on that IP only and the gateway's dial to `127.0.0.1:pairPort`
+for its OWN gateway-hosted sub-peer got ECONNREFUSED → `target-unreachable`. Mac-only because only the Mac had
+BOTH a gateway-hosted sub-peer AND a non-`0.0.0.0` bind (Linux gateways carry no sub-peers; Windows binds
+`0.0.0.0`). **Fix:** `pairServer.listen(0, HOST)` — the pair port is a loopback-only internal listener and should
+never be on the tailnet (small attack-surface win too). This is the same failure earlier mislabelled in
+`test_migrate_dial_live` as "a loopback-harness quirk, not a routing bug"; it was real. That test now delivers
+A→B's gateway-hosted sub-peer and asserts receipt — verified to FAIL with the exact `target-unreachable` against
+the pre-fix bind, so it's a genuine regression guard. Full suite green. **Deploy:** the Mac must pull v1.40.0 +
+restart its bridge for MacDaddy delivery to work.
 
 ## #46 — realm token from a FILE (`AI_BRIDGE_TOKEN_FILE`)  ·  **DONE (v1.29.0)**
 The realm token was appearing in **plaintext in the process command line** on any host whose MCP client

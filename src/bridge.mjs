@@ -105,7 +105,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.39.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.40.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -762,7 +762,14 @@ const pairServer = profile.transport.createServer(sock => {
   })
   sock.on('error', () => {})
 })
-pairServer.listen(0, BIND, () => { pairPort = pairServer.address().port; election() })
+// The pair port is a HOST-INTERNAL splice target: it is only ever dialed over loopback — the local gateway's
+// cross-host CONNECT re-splice and same-host pair-dials both use HOST (127.0.0.1); cross-host peers reach the
+// WELL-KNOWN port and the gateway re-splices locally (mergeRemoteRoster rewrites a remote session's port to the
+// owning gateway's PORT, so pairPort never crosses a host). Binding it to BIND broke exactly that re-splice on a
+// host whose bind is a specific tailnet IP (not 0.0.0.0): pairServer listened on the tailnet IP only, so the
+// gateway's dial to 127.0.0.1:pairPort for its OWN sub-peer got ECONNREFUSED -> the peer was reachable inbound
+// but undeliverable (target-unreachable) to everyone. Bind to loopback so delivery is independent of the bind IF.
+pairServer.listen(0, HOST, () => { pairPort = pairServer.address().port; election() })
 
 // ---------------------------------------------------------------- page delivery (gateway)
 function pageSockOf(instance) {

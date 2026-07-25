@@ -39,15 +39,29 @@ check('the migrated dialer FEDERATED with the old-port peer via the compat fallb
   !!bOnA && bOnA.host === '127.0.0.2', JSON.stringify(aSessions.map(s => ({ name: s.name, host: s.host }))))
 
 // B registers a sub-peer; it must appear in A's roster (gossip flows over the healed link, both directions)
-await call(B, 'register_self', { name: 'Bpeer', secret: 'sb', project: 'DP' })
+const bpeer = await call(B, 'register_self', { name: 'Bpeer', secret: 'sb', project: 'DP' })
 await sleep(600)
 const aSessions2 = (await call(A, 'list_sessions')).sessions || []
 const bpeerVisible = aSessions2.some(s => (s.subpeers || []).some(sp => sp.name === 'Bpeer'))
 check('the old-port peer\'s sub-peers gossip across the healed link into the migrated node\'s roster', bpeerVisible,
   JSON.stringify(aSessions2.map(s => ({ name: s.name, subs: (s.subpeers || []).map(x => x.name) }))))
-// (cross-host message ROUTING is covered by test_federation; not re-tested here because binding B to 127.0.0.2
-//  makes B's own-session self-splice dial HOST (os.hostname) rather than 127.0.0.2 — a loopback-harness quirk,
-//  not a routing bug. In production BIND=0.0.0.0 so that path resolves normally.)
+
+// Cross-host DELIVERY to a peer that is its own host's GATEWAY sub-peer. B is bound to a SPECIFIC IP (127.0.0.2,
+// as a real host binds its tailnet IP — NOT 0.0.0.0), so when A's envelope reaches B's well-known port, B must
+// re-splice it to Bpeer over loopback (127.0.0.1:pairPort). This is the exact path that silently broke the Mac:
+// its pairServer had been bound to the tailnet IP, so the loopback re-splice got ECONNREFUSED and EVERY inbound
+// send to the gateway-hosted sub-peer failed target-unreachable — while the peer could still send out fine. The
+// fix binds pairServer to loopback. Regression guard: A -> Bpeer must deliver, and B must actually receive it.
+await call(A, 'register_self', { name: 'Apeer', secret: 'sa', project: 'DP' })
+const sent = await call(A, 'send_to_peer', { as: 'Apeer', secret: 'sa', target: bpeer.peer_id,
+  verb: 'test', subject: 'cross-host to a gateway-hosted sub-peer', message: 'hello Bpeer' })
+check('A -> B gateway-hosted sub-peer send is accepted (loopback re-splice, not target-unreachable)',
+  sent.ok === true, JSON.stringify(sent))
+await sleep(400)
+const bMail = await call(B, 'inbox', { for: bpeer.peer_id, secret: 'sb', cursor: 0 })
+check('B\'s gateway-hosted sub-peer actually RECEIVES the cross-host message',
+  (bMail.messages || []).some(m => m.subject === 'cross-host to a gateway-hosted sub-peer'),
+  JSON.stringify((bMail.messages || []).map(m => m.subject)))
 
 console.log(`\n${pass} passed, ${fail} failed`)
 for (const b of [A, B]) { try { await b.transport.close() } catch {} }
