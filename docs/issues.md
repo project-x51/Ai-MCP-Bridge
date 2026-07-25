@@ -194,6 +194,17 @@ collapse a FOLLOWER bridge that hosts exactly one sub-peer of its own into that 
 or extend the hide-bridges rule to code follower-bridges the same way it hides agent ones. Verify it does not
 hide a genuine standalone code session that registered no sub-peer. Not a bridge/protocol change.
 
+## #59 — rip out the dual-port compat capability once the realm is migrated  ·  **OPEN** (cleanup, after #56)
+The `compatPorts`/`compatWsPorts` machinery (#57, v1.37.0) is a TRANSITIONAL migration aid. Once #56 is complete
+and the dashboard's Computers/Bridge column shows every host advertising 12317/12318 (no 7000 anywhere), remove
+it: (a) set `compatPorts`/`compatWsPorts` back to `[]` on every host (or delete the keys), then (b) in a later
+release, delete the `COMPAT_PORTS`/`COMPAT_WS_PORTS` config, the multi-port `bindPorts` loop (revert election to
+the single-port bind), the per-ws-port `startWsIngress` loop, and the `becomeFollower(gwPort)` parameter — folding
+back toward the pre-#57 single-port shape while KEEPING the handler extraction (`onControlConn`/`onWsConnection`/
+`startWsIngress`), which is a clean improvement worth retaining. Keep `test_dual_port_live` until the code is
+removed, then delete it with the feature. Do NOT do this until #56 is fully done — removing compat early strands
+any host still on the old port.
+
 ## Doc gotchas to fold into `linux-setup.md` / `architecture.md`
 - **"Synced checkout ≠ running bridge."** A new commit appearing in the Dropbox/git checkout does NOT restart
   the running bridge — the tray only relaunches it if it dies, and the MCP transport doesn't reconnect on its
