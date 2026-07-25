@@ -18,7 +18,10 @@
   .b-send { background:#DBEAFE; color:#1E40AF; } .b-recv { background:#DCFCE7; color:#14532D; }
   .b-page { background:#FCE7F3; color:#9D174D; } .b-sess { background:#E0F2FE; color:#075985; }
   .wait { color:#B45309; font-weight:700; font-size:11px; }   /* uncollected-mail count next to a session/topic */
-  .mono.mixed { color:#B45309; font-weight:600; }             /* a computer running more than one bridge version */
+  .mono.mixed { color:#B45309; font-weight:600; }             /* a computer running more than one bridge version (mid-upgrade) */
+  .mono.latest { color:#16A34A; font-weight:600; }            /* newest bridge version on the mesh */
+  .mono.incompat { color:#DC2626; font-weight:700; }          /* too old to interoperate (below the compat floor) */
+  .mono.ok { color:#334155; }                                 /* compatible, just behind the latest */
   #traces tr:first-child td { background:#FEFCE8; }
   #map { width: 100%; background: #F8FAFC; border: 1px solid #E5E7EB; border-radius: 10px; }
   .hint { color:#9CA3AF; font-size:11.5px; margin: 4px 0 0 2px; }
@@ -61,11 +64,15 @@
   .n-subp.code circle { fill: #FFEDD5; stroke: #F97316; }
   .n-client { font-size: 9px; fill: #94A3B8; text-anchor: middle; pointer-events: none; }
   /* #50: bridge version on the map. Per-node running version; amber when it differs from the mesh mode. */
-  .n-ver { font-size: 8.5px; fill: #94A3B8; text-anchor: middle; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; }
-  .n-ver.odd { fill: #B45309; font-weight: 700; }
-  .n-hostver { font-size: 10px; fill: #64748B; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; }
-  .n-hostver.mixed { fill: #B45309; font-weight: 700; }   /* this host runs >1 version, or differs from the mesh */
-  .map-skew { font-size: 11px; fill: #B45309; font-weight: 700; }   /* whole-mesh version skew banner */
+  .n-ver { font-size: 8.5px; fill: #334155; text-anchor: middle; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; }  /* compatible, behind = black */
+  .n-ver.latest { fill: #16A34A; font-weight: 700; }      /* newest version on the mesh = green */
+  .n-ver.incompat { fill: #DC2626; font-weight: 700; }    /* below the compat floor = red */
+  .n-hostver { font-size: 10px; fill: #334155; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .n-hostver.latest { fill: #16A34A; font-weight: 700; }
+  .n-hostver.incompat { fill: #DC2626; font-weight: 700; }
+  .n-hostver.mixed { fill: #B45309; font-weight: 700; }   /* this host runs >1 version at once (stuck mid-upgrade) */
+  .map-skew { font-size: 11px; fill: #DC2626; font-weight: 700; }   /* red banner: an INCOMPATIBLE version is present */
+  .map-note { font-size: 11px; fill: #64748B; }                     /* neutral note: compatible version skew during a rollout */
   .edge.subp { stroke-dasharray: 3 3; stroke: #EAB308; }
   .pulse circle, .pulse rect { stroke: #F59E0B !important; stroke-width: 3.5 !important; }
   .edge.pulse-e { stroke: #F59E0B; stroke-width: 3; }
@@ -104,7 +111,7 @@
   <h2 class="sech"><span class="chev">▾</span>Mesh map</h2>
   <div class="secb">
     <svg id="map" height="10"></svg>
-    <div class="hint">Click a node to set its alias (sessions/pages rename live; host aliases persist in config.json). Amber flash = message activity. Each node shows its bridge version; <b style="color:#B45309">amber</b> = out of step with the rest of the mesh (a node behind, or one host running two versions mid-upgrade).</div>
+    <div class="hint">Click a node to set its alias (sessions/pages rename live; host aliases persist in config.json). Amber flash = message activity. Each node shows its bridge version: <b style="color:#16A34A">green</b> = latest on the mesh · <span style="color:#334155">black</span> = compatible but behind · <b style="color:#DC2626">red</b> = too old to interoperate · <b style="color:#B45309">amber</b> host badge = one host running two versions mid-upgrade.</div>
   </div>
 </section>
 <section class="sec" data-sec="persist">
@@ -194,13 +201,22 @@
   function pu(proj,user){ if(!proj || proj==='unclassified') return '<span class="kv" style="color:#9CA3AF">infra</span>';
     return '<span class="bub b-pu">'+esc(tc(proj))+(user?' · '+esc(tc(user)):'')+'</span>'; }
   function machineOf(s){ return s.host_label || String(s.session).split('/')[0]; }
-  // Bridge version(s) running on one computer. Normally one; a machine mid-upgrade (or running an old tray
-  // beside a new session) shows several — flagged amber, because a mixed mesh is exactly when version skew
-  // starts explaining "why doesn't feature X work over there".
-  function verCell(vers){
+  // Bridge-version status vs the rest of the mesh (Robin's scheme): the NEWEST version present = green; a version
+  // too old to still interoperate (below the compat floor) = red; a compatible-but-behind version = black.
+  // MIN_COMPATIBLE is the oldest version that still speaks the current protocol — bump it when a real breaking
+  // change ships (last hard break: stable `peer:` ids at v1.26.0, §9). A single host running >1 version at once
+  // is a separate, orthogonal warning (amber) — a stuck mid-upgrade, not an incompatibility.
+  var MIN_COMPATIBLE='1.26.0';
+  function vparts(v){ return String(v||'0').split('.').map(function(n){return parseInt(n,10)||0;}); }
+  function vcmp(a,b){ var A=vparts(a),B=vparts(b); for(var i=0;i<3;i++){ if(A[i]!==B[i]) return A[i]<B[i]?-1:1; } return 0; }
+  function meshLatest(sessions){ var mx=null; (sessions||[]).forEach(function(s){ if(s.bridge_version && (mx===null||vcmp(s.bridge_version,mx)>0)) mx=s.bridge_version; }); return mx; }
+  function verStatus(v,latest){ if(!v) return ''; if(v===latest) return 'latest'; if(vcmp(v,MIN_COMPATIBLE)<0) return 'incompat'; return 'ok'; }
+  // Bridge version(s) on one computer for the Computers table. One version -> coloured by status. Several at once
+  // (an old tray beside a new session) -> amber "mixed", the orthogonal stuck-upgrade warning.
+  function verCell(vers,latest){
     var vs=Object.keys(vers||{}).sort();
     if(!vs.length) return '<span class="mono" style="color:#9CA3AF">—</span>';
-    if(vs.length===1) return '<span class="mono">v'+esc(vs[0])+'</span>';
+    if(vs.length===1) return '<span class="mono '+verStatus(vs[0],latest)+'">v'+esc(vs[0])+'</span>';
     return '<span class="mono mixed" title="mixed bridge versions on this computer">v'+esc(vs.join(', v'))+'</span>';
   }
   // Computers: one row per machine on the mesh (this machine first). Address = the tailnet advertise host
@@ -216,6 +232,7 @@
     (m.pages||[]).forEach(function(p){ ens(p.host_label||gwHost||order[0]||'?').conns++; });
     order.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });   // this machine (local gateway's host) first
     var ct=document.getElementById('comptag'); if(ct) ct.textContent=order.length+(order.length===1?' computer':' computers');
+    var latest=meshLatest(m.sessions);   // newest version anywhere on the mesh = the green baseline
     order.forEach(function(h){
       var e=mach[h], isThis=(h===gwHost);
       var label=(m.hosts&&m.hosts[h])?(m.hosts[h]+' ('+h+')'):h;
@@ -224,7 +241,7 @@
         '<td><span class="b-mach">🖥 '+esc(label)+'</span>'+(isThis?' <span class="bub b-gw">this machine</span>':'')+'</td>'+
         '<td><span class="mono">'+esc(e.addr||(isThis?'local':'—'))+'</span></td>'+
         '<td>'+e.sessions+'</td><td>'+e.conns+'</td>'+
-        '<td>'+verCell(e.vers)+'</td>';
+        '<td>'+verCell(e.vers,latest)+'</td>';
       cb.appendChild(tr);
     });
   }
@@ -425,13 +442,18 @@
     // #50: bridge-version skew is a whole-MESH property, easy to miss on a map that looks healthy node-by-node.
     // Tally every running version; the MODE is "expected", anything else is amber (a node behind, or a host
     // running >1 version at once — the phub-lnx-gold case). Surfaced per-node, per-host, and as a top banner.
+    // version status per node: newest on the mesh = green, below the compat floor = red (incompatible), else black.
+    var latest=meshLatest(m.sessions);
     var verCount={}; (m.sessions||[]).forEach(function(s){ if(s.bridge_version) verCount[s.bridge_version]=(verCount[s.bridge_version]||0)+1; });
-    var verKeys=Object.keys(verCount).sort(function(a,b){ return verCount[b]-verCount[a] || (a<b?1:-1); });
-    var modeVer=verKeys[0]||null, meshMixed=verKeys.length>1;
+    var verKeys=Object.keys(verCount).sort(function(a,b){ return vcmp(b,a); });   // newest first
+    var meshMixed=verKeys.length>1;
+    var incompat=verKeys.filter(function(v){ return verStatus(v,latest)==='incompat'; });
     var X=14, boxTops=20, maxBottom=0, gwCenters=[];  // top margin == bottom margin (viewBox = maxBottom+20)
-    if(meshMixed){
-      var bn=verKeys.slice().sort().map(function(v){return 'v'+v+' ('+verCount[v]+')';}).join('   ');
-      el('text',{x:14,y:15,'class':'map-skew'},gNode).textContent='⚠ mixed bridge versions on the mesh:  '+bn;
+    if(incompat.length || meshMixed){
+      // Red WARNING only when an incompatible version is present; a compatible skew during a rollout is a neutral note.
+      var warn=incompat.length>0;
+      var bn=verKeys.map(function(v){return 'v'+v+(v===latest?' (latest)':'')+' ('+verCount[v]+')';}).join('   ');
+      el('text',{x:14,y:15,'class':warn?'map-skew':'map-note'},gNode).textContent=(warn?'⚠ INCOMPATIBLE bridge version(s) on the mesh:  ':'bridge versions:  ')+bn;
       boxTops=34;   // drop the boxes to make room for the banner
     }
     names.forEach(function(h){
@@ -473,8 +495,8 @@
       var hv={}; hh.sessions.forEach(function(s){ if(s.bridge_version) hv[s.bridge_version]=1; });
       var hvk=Object.keys(hv).sort();
       if(hvk.length){
-        var hOdd=hvk.length>1 || (meshMixed && hvk[0]!==modeVer);
-        var hb=el('text',{x:X+w-14,y:boxTops+22,'class':'n-hostver'+(hOdd?' mixed':''),'text-anchor':'end'},gNode);
+        var hcls=hvk.length>1 ? 'mixed' : verStatus(hvk[0], latest);   // >1 version on one host = amber; else green/red/black by status
+        var hb=el('text',{x:X+w-14,y:boxTops+22,'class':'n-hostver '+hcls,'text-anchor':'end'},gNode);
         hb.textContent='v'+hvk.join(', v');
       }
       var y1=boxTops+70;
@@ -487,9 +509,9 @@
         var ptag=(s.project&&s.project!=='unclassified')?(tc(s.project)+(s.user?' · '+tc(s.user):'')):s.client;
         if(ptag){ var cl=el('text',{x:x,y:y1+63,'class':'n-client'},g); cl.textContent=ptag; }
         if(isGw){ var t=el('text',{x:x,y:y1+4,'class':'n-tag'},g); t.textContent='GATEWAY'; gwCenters.push({x:x,y:y1,host:h}); }
-        // #50: this node's running bridge version, just above the circle. Amber when it isn't the mesh mode —
-        // so a single stale bridge (or the older half of a mixed host) stands out at a glance. (a) + (b).
-        if(s.bridge_version){ var vt=el('text',{x:x,y:y1-27,'class':'n-ver'+((meshMixed&&s.bridge_version!==modeVer)?' odd':'')},g); vt.textContent='v'+s.bridge_version; }
+        // this node's running bridge version, just above the circle: green = newest on the mesh, red = too old to
+        // interoperate, black = compatible but behind.
+        if(s.bridge_version){ var vt=el('text',{x:x,y:y1-27,'class':'n-ver '+verStatus(s.bridge_version,latest)},g); vt.textContent='v'+s.bridge_version; }
         g.addEventListener('click',function(){ alias('session',s.session,s.name); });
         nodePos[s.session]={x:x,y:y1,el:g};
       });

@@ -18,8 +18,8 @@ const doc = dom.window.document
 const roster = {
   type: 'welcome', gateway: 'ROBIN-Z790/aaa', hosts: { 'ROBIN-Z790': 'Lab PC' },
   sessions: [
-    { session: 'ROBIN-Z790/aaa', name: 'aaa', host_label: 'ROBIN-Z790', bridge_version: '1.25.0', is_gateway: true, client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
-    { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', bridge_version: '1.25.0', is_gateway: false, client: 'local-agent', client_kind: 'agent', realm: 'default',
+    { session: 'ROBIN-Z790/aaa', name: 'aaa', host_label: 'ROBIN-Z790', bridge_version: '1.38.0', is_gateway: true, client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
+    { session: 'ROBIN-Z790/bbb', name: 'bbb', host_label: 'ROBIN-Z790', bridge_version: '1.38.0', is_gateway: false, client: 'local-agent', client_kind: 'agent', realm: 'default',
       // topic emphasis fixture: durable(bold) x exclusive(underline) are INDEPENDENT flags — all four combinations
       topics: [
         { pattern: 'bothflags', role: 'owner', holder: 'ROBIN-Z790/bbb/robin-1', exclusive: true, persistent: true },
@@ -30,8 +30,8 @@ const roster = {
       subpeers: [{ id: 'ROBIN-Z790/bbb/robin-1', name: 'ROBIN-1', client_kind: 'agent', project: 'AIMB', user: 'Robin', realm: 'default' },
         { id: 'ROBIN-Z790/bbb/cow-1', name: 'Cowork-Conn', client_kind: 'cowork', project: 'AIMB', user: 'Robin', realm: 'default' },
         { id: 'ROBIN-Z790/bbb/cod-1', name: 'Coder-Conn', client_kind: 'code', project: 'AIMB', user: 'robin', realm: 'default' }] },
-    { session: 'VOLT-001/ccc', name: 'ccc', host_label: 'VOLT-001', bridge_version: '1.24.17', is_gateway: true, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
-    { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', bridge_version: '1.25.0', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
+    { session: 'VOLT-001/ccc', name: 'ccc', host_label: 'VOLT-001', bridge_version: '1.24.0', is_gateway: true, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'Task Tray', client_kind: 'other', realm: 'default', subpeers: [], topics: [] },
+    { session: 'VOLT-001/ddd', name: 'ddd', host_label: 'VOLT-001', bridge_version: '1.30.0', is_gateway: false, origin: 'VOLT-001/ccc', host: '100.115.125.90', client: 'local-agent', client_kind: 'agent', realm: 'default', topics: [],
       subpeers: [{ id: 'VOLT-001/ddd/volt-1', name: 'VOLT-1', client_kind: 'code', mode: 'push', channel_capable: true, project: 'CamelCo', user: 'Alex', realm: 'default' }] },
   ],
   pages: [{ instance: 'pg1', page_kind: 'chat', title: 'Chat — Robin', project: 'camelco', user: 'Robin', host_label: 'ROBIN-Z790' }],
@@ -50,10 +50,10 @@ check('Computers shows the remote machine tailnet address', compRows.some(r => r
 // default expander state: Computers open, Mesh map collapsed
 // bridge version per computer (next to Connections) — single vs skewed
 const rowFor = h => compRows.find(r => r.textContent.includes(h))
-check('Computers shows the bridge version for a machine', !!(rowFor('ROBIN-Z790') && rowFor('ROBIN-Z790').textContent.includes('v1.25.0')), rowFor('ROBIN-Z790') && rowFor('ROBIN-Z790').textContent)
-check('single-version machine is not flagged mixed', !!(rowFor('ROBIN-Z790') && !rowFor('ROBIN-Z790').querySelector('.mixed')))
-check('a version-skewed machine lists BOTH versions', !!(rowFor('VOLT-001') && rowFor('VOLT-001').textContent.includes('v1.24.17') && rowFor('VOLT-001').textContent.includes('v1.25.0')), rowFor('VOLT-001') && rowFor('VOLT-001').textContent)
-check('version-skewed machine is flagged mixed', !!(rowFor('VOLT-001') && rowFor('VOLT-001').querySelector('.mixed')))
+check('Computers shows the bridge version for a machine', !!(rowFor('ROBIN-Z790') && rowFor('ROBIN-Z790').textContent.includes('v1.38.0')), rowFor('ROBIN-Z790') && rowFor('ROBIN-Z790').textContent)
+check('the latest-version machine is coloured green (latest), not mixed', !!(rowFor('ROBIN-Z790') && rowFor('ROBIN-Z790').querySelector('.mono.latest') && !rowFor('ROBIN-Z790').querySelector('.mixed')))
+check('a version-skewed machine lists BOTH versions', !!(rowFor('VOLT-001') && rowFor('VOLT-001').textContent.includes('v1.24.0') && rowFor('VOLT-001').textContent.includes('v1.30.0')), rowFor('VOLT-001') && rowFor('VOLT-001').textContent)
+check('a machine running two versions at once is flagged mixed (amber)', !!(rowFor('VOLT-001') && rowFor('VOLT-001').querySelector('.mixed')))
 check('Computers section open by default', !doc.querySelector('section[data-sec="computers"]').classList.contains('collapsed'))
 check('Mesh map section collapsed by default', doc.querySelector('section[data-sec="map"]').classList.contains('collapsed'))
 
@@ -120,16 +120,17 @@ check('topic durable-only renders bold, NOT underlined', /<b>[^<]*Durableonly/i.
 check('topic exclusive-only renders underlined, NOT bold', /<u>[^<]*Exclusiveonly/i.test(sbHtml) && !/<b>[^<]*Exclusiveonly/i.test(sbHtml))
 check('topic with neither flag renders plain', !/<b>[^<]*Neitherflag/i.test(sbHtml) && !/<u>[^<]*Neitherflag/i.test(sbHtml))
 
-// #50: bridge version ON THE MAP — mesh mode is 1.25.0 (x3); VOLT-001/ccc is behind (1.24.17), and VOLT-001
-// runs TWO versions at once. The map must surface all of that (a per-node version, a per-host badge, a banner).
-check('map draws a whole-mesh version-skew banner', !!map.querySelector('.map-skew') && /1\.24\.17/.test(map.querySelector('.map-skew').textContent))
+// bridge version ON THE MAP — tri-state by compatibility (Robin's scheme). latest = 1.38.0 (green); VOLT-001/ddd
+// is 1.30.0 (compatible-but-behind = black); VOLT-001/ccc is 1.24.0, below the 1.26.0 compat floor (incompatible
+// = red); and VOLT-001 runs TWO versions at once (mixed host badge = amber). A red banner flags the incompatible.
+check('map draws a RED banner naming the INCOMPATIBLE version', !!map.querySelector('.map-skew') && /INCOMPATIBLE/i.test(map.querySelector('.map-skew').textContent) && /1\.24\.0/.test(map.querySelector('.map-skew').textContent))
 const hostVers = [...map.querySelectorAll('.n-hostver')]
-check('the version-skewed host box badge is flagged mixed (VOLT-001 runs two)', hostVers.some(e => e.classList.contains('mixed') && /1\.24\.17/.test(e.textContent) && /1\.25\.0/.test(e.textContent)), hostVers.map(e => e.textContent + (e.classList.contains('mixed') ? '*' : '')).join(' | '))
-check('the uniform host box badge is NOT flagged mixed (ROBIN-Z790 = mesh mode)', hostVers.some(e => e.textContent === 'v1.25.0' && !e.classList.contains('mixed')))
+check('the host running two versions at once is flagged mixed (amber)', hostVers.some(e => e.classList.contains('mixed') && /1\.24\.0/.test(e.textContent) && /1\.30\.0/.test(e.textContent)), hostVers.map(e => e.textContent + (e.classList.contains('mixed') ? '*' : '')).join(' | '))
+check('the latest-version host badge is green (latest), not mixed', hostVers.some(e => e.textContent === 'v1.38.0' && e.classList.contains('latest') && !e.classList.contains('mixed')))
 const nver = id => { const n = doc.getElementById(id); return n && n.querySelector('.n-ver') }
-check('a behind node carries an AMBER version (VOLT-001/ccc @1.24.17)', !!nver('n-VOLT-001/ccc') && nver('n-VOLT-001/ccc').classList.contains('odd') && nver('n-VOLT-001/ccc').textContent === 'v1.24.17')
-check('a mode-version node is NOT amber (VOLT-001/ddd @1.25.0)', !!nver('n-VOLT-001/ddd') && !nver('n-VOLT-001/ddd').classList.contains('odd') && nver('n-VOLT-001/ddd').textContent === 'v1.25.0')
-check('the local gateway node shows its version too (ROBIN-Z790/aaa @1.25.0)', !!nver('n-ROBIN-Z790/aaa') && nver('n-ROBIN-Z790/aaa').textContent === 'v1.25.0')
+check('an INCOMPATIBLE node is RED (VOLT-001/ccc @1.24.0)', !!nver('n-VOLT-001/ccc') && nver('n-VOLT-001/ccc').classList.contains('incompat') && nver('n-VOLT-001/ccc').textContent === 'v1.24.0')
+check('a COMPATIBLE-OLD node is black/ok — not green, not red (VOLT-001/ddd @1.30.0)', !!nver('n-VOLT-001/ddd') && nver('n-VOLT-001/ddd').classList.contains('ok') && !nver('n-VOLT-001/ddd').classList.contains('latest') && !nver('n-VOLT-001/ddd').classList.contains('incompat') && nver('n-VOLT-001/ddd').textContent === 'v1.30.0')
+check('the LATEST node is GREEN (ROBIN-Z790/aaa @1.38.0)', !!nver('n-ROBIN-Z790/aaa') && nver('n-ROBIN-Z790/aaa').classList.contains('latest') && nver('n-ROBIN-Z790/aaa').textContent === 'v1.38.0')
 
 // z-order fix: boxes < edges < nodes, so a second host's opaque box can't paint over its own edges
 const groups = [...map.children].filter(c => c.tagName === 'g')

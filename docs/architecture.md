@@ -1112,6 +1112,19 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.39.0):** *dashboard version colouring by COMPATIBILITY, not popularity (Robin).* #50 flagged any
+  version differing from the mesh MODE (most common) amber — which during a rollout wrongly reddened the NEWEST
+  node (the minority) while the old majority looked fine. Replaced with a compatibility tri-state: **green** =
+  the newest version present on the mesh · **red** = below the compat floor (`MIN_COMPATIBLE`, currently 1.26.0 —
+  the stable-`peer:`-id break, §9), i.e. too old to interoperate · **black** = compatible, just behind. A host
+  running >1 version at once stays a separate **amber** "mixed" badge (a stuck mid-upgrade, orthogonal to
+  compatibility). The map banner is now RED only when an incompatible version is actually present; a compatible
+  skew during a rollout is a neutral grey note, not an alarm. Applied everywhere versions render — per-node map
+  labels, per-host badges, the Computers/Bridge column — with the legend rewritten. `MIN_COMPATIBLE` lives in
+  `dashboard.html` (served by the gateway) with a comment to bump it on a real breaking change. Verified by the
+  rewritten `test_dashboard_multihost` (latest=green, a <floor node=red, a ≥floor-but-behind node=black, a
+  two-version host=amber, red banner names the incompatible). On the current live mesh: 1.38.0 green, 1.36.0 and
+  1.32.0 black, no red — a healthy rollout reads as such. Suite 662 across 33.
 - **Built (v1.38.0):** *dual-port, the CROSS-HOST dial half (#57 fix — live-mesh incident).* v1.37.0's compat
   window covered the LISTEN side (a gateway binds new+old ports) and same-host election, but not the OUTBOUND
   cross-host dial. `facets/discovery/tailscale.js` hands each candidate the DIALER's own port (it assumes a
