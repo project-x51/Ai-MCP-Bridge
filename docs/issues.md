@@ -19,11 +19,17 @@ important is only in chat.
 So: **all v1.39.0; port-flip still pending on Mac + both Linux boxes** (7000 → 12317). Dual-port keeps the mixed
 realm federated. Once every host shows 12317 on the dashboard Bridge column, do #59 (rip out compat ports).
 
-**⚠ v1.40.0 fix needs DEPLOYING to the Mac (#60).** The Mac could send to the mesh but nothing could be routed to
-MacDaddy (`target-unreachable`) — the `pairServer` was bound to the Mac's tailnet IP so the gateway's loopback
-re-splice to its own sub-peer was refused. Fixed by binding `pairServer` to loopback. **The Mac must pull v1.40.0
-+ restart its bridge** for delivery to MacDaddy to work; the port-flip alone won't fix it (though moving off a
-specific bind would). Windows/Linux boxes are unaffected (bind `0.0.0.0` / no sub-peers) but should still upgrade.
+**"Mac never receives Bridget's messages" — real cause is #62 (cross-project consent), NOT #60.** The Mac is
+now fully migrated (v1.40.0 / 12317 / bind 0.0.0.0). The actual block: `deliveryAllowed` is receiver-side +
+directional and the Mac's bridge lacks an `AIMB→PowerHub` grant (ROBIN/LITTLE have it via shared Dropbox
+persistence; the Mac, a separate machine, doesn't). So AIMB (Bridget) → PowerHub (MacDaddy/Mac-2) is
+`project-denied` and dropped — while **#61** makes the sender see `ok:true`, which masked it and sent me chasing
+#60/ports for an hour. #60 was a real latent bug (tailnet-IP `pairServer` bind) and its v1.40.0 fix stands, but it
+was NOT this symptom's cause. **Immediate fix:** add to the Mac's `config.json` (live-reloads, no restart) —
+`"projects":{"default":"strict","allow":[{"from":"AIMB","to":"PowerHub","mode":"bidirectional"}]}`. Diagnosed via
+SSH: **`ssh mac` now works** (key auth over Tailscale + macOS Remote Login; alias in `~/.ssh/config`, key
+`~/.ssh/robins_mac_ed25519`, user `robin`, host `robins-macbook-pro.tail14b1ac.ts.net`). NB the Mac App Store
+Tailscale build can't run Tailscale's own SSH server — we use macOS Remote Login instead.
 
 **The port migration (#56) is IN FLIGHT** and working: default ports moved 7000/7001 → **12317/12318** (macOS
 AirPlay clash). Dual-port compat (#57) is THREE surfaces (bind, same-host election, cross-host dial — the v1.38.0
@@ -34,13 +40,44 @@ relaunches a dead bridge on next MCP use. **Use the doorbell** (`node tools/aimb
 --project AIMB --status <file>`, backgrounded) to wait for mail instead of manually polling `@` — it wakes on
 real mail only and costs no tokens idle.
 
-**Immediate pickups:** (a) get the Mac on v1.40.0 + restart (unblocks MacDaddy delivery — #60); (b) finish the
-port-flip on Mac + both Linux boxes; (c) #59 once all on 12317. **Bridget reconnect ritual:** `register_self`
+**Immediate pickups:** (a) add the `AIMB→PowerHub` `projects` edge to the Mac's `config.json` to unblock delivery
+to MacDaddy/Mac-2 (#62; live-reloads); (b) fix #61 (ok:true masks project-denied/dead-letter) — highest-value, it
+hid #62; (c) #59 once all on 12317. **Bridget reconnect ritual:** `register_self`
 first (name Bridget, secret `bridget-aimb-2026`, project AIMB, user Robin), use the returned `peer_id` for
 inbox/send — the bridge restarts often during this migration, so re-register whenever a send returns
 `unknown-subpeer`.
 
 ---
+
+## #62 — cross-project consent grants don't federate (per-receiving-host)  ·  **OPEN (root cause of "Mac never receives")**
+`deliveryAllowed` (bridge.mjs) is RECEIVER-side and directional: a PowerHub bridge accepts an AIMB message only
+if THAT bridge has an `AIMB→PowerHub` edge — a static `CFG.projects` edge or a durable runtime grant
+(`allow_project`, persisted in `lib/consent.js`'s `runtimeAllow`). **Grants are per-receiving-host and do NOT
+federate across the mesh.** So a sender that was legitimately granted access on one host (ROBIN/LITTLE — shared
+Dropbox persistence) silently CANNOT reach the same-named peer once it lives on a host that lacks the grant
+(Robin's Mac — separate machine, own persistence). This was the real cause of "MacDaddy/Mac-2 never receive
+Bridget's messages" while VirtualGuy on LITTLE received them fine. Confirmed: `deliverSub` returns
+`project-denied` (bridge.mjs:638) on the Mac; the reply-cap exception (bridge.mjs:263) still works, which is why
+a `reply_to` reply lands where a plain send doesn't. **Immediate fix (applied):** add a static edge to the Mac's
+`config.json` — `"projects": { "default": "strict", "allow": [ { "from": "AIMB", "to": "PowerHub", "mode":
+"bidirectional" } ] }` — which live-reloads (bridge.mjs:211, no restart). **Design fix (this issue):** decide how
+cross-project grants should propagate — options: (a) gossip runtime grants to peer hubs so a grant is realm-wide;
+(b) evaluate consent against the SENDER's home-bridge grant (carried, signed, in the envelope) rather than only
+the receiver's local map; (c) keep it receiver-local but make the shared config the single source of truth for
+static edges and document that per-host runtime grants are host-scoped by design. Relates to #61.
+
+## #61 — `send_to_peer` reports `ok:true` even when delivery is denied or dead-lettered  ·  **OPEN (observability/correctness)**
+The pair-splice MSG handler (bridge.mjs, `pairServer`) sends `CLOSE {code:'ok'}` UNCONDITIONALLY after calling
+`deliverSub`/`deliver`, ignoring their return. So when `deliverSub` returns `project-denied` (bridge.mjs:638) or
+dead-letters to the process inbox (bridge.mjs:635 — target not in `subpeers`), the CROSS-HOST sender's
+`dialAndSend` sees `CLOSE` and reports **`ok:true`**. The caller cannot tell a real delivery from a silent drop.
+This masked #62 for a full debugging session — every denied/dropped send to the Mac looked like a success, which
+sent the investigation chasing transport/port/bind theories (#60) instead of consent. **Fix:** propagate the real
+outcome — have the MSG handler send `CLOSE {code}` carrying `deliverSub`'s result (e.g. `project-denied`,
+`dead-lettered`), and have `dialAndSend` surface a non-ok / a `delivered:false` + `code` to the sender. Keep
+dead-letter as `ok` only if we deliberately want fire-and-forget semantics — but a `project-denied` MUST NOT read
+as success. Verified live: sends to MacDaddy returned `ok:true` while its `unread_direct` stayed 0 and it never
+received them. Relates to #62.
 
 ## #60 — inbound-only host: pair-listener bound the tailnet IP, not loopback  ·  **DONE (v1.40.0)**
 Robin's Mac could SEND to the mesh but nothing on the mesh could be routed TO its sub-peer (MacDaddy): every
