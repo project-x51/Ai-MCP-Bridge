@@ -1112,6 +1112,27 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.42.0):** *a cross-host send reports the receiver's REAL outcome — `ok:true` no longer masks a
+  denied or dead-lettered delivery (#61).* **What broke:** `send_to_peer` to a sub-peer on ANOTHER host returned
+  `ok:true` even when that host refused (`project-denied`) or dead-lettered the message — which hid #62 (grants don't
+  federate) for a full debugging session. A LOCAL send already returned the honest result; only the cross-host path
+  lied. **Root cause:** the `pairServer` `MSG` handler called `deliver`/`deliverSub` and then sent `CLOSE {code:'ok'}`
+  unconditionally, ignoring the return; `dialAndSend` resolved `{ok:true}` on any `CLOSE`. **Fix:** the MSG handler
+  now captures the result and sends `CLOSE {code}` with `code = 'ok'` when `r.ok`, else `r.code`, plus
+  `dead_lettered`/`dedup` flags when set; `dialAndSend` resolves `ok` only for `code:'ok'` or a code-less CLOSE, else
+  `{ok:false, code}`, and passes the flags through. The gateway's CONNECT splice is byte-opaque, so the richer CLOSE
+  reaches the remote sender unchanged, and the result now mirrors a local send exactly: denied → `{ok:false,
+  code:'project-denied'}`, dead-letter → `{ok:true, dead_lettered:true}`, loop → `{ok:false, code:'loop'}`. All
+  consumers (`send_to_peer` spreads `...r`; topic/publish fan-out and the WS leaf `send` read `r.ok`/`r.code`;
+  `deliverSystemToProject` counts `r.ok`) pick it up with no further change. **Backward compat:** an OLD receiver
+  always sends `CLOSE {code:'ok'}` → a new sender still reads ok (no regression); a NEW receiver's `CLOSE
+  {code:'project-denied'}` read by an OLD sender still reads ok (old code ignores the code — no improvement until the
+  SENDER is on 1.42.0, but no breakage). So the fix is sender+receiver: both ends must run 1.42.0 to see a refusal.
+  New `test_delivery_outcome_live` (10 checks, two gateways on 127.0.0.1/127.0.0.2): cross-host denied →
+  `ok:false/project-denied` and the target's inbox stays empty; same-project positive control delivers; after the
+  B-side `allow_project {project:'Mine'}` the same send succeeds and lands; a send to a dead id under B's session
+  reports `dead_lettered:true` and lands in B's process inbox. Verified to FAIL against the pre-fix bridge (2 fails:
+  the denied send reads `ok:true`, the dead-letter reads plain `ok:true`), so it is a real regression guard.
 - **Built (v1.41.0):** *connect reminders (by client type), claim-default flip, and a session-resolved `set_wake` (#64).*
   Three related changes, all Robin's calls. (1) **`connect` operation + `client` scope** in the reminder system
   (`lib/reminders.js`): a reminder can now be pinned to the register moment and filtered by the session's client

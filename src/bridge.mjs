@@ -105,7 +105,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.41.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.42.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -752,12 +752,16 @@ const pairServer = profile.transport.createServer(sock => {
       sendFrame(sock, { t: 'ACCEPT', connId: crypto.randomBytes(4).toString('hex') })
     } else if (f.t === 'MSG') {
       const env = f.body
+      let r = /** @type {any} */ ({ ok: true })
       if (env && env.id) {
-        if (env.to === SESSION) await deliver(env)
-        else if (isLocalSubId(env.to)) deliverSub(env.to, env)
-        else await deliver(env)            // pre-1.1 senders: target match already enforced at CONNECT
+        if (env.to === SESSION) r = await deliver(env)
+        else if (isLocalSubId(env.to)) r = deliverSub(env.to, env)
+        else r = await deliver(env)        // pre-1.1 senders: target match already enforced at CONNECT
       }
-      sendFrame(sock, { t: 'CLOSE', code: 'ok' })
+      // #61: CLOSE carries the REAL outcome (was an unconditional code:'ok', which made a project-denied /
+      // dead-lettered cross-host send read as success). Pre-1.42 senders ignore the code and still read ok.
+      sendFrame(sock, { t: 'CLOSE', code: r && r.ok ? 'ok' : ((r && r.code) || 'failed'),
+        ...(r && r.dead_lettered ? { dead_lettered: true } : {}), ...(r && r.dedup ? { dedup: true } : {}) })
     } else if (f.t === 'PING') sendFrame(sock, { t: 'PONG', seq: f.seq })
   })
   sock.on('error', () => {})
@@ -823,7 +827,11 @@ function dialAndSend(port, host, target, env) {
     onFrames(sock, f => {
       if (f.t === 'ACCEPT') sendFrame(sock, { t: 'MSG', seq: 1, body: env })
       else if (f.t === 'REJECT') { clearTimeout(timer); finish({ ok: false, code: f.code }) }
-      else if (f.t === 'CLOSE') { clearTimeout(timer); finish({ ok: true }) }
+      else if (f.t === 'CLOSE') {   // #61: surface the receiver's outcome; a code-less CLOSE (older bridge) reads as ok
+        clearTimeout(timer)
+        const good = !f.code || f.code === 'ok'
+        finish({ ok: good, ...(good ? {} : { code: f.code }), ...(f.dead_lettered ? { dead_lettered: true } : {}), ...(f.dedup ? { dedup: true } : {}) })
+      }
     })
     sock.on('error', e => { clearTimeout(timer); finish({ ok: false, code: e.code || 'dial-failed' }) })
   })

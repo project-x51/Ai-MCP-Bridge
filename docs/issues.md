@@ -6,9 +6,13 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-29, v1.41.0) — read this first after a compact
-**Current version: v1.41.0.** All work committed + pushed to `main`. Everything below is durable; nothing
-important is only in chat.
+## RESUME STATE (updated 2026-09-30, v1.42.0) — read this first after a compact
+**Current version: v1.42.0.** All work committed to `main` (v1.42.0 committed locally, not yet pushed). Everything
+below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.42.0):** Fixed **#61** — a cross-host `send_to_peer` now reports the receiver's real outcome
+(`project-denied` → `ok:false`; dead-letter → `ok:true, dead_lettered:true`) instead of a blanket `ok:true`. Hosts
+must run 1.42.0 on both ends to see refusals; roll it out so #62-style drops stop failing silently.
 
 **2026-09-29 (v1.41.0):** Shipped **#64** — connect reminders (new `connect` operation + `client` scope, so a
 standing reminder can be pinned to register and filtered by client kind; the shipped default tells `code` sessions
@@ -51,8 +55,8 @@ relaunches a dead bridge on next MCP use. **Use the doorbell** (`node tools/aimb
 real mail only and costs no tokens idle.
 
 **Immediate pickups:** (a) add the `AIMB→PowerHub` `projects` edge to the Mac's `config.json` to unblock delivery
-to MacDaddy/Mac-2 (#62; live-reloads); (b) fix #61 (ok:true masks project-denied/dead-letter) — highest-value, it
-hid #62; (c) #59 once all on 12317. **Bridget reconnect ritual:** `register_self`
+to MacDaddy/Mac-2 (#62; live-reloads); (b) ~~fix #61~~ DONE v1.42.0 — roll 1.42.0 to every host so denied sends
+stop reading ok:true; (c) #59 once all on 12317. **Bridget reconnect ritual:** `register_self`
 first (name Bridget, secret `bridget-aimb-2026`, project AIMB, user Robin), use the returned `peer_id` for
 inbox/send — the bridge restarts often during this migration, so re-register whenever a send returns
 `unknown-subpeer`.
@@ -169,7 +173,7 @@ cross-project grants should propagate — options: (a) gossip runtime grants to 
 the receiver's local map; (c) keep it receiver-local but make the shared config the single source of truth for
 static edges and document that per-host runtime grants are host-scoped by design. Relates to #61.
 
-## #61 — `send_to_peer` reports `ok:true` even when delivery is denied or dead-lettered  ·  **OPEN (observability/correctness)**
+## #61 — `send_to_peer` reports `ok:true` even when delivery is denied or dead-lettered  ·  **DONE (v1.42.0)**
 The pair-splice MSG handler (bridge.mjs, `pairServer`) sends `CLOSE {code:'ok'}` UNCONDITIONALLY after calling
 `deliverSub`/`deliver`, ignoring their return. So when `deliverSub` returns `project-denied` (bridge.mjs:638) or
 dead-letters to the process inbox (bridge.mjs:635 — target not in `subpeers`), the CROSS-HOST sender's
@@ -181,6 +185,10 @@ outcome — have the MSG handler send `CLOSE {code}` carrying `deliverSub`'s res
 dead-letter as `ok` only if we deliberately want fire-and-forget semantics — but a `project-denied` MUST NOT read
 as success. Verified live: sends to MacDaddy returned `ok:true` while its `unread_direct` stayed 0 and it never
 received them. Relates to #62.
+**Fixed (v1.42.0):** the MSG handler's `CLOSE` now carries `deliver`/`deliverSub`'s result (`code` + `dead_lettered`
+/`dedup`) and `dialAndSend` surfaces it, so a cross-host send returns exactly what a local one does (denied →
+`ok:false, code:'project-denied'`; dead-letter → `ok:true, dead_lettered:true`). Needs 1.42.0 on BOTH ends (a code-
+less/old CLOSE still reads ok). Guard: `test_delivery_outcome_live`, proven to fail pre-fix. See architecture §13.
 
 ## #60 — inbound-only host: pair-listener bound the tailnet IP, not loopback  ·  **DONE (v1.40.0)**
 Robin's Mac could SEND to the mesh but nothing on the mesh could be routed TO its sub-peer (MacDaddy): every
