@@ -6,11 +6,21 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (as of 2026-07-25, v1.40.0) — read this first after a compact
-**Current version: v1.40.0.** All work committed + pushed to `main`. Everything below is durable; nothing
+## RESUME STATE (updated 2026-09-29, v1.41.0) — read this first after a compact
+**Current version: v1.41.0.** All work committed + pushed to `main`. Everything below is durable; nothing
 important is only in chat.
 
-**Live mesh right now** (from `list_sessions`): every host is on **v1.39.0 gateways** (whole realm upgraded) —
+**2026-09-29 (v1.41.0):** Shipped **#64** — connect reminders (new `connect` operation + `client` scope, so a
+standing reminder can be pinned to register and filtered by client kind; the shipped default tells `code` sessions
+to use the doorbell), `claim_topic` defaults flipped to **exclusive+announce_offline+persistent all true**, and
+`set_wake` now returns a **session-type-resolved** unsupported message (code → doorbell fallback; else → none).
+The bridge restarted at some point over the ~2 months since the snapshot below — on reconnect the queue epoch had
+reset and Bridget's `Bridge` claim had NOT rehydrated (re-claimed it). **The mesh snapshot below is from
+2026-07-25 and is almost certainly stale — re-run `list_sessions` before trusting host/port details.** Rollout
+note for #64: the `connect` default belongs in a host's config only AFTER it runs 1.41.0 (on 1.40.0 an unknown
+`connect`/`client` folds to a `receive`/`all` reminder), so the live/shared config was intentionally NOT edited.
+
+**Live mesh (SNAPSHOT 2026-07-25 — STALE, re-verify):** every host was on **v1.39.0 gateways** —
 - ROBIN-Z790 (this machine) — port **12317**, gateway is the Task Tray bridge; my session (Bridget) is a follower.
 - LITTLE-001 — **12317** (migrated; reads the shared Dropbox config, no local edit needed).
 - Robins-Mac — still on **7000** (version-migrated, not yet PORT-migrated); owns topic `mac`; runs MacDaddy.
@@ -48,6 +58,26 @@ inbox/send — the bridge restarts often during this migration, so re-register w
 `unknown-subpeer`.
 
 ---
+
+## #64 — connect reminders (by client type) + claim-default flip + session-resolved set_wake  ·  **DONE (v1.41.0)**
+Three related changes (Robin's calls), all shipped and tested. **(a) Connect reminders.** Added `connect` to
+`BEHAVIOR_OPERATIONS` and `client` to `BEHAVIOR_SCOPES` (`lib/reminders.js`); `matches()` gains a `client` branch
+(match = client kind: code|agent|cowork|other). `register_self` computes `opReminders(id,'connect',{client_kind})`
+and returns them as `connect_reminders` (both fresh + reattach paths). The shipped **config default** (a `connect`
+/`client:code` reminder in `behaviors.default`) tells code sessions to run the doorbell — a runtime-configurable,
+client-typed standing hint, replacing the idea of a static instructions line. This is how a poll/code client
+learns its options at connect while bridge-side `wake` stays unimplemented. **(b) claim_topic defaults** flipped
+to `exclusive:true`, `announce_offline:true` (persistent was already default-true when persistence is on): a plain
+claim is now sole-owner + durable + offline-announcing; shared/silent are explicit opt-outs. Tool-schema + config
+docs updated. **(c) set_wake** stays `unsupported` (`CAPS.wake=false`) but resolves the message by the CALLER's
+client kind — `code` → "Not implemented, but you can use the doorbell service as a fallback" (+ the command);
+others → "Not implemented for your session with no fallback supported". Tests: `test_connect_reminders_live` (10
+checks — claim defaults on the roster, both set_wake branches, client-scope gating both directions);
+`test_offline_park_live` updated so the silent-parking case opts out of announce explicitly. Full suite green.
+**Rollout:** the `connect` config default goes into a host's live config only AFTER it runs 1.41.0. **Follow-on
+idea (not built):** `connect` currently fires in the `register_self` RESPONSE (pull); a true bridge-initiated
+`wake` (push a non-running session awake) remains impossible — the doorbell is the fallback and is what #64 wires
+in by default.
 
 ## #63 — stale cross-host federation state after a peer's port-migration doesn't self-heal  ·  **OPEN (needed a manual restart)**
 After the Mac flipped 7000→12317 (and churned through several restarts), **LITTLE-001 kept stale delivery state for

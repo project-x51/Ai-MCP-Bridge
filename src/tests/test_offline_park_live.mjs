@@ -31,7 +31,7 @@ await call(B, 'register_self', { name: 'Owner', secret: 'so', project: 'shared' 
 await call(B, 'register_self', { name: 'Sender', secret: 'ss', project: 'shared' })
 await sleep(150)
 await call(B, 'claim_topic', { topic: 'jobs', as: 'Owner', secret: 'so', exclusive: true, announce_offline: true })
-await call(B, 'claim_topic', { topic: 'quiet', as: 'Owner', secret: 'so', exclusive: true })   // announce_offline default false
+await call(B, 'claim_topic', { topic: 'quiet', as: 'Owner', secret: 'so', exclusive: true, announce_offline: false })   // #64: announce_offline now defaults TRUE, so silent parking must opt out explicitly
 await sleep(150)
 await call(B, 'deregister', { peer_id: (await call(B, 'list_sessions')).sessions.flatMap(s => s.subpeers || []).find(s => s.name === 'Owner').id, secret: 'so' })
 await sleep(150)

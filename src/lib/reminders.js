@@ -16,16 +16,21 @@
 import { lc, projKey } from './keys.js'
 import { patternKey, topicMatch } from './topics.js'
 
-export const BEHAVIOR_SCOPES = ['topic', 'host', 'project', 'subscription', 'all']
+// Scopes select WHICH instances of an operation a reminder fires for, by matching the operation's subject.
+// 'client' matches the SESSION's client kind (code|agent|cowork|other) — used by the 'connect' operation to pin
+// connect-time guidance to a client type (e.g. tell only 'code' sessions about the doorbell fallback for wake).
+export const BEHAVIOR_SCOPES = ['topic', 'host', 'project', 'subscription', 'client', 'all']
 // The operations a reminder can attach to. 'receive' is the default. Adding one is: list it here + call
 // remindersFor() at that bridge hook with a subject context. An operation that can't expose a given scope's
 // subject (e.g. a topic scope on allow_project, which has no topic) simply never matches — harmless.
-export const BEHAVIOR_OPERATIONS = ['receive', 'send', 'publish', 'claim_topic', 'release_topic', 'subscribe', 'allow_project', 'revoke_project', 'request_project_access']
+// 'connect' fires ONCE when a session registers (register_self): its subject carries client_kind, so a
+// 'client'-scoped connect reminder targets a session TYPE — a standing "on connect, if you are <kind>, do X".
+export const BEHAVIOR_OPERATIONS = ['receive', 'send', 'publish', 'claim_topic', 'release_topic', 'subscribe', 'allow_project', 'revoke_project', 'request_project_access', 'connect']
 // #47: 'deliver' was renamed 'receive'. The old name stays accepted everywhere as an alias — both from a stale
 // client that still sends operation:'deliver', and from durable .beh files written before the rename — so nothing
 // re-anchors: op0 folds it to the canonical name on the way in.
 export const OP_ALIASES = { deliver: 'receive' }
-const ORDER = { topic: 0, subscription: 1, project: 2, host: 3, all: 4 }   // most-specific first in the returned list
+const ORDER = { topic: 0, subscription: 1, client: 2, project: 3, host: 4, all: 5 }   // most-specific first in the returned list
 const MAX_LEN = 365, MAX_COUNT = 64   // per-reminder char cap (raised from 280 ~+30% so a convention can spell out its format)
 const op0 = o => { const x = OP_ALIASES[o] || o; return BEHAVIOR_OPERATIONS.includes(x) ? x : 'receive' }   // normalize: alias/unknown/absent ⇒ canonical, default 'receive'
 // identity key for a (operation, scope, match) so re-registering the same one replaces it (case-insensitive).
@@ -48,6 +53,7 @@ export function createReminders({ persistence, persist }) {
     if (b.scope === 'project') return !!ctx.project && projKey(b.match) === projKey(ctx.project)
     if (b.scope === 'topic') return !!ctx.topic && patternKey(b.match) === patternKey(ctx.topic)
     if (b.scope === 'subscription') return !!(ctx.topic && (patternKey(b.match) === patternKey(ctx.topic) || (ctx.matchedPattern && patternKey(b.match) === patternKey(ctx.matchedPattern)) || topicMatch(b.match, ctx.topic)))
+    if (b.scope === 'client') return !!ctx.client_kind && lc(b.match) === lc(ctx.client_kind)   // 'connect' op: match the session's client kind
     return false
   }
 

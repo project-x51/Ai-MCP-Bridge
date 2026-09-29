@@ -1112,6 +1112,22 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.41.0):** *connect reminders (by client type), claim-default flip, and a session-resolved `set_wake` (#64).*
+  Three related changes, all Robin's calls. (1) **`connect` operation + `client` scope** in the reminder system
+  (`lib/reminders.js`): a reminder can now be pinned to the register moment and filtered by the session's client
+  kind (`code`/`agent`/`cowork`/`other`). `register_self` returns any matching ones as `connect_reminders`, and
+  the shipped config default tells **code** sessions to run the doorbell — a runtime-configurable, client-typed
+  standing hint rather than a hardcoded instructions line. There is no bridge-side `wake`, so this is how a poll
+  client learns its options at connect. (2) **`claim_topic` defaults flipped to `exclusive:true` +
+  `announce_offline:true`** (persistent was already default-true): a plain claim is now a sole-owner, durable,
+  offline-announcing responsibility — matching how every real topic is already claimed; shared/silent are the
+  opt-outs. (3) **`set_wake` now answers by session type**: still `unsupported` (`CAPS.wake=false`), but a `code`
+  session is told *"use the doorbell as a fallback"* (with the command), while others get *"no fallback
+  supported"* — so the caller learns what it can actually do. New `test_connect_reminders_live` (10 checks) proves
+  the claim defaults on the roster, both `set_wake` branches, and client-scope gating (code matches, cowork
+  doesn't, `all` always fires); `test_offline_park_live` updated (silent parking now opts out explicitly). Full
+  suite green. Live rollout note: the `connect` default goes into a host's config only AFTER it runs 1.41.0 — on
+  1.40.0 an unknown `connect` op/`client` scope folds to a `receive`/`all` reminder.
 - **Built (v1.40.0):** *pair-listener binds loopback, not the tailnet IP — fixes an inbound-only host (#60).* A
   host could SEND to the mesh but NOTHING on the mesh could be routed to it: every `send_to_peer` to Robin's Mac
   came back `target-unreachable`, though the Mac appeared healthy in every roster and its own sends landed fine.

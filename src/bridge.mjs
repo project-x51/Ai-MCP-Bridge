@@ -105,7 +105,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.40.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.41.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1621,7 +1621,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         await syncDurableMailbox(existing)   // §23: a returning peer also picks up out-of-band parked mail
         callerId = existing.id   // §20 resync on reattach too: hand back current topics + access + the inbox hint
         const reTopics = [...myTopics.values()].filter(e => e.holder === existing.id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: consent.reachable(existing.identity?.project), behaviors: reminders.list(existing.id), default_behaviors: reminders.defaultList() })
+        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: consent.reachable(existing.identity?.project), behaviors: reminders.list(existing.id), default_behaviors: reminders.defaultList(), connect_reminders: opReminders(existing.id, 'connect', { client_kind: existing.client_kind }) || [] })
       }
       let parent = null
       if (a.parent) {
@@ -1692,7 +1692,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // §20 resync: hand back the identity's current topics (owned + subscribed, post-rehydration) and the
       // projects it may reach — so a reconnecting/compacted session relearns its state without re-attaching.
       const myTopicsNow = [...myTopics.values()].filter(e => e.holder === id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: consent.reachable(ident.project), behaviors: reminders.list(id), default_behaviors: reminders.defaultList() })
+      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: consent.reachable(ident.project), behaviors: reminders.list(id), default_behaviors: reminders.defaultList(), connect_reminders: opReminders(id, 'connect', { client_kind: ckind }) || [] })
     }
     case 'deregister': {
       const { sp, err } = authSub(String(a.peer_id || ''), a.secret)
@@ -1737,11 +1737,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (a.force) return ok({ ok: false, code: 'unsupported', what: 'forced takeover (offline delivery, T14)' })
       // §12: when persistence is on a claim is durable BY DEFAULT (responsibilities survive a restart);
       // opt out with persistent:false. Without persistence the flag is a no-op (nothing to write).
-      const persistent = PERSIST && a.persistent !== false
+      const persistent = PERSIST && a.persistent !== false                // durable BY DEFAULT (opt out: persistent:false)
       const description = String(a.description || '')
-      const exclusive = !!a.exclusive
+      const exclusive = a.exclusive != null ? !!a.exclusive : true         // §6: single-owner BY DEFAULT (opt out: exclusive:false for a shared topic)
       const icon = String(a.icon || '').trim().slice(0, 16) || null
-      const announce_offline = !!a.announce_offline                       // §16: tell senders when I'm offline (else parked silently)
+      const announce_offline = a.announce_offline != null ? !!a.announce_offline : true   // §16: tell senders when I'm offline BY DEFAULT (pass false to park silently)
       const grace_minutes = a.grace_minutes != null ? Number(a.grace_minutes) : null   // §16: per-claim takeover grace
       const allow_other_user = a.allow_other_user != null ? !!a.allow_other_user : null // §16: per-claim cross-user takeover
       let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
@@ -1770,7 +1770,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const keep_alive = a.keep_alive != null ? !!a.keep_alive : !!kept   // claim-time property: this topic should survive handoffs
       const eDesc = description || (kept && kept.description) || ''
       const eIcon = icon || (kept && kept.icon) || null
-      const eAnnounce = a.announce_offline != null ? announce_offline : !!(kept && kept.announce_offline)
+      const eAnnounce = a.announce_offline != null ? announce_offline : (kept && kept.announce_offline != null ? !!kept.announce_offline : true)   // explicit > kept-alive inheritance > default ON
       const k = `${holder}|owner|${patternKey(topic)}`
       const reclaim = myTopics.has(k)
       myTopics.set(k, { pattern: topic, role: 'owner', description: eDesc, exclusive, icon: eIcon, holder, holder_name: holderName, project: holderProject, realm: holderRealm,
@@ -1946,7 +1946,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const reached = await deliverSystemToProject(to, 'project_access_request', payload)
       return ok({ ok: true, request_id: reqId, to, ttl_minutes: ttlMin, delivered_to: reached, reminders: opReminders(requester, 'request_project_access', { project: to }) })
     }
-    case 'set_wake': return ok({ ok: false, code: 'unsupported', what: 'wake (T14 — reserved for the watcher/doorbell feature)' })
+    case 'set_wake': {   // T14 wake is unsupported (CAPS.wake=false); tell the caller their fallback, RESOLVED BY SESSION TYPE
+      const kind = (callerId && subpeers.get(callerId)?.client_kind) || clientKind(CLIENT && CLIENT.name)
+      const fallback = kind === 'code'   // only a code session can run the doorbell script + be re-woken by its harness
+      return ok({ ok: false, code: 'unsupported',
+        what: fallback ? 'Not implemented, but you can use the doorbell service as a fallback'
+                       : 'Not implemented for your session with no fallback supported',
+        fallback: fallback ? 'doorbell' : null,
+        ...(fallback ? { hint: 'run tools/aimb-doorbell.mjs backgrounded (--name <you> --project <proj>); it blocks on a socket at ~zero cost and wakes you when mail is waiting (token/port default from ../config.json)' } : {}) })
+    }
     case 'send_to_peer': {
       if (!String(a.subject || '').trim()) return ok({ ok: false, code: 'subject-required' })   // T7: no lazy callers
       if (a.park) return ok({ ok: false, code: 'unsupported', what: 'park (offline delivery, T14)' })
