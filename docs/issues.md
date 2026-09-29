@@ -59,6 +59,62 @@ inbox/send — the bridge restarts often during this migration, so re-register w
 
 ---
 
+## #66 — replication audit: what federates mesh-wide vs what's bridge-local  ·  **OPEN (audit — Robin, 2026-09-29)**
+Triggered by #62 (a consent grant not rippling past one bridge). Audit of bridge state, classified by whether it
+replicates across the mesh. **The routing + observation plane FEDERATES; the policy + durability plane does NOT.**
+
+**Replicates mesh-wide** (via `gossipFrame`/PEER_ROSTER, one hop, + `broadcastRoster` to followers — the ONLY
+things in the gossip are `sessions` and `pages`):
+- Sessions (id, name, host, port, bridge_version, capabilities, client kind, project/user).
+- Sub-peers per session.
+- Topic **claims** (role:owner) and **subscriptions** (role:subscriber) — they ride the session's `topics` array,
+  so `allTopicEntries()` (which walks the whole `roster`, remote entries included) sees them everywhere. Hence
+  directed `topic:` sends to an owner, publish fan-out to subscribers (`subscribersOf` → `routeEnvelope` dials
+  cross-host), and roster visibility all work cross-host. ✓
+- Pages — but DISPLAY FIELDS ONLY (`localPagesSlice`: instance, kind, title, subject, icon, project, user).
+- Host aliases (gateway's `rosterPayload.hosts`).
+
+**Does NOT replicate** — local to a bridge PROCESS (RAM) or to a persistence STORE (shared only where the store
+is, e.g. the Windows Dropbox pair; never across separate machines):
+1. **Consent grants** (`runtimeAllow` / `allow_project`) — per-process + durable per-store, NOT gossiped. → #62,
+   the acute case. You can SEE and ADDRESS a peer mesh-wide, but whether a cross-project send is ALLOWED depends on
+   the RECIPIENT's host having the grant. Proven live 2026-09-29: a doorbell broadcast reached Marz sessions on
+   LITTLE (grant there) but was `project-denied` for MapGuy2 on ROBIN and Ferret:Mac.1 on the Mac (no grant there).
+2. **Session behaviour reminders** (`set_behavior`) — per-holder-identity, RAM + durable per-store; follow the
+   identity only within a shared store. Applied on the holder's hosting bridge.
+3. **Default + connect reminders** (`config.behaviors.default`) and **static consent edges** (`config.projects`)
+   — per CONFIG FILE. Shared only via a shared config. This is why the #64 connect-reminder default must be added
+   to each host's config (or a realm-wide config) to take effect everywhere.
+4. **Retained topic values** (last-value-per-topic) — per store; a new subscriber gets the retained value only
+   from the store that holds it (so cross-host retained delivery is not guaranteed).
+5. **Durable registrations** (name→identity offline-park), **parked mailboxes**, **vault** (sealed secrets) — per
+   store, keyed to the recipient's home bridge BY DESIGN (federating these = shared durable storage, big change).
+6. **Remote page subscriptions** — gossiped pages carry display fields only, so a cross-host publish does NOT
+   reach a remote page's subscription (edge case).
+
+**The bug class:** routing federates but policy doesn't, so a peer is reachable everywhere while the rule that
+governs the interaction (consent, behaviour) lives only where it was set. **Fix candidates, priority order:**
+(a) **grants** (#62) — gossip them in PEER_ROSTER, or carry a signed grant in the envelope (sender-side proof), or
+a shared consent store; (b) **default/connect reminders** — a realm-wide config or gossip, so a connect reminder
+set once reaches all hosts; (c) **retained values** + (d) **remote page subscriptions** — include in gossip;
+(e) leave parked-mail/vault/registrations store-local by design. #61 (ok:true masks a denied/dropped send) makes
+every one of these fail SILENTLY, so #61 is a prerequisite for trusting any of it.
+
+## #65 — self-updating bridge (message-triggered upgrade)  ·  **DESIRABLE (spec before build — Robin, 2026-09-29)**
+A future release should let an operator send a bridge a control message that makes it upgrade itself: `git fetch`
++ checkout a signed tag + `npm ci` if deps moved + restart — so a new bridge version rolls across all hosts without
+hand-SSHing each. **Hard parts / requirements:** (1) **Restart is not self-serve** — a bridge is a child of its
+MCP client (Claude Code) or the tray; delegate the restart to the supervisor (tray / launchd / systemd) or re-exec
+and rely on the client to respawn (Claude Code respawns its MCP server on next tool use). (2) **Security — this is
+RCE over a shared-token mesh:** MUST be opt-in per host (`allowRemoteUpgrade`), operator-presence-gated (Windows
+Hello / authorizer — not silent), pinned to a trusted remote + a **signed tag** (never an arbitrary ref), ideally
+accepted only from a trusted admin identity. (3) **Git state** clean + pull authenticated (differs per host).
+(4) **Coordination** — orchestrate one host at a time with a health check between; a broadcast "everyone restart"
+churns/partitions the mesh (#63). Pairs with #64 (a freshly-upgraded bridge announces its new version) and needs
+the same operator control-plane the #66 broadcast problem wants (a trusted, presence-gated channel not subject to
+per-project app-consent). **MVP:** `bridge_admin {action:"upgrade", ref}` → Hello-gated → fetch + verify signed
+tag → supervisor restart → report status over the mesh.
+
 ## #64 — connect reminders (by client type) + claim-default flip + session-resolved set_wake  ·  **DONE (v1.41.0)**
 Three related changes (Robin's calls), all shipped and tested. **(a) Connect reminders.** Added `connect` to
 `BEHAVIOR_OPERATIONS` and `client` to `BEHAVIOR_SCOPES` (`lib/reminders.js`); `matches()` gains a `client` branch
