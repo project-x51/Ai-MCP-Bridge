@@ -108,7 +108,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.52.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.53.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1320,13 +1320,17 @@ async function probeFacet(f) {
     return (await f.probe()) || { ok: false, reason: 'no-result' }
   } catch (e) { return { ok: false, reason: 'probe-error:' + ((e && e.message) || e) } }
 }
+// #42: the last probe result per facet, surfaced in my_identity as `facet_probe` so the REASON a capability
+// is false (and any fix hint, e.g. "tpm helper not built — run build-tpm.cmd") is visible, not just the bit.
+const FACET_PROBE = { vault: null, authorizer: null }
 async function probeFacets() {
   const v = await probeFacet(profile.vault), a = await probeFacet(profile.authorizer)
+  FACET_PROBE.vault = { facet: profile.names.vault, ...v }; FACET_PROBE.authorizer = { facet: profile.names.authorizer, ...a }
   CAPS.recover_secret = !!v.ok
   CAPS.presence_confirm = !!a.ok
   // configured-but-unbacked is the case worth shouting about: it only bites at the moment of need
-  if (profile.names.vault !== 'none' && !v.ok) log(`WARN vault="${profile.names.vault}" is NOT backed on this host (${v.reason}) — recover_secret will fail; capabilities.recover_secret=false`)
-  if (profile.names.authorizer !== 'none' && !a.ok) log(`WARN authorizer="${profile.names.authorizer}" is NOT backed on this host (${a.reason}) — presence confirmation will deny; capabilities.presence_confirm=false`)
+  if (profile.names.vault !== 'none' && !v.ok) log(`WARN vault="${profile.names.vault}" is NOT backed on this host (${v.reason}${v.detail ? `: ${v.detail}` : ''}) — recover_secret will fail; capabilities.recover_secret=false${v.hint ? ` — ${v.hint}` : ''}`)
+  if (profile.names.authorizer !== 'none' && !a.ok) log(`WARN authorizer="${profile.names.authorizer}" is NOT backed on this host (${a.reason}${a.detail ? `: ${a.detail}` : ''}) — presence confirmation will deny; capabilities.presence_confirm=false${a.hint ? ` — ${a.hint}` : ''}`)
   announceCaps()   // #41(c): propagate the probed result — a follower must not leave its stale REGISTER-time caps on the gateway roster
 }
 setTimeout(() => { probeFacets().catch(() => {}) }, Number(process.env.AI_BRIDGE_PROBE_MS || 50)).unref()   // delay env-tunable so a test can force the register-before-probe ordering (#41c)
@@ -1890,7 +1894,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   if (a.as && a.secret != null) { const r = authSub(String(a.as), a.secret); if (!r.err) callerId = r.sp.id }   // identify the caller for the hint
   switch (req.params.name) {
     case 'my_identity': return ok({ session: SESSION, name: NAME, role, host: SESSION.split('/')[0], gateway: gatewayId, pair_port: pairPort, gateway_port: PORT,
-      bridge_version: BRIDGE_VERSION, capabilities: CAPS, realm: REALM, profile: profile.names, identity: PROC_IDENT,
+      bridge_version: BRIDGE_VERSION, capabilities: CAPS, facet_probe: FACET_PROBE, realm: REALM, profile: profile.names, identity: PROC_IDENT,
       client: CLIENT, mode_override: MODE_OVERRIDE, subpeers: [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, project: s.identity?.project, user: s.identity?.user })),
       topics: topicList() })
     case 'set_name': {
@@ -2009,7 +2013,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const v = await persistence.vault.get(ident)
       if (!v || !v.sealed) return ok({ ok: false, code: 'no-vault-entry', name })
       const res = await vault.unseal(v.sealed, { subject: `Recover the Ai MCP Bridge secret for session "${r.name}" (${r.project}).` })
-      if (!res || !res.ok) return ok({ ok: false, code: 'recovery-denied', reason: res ? res.reason : 'unseal-failed' })
+      if (!res || !res.ok) return ok({ ok: false, code: 'recovery-denied', reason: res ? res.reason : 'unseal-failed', ...(res && res.detail ? { detail: res.detail } : {}) })
       emitTraceRaw({ dir: 'con', verb: 'recover_secret', from: SESSION, from_name: NAME, to: SESSION, size: 0, note: `secret recovered for "${r.name}" (${res.by})`, envelope_id: null })
       return ok({ ok: true, name: r.name, project: r.project, secret: res.plaintext, by: res.by,
         hint: 're-register with name + this secret to reattach (you get your topics + parked mail back), then use it as as/secret on send_to_peer and for/secret on inbox' })

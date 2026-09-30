@@ -6,9 +6,17 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.52.0) — read this first after a compact
-**Current version: v1.52.0.** All work committed to `main` (v1.42.0 – v1.52.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.53.0) — read this first after a compact
+**Current version: v1.53.0.** All work committed to `main` (v1.42.0 – v1.53.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.53.0):** Fixed **#42** — the `tpm` vault now trusts a key only when `Tpm.exe` POSITIVELY reports the
+Microsoft Platform Crypto Provider + a `TPM-Version:` platform type; otherwise `recover_secret:false` (reason + hint in
+`my_identity.facet_probe`) and `seal()` refuses. The helper (`Tpm.cs`) is hardware-or-nothing (TBS device check + PCP
+only, exit 2 otherwise). **Key-compatible** (same provider + `aimb-vault` key; identical public key verified) — no
+re-registration. **DEPLOY STEP FOR ROBIN (pending):** the new `Tpm.exe` is NOT built into `tray/windows/` yet (the live
+exe was left untouched). Run `tray/windows/build-tpm.cmd` on ROBIN-Z790 (Dropbox syncs it to LITTLE-001), THEN restart
+bridges/tray. A 1.53.0 bridge with the old exe reports `recover_secret:false` (`tpm-helper-outdated`) until rebuilt.
 
 **2026-09-30 (v1.52.0):** Fixed **#58** (dashboard only) — a CLI host's per-session follower `code` bridge that hosts
 exactly one sub-peer now renders ONCE, as that sub-peer, in the sessions list (both views), the mesh map and the
@@ -369,7 +377,7 @@ mailboxes were sealed with the OLD token → undecryptable after rotation, so dr
 loss. Not urgent: exposure is limited to a local `ps` on a single-user dev VM. Revisit after #46 lands and
 phub-lnx-gold is switched to the file form.
 
-## #42 — the TPM probe lies about hardware backing  ·  **OPEN** (spawned background task `task_8e2f15cf`)
+## #42 — the TPM probe lies about hardware backing  ·  **DONE (v1.53.0 — helper rebuild pending deploy)**
 `tray/windows/Tpm.exe --pubkey` returns exit 0 + a valid RSA key on a machine with **no TPM** (falls back to
 a software KSP), so `facets/vault/tpm.js` `probe()` reports `recover_secret:true` on a TPM-less box, and —
 worse — `seal()` succeeds against that software key (secrets silently sealed to non-TPM storage). **Fix is
@@ -379,6 +387,14 @@ C#:** `Tpm.cs` must open the key under the **Platform Crypto Provider** and exit
 helper exists; (b) `Tpm.exe`/`HelloConfirm.exe` are git-ignored but **Dropbox-synced**, so a Windows-built
 helper lands on other machines regardless of their actual TPM — feeding the false positive nondeterministically.
 Design principle to preserve: `profile.names.vault` = intent, `capabilities.recover_secret` = verified truth.
+**Fixed:** `Tpm.cs` requires a TPM visible to TPM Base Services and a key in the Platform Crypto Provider that answers
+`PCP_PLATFORM_TYPE`; every mode exits 2 + `ERROR=…` otherwise (no software fallback; `--decrypt` checks before Hello).
+`--pubkey` prints `PROVIDER=` + `PLATFORM_TYPE=`; `tpm.js` requires both for `probe()` AND `seal()` (a pre-#42 exe reads
+`tpm-helper-outdated`); a missing helper reports `tpm-helper-missing` + a build-tpm.cmd hint in
+`my_identity.facet_probe`. Finding: the OLD helper already used only the PCP (key `aimb-vault`) — no fallback in its
+source — so the fix is key-compatible; the field "no TPM" came from `Win32_Tpm`, which needs admin. The runtime
+checks make a Dropbox-synced exe fail honestly on a TPM-less box. Guarded by `test_facet_probe_live` (stub helpers;
+5 checks fail pre-fix). **Pending deploy:** build the new `Tpm.exe` into `tray/windows/` (`build-tpm.cmd`), restart.
 
 ## Config defaults — ship `receive`/`send` behaviour conventions  ·  **DONE (commit b9263a2, refined v1.33.0)**
 Shipped to `config.example.json` (repo) and the live Dropbox `config.json` as a `behaviors.default` ARRAY,

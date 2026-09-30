@@ -2,8 +2,15 @@
 rem Build Tpm.exe — the TPM vault helper used by the bridge `tpm` vault facet (secret recovery, §21).
 rem In-box .NET Framework compiler (csc) + the OS WinRT metadata (for the Windows Hello prompt). Needs
 rem .NET Framework 4.x. C# 5 source. No (...) command-grouping blocks (a "(x86)" path would break the parser).
+rem   build-tpm.cmd              -> builds Tpm.exe next to this script (what the bridge uses by default)
+rem   build-tpm.cmd <out-dir>    -> builds into <out-dir> instead, e.g. a scratch dir to test a new helper
+rem                                 without replacing the live one (point AI_BRIDGE_TPM_HELPER at it)
 setlocal
 set "DIR=%~dp0"
+set "OUT=%DIR%"
+if not "%~1"=="" set "OUT=%~1"
+if not "%OUT:~-1%"=="\" set "OUT=%OUT%\"
+if not exist "%OUT%" echo Output directory does not exist: %OUT% & exit /b 1
 set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if not exist "%CSC%" set "CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe"
 if not exist "%CSC%" echo Could not find csc.exe (.NET Framework 4.x required). & exit /b 1
@@ -24,4 +31,4 @@ set "FOUND=%WINDIR%\System32\WinMetadata\Windows.Foundation.winmd"
 set "SEC=%WINDIR%\System32\WinMetadata\Windows.Security.winmd"
 if not exist "%FOUND%" echo Missing OS WinRT metadata (Windows.Foundation.winmd). & exit /b 1
 
-"%CSC%" /nologo /target:exe /out:"%DIR%Tpm.exe" /r:System.Core.dll /r:"%FACADE%" /r:"%WINRT%" /r:"%FOUND%" /r:"%SEC%" "%DIR%Tpm.cs"
+"%CSC%" /nologo /target:exe /out:"%OUT%Tpm.exe" /r:System.Core.dll /r:"%FACADE%" /r:"%WINRT%" /r:"%FOUND%" /r:"%SEC%" "%DIR%Tpm.cs"

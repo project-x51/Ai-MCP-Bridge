@@ -1114,6 +1114,48 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.53.0):** *TPM probe requires the platform crypto provider — no software-key false positive (#42).*
+  **What was wrong:** the #41 `tpm` probe asked "did `Tpm.exe --pubkey` exit 0 with a PUBKEY?", and `seal()` trusted
+  the same answer — so on the field host with no usable TPM the bridge advertised `recover_secret:true` and would
+  seal secrets to whatever key came back. "Got bytes" cannot answer "was it hardware". **Found on the way (the old
+  helper):** the pre-#42 `Tpm.cs` already named ONLY the Microsoft Platform Crypto Provider, per-user key
+  `aimb-vault` — there is no software-provider fallback in its source (the live exe's strings confirm the same
+  provider + key name), and on ROBIN-Z790 (Intel PTT, TPM 2.0) that key exists in the PCP and not in the software
+  KSP. The field host's "no TPM" reading came from `Win32_Tpm`, which needs admin (non-elevated it is *Access
+  denied*), so what backed the key there is still unproven; the new helper now answers that definitively. **Built:**
+  (1) `tray/windows/Tpm.cs` is hardware-or-nothing for EVERY mode: it requires a TPM visible to TPM Base Services
+  (`Tbsi_GetDeviceInfo`, no admin needed), opens/creates the key under the Platform Crypto Provider only, and proves
+  the key is TPM-backed by the provider answering `PCP_PLATFORM_TYPE` (`TPM-Version:2.0 -Level:0-…`), which a
+  software KSP cannot. Any failure is **exit 2** + `ERROR=<no-tpm|platform-provider-unavailable|not-platform-provider|
+  not-hardware-backed|key-missing …>` on stderr. `--pubkey` now also prints `PROVIDER=` and `PLATFORM_TYPE=` (the
+  positive signal); `--decrypt` opens the key (never creates one) BEFORE raising Windows Hello, so a TPM-less box
+  never shows a prompt that cannot lead to a decrypt; optional `--key <name>` for scratch testing. `build-tpm.cmd`
+  takes an optional output directory so a new helper can be built and tested without replacing the live one.
+  (2) `facets/vault/tpm.js` `hardwareKey()` trusts a key only when the helper exits 0 AND reports
+  `PROVIDER=Microsoft Platform Crypto Provider` AND a `PLATFORM_TYPE=TPM-Version:…`; otherwise `probe()` is false
+  with a reason (`tpm-unavailable` + the helper's `detail`, `tpm-not-hardware`, or `tpm-helper-outdated` for a pre-#42
+  exe) and `seal()` returns null (nothing stored, WARN logged) instead of sealing to unproven storage. A missing helper
+  still is NOT auto-built by the probe, but now says so: `reason:'tpm-helper-missing'` + `hint: "tpm helper not built
+  — run tray/windows/build-tpm.cmd, then restart the bridge"`. `seal()`/`unseal()` only auto-build the DEFAULT helper
+  path (building for an `AI_BRIDGE_TPM_HELPER` override would silently replace the live exe instead); new
+  `AI_BRIDGE_TPM_KEY` passes `--key`. (3) `bridge.mjs` keeps the last probe result per facet and returns it in
+  `my_identity.facet_probe` (reason/detail/hint visible, not just the bit), adds the hint to the startup WARN, and a
+  failed unseal's helper `detail` rides `recover_secret`'s `recovery-denied`. **Dropbox-synced exe:** the checks are
+  made at RUNTIME on the machine that runs the exe; nothing about the build machine's TPM is baked in, so a
+  Windows-built `Tpm.exe` that Dropbox lands on a TPM-less machine now exits 2 there and the probe reports false.
+  **Verified:** `test_facet_probe_live` +10 checks (21 total) with a stub helper compiled by the in-box csc —
+  software-KSP provider ⇒ false + seal refused (`no-vault-entry`), pre-#42 output ⇒ false + refused, non-zero exit ⇒
+  false, platform provider ⇒ true + sealed (recovery reaches the helper) — plus the missing-helper hint; 5 of them FAIL
+  against the pre-fix `tpm.js`. Scratch build on ROBIN-Z790: `--pubkey`/`--selftest` report the PCP + `TPM-Version:2.0
+  … VendorID:'INTC'`; a `tpm.js` seal to a scratch key TPM-decrypts back to the plaintext (Hello-gated `--decrypt` not
+  run headlessly); a missing key fails exit 2 before any prompt. Suite 1004 across 43. **Deployment — KEY-COMPATIBLE:** same provider, same
+  key name, and the new helper returns a byte-identical public key for the existing `aimb-vault` key, so existing
+  sealed blobs keep working and no re-registration is needed. Rebuild the live helper with
+  `tray\windows\build-tpm.cmd` (Dropbox then syncs it to other Windows hosts, where it now fails honestly if they
+  lack a TPM), then restart bridges/tray to pick up v1.53.0. Order matters only one way: a v1.53.0 bridge with the
+  OLD exe reports `recover_secret:false` (`tpm-helper-outdated`) and skips re-sealing (existing vault entries are kept;
+  an identity registering for the FIRST time in that window gets none until it re-registers) until the exe is rebuilt;
+  an older bridge with the NEW exe works unchanged (it still reads `PUBKEY=`). So: rebuild first, then restart.
 - **Built (v1.52.0):** *the dashboard shows a CLI code session ONCE, not as bridge + sub-peer (#58).* **What was
   wrong:** the desktop app shares ONE bridge across conversations (N conversations = 1 bridge + N sub-peers, and the
   connections view hides that agent bridge), but a CLI host spawns one follower bridge PER Claude Code session (MCP
@@ -1755,7 +1797,9 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   `test_caps_propagate_live` (5 checks: a follower's roster entry goes false→true as its late probe lands),
   proven sensitive by reverting the re-announce (the follower's roster bit stays stale while its self-report
   is correct — the exact split-brain reported from the field). Suite 592 across 27.
-- **Defect — OPEN (#42): the #41 probe's PREMISE is false — `Tpm.exe --pubkey` succeeds without a TPM.**
+- **Superseded — was open (#42), FIXED in v1.53.0 (see that entry; the helper source turned out to have no
+  software fallback, but "got a key" still proved nothing): the #41 probe's PREMISE is false — `Tpm.exe
+  --pubkey` succeeds without a TPM.**
   Distinct from #41(c) above (that was propagation; this is the probe asking the wrong question). Field-
   confirmed on a host with **no TPM at all** (`Win32_Tpm` returns no instance; fTPM disabled in firmware):
   `Tpm.exe --pubkey` still returns **exit 0 and a valid RSA key**, because the helper falls back to a
