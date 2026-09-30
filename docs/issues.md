@@ -22,7 +22,7 @@ with `list_sessions`).
 Optional tidy: live configs still carry ignored `compatPorts` keys (harmless). Not done: the optional
 `from_topic`-aware receive line in `behaviors.realm` (#54).
 
-**Still open:** #70 agent activity board (idea, spec first), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -146,48 +146,106 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
-## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (idea — Robin, 2026-09-30; spec before build)**
-Robin's observation: sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows
-what those agents are doing right now. Idea: a new dashboard page listing sessions **grouped by project**, each
-session's **agents underneath**, and under each agent its **progress**, reported by the agent itself through a
-doorbell-style script. The bridge gossips it so the page shows what is happening across the whole bridge, and may
-also log it.
+## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (spec in progress — Robin + Bridget, 2026-09-30)**
+**Why:** sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows what those
+agents are doing right now. **What:** a new dashboard page showing, across the whole mesh, sessions grouped by project,
+each session's agents under it, and each agent's progress. Agents report it themselves with a doorbell-style script (or
+a bridge tool). The bridge gossips the current state, and each host keeps the full log.
 
-**Proposed shape (Bridget, for review):**
-- **Hierarchy mostly exists:** `register_self {parent}` already links a subagent to its session. What's missing is
-  status and progress.
-- **One primitive, a keyed status line:** `{agent, key, context?, state: running|done|failed|blocked, text, updated_at}`.
-  This covers every variant Robin raised:
-  - a *one-liner* is a single key (e.g. `main`);
-  - *update-in-place* means reusing a key ("tests: 312/1020");
-  - *tied to a context* groups lines under the thing being worked on (`context:"#62 grants"`);
-  - the *log* is the append-only history of every change.
-- **Keep gossip small:**
-  - Only the current keyed lines replicate, riding the roster gossip the way grants do (#62), capped per agent and per
-    host with the oldest dropped.
-  - The full log stays on the originating host (daily JSONL) and is fetched on demand when the dashboard expands an
-    agent, like the #66d `CONNECT` pattern.
-  - Replicating every log line would flood the mesh.
-- **Two ways to report:**
-  - *Explicit:* `tools/aimb-status.mjs --key tests --text "312/1020" --state running [--context …]`, which reuses the
-    doorbell's gateway connection, plus a `status` MCP tool for agents that have the bridge loaded.
-  - *Automatic:* client lifecycle hooks (e.g. Claude Code agent start/stop hooks, if available; verify first) report
-    start and stop without the agent's cooperation, so a dead agent never shows "running" forever.
-- **Staleness:** lines silent for N minutes render as stale. When a session leaves the mesh, its agents are marked
-  gone rather than left showing running.
-- **Visibility (decide):**
-  - Status text is plaintext realm-wide, like a subject. Agents must be told never to put secrets in it.
-  - Open question: should a viewer see only projects they have access to?
-- **Orchestrator query:** a tool returning agent status, so a session (e.g. Bridget on `@`) can answer "what's
-  everyone doing", not just the dashboard.
+### Decided so far
+**Hierarchy and identity:**
+- The tree is project → session → agent → context → message.
+- Agents do NOT register. An agent reports as `session + agent label`, and the orchestrator puts that one line in the
+  agent's prompt.
+- Agents may nest with a path label (`spec-70/research`). Claude Code subagents can't spawn subagents as far as we know,
+  but workflows and other SDK clients can go deeper, and the tree just adds a level.
 
-**Suggested phasing:**
-1. **v1:** script + `status` tool, keyed lines with context, current-state gossip, and a dashboard "Activity" page
-   (project → session → agent).
-2. **v2:** hook-driven lifecycle, on-demand log history, persistence.
-3. **v3:** the orchestrator-facing query tool.
+**Message model:** every message belongs to a context.
+- `@root` is the default and is the agent's or session's own context.
+- `@Ctx <text>` adds a message to that context's log.
+- `@~Ctx <text>` adds it to the log **and** makes it the context's **current** line.
+- `@~root` sets the headline status.
+- A message with no prefix is logged to `@root` without changing the headline, so setting a current line is always a
+  deliberate `@~`.
+- A context is created by its first message. Quote names with spaces: `@~"CTX strip 17"`.
+- Progress and ETA take effect on `@~` messages (an `@` message only records them in its log entry).
+- Optional `details` (≤ 2 KB text) and `data` (≤ 4 KB JSON) are **not gossiped**; the dashboard fetches them on demand.
+- Keyed update-in-place lines (an earlier idea) are dropped; `@~` replaces them.
 
-Related: #58 (dashboard session dedupe), #62/#66 (what federates), #53 (doorbell-style scripts), #65 (a rollout would
+**States:**
+- Reported states: `running | blocked | failed | done | idle`.
+- **Stale is computed, never reported.** A running or blocked item with no message of ANY kind for longer than the
+  threshold (default 15 min) shows as "stale, was X", with its text greyed. A context goes stale by its own most
+  recent message.
+- Done, failed and idle never go stale.
+- When a session leaves the mesh, its agents are marked **gone**.
+
+**Lifecycle:** an agent's first message starts it. `@~root` set to done or failed ends it. Finished agents stay visible
+for 24h, collapsed, then leave the gossip; they remain in the host's daily log.
+
+**Progress:** a context may carry `done/total unit` or a %.
+- The agent's or session's `@root` shows either a reported figure or a **rollup** of its contexts: summed when they
+  share a unit, otherwise the average %.
+- A rollup is labelled as one.
+- An ETA is always shown as **estimated**.
+
+**Times:** no inline time text. Each row has a **status ring**:
+- the centre shows the state: a dot for live states, a tick for done, a cross for failed;
+- the ring empties as the time left before going stale runs out.
+
+Hover tooltips carry the actual times: started, elapsed, last activity, stale-at, or finished and how long it took.
+⌛ appears only when there's an ETA (hover shows "estimated"). 🔔 appears when the session's doorbell is armed. Hovering
+a progress bar shows the exact counts and whether they were reported or rolled up.
+
+**Layout:**
+- **Tree only.** The cards layout was prototyped and dropped.
+- Projects cycle between all, sessions only and collapsed. A global Projects / Sessions / Agents depth control sets
+  every project at once.
+- Default view: every session with its agents' `@root` lines showing, and all contexts and messages closed.
+- An expanded agent or session shows a **Log** (every context, newest first, tagged `@ctx` / `@~ctx`), then its
+  contexts (name, current line, progress, ETA). Each context expands into its own log. A log entry expands into its
+  details and JSON.
+- An "Active only" filter hides finished agents.
+- A pill appears only for blocked, failed or stale.
+- The layout needs further work (Robin).
+
+**Visibility:** status text is plaintext realm-wide, like a subject. There's no project scoping; agents are told never
+to put secrets in it.
+
+### The call (proposed; name = `log`)
+**Bridge tool:**
+```
+log({ as, secret,                 // the reporting session (registered sub-peer)
+      agent?,                     // agent label/path under it; omit = the session itself
+      text,                       // one-liner ≤ 120 chars; may start with @ctx / @~ctx
+      context?,                   // "@root" (default) | "@Ctx" | "@~Ctx"; overrides a prefix in text
+      state?,                     // running|blocked|failed|done|idle; default: the context's current, else running
+      progress?,                  // "4812/12000 tiles" | "3/6" | "61%"
+      eta?,                       // "15m" | "1h25m" | "19:27"
+      details?, data? })          // ≤ 2 KB text / ≤ 4 KB JSON, fetched on demand
+  → { ok, id, ts, agent, context, current, stale_at }
+```
+
+**Script:** `tools/aimb-log.mjs`, token-gated like the doorbell, no registration needed.
+```
+node aimb-log.mjs --session <name> [--project P] [--agent <label>] [--ctx "@~Ctx"] [--state S]
+  [--progress 4812/12000:tiles] [--eta 1h25m] [--details "..."] [--data '{...}' | --data-file f.json] "<text>"
+```
+- It prints one JSON line. Exit codes: 0 ok, 4 bridge error, 64 usage.
+- Anyone holding the realm token can report as any session via the script. That is the same trust as the doorbell,
+  and was accepted (Robin); the bridge tool checks `as`/`secret`.
+
+### Still to decide / build notes
+- The gossip frame shape and caps: current lines only, with per-agent and per-host limits and oldest-first eviction.
+- Where the log lives: on the originating host, in a daily JSONL file.
+- On-demand fetch for logs, details and data, via the `CONNECT` pattern from #66d.
+- The orchestrator guidance text: what to put in an agent's prompt, and reporting at milestones rather than every step
+  (token cost).
+- Whether client hooks can automate start and stop.
+- The read tool for orchestrators, so a session can answer "what's everyone doing".
+- The layout polish still to come.
+
+Related: #58 (dashboard session dedupe), #62/#66 (what federates), #39/#53 (doorbell-style scripts), #65 (a rollout would
 benefit from the same visibility).
 
 ## #69 — doorbell 6-hour inbox check-in keeps the bridge loaded  ·  **DONE (v1.54.0)**
