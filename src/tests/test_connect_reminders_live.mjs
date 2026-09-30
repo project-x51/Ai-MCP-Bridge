@@ -16,7 +16,7 @@ const PDIR = path.join(os.tmpdir(), 'aimb-conntest-' + Date.now())
 
 const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR,
   env: { ...process.env, AI_BRIDGE_NAME: 'Host', AI_BRIDGE_PORT: '13520', AI_BRIDGE_WS_PORT: '13521', AI_BRIDGE_TOKEN: 'conntok',
-    AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none', AI_BRIDGE_COMPAT_PORTS: '', AI_BRIDGE_COMPAT_WS_PORTS: '',
+    AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none',
     AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: PDIR }, stderr: 'pipe' })
 const B = { client: new Client({ name: 'test-conn', version: '0' }, { capabilities: {} }), transport }
 await B.client.connect(transport); await sleep(500)

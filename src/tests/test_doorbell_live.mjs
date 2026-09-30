@@ -23,7 +23,7 @@ const t = new StdioClientTransport({
   command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR,
   env: { ...process.env, AI_BRIDGE_NAME: 'GW', AI_BRIDGE_PORT: PORT, AI_BRIDGE_WS_PORT: WSPORT, AI_BRIDGE_TOKEN: TOKEN,
          AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: PDIR, AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none',
-         AI_BRIDGE_DOORBELL_PING_MS: '400', AI_BRIDGE_COMPAT_PORTS: '', AI_BRIDGE_COMPAT_WS_PORTS: '' },
+         AI_BRIDGE_DOORBELL_PING_MS: '400' },
   stderr: 'pipe',
 })
 const c = new Client({ name: 'doorbell-test', version: '0' }, { capabilities: {} })

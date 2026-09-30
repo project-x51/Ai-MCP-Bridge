@@ -1114,6 +1114,26 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.46.0):** *removed the dual-port compat capability — the realm port migration is complete (#59,
+  closes #56).* The transitional #57 machinery (v1.37.0 bind/election + v1.38.0 cross-host dial fallback) existed
+  only to carry the realm from 7000/7001 to 12317/12318 without a coordinated restart. Every online host (ROBIN-Z790,
+  LITTLE-001, Robins-Mac, phub-lnx-01 — the last migrated 2026-09-30 on v1.44.0) now runs on 12317/12318, and
+  phub-lnx-02 is retired, so the window is closed. **Removed:** the `COMPAT_PORTS`/`COMPAT_WS_PORTS` constants and
+  their `compatPorts`/`compatWsPorts` config + `AI_BRIDGE_COMPAT_PORTS`/`AI_BRIDGE_COMPAT_WS_PORTS` env reads; the
+  multi-port `bindPorts` loop and `becomeFollower(gwPort)` parameter (election is back to *bind `PORT`; on
+  `EADDRINUSE` follow the gateway on `PORT`*); the per-compat-ws-port WS ingress (one `startWsIngress(WS_PORT)`); and
+  the port-fallback loop in `connectToPeer` (back to ONE dial on the candidate's port, freeing the address on close so
+  a later discovery tick retries). The `onControlConn`/`onWsConnection`/`startWsIngress` handler extraction is kept.
+  Untouched: all #63 self-healing in `connectToPeer`/`adoptPeer`/the heartbeat (including the same-host
+  different-port restart probe — a host can still restart on another port), the #62 grants frames and the #61 CLOSE
+  behaviour. `tailscale.js` still hands each candidate the DIALER's own port, which is correct again: **the realm must
+  share one control port**, and a host still on 7000 can no longer federate. Live configs (e.g. the shared Dropbox
+  `config.json`) may still carry `compatPorts`/`compatWsPorts`; those keys are now simply ignored.
+  `config.example.json` drops them and `_comment_ports` now states the one-port rule (keeping the avoid-7000-on-macOS
+  warning). **Tests:** `test_dual_port_live` deleted; `test_migrate_dial_live` rewritten as
+  `test_gateway_subpeer_delivery_live`, keeping only the #60 guard (A delivers to a sub-peer hosted by B's gateway
+  while B binds a specific IP, 127.0.0.2, exercising the loopback `pairServer` re-splice) with both hosts on one
+  shared port; the now-meaningless `AI_BRIDGE_COMPAT_*: ''` spawn env was stripped from the live tests. Suite 754 across 36.
 - **Built (v1.45.0):** *cross-project consent grants federate mesh-wide as a last-writer-wins set (#62).* **What
   broke:** consent is receiver-side — `deliveryAllowed` → `consent.mayInitiate(from, to)` runs in the bridge PROCESS
   hosting the target — but an `allow_project` grant lived only in the one process that ran it (RAM + that host's

@@ -38,15 +38,9 @@ let CFG = {}
 try { CFG = JSON.parse(fs.readFileSync(path.join(HERE, 'config.json'), 'utf8')) } catch {}
 const PORT = Number(process.env.AI_BRIDGE_PORT || CFG.port || 12317)     // default moved off 7000: macOS Control Center AirPlay Receiver binds *:7000, so bind 0.0.0.0 there fails EADDRINUSE (MacDaddy). 12317/12318 are clear on macOS/Windows/Linux.
 const WS_PORT = Number(process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 12318)
-// #57 dual-port: during a port migration a gateway can ALSO listen on the old well-known ports, so a bridge still
-// configured for them JOINS it (its bind fails -> it follows) instead of standing up a rival gateway on a
-// different port. That is what lets the realm move ports with NO coordinated restart. OPT-IN — set it in the SAME
-// config edit that flips the port, e.g. `"port": 12317, "compatPorts": [7000]`. Default off (single-port, exactly
-// as before). The primary port is filtered out automatically, so a host still on 7000 with compatPorts:[7000] is
-// simply single-port. Env AI_BRIDGE_COMPAT_PORTS / AI_BRIDGE_COMPAT_WS_PORTS (comma-separated) override for tests.
-const parsePorts = (v, dflt) => (v != null ? String(v).split(',').map(s => Number(String(s).trim())).filter(Boolean) : (Array.isArray(dflt) ? dflt : []))
-const COMPAT_PORTS = parsePorts(process.env.AI_BRIDGE_COMPAT_PORTS, CFG.compatPorts !== undefined ? CFG.compatPorts : []).filter(p => p !== PORT)
-const COMPAT_WS_PORTS = parsePorts(process.env.AI_BRIDGE_COMPAT_WS_PORTS, CFG.compatWsPorts !== undefined ? CFG.compatWsPorts : []).filter(p => p !== WS_PORT)
+// One well-known control port (+ ws port) per host, shared by the whole realm: cross-host discovery hands each
+// candidate the dialer's OWN port. (#57's transitional compatPorts/compatWsPorts were removed in v1.46.0 (#59)
+// once every host had migrated to 12317/12318; a leftover key in a live config.json is simply ignored.)
 // #46: read the realm token from a FILE when AI_BRIDGE_TOKEN_FILE is set, so an MCP client config can
 // reference a PATH (harmless in `ps`/argv) instead of inlining the secret VALUE into the command line — argv
 // is world-readable via the process list and captured by crash dumps / monitors / support bundles, and the
@@ -105,7 +99,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.45.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.46.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -283,8 +277,8 @@ const ciEq = (a, b) => lc(a) === lc(b)
 let role = 'binding'              // binding | gateway | follower | stopping
 let pairPort = 0                  // this bridge's own listener for inbound pair conns
 let gwSock = null                 // follower: control connection to gateway
-let gwServers = []                // gateway: the control servers (primary + #57 compat ports)
-let wssList = []                  // gateway: WS leaf servers, one per ws port (primary + #57 compat)
+let gwServer = null               // gateway: the :PORT control server
+let wss = null                    // gateway: WS leaf server (on :WS_PORT)
 let roster = new Map()            // session -> {session, name, port, kind:'session', subpeers:[], client}
 let pages = new Map()             // instance -> {instance, page_kind, title, kind:'page'}  (gateway only)
 let backoff = 200
@@ -1312,43 +1306,33 @@ function connectToPeer(host, port) {
   const addr = `${host}:${port}`
   if (peerByAddr.has(addr)) return
   peerByAddr.add(addr)
-  // #57 fix: cross-host discovery hands us the candidate on OUR port (tailscale assumes a uniform realm port),
-  // but during a migration a peer may still be on an OLD port. So try the primary port, then fall back through
-  // our compat ports — a MIGRATED dialer still reaches an un-migrated peer. The upstream tie-break still elects a
-  // single dialer per pair; this only changes WHICH port that dialer succeeds on. (The inbound direction already
-  // works: an old-port peer dialing US lands on our compat LISTENER.) A non-migrated node (no compat) is unchanged.
-  const ports = [port, ...COMPAT_PORTS.filter(p => p !== port)]
-  let idx = 0, peerSession = null
-  const attempt = () => {
-    const p = ports[idx++]
-    let linked = false
-    const sock = profile.transport.connect(p, host)
-    const giveUp = setTimeout(() => { if (!linked) { try { sock.destroy() } catch {} } }, 4000)
-    if (giveUp.unref) giveUp.unref()
-    sock.on('connect', () => {
-      sendFrame(sock, { t: 'HELLO', ver: VER, fromBridge: SESSION, fromSession: SESSION, name: NAME, auth: TOKEN })
-      sendFrame(sock, peerHello())
-      sendFrame(sock, gossipFrame())
-    })
-    onFrames(sock, f => {
-      if (f.t === 'PEER_HELLO') {
-        linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || p, f.name, f, true)
-        sendFrame(sock, gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted
-      }
-      else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants)
-      else if (f.t === 'PING') { if (!TEST_GOSSIP) sendFrame(sock, { t: 'PONG', seq: f.seq }) }   // #63: the accepting hub probes us too (<=1.43 dialers ignore PING — 'legacy' mimics that)
-      else if (f.t === 'PONG') touchPeer(sock)
-      else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
-    })
-    sock.on('close', () => {
-      clearTimeout(giveUp)
-      if (linked) { peerByAddr.delete(addr); if (peerSession && peerGw.get(peerSession)?.sock === sock) dropPeer(peerSession) }
-      else if (idx < ports.length) attempt()   // this port yielded no peer link -> try the next compat port
-      else peerByAddr.delete(addr)              // exhausted -> let a later discovery tick retry from the top
-    })
-    sock.on('error', () => {})
-  }
-  attempt()
+  // One dial on the candidate's port (discovery hands us the realm's shared port). If it yields no peer link we
+  // free the address so a later discovery tick retries it.
+  let linked = false, peerSession = null
+  const sock = profile.transport.connect(port, host)
+  const giveUp = setTimeout(() => { if (!linked) { try { sock.destroy() } catch {} } }, 4000)
+  if (giveUp.unref) giveUp.unref()
+  sock.on('connect', () => {
+    sendFrame(sock, { t: 'HELLO', ver: VER, fromBridge: SESSION, fromSession: SESSION, name: NAME, auth: TOKEN })
+    sendFrame(sock, peerHello())
+    sendFrame(sock, gossipFrame())
+  })
+  onFrames(sock, f => {
+    if (f.t === 'PEER_HELLO') {
+      linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || port, f.name, f, true)
+      sendFrame(sock, gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted
+    }
+    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants)
+    else if (f.t === 'PING') { if (!TEST_GOSSIP) sendFrame(sock, { t: 'PONG', seq: f.seq }) }   // #63: the accepting hub probes us too (<=1.43 dialers ignore PING — 'legacy' mimics that)
+    else if (f.t === 'PONG') touchPeer(sock)
+    else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
+  })
+  sock.on('close', () => {
+    clearTimeout(giveUp)
+    peerByAddr.delete(addr)   // linked or not, let a later discovery tick re-dial this address
+    if (linked && peerSession && peerGw.get(peerSession)?.sock === sock) dropPeer(peerSession)
+  })
+  sock.on('error', () => {})
 }
 // §7/#35: the advertise host is the one per-machine value that can't live in a shared config, so when left
 // auto (no advertiseHost, bind 0.0.0.0 ⇒ ADVERTISE starts as loopback) we derive it from the discovery
@@ -1409,9 +1393,9 @@ setInterval(() => {
 }, GOSSIP_REFRESH_MS).unref()
 
 // ---------------------------------------------------------------- gateway role
-function becomeGateway(servers) {
-  role = 'gateway'; gwServers = servers; backoff = 200; gatewayId = SESSION
-  log(`gateway on :${[PORT, ...COMPAT_PORTS].join(',')} (session ${SESSION})`)
+function becomeGateway(server) {
+  role = 'gateway'; gwServer = server; backoff = 200; gatewayId = SESSION
+  log(`gateway on :${PORT} (session ${SESSION})`)
   emitTraceRaw({ dir: 'con', verb: 'gateway', from: SESSION, from_name: NAME, to: SESSION, size: 0,
     note: 'promoted to gateway', envelope_id: null })
   roster = new Map([[SESSION, { session: SESSION, name: NAME, port: pairPort, kind: 'session',
@@ -1420,15 +1404,15 @@ function becomeGateway(servers) {
     realm: REALM, project: PROC_IDENT?.project || null, user: PROC_IDENT?.user || null,
     client: CLIENT ? CLIENT.name : null, client_kind: CLIENT ? clientKind(CLIENT.name) : null }]])
   flushPendingTraces()
-  for (const server of servers) server.on('connection', onControlConn)         // #57: primary + every compat control port share one handler
-  for (const wsPort of [WS_PORT, ...COMPAT_WS_PORTS]) startWsIngress(wsPort)    // #57: WS ingress on primary + every compat ws port
+  server.on('connection', onControlConn)
+  startWsIngress(WS_PORT)
   broadcastRoster()
   maybeLaunchTray()
   startDiscovery()   // §7: begin enumerating + linking peer hubs across machines (no-op for discovery=none)
 }
 
-// A follower/peer control connection. Extracted (#57) so the primary AND each compat-port server share one
-// handler; `who` is per-connection (set by HELLO before any privileged frame is honoured).
+// A follower/peer control connection on :PORT. `who` is per-connection (set by HELLO before any privileged frame
+// is honoured).
 function onControlConn(sock) {
     let who = null
     onFrames(sock, async f => {
@@ -1494,8 +1478,7 @@ function onControlConn(sock) {
 }
 
 // WS leaf ingress on ONE ws port — served on an HTTP server so the dashboard loads from http://127.0.0.1:<port>
-// (same origin as the WS). file:// pages are blocked from ws://127.0.0.1 by Chrome PNA; http isn't. #57 runs one
-// per ws port (primary + compat) so a client on an old ws port still reaches the gateway during a migration.
+// (same origin as the WS). file:// pages are blocked from ws://127.0.0.1 by Chrome PNA; http isn't.
 function startWsIngress(wsPort) {
   try {
     const httpd = profile.transport.createHttpServer((req, res) => {
@@ -1512,14 +1495,13 @@ function startWsIngress(wsPort) {
     })
     httpd.on('error', e => log('http server error', e.code))
     httpd.listen(wsPort, BIND)
-    const wss = profile.transport.createWsServer({ server: httpd })
-    wssList.push(wss)
+    wss = profile.transport.createWsServer({ server: httpd })
     wss.on('connection', onWsConnection)
     wss.on('error', e => log('ws server error', e.code))
   } catch (e) { log('ws listener failed', e.code) }
 }
 
-// A WS leaf connection (listener / page / dashboard). Extracted (#57) so every ws-port server shares it.
+// A WS leaf connection (listener / page / dashboard).
 function onWsConnection(ws) {
       ws.on('message', async raw => {
         let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
@@ -1614,10 +1596,10 @@ function onWsConnection(ws) {
 }
 
 // ---------------------------------------------------------------- follower role
-function becomeFollower(gwPort = PORT) {   // #57: connect to whichever port the gateway was found on (may be a compat port during a migration)
+function becomeFollower() {
   role = 'follower'
   teardownPeers()   // §7: a follower reaches remote hubs via its gateway's merged roster, not its own peer links
-  const sock = profile.transport.connect(gwPort, HOST)
+  const sock = profile.transport.connect(PORT, HOST)
   gwSock = sock
   sock.on('connect', () => {
     backoff = 200
@@ -1628,7 +1610,7 @@ function becomeFollower(gwPort = PORT) {   // #57: connect to whichever port the
       realm: REALM, project: PROC_IDENT?.project || null, user: PROC_IDENT?.user || null,
       client: CLIENT ? CLIENT.name : null })
     sendFrame(sock, { t: 'GRANTS', session: SESSION, grants: consent.grantSet() })   // #62: anything granted/learned while not following (a ≤1.44 gateway ignores it)
-    log(`follower registered with gateway on :${gwPort}`)
+    log(`follower registered with gateway on :${PORT}`)
   })
   onFrames(sock, f => {
     if (f.t === 'RENAME') { NAME = f.name }
@@ -1646,26 +1628,16 @@ function becomeFollower(gwPort = PORT) {   // #57: connect to whichever port the
 }
 
 // ---------------------------------------------------------------- election (the single retry edge)
-// #57 dual-port invariant: a gateway owns EVERY well-known control port on the host (primary + compat). So
-// "is there already a gateway here?" == "is ANY of those ports already bound?". We try to bind them all; if ANY
-// is already held, an existing gateway is there (possibly an older one on just the old port) and we FOLLOW it on
-// that port rather than standing up a rival. Empty COMPAT_PORTS ⇒ single-port behaviour, identical to before.
+// Whoever binds the well-known PORT is this host's gateway; EADDRINUSE means one already holds it, so follow it.
 function election() {
   if (role === 'stopping') return
   role = 'binding'
-  bindPorts([PORT, ...COMPAT_PORTS], [], 0)
-}
-function bindPorts(ports, bound, i) {
-  if (role === 'stopping') return
-  if (i >= ports.length) return becomeGateway(bound)   // grabbed them all → we're the gateway
   const server = profile.transport.createServer()
   server.once('error', e => {
-    if (e.code === 'EADDRINUSE') {                      // a gateway already holds this port → drop what we grabbed and follow it there
-      for (const s of bound) { try { s.close() } catch {} }
-      becomeFollower(ports[i])
-    } else { log('bind error', ports[i], e.code); for (const s of bound) { try { s.close() } catch {} } setTimeout(election, backoff); backoff = Math.min(backoff * 2, 3000) }
+    if (e.code === 'EADDRINUSE') becomeFollower()
+    else { log('bind error', PORT, e.code); setTimeout(election, backoff); backoff = Math.min(backoff * 2, 3000) }
   })
-  server.listen(ports[i], BIND, () => { bound.push(server); bindPorts(ports, bound, i + 1) })
+  server.listen(PORT, BIND, () => becomeGateway(server))
 }
 
 // ---------------------------------------------------------------- MCP server (the session side)

@@ -47,6 +47,7 @@ export function create(ctx) {
       for (const p of peers) {
         if (!p || p.Online !== true) continue
         const host = hostOf(p)
+        // the DIALER's own port: the realm must share ONE control port (a host on a different port can't federate)
         if (host) out.push({ host, port: ctx.PORT })
       }
       return out

@@ -6,9 +6,15 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.45.0) — read this first after a compact
-**Current version: v1.45.0.** All work committed to `main` (v1.42.0 – v1.45.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.46.0) — read this first after a compact
+**Current version: v1.46.0.** All work committed to `main` (v1.42.0 – v1.46.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.46.0):** Did **#59** and closed **#56** — the realm port migration is COMPLETE. Every online host
+(ROBIN-Z790, LITTLE-001, Robins-Mac, phub-lnx-01) runs on 12317/12318; phub-lnx-02 is retired. The dual-port compat
+capability (#57/v1.37.0 + the v1.38.0 dial fallback) is gone: one well-known port, single-port election, one WS
+ingress, a single cross-host dial. A host still on 7000 can no longer federate. Leftover `compatPorts`/
+`compatWsPorts` keys in live configs (e.g. the shared Dropbox `config.json`) are now ignored, so no edit is needed.
 
 **2026-09-30 (v1.45.0):** Fixed **#62**. Runtime cross-project grants (`allow_project`/`revoke_project`) now
 replicate mesh-wide as a last-writer-wins set (revoke = tombstone): gossiped in `PEER_ROSTER.grants`, pushed to
@@ -35,20 +41,15 @@ must run 1.42.0 on both ends to see refusals; roll it out so #62-style drops sto
 standing reminder can be pinned to register and filtered by client kind; the shipped default tells `code` sessions
 to use the doorbell), `claim_topic` defaults flipped to **exclusive+announce_offline+persistent all true**, and
 `set_wake` now returns a **session-type-resolved** unsupported message (code → doorbell fallback; else → none).
-The bridge restarted at some point over the ~2 months since the snapshot below — on reconnect the queue epoch had
-reset and Bridget's `Bridge` claim had NOT rehydrated (re-claimed it). **The mesh snapshot below is from
-2026-07-25 and is almost certainly stale — re-run `list_sessions` before trusting host/port details.** Rollout
+The bridge restarted at some point over the ~2 months after the 2026-07-25 snapshot — on reconnect the queue epoch had
+reset and Bridget's `Bridge` claim had NOT rehydrated (re-claimed it). Rollout
 note for #64: the `connect` default belongs in a host's config only AFTER it runs 1.41.0 (on 1.40.0 an unknown
 `connect`/`client` folds to a `receive`/`all` reminder), so the live/shared config was intentionally NOT edited.
 
-**Live mesh (SNAPSHOT 2026-07-25 — STALE, re-verify):** every host was on **v1.39.0 gateways** —
-- ROBIN-Z790 (this machine) — port **12317**, gateway is the Task Tray bridge; my session (Bridget) is a follower.
-- LITTLE-001 — **12317** (migrated; reads the shared Dropbox config, no local edit needed).
-- Robins-Mac — still on **7000** (version-migrated, not yet PORT-migrated); owns topic `mac`; runs MacDaddy.
-- phub-lnx-01, phub-lnx-02 — v1.39.0 gateways, still on **7000** (bare gateways, no sub-peers).
-
-So: **all v1.39.0; port-flip still pending on Mac + both Linux boxes** (7000 → 12317). Dual-port keeps the mixed
-realm federated. Once every host shows 12317 on the dashboard Bridge column, do #59 (rip out compat ports).
+**Live mesh (2026-09-30):** every online host is on port **12317** — ROBIN-Z790 (this machine; gateway is the Task
+Tray bridge, Bridget is a follower), LITTLE-001 (reads the shared Dropbox config), Robins-Mac (owns topic `mac`, runs
+MacDaddy) and phub-lnx-01 (migrated 2026-09-30 on v1.44.0). **phub-lnx-02 is RETIRED.** Versions vary per host
+(roll-outs of 1.42–1.46 are pending), so re-run `list_sessions` before trusting version details.
 
 **"Mac never receives Bridget's messages" — real cause is #62 (cross-project consent), NOT #60.** The Mac is
 now fully migrated (v1.40.0 / 12317 / bind 0.0.0.0). The actual block: `deliveryAllowed` is receiver-side +
@@ -62,10 +63,8 @@ SSH: **`ssh mac` now works** (key auth over Tailscale + macOS Remote Login; alia
 `~/.ssh/robins_mac_ed25519`, user `robin`, host `robins-macbook-pro.tail14b1ac.ts.net`). NB the Mac App Store
 Tailscale build can't run Tailscale's own SSH server — we use macOS Remote Login instead.
 
-**The port migration (#56) is IN FLIGHT** and working: default ports moved 7000/7001 → **12317/12318** (macOS
-AirPlay clash). Dual-port compat (#57) is THREE surfaces (bind, same-host election, cross-host dial — the v1.38.0
-`connectToPeer` fallback). The shared Dropbox `config.json` (gitignored) is already flipped to `port 12317,
-wsPort 12318, compatPorts [7000], compatWsPorts [7001]` + the receive/send behaviour defaults. **Restarting a
+**The port migration (#56) is DONE:** default ports moved 7000/7001 → **12317/12318** (macOS AirPlay clash), every
+host is on them, and v1.46.0 (#59) removed the compat window. **Restarting a
 bridge = restart the Claude app or the Task Tray** (`tray/windows/AiMcpBridgeTray.exe --root <src>`); the desktop
 relaunches a dead bridge on next MCP use. **Use the doorbell** (`node tools/aimb-doorbell.mjs --name Bridget
 --project AIMB --status <file>`, backgrounded) to wait for mail instead of manually polling `@` — it wakes on
@@ -73,9 +72,9 @@ real mail only and costs no tokens idle.
 
 **Immediate pickups:** (a) add the `AIMB→PowerHub` `projects` edge to the Mac's `config.json` to unblock delivery
 to MacDaddy/Mac-2 (#62; live-reloads); (b) ~~fix #61~~ DONE v1.42.0 — roll 1.42.0 to every host so denied sends
-stop reading ok:true; (c) #59 once all on 12317. **Bridget reconnect ritual:** `register_self`
+stop reading ok:true; (c) ~~#59~~ DONE v1.46.0. **Bridget reconnect ritual:** `register_self`
 first (name Bridget, secret `bridget-aimb-2026`, project AIMB, user Robin), use the returned `peer_id` for
-inbox/send — the bridge restarts often during this migration, so re-register whenever a send returns
+inbox/send — the bridge restarts often, so re-register whenever a send returns
 `unknown-subpeer`.
 
 ---
@@ -399,7 +398,10 @@ that is currently OWNED, so nothing backstops a re-claim. **Fix:** on a re-claim
 to the EXISTING record for any field the caller omitted, so a re-claim is a patch not a replace. Keep an
 explicit `null`/`false` as a real clear. Workaround until then: pass every field you want to keep.
 
-## #56 — migrate the WHOLE REALM to ports 12317/12318  ·  **IN PROGRESS** (3/4 hosts done; phub-lnx-01 remains)
+## #56 — migrate the WHOLE REALM to ports 12317/12318  ·  **DONE (2026-09-30)**
+**Closed:** phub-lnx-01 was migrated to 12317 on v1.44.0 (pulled, config flipped, `aimb-bridge.service` restarted;
+it shows port 12317 on the mesh), and phub-lnx-02 is retired. Every online host is on 12317/12318, so the compat
+window was removed in v1.46.0 (#59). The procedure below is kept as history; `compatPorts` no longer exists.
 The shipped default moved to 12317/12318 in v1.36.0, but existing hosts keep 7000/7001 via their own
 `config.json` until migrated. Robin wants the whole realm moved eventually. **#57 (v1.37.0) removes the
 coordinated-restart requirement** that used to make this delicate: a gateway can hold the new AND old port at
@@ -440,7 +442,10 @@ collapse a FOLLOWER bridge that hosts exactly one sub-peer of its own into that 
 or extend the hide-bridges rule to code follower-bridges the same way it hides agent ones. Verify it does not
 hide a genuine standalone code session that registered no sub-peer. Not a bridge/protocol change.
 
-## #59 — rip out the dual-port compat capability once the realm is migrated  ·  **OPEN** (cleanup, after #56)
+## #59 — rip out the dual-port compat capability once the realm is migrated  ·  **DONE (v1.46.0)**
+**Done:** compat config, multi-port bind/election, per-compat WS ingress and the `connectToPeer` fallback are gone;
+the handler extraction is kept. `test_dual_port_live` was deleted, and `test_migrate_dial_live` became
+`test_gateway_subpeer_delivery_live` (keeps only the #60 loopback re-splice guard). See architecture §13 v1.46.0.
 The `compatPorts`/`compatWsPorts` machinery (#57, v1.37.0) is a TRANSITIONAL migration aid. Once #56 is complete
 and the dashboard's Computers/Bridge column shows every host advertising 12317/12318 (no 7000 anywhere), remove
 it: (a) set `compatPorts`/`compatWsPorts` back to `[]` on every host (or delete the keys), then (b) in a later

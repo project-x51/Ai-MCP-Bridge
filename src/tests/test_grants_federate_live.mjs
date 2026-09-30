@@ -27,7 +27,7 @@ function spawn(name, bind, port, extra) {
   const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + BRIDGE], cwd: SRCDIR,
     env: { ...process.env, AI_BRIDGE_NAME: name, AI_BRIDGE_PORT: port, AI_BRIDGE_WS_PORT: String(Number(port) + 1),
       AI_BRIDGE_TOKEN: TOKEN, AI_BRIDGE_BIND: bind, AI_BRIDGE_ADVERTISE_HOST: bind, AI_BRIDGE_PERSISTENCE: 'none',
-      AI_BRIDGE_COMPAT_PORTS: '', AI_BRIDGE_COMPAT_WS_PORTS: '', AI_BRIDGE_TEST_GOSSIP: '',
+      AI_BRIDGE_TEST_GOSSIP: '',
       // a LONG #63 refresh, so every propagation below must be PROMPT (change-driven), not ride the periodic refresh
       AI_BRIDGE_GOSSIP_REFRESH_MS: '60000',
       AI_BRIDGE_DISCOVERY: 'seeds', AI_BRIDGE_SEEDS: '', AI_BRIDGE_DISCOVERY_MS: '300', ...extra }, stderr: 'pipe' })

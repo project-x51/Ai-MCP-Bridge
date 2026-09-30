@@ -35,8 +35,8 @@ This file is **gitignored** — create it locally. Do **NOT** copy a Windows mac
 
 > **Ports default to 12317/12318** (moved off 7000). On macOS, Control Center's AirPlay Receiver binds `*:7000`,
 > so a `bind: 0.0.0.0` gateway on 7000 fails `EADDRINUSE`; 12317/12318 bind cleanly on macOS, Windows and Linux.
-> The gateway port is gossiped, so mixed-port hosts still federate during a rolling migration — only same-host
-> sessions must agree. Linux has no such clash, but match the realm's port so cross-host dialling is uniform.
+> Linux has no such clash, but **every host in the realm must use the same port**: cross-host discovery dials each
+> peer on the dialer's own port, so a host on a different port cannot federate.
 
 - `advertiseHost` **auto-derives** from `tailscale status`, so this file needs no per-machine address.
 - `vault: "none"` means a session that loses its `register_self` secret cannot recover it (no TPM/Hello here),
