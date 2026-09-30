@@ -7,27 +7,22 @@ project's `#NN` sequence.
 ---
 
 ## RESUME STATE (updated 2026-09-30, v1.54.0) — read this first after a compact
-**Current version: v1.54.0.** All work committed AND pushed to `main` (HEAD `2be5989`). Everything below is durable;
+**Current version: v1.54.0.** All work committed AND pushed to `main` (see `git log`). Everything below is durable;
 nothing important is only in chat.
 
-**>>> NEXT: DEPLOY — none of v1.42.0–v1.54.0 is running live yet.** As of 2026-09-30 ROBIN-Z790, LITTLE-001 and
-Robins-Mac run **1.40.0**; phub-lnx-01 runs **1.44.0**. Most fixes (#61/#62/#63/#66) need BOTH ends upgraded. Robin has
-been asked to OK the rollout (it restarts every live bridge; sessions drop briefly and reconnect). Order:
-1. **Rebuild `tray/windows/Tpm.exe`** on ROBIN-Z790: run `tray/windows/build-tpm.cmd` (builds in place; Dropbox syncs
-   it to LITTLE). Verify `Tpm.exe --pubkey` prints `PROVIDER=Microsoft Platform Crypto Provider`. Key-compatible —
-   no re-registration (#42).
-2. **Upgrade + restart every host.** ROBIN + LITTLE share this Dropbox checkout → restart via the Task Tray / Claude
-   app. Mac: `ssh mac`, `git pull` in `/Users/robin/Ai-MCP-Bridge`, restart its Claude sessions (node is
-   `/opt/homebrew/bin/node`; non-login shells lack it on PATH). phub-lnx-01: `ssh phub1`, `git pull --ff-only` in
-   `~/Ai-MCP-Bridge`, `systemctl --user restart aimb-bridge.service` (token lives in `~/.aimb/bridge.env`, port in
-   `src/config.json`). Then `list_sessions` to confirm versions. Deploy `tools/aimb-doorbell.mjs` together with
-   `tools/aimb-doorbell-clock.mjs` (#69 — the script imports it).
-3. **Once every host is ≥1.47.0:** add a `behaviors.realm` block (fresh `updated_at`) to the shared Dropbox
-   `config.json` carrying the doorbell connect reminder (as in `config.example.json`) and, if wanted, the
-   `from_topic`-aware receive line (#54). It spreads realm-wide (#66b). Never echo that file's token.
-4. Optional tidy: live configs still carry ignored `compatPorts` keys (harmless).
+**DEPLOYED (2026-09-30):** every live host runs **v1.54.0**: ROBIN-Z790, LITTLE-001, Robins-Mac, phub-lnx-01 (checked
+with `list_sessions`).
+- `Tpm.exe` was rebuilt: it reports the Platform Crypto Provider, and the public key is unchanged.
+- The shared Dropbox `config.json` now carries `behaviors.realm` (`updated_at` 2026-09-30T05:30:57Z) with the
+  code-session doorbell connect reminder. It reloads live and was verified on a `register_self`.
+- The tray gained **Restart Bridges…** (`1012daf`). ROBIN runs the new tray.
+- **LITTLE's tray is NOT running.** The new exe is in place there, but it has to be started on the interactive desktop
+  (SSH can't: a scheduled-task launch was refused by the auto-mode classifier as persistence).
 
-**Still open:** #70 agent activity board (idea, spec first), #65 self-updating bridge (desirable, spec first — would automate step 2), #53 Cowork doorbell,
+Optional tidy: live configs still carry ignored `compatPorts` keys (harmless). Not done: the optional
+`from_topic`-aware receive line in `behaviors.realm` (#54).
+
+**Still open:** #70 agent activity board (idea, spec first), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -132,7 +127,9 @@ MacDaddy) and phub-lnx-01 (migrated 2026-09-30 on v1.44.0). **phub-lnx-02 is RET
 
 **Remote admin + history:** `ssh mac` (robin@robins-macbook-pro.tail14b1ac.ts.net, key `~/.ssh/robins_mac_ed25519`,
 macOS Remote Login — the App Store Tailscale build can't run Tailscale SSH) and `ssh phub1` (robin@phub-lnx-01, key
-`~/.ssh/phub_lnx_01_ed25519`). The old "Mac never receives Bridget" saga (2026-07-25) was #62 (per-host consent) masked
+`~/.ssh/phub_lnx_01_ed25519`) and `ssh little1` (robin@little-001, key `~/.ssh/little_001_ed25519`,
+Windows OpenSSH set up 2026-09-30: Tailscale-only firewall, key-only, PowerShell shell; the tray runs in the
+interactive session, so SSH can't show it on the desktop). The old "Mac never receives Bridget" saga (2026-07-25) was #62 (per-host consent) masked
 by #61; MacDaddy fixed it live with `allow_project`, and both bugs are now fixed in code (v1.42.0 / v1.45.0).
 Writing a remote config over SSH can trip the auto-mode classifier — hand Robin the command if it does.
 
