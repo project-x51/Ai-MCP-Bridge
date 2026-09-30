@@ -108,7 +108,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.48.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.49.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1167,13 +1167,30 @@ async function publishToTopic(from, ref, verb, body, subject, askerProject) {
 }
 
 // ---------------------------------------------------------------- roster sync
+// #68: the PUBLIC view of a page entry — an explicit ALLOW-LIST (like localPagesSlice), never a spread. The stored
+// entry also holds `capKey`, the page's reply-cap signing key: it stays in the in-memory `pages` map (makeEnvelope
+// mints with it, verifyReplyCap checks against it) and must NEVER leave the process — whoever holds it can mint a
+// valid reply cap and deliver to that page from a project with no grant (a cross-project consent bypass). Every
+// page that goes out (list_sessions, follower ROSTER, WS welcome/roster, dashboards) passes through here. A function
+// declaration (hoisted, literals inside) so it is usable from any point of module init.
+function publicPage(p) {
+  const o = {}
+  for (const k of ['instance', 'page_kind', 'title', 'subject', 'subscriptions', 'icon', 'kind', 'project', 'user', 'realm',
+    'host_label', 'origin', 'host', 'port', 'page_ingress']) if (p[k] !== undefined) o[k] = p[k]
+  if (p.identity && typeof p.identity === 'object') {   // the identity facet's label fields only
+    const i = {}
+    for (const k of ['realm', 'scheme', 'id', 'project', 'user', 'display', 'assurance']) if (p.identity[k] !== undefined) i[k] = p.identity[k]
+    o.identity = i
+  }
+  return o
+}
 function rosterPayload() {
   const HOSTNAME = String(SESSION).split('/')[0]
-  const localPages = [...pages.values()].map(p => ({ ...p, host_label: HOSTNAME }))
+  const localPages = [...pages.values()].map(p => publicPage({ ...p, host_label: HOSTNAME }))   // #68: allow-listed — no capKey
   // is_gateway is true for THIS host's gateway AND for each remote host's gateway (a gossiped entry whose
   // session id equals its origin) — so the dashboard can mark and structure every machine, not just ours.
   return { sessions: [...roster.values()].map(s => ({ ...s, is_gateway: s.session === gatewayId || (!!s.origin && s.session === s.origin), host_label: String(s.session).split('/')[0] })),
-    pages: [...localPages, ...remotePages.values()], hosts: ALIASES, gateway: gatewayId || (role === 'gateway' ? SESSION : null) }
+    pages: [...localPages, ...[...remotePages.values()].map(publicPage)], hosts: ALIASES, gateway: gatewayId || (role === 'gateway' ? SESSION : null) }
 }
 // VISIBILITY (§4): a page sees only the projects it may reach (same project / open / static edge),
 // so "can't see → can't address" matches the delivery gate. Enforced by default; a page opts out with
@@ -1352,7 +1369,7 @@ function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, re
   }
   for (const [k, v] of [...remotePages]) if (v.origin === fromGw) remotePages.delete(k)
   const rhost = String(fromGw).split('/')[0]
-  for (const p of (pages || [])) if (p && p.instance) remotePages.set(p.instance, { ...p, origin: fromGw, host_label: rhost, host: host || HOST, port: port || PORT })   // #66d: dial the page via its owning gateway
+  for (const p of (pages || [])) if (p && p.instance) remotePages.set(p.instance, { ...publicPage(p), origin: fromGw, host_label: rhost, host: host || HOST, port: port || PORT })   // #66d: dial the page via its owning gateway; #68: keep only public fields of what a peer sent
   broadcastRoster()
 }
 function touchPeer(sock) { for (const p of peerGw.values()) if (p.sock === sock) p.seen = Date.now() }
@@ -1742,7 +1759,7 @@ function becomeFollower() {
     else if (f.t === 'REGISTERED') { flushPendingTraces() }
     else if (f.type === 'ROSTER') {
       roster = new Map(f.sessions.map(s => [s.session, s]))
-      pages = new Map((f.pages || []).map(p => [p.instance, p]))
+      pages = new Map((f.pages || []).filter(p => p && p.instance).map(p => [p.instance, publicPage(p)]))   // #68: a ≤1.48 gateway still sends page capKeys — never keep (or re-emit) one here; a follower never uses a page's key
       if (f.gateway) gatewayId = f.gateway
       consent.merge(f.grants)   // #62: consent for MY sub-peers is checked here, so learn the realm's grants from the gateway
       realmDefaults.merge(f.realm_defaults)   // #66b: MY sub-peers' reminders are computed here too

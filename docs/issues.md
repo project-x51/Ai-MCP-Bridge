@@ -6,9 +6,13 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.48.0) — read this first after a compact
-**Current version: v1.48.0.** All work committed to `main` (v1.42.0 – v1.48.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.49.0) — read this first after a compact
+**Current version: v1.49.0.** All work committed to `main` (v1.42.0 – v1.49.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.49.0):** Fixed **#68** (security) — page reply-cap signing keys (`capKey`) no longer leak in
+`list_sessions`, the follower `ROSTER` or the WS `welcome`/`roster`; pages go out through an allow-list
+(`publicPage`). No config change; roll 1.49.0 to every gateway to stop the leak mesh-wide.
 
 **2026-09-30 (v1.48.0):** Did **#66(c)+(d)** and closed **#66**. (c) Retained topic values now replicate mesh-wide
 as a last-writer-wins set keyed by (realm, project, topic) (`lib/retained.js`; `PEER_ROSTER.retained` /
@@ -100,6 +104,24 @@ inbox/send — the bridge restarts often, so re-register whenever a send returns
 `unknown-subpeer`.
 
 ---
+
+## #68 — page capKey (reply-cap signing key) leaked in roster/list_sessions/WS  ·  **DONE (v1.49.0)**
+Found by the #66d agent (2026-09-30): `list_sessions` showed each page as `capKey: {type:'Buffer', data:[...]}`.
+A page leaf's stored entry holds `capKey`, its reply-cap SIGNING key (`makeEnvelope` mints with it,
+`verifyReplyCap` checks a reply to the page against it), and `rosterPayload()` spread the stored entries — so the key
+went out in `list_sessions`, the follower `ROSTER` frame (and a follower's `list_sessions`) and the WS
+`welcome`/`roster` to every other page and dashboard. Only the peer gossip (`localPagesSlice`) was allow-listed.
+**Impact:** whoever holds page P's key can mint a valid reply cap and deliver to P from a project with NO grant (the
+reply-cap exception in `deliveryAllowed` bypasses consent) — a cross-project consent bypass WITHIN the realm. All
+members share the realm token (and since #43 a page key is derivable from token + instance anyway), so nothing is
+exposed to outsiders; the key just no longer lands ready-made in AI transcripts, logs and web pages. **Fix:**
+`publicPage()` — an explicit allow-list of the public page fields — applied in `rosterPayload()` to local and remote
+(#66d) pages, so every roster-shaped output goes through it; a follower and `mergeRemoteRoster` also keep only the
+public fields of what they receive. `capKey` stays in the in-memory `pages` map. Audit of sessions, sub-peers
+(`secretHash`, sub-peer `capKey`), topics, traces, the dashboard persistence snapshot (vault identities only, never
+`sealed`) and the MCP tool replies found no other leak. Test: `test_roster_secrets_live` (30), verified to fail
+(13 checks) on the pre-fix code. No rollout dependency — a 1.49.0 bridge stops emitting keys on its own; a ≤1.48
+gateway still emits them until upgraded (a 1.49.0 follower drops them on receipt).
 
 ## #67 — doorbell hourly chime + connect reminder carries the script location  ·  **DONE (v1.43.0)**
 Robin's request (2026-09-30), two parts. **(a) Hourly chime as the default.** With no `--timeout` the doorbell exits

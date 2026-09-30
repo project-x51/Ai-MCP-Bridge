@@ -1114,6 +1114,32 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.49.0):** *stop leaking page reply-cap keys in the roster (#68).* **What was wrong:** each page leaf's
+  entry in the gateway's `pages` map holds `capKey`, its reply-cap SIGNING key (`makeEnvelope` mints a page's caps
+  with it; `verifyReplyCap` checks a reply to the page against it). `rosterPayload()` built its page list by
+  SPREADING the stored entries (`{ ...p, host_label }`), so every page's `capKey` (a serialized Buffer) went out in
+  the `list_sessions` tool, in the follower `ROSTER` frame (and so a follower's own `list_sessions`), and in the WS
+  `welcome`/`roster` to every leaf — other pages and dashboards (`rosterPayloadFor`/`rosterFor` derive from it). A
+  holder of page P's `capKey` can mint a valid reply cap and deliver to P from a project with no grant: the reply-cap
+  exception in `deliveryAllowed` is an independent allow OR'd after the consent check, so this is a cross-project
+  consent bypass. Only the peer gossip (`localPagesSlice`) was already allow-listed. **Fix:** new `publicPage(p)` —
+  an explicit ALLOW-LIST of the public page fields (`instance, page_kind, title, subject, subscriptions, icon, kind,
+  project, user, realm, host_label, origin, host, port, page_ingress` + the identity facet's label fields) — applied
+  in `rosterPayload()` to local AND remote (#66d) pages, so every roster-shaped output passes through it. Defence in
+  depth: a follower keeps only `publicPage()` of what a (≤1.48) gateway's `ROSTER` sends, and `mergeRemoteRoster`
+  keeps only the public fields of a peer's gossiped pages. `capKey` stays in the in-memory `pages` map where the
+  gateway needs it (a follower never uses a page's key: pages send and receive on their gateway). **Audit** of the
+  rest: session entries, sub-peer lists (the `REGISTER`/`SUBPEERS`/`announceSubpeers`/`becomeGateway` builders),
+  topic records, traces, the dashboard persistence snapshot (vault identities only, never `sealed`), `my_identity`
+  and `register_self` replies were already built field-by-field — no `secretHash`, sub-peer `capKey`, token or sealed
+  data leaves the process. **Scope:** a consent bypass WITHIN the realm; every reader of the roster already holds the
+  realm token, from which (since #43) a page's key is derivable anyway, so nothing is exposed to outsiders — but the
+  key no longer lands ready-made in AI transcripts, logs and every web page. New `test_roster_secrets_live` (30
+  checks): a gateway + follower + raw control-port follower + peer gateway on a second loopback "host", pages and
+  secret-holding sub-peers on both; asserts no `capKey`/`secretHash`/`token`/`sealed` key (or serialized Buffer) at
+  any depth in `list_sessions` (gateway, follower, peer), the follower `ROSTER` frames on the wire, and a dashboard's
+  and a second page's `welcome`/`roster`/`trace_history`; plus the reply-cap flow to a page still works (a
+  cross-project reply is delivered, a fresh send is still denied). Verified to FAIL (13 checks) on the pre-fix code.
 - **Built (v1.48.0):** *retained values + remote page subscriptions federate (#66c/d).* **(c) What was wrong:** a
   `publish {retain:true}` was stored only in the PUBLISHING host's persistence store, and the subscribe-time catch-up
   read only the subscriber's own store — so a subscriber that joined later on another machine never got the value.
