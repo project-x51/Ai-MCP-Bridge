@@ -7,5 +7,6 @@ import crypto from 'node:crypto'
 /** @param {import('../types').Envelope} env @returns {string} stable "env_<hash>" id */
 export function envelopeId(env) {
   return 'env_' + crypto.createHash('sha1')
-    .update(`${env.from?.session}|${env.to}|${env.verb}|${env.subject}|${env.pattern}|${env.topic}|${env.body}|${env.ts}`).digest('hex').slice(0, 12)
+    .update(`${env.from?.session}|${env.to}|${env.verb}|${env.subject}|${env.pattern}|${env.topic}|${env.body}|${env.ts}` +
+      (env.from_topic ? `|ft:${env.from_topic}` : '')).digest('hex').slice(0, 12)   // #54: only when present, so a plain envelope's id is unchanged
 }

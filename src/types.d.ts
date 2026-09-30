@@ -37,11 +37,15 @@ export interface Envelope {
   system?: boolean
   retained?: boolean
   dead_letter_for?: string
+  /** #54: sent ON BEHALF OF this topic (additive to `from`; set by the sending bridge after an ownership check) */
+  from_topic?: string
+  /** #54: that topic's claim icon, when it has one */
+  from_topic_icon?: string
 }
 export interface EnvelopeFrom { session?: string; name?: string; kind?: string; project?: string; user?: string; realm?: string; hops?: string[] }
 /** What makeEnvelope() accepts — `to` required; the rest optional. verb/body/subject/etc. are app-defined values
  *  that flow in from untyped JSON, so they're permissive — the bug-catching value is in the identity/record shapes. */
-export interface EnvelopeInput { to: string; from?: EnvelopeFrom; verb?: any; body?: any; subject?: any; pattern?: any; topic?: any; reply_to?: any }
+export interface EnvelopeInput { to: string; from?: EnvelopeFrom; verb?: any; body?: any; subject?: any; pattern?: any; topic?: any; reply_to?: any; from_topic?: string; from_topic_icon?: string }
 
 /** A durable claim record (responsibility for a topic), self-describing so an OFFLINE owner can be parked to (§12/§16). */
 export interface ClaimRecord {

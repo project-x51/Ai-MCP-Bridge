@@ -6,8 +6,10 @@
 //   project / user: this page's mandatory classification. seeAll: opt out of visibility filtering
 //   (default false ⇒ the roster is filtered to the projects this page may reach; true ⇒ see all).
 // API: aimbBridge.onUpdate(cb) -> cb({status, sessions, pages, topics});
-//      aimbBridge.send({to, subject, verb, body}) -> Promise(ack); to may be a session/sub-peer id,
+//      aimbBridge.send({to, subject, verb, body, from_topic?}) -> Promise(ack); to may be a session/sub-peer id,
 //      "page:<instance>", or "topic:<topic>" (delivered to the topic OWNERS only). subject REQUIRED.
+//      from_topic (#54): send on behalf of the page's own `subject` (the only topic a page owns); any other
+//      topic is refused (ack ok:false, code not-topic-owner).
 //      aimbBridge.publish({topic, subject, verb, body}) -> Promise(ack) — event to ALL subscribers.
 //      aimbBridge.onMessage(cb) -> cb(envelope) for inbound envelopes ({from, verb, subject, body, id, ...})
 window.aimbBridge = (function () {
@@ -76,7 +78,7 @@ window.aimbBridge = (function () {
   return {
     onUpdate: function (cb) { cbs.push(cb); cb({ status: status, sessions: sessions, pages: pages, topics: topics }); },
     onMessage: function (cb) { msgCbs.push(cb); },
-    send: function (o) { return wsCall({ type: 'send', to: o.to, subject: o.subject, verb: o.verb, body: o.body }); },
+    send: function (o) { return wsCall({ type: 'send', to: o.to, subject: o.subject, verb: o.verb, body: o.body, from_topic: o.from_topic }); },
     publish: function (o) { return wsCall({ type: 'publish', topic: o.topic, subject: o.subject, verb: o.verb, body: o.body }); },
     /* re-open the socket with patched config (e.g. {project:"AIMB"}) — same instance, new hello identity */
     reconnect: function (patch) {

@@ -108,7 +108,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.50.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.51.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -463,6 +463,7 @@ function emitTrace(dir, env, note) {
     to: env.to, to_name: nameOf(env.to), to_kind: kindOf(env.to),
     subject: env.subject || null, pattern: env.pattern || 'send', topic: env.topic || null,
     topic_icon: env.topic ? iconOf(env.topic, env.from?.project || 'unclassified') : null,
+    ...(env.from_topic ? { from_topic: env.from_topic, from_topic_icon: env.from_topic_icon || null } : {}),   // #54
     verb: env.verb || null, dir, size: (env.body || '').length, note: note || null })
 }
 // trace collection (the ring + dashboard fan-out) lives in lib/traces.js — emit here, collect there.
@@ -716,6 +717,11 @@ function iconOf(path, targetProject) {     // claim icon for a concrete topic (d
   for (const e of allTopicEntries()) if (e.role === 'owner' && e.icon && projKey(e.project) === tp && topicMatch(e.pattern, path)) return e.icon
   return null
 }
+// #54: the push-channel meta for an envelope sent on behalf of a topic — flat strings like the rest of the meta; nothing
+// at all when absent (so a plain message's meta is unchanged).
+function fromTopicMeta(env) {
+  return env.from_topic ? { from_topic: String(env.from_topic), ...(env.from_topic_icon ? { from_topic_icon: String(env.from_topic_icon) } : {}) } : {}
+}
 function deliverSub(id, env) {
   if (seen.has(env.id)) return { ok: true, dedup: true }
   remember(env.id)
@@ -739,7 +745,7 @@ function deliverSub(id, env) {
       params: { content: plainBody(env),
         meta: { from: String(env.from?.session || ''), from_name: String(env.from?.name || ''),
                 from_kind: String(env.from?.kind || 'session'), verb: String(env.verb || ''), envelope_id: env.id,
-                subject: String(env.subject || ''), pattern: String(env.pattern || 'send'), topic: env.topic || null,
+                subject: String(env.subject || ''), pattern: String(env.pattern || 'send'), topic: env.topic || null, ...fromTopicMeta(env),
                 for: sp.id, for_name: sp.name, ...(rems.length ? { reminders: rems } : {}) } },
     }).catch(() => {})
   }
@@ -822,7 +828,7 @@ async function deliver(env) {
           content: plainBody(env),
           meta: { from: String(env.from?.session || ''), from_name: String(env.from?.name || ''),
                   from_kind: String(env.from?.kind || 'session'), verb: String(env.verb || ''), envelope_id: env.id,
-                  subject: String(env.subject || ''), pattern: String(env.pattern || 'send'), topic: env.topic || null },
+                  subject: String(env.subject || ''), pattern: String(env.pattern || 'send'), topic: env.topic || null, ...fromTopicMeta(env) },
         },
       })
     } catch {}
@@ -1020,7 +1026,7 @@ function senderIdent(f) {
   return { realm: REALM }
 }
 /** @param {import('./types').EnvelopeInput} input @returns {import('./types').Envelope} */
-function makeEnvelope({ to, verb, body, reply_to, from, subject, pattern, topic }) {
+function makeEnvelope({ to, verb, body, reply_to, from, subject, pattern, topic, from_topic, from_topic_icon }) {
   const base = from || /** @type {import('./types').EnvelopeFrom} */ ({ session: SESSION, name: NAME, kind: 'session' })
   const f = base.project ? base : { ...base, ...senderIdent(base) }
   const hops = [...(from?.hops || [])]
@@ -1035,6 +1041,10 @@ function makeEnvelope({ to, verb, body, reply_to, from, subject, pattern, topic 
     pattern: pattern || 'send', topic: topic || null,
     body: typeof body === 'string' ? body : JSON.stringify(body),
     reply_to: reply_to || null, hops }
+  // #54: "sent on behalf of topic X" — ADDITIVE attribution beside `from` (never replacing it: accountability, reply
+  // routing, reply-caps and the hop guard all key off the real peer). Callers pass it only after fromTopicOf()
+  // validated ownership on THIS bridge, so receivers can trust it like `from`. Absent ⇒ the fields are not set at all.
+  if (from_topic) { env.from_topic = from_topic; if (from_topic_icon) env.from_topic_icon = from_topic_icon }
   env.id = envelopeId(env)
   // reply capability (§5): a reply ECHOES the cap of the message it answers; otherwise mint a fresh
   // cap bound to (senderProject | targetProject | envId | expiry), keyed by the sender's capKey.
@@ -1054,13 +1064,36 @@ function makeEnvelope({ to, verb, body, reply_to, from, subject, pattern, topic 
   return env
 }
 
+// #54: may `holder` (a local sub-peer, this process, or a page leaf) speak FOR topic `ref` (send_to_peer `from_topic`)?
+// Only a CURRENT owner may: a live role:'owner' claim held by the caller, in the caller's project (any co-owner of a
+// shared topic qualifies; a page owns exactly its auto-claimed `subject`). A dormant durable record doesn't count — it
+// is not holding the topic now. Checked on the SENDING bridge before the envelope exists; anything else is spoofing.
+// Returns { ft } (makeEnvelope fields: the claim's own spelling + its icon — the caller's own claim icon, else any
+// co-owner's, so a shared topic reads the same whichever owner speaks) or { err }.
+function fromTopicOf(holder, holderProject, ref) {
+  const { project, path } = parseTopicRef(ref, holderProject, REALM)
+  if (!path || isWildcard(path)) return { err: { ok: false, code: 'wildcard-from-topic', topic: String(ref), hint: 'from_topic must be one concrete topic you own' } }
+  let claim = null
+  if (projKey(project) === projKey(holderProject)) {
+    if (String(holder).startsWith('page:')) {
+      const p = pages.get(String(holder).slice(5))
+      if (p && p.subject && patternKey(p.subject) === patternKey(path)) claim = { pattern: p.subject, icon: p.icon || null }
+    } else {
+      const e = myTopics.get(`${holder}|owner|${patternKey(path)}`)
+      if (e && projKey(e.project) === projKey(holderProject)) claim = e
+    }
+  }
+  if (!claim) return { err: { ok: false, code: 'not-topic-owner', topic: path, hint: 'you can only send on behalf of a topic you currently own (claim_topic it first)' } }
+  const icon = claim.icon || iconOf(path, holderProject)
+  return { ft: { from_topic: claim.pattern, ...(icon ? { from_topic_icon: icon } : {}) } }
+}
 // topic:<topic> send targeting (T3/T5): explicit prefix only. Delivered to the topic's OWNERS —
 // exclusive topic = exactly one; shared = every co-owner (one envelope each; dedupe is free).
 function askerProjectOf(from) { return (senderIdent(from && from.session ? from : { session: SESSION }).project) || 'unclassified' }
 // §16: a directed send to a topic whose durable owner is OFFLINE parks to that owner's mailbox (delivered
 // on its return) instead of bouncing no-owner. Consent is checked at park-time (you can only park what you
 // could send live). The sender is told it's offline ONLY if the owner opted in at claim time (announce_offline).
-async function parkToOfflineOwners(from, project, path, verb, body, reply_to, subject, askerProject, ref) {
+async function parkToOfflineOwners(from, project, path, verb, body, reply_to, subject, askerProject, ref, ft) {
   if (!PERSIST) return { ok: false, code: 'no-owner', topic: ref }
   let dormant = []
   try { dormant = await persistence.claims.read(project, path) } catch { }
@@ -1071,13 +1104,13 @@ async function parkToOfflineOwners(from, project, path, verb, body, reply_to, su
     const ident = claimIdentity(rec, project)
     if (!ident) continue
     if (!consent.mayInitiate(ap, projKey(rec.project || project))) continue   // park only what you could send live
-    const env = makeEnvelope({ to: `topic:${path}`, verb, body, reply_to, from, subject, pattern: 'send', topic: path })
+    const env = makeEnvelope({ to: `topic:${path}`, verb, body, reply_to, from, subject, pattern: 'send', topic: path, ...ft })
     try { await persistence.mailbox.put(ident, env.id, env) } catch { continue }
     parked.push(env.id)
     if (rec.announce_offline) announce.push(rec.holder_name || ident.name)
     emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
       to: `topic:${path}`, to_name: path, to_kind: 'topic', subject: subject || null, pattern: 'send', topic: path,
-      size: String(body || '').length, note: `parked for offline owner ${ident.name}`, envelope_id: env.id })
+      size: String(body || '').length, note: `parked for offline owner ${ident.name}`, envelope_id: env.id, ...ft })
   }
   if (!parked.length) {
     // #26: no live or dormant owner — but if the topic was kept ALIVE (ownerless) on release, park against the
@@ -1085,12 +1118,12 @@ async function parkToOfflineOwners(from, project, path, verb, body, reply_to, su
     let kept = null
     try { kept = await persistence.keptTopics.get(project, path) } catch { }
     if (kept && consent.mayInitiate(ap, projKey(kept.project || project))) {
-      const env = makeEnvelope({ to: `topic:${path}`, verb, body, reply_to, from, subject, pattern: 'send', topic: path })
+      const env = makeEnvelope({ to: `topic:${path}`, verb, body, reply_to, from, subject, pattern: 'send', topic: path, ...ft })
       try { await persistence.mailbox.put(topicMailIdent(kept.realm, kept.project || project, path), env.id, env) }
       catch { return { ok: false, code: 'no-owner', topic: ref } }
       emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
         to: `topic:${path}`, to_name: path, to_kind: 'topic', subject: subject || null, pattern: 'send', topic: path,
-        size: String(body || '').length, note: 'parked for ownerless kept-alive topic', envelope_id: env.id })
+        size: String(body || '').length, note: 'parked for ownerless kept-alive topic', envelope_id: env.id, ...ft })
       return { ok: true, parked: true, ownerless: true, topic: path, project: kept.project || project, envelope_id: env.id,
         ...(kept.announce_offline ? { offline: true } : {}) }
     }
@@ -1102,7 +1135,7 @@ async function parkToOfflineOwners(from, project, path, verb, body, reply_to, su
 // §19: a directed send to a peer BY NAME that has no LIVE registration but DOES have a durable one (it's
 // just offline / its gateway restarted) parks to that peer's mailbox instead of bouncing unknown-target.
 // Returns the park result, or null to let the caller fall through to a clear unknown-target.
-async function parkToOfflineName(from, name, verb, body, reply_to, subject, askerProject) {
+async function parkToOfflineName(from, name, verb, body, reply_to, subject, askerProject, ft) {
   if (!PERSIST) return null
   let regs = []
   try { regs = await persistence.registrations.byName(name) } catch { return null }
@@ -1113,14 +1146,14 @@ async function parkToOfflineName(from, name, verb, body, reply_to, subject, aske
   if (reachable.length > 1) return { ok: false, code: 'ambiguous-name', candidates: reachable.map(r => `${r.project}:${r.name}`) }
   const r = reachable[0]
   const ident = { realm: r.realm || REALM, project: r.project, user: r.user, name: r.name }
-  const env = makeEnvelope({ to: `name:${r.name}`, verb, body, reply_to, from, subject })
+  const env = makeEnvelope({ to: `name:${r.name}`, verb, body, reply_to, from, subject, ...ft })
   try { await persistence.mailbox.put(ident, env.id, env) } catch { return null }
   emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
     to: r.name, to_name: r.name, to_kind: 'subpeer', subject: subject || null, pattern: 'send',
-    size: String(body || '').length, note: `parked for offline peer ${r.name}`, envelope_id: env.id })
+    size: String(body || '').length, note: `parked for offline peer ${r.name}`, envelope_id: env.id, ...ft })
   return { ok: true, parked: true, offline: true, to: r.name, project: r.project, envelope_id: env.id }
 }
-async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, askerProject) {
+async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, askerProject, ft) {   // ft: #54 validated from_topic fields (or undefined)
   const explicit = String(ref || '').trim().startsWith('@')   // "@project/path" names a project — respect it, no cross-project fallback
   const { project, path } = parseTopicRef(ref, askerProject, REALM)
   if (isWildcard(path)) return { ok: false, code: 'wildcard-target', topic: ref }
@@ -1147,10 +1180,10 @@ async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, aske
       owners = reachable[0][1].owners; routedProject = reachable[0][1].name
     }
   }
-  if (!owners.length) return parkToOfflineOwners(from, project, path, verb, body, reply_to, subject, askerProject, ref)
+  if (!owners.length) return parkToOfflineOwners(from, project, path, verb, body, reply_to, subject, askerProject, ref, ft)
   const fanout = []
   for (const h of owners) {
-    const env = makeEnvelope({ to: h.holder, verb, body, reply_to, from, subject, pattern: 'send', topic: path })
+    const env = makeEnvelope({ to: h.holder, verb, body, reply_to, from, subject, pattern: 'send', topic: path, ...ft })
     const r = await routeEnvelope(env)
     fanout.push({ to: h.holder, holder_name: h.holder_name || null, ok: !!r.ok, code: r.code || null, envelope_id: env.id })
   }
@@ -1715,13 +1748,20 @@ function onWsConnection(ws) {
               subscribers: r.subscribers ?? null, fanout: r.fanout || null }))
             return
           }
+          // #54: a page may send on behalf of the topic it owns — its auto-claimed `subject` — validated like send_to_peer
+          let ft
+          if (m.from_topic != null && String(m.from_topic).trim()) {
+            const v = fromTopicOf(from.session, askerProjectOf(from), String(m.from_topic).trim())
+            if (v.err) { ws.send(JSON.stringify({ type: 'sent', ref: m.ref || null, ok: false, code: v.err.code, topic: v.err.topic })); return }
+            ft = v.ft
+          }
           if (String(m.to || '').startsWith('topic:')) {                 // page -> topic owners (T3)
-            const r = /** @type {any} */ (await routeToTopicOwners(from, String(m.to).slice(6).trim(), m.verb, m.body, null, String(m.subject).trim(), askerProjectOf(from)))
+            const r = /** @type {any} */ (await routeToTopicOwners(from, String(m.to).slice(6).trim(), m.verb, m.body, null, String(m.subject).trim(), askerProjectOf(from), ft))
             ws.send(JSON.stringify({ type: 'sent', ref: m.ref || null, ok: !!r.ok, code: r.code || null,
               envelope_id: r.envelope_id || null, fanout: r.fanout || null }))
             return
           }
-          const env = makeEnvelope({ to: m.to, verb: m.verb, body: m.body, from, subject: String(m.subject).trim() })
+          const env = makeEnvelope({ to: m.to, verb: m.verb, body: m.body, from, subject: String(m.subject).trim(), ...ft })
           let r
           if (m.to === SESSION) { r = await deliver(env); emitTrace('send', env, 'leaf->gateway') }
           else if (isLocalSubId(m.to)) { r = deliverSub(m.to, env); emitTrace('send', env, 'leaf->subpeer') }
@@ -2248,10 +2288,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (err) return ok(err)
         from = { session: sp.id, name: sp.name, kind: 'subpeer' }
       }
+      // #54: send ON BEHALF OF a topic the caller currently owns — validated here, before anything is routed or parked
+      let ft
+      if (a.from_topic != null && String(a.from_topic).trim()) {
+        const v = fromTopicOf(from ? from.session : SESSION, askerProjectOf(from), String(a.from_topic).trim())
+        if (v.err) return ok(v.err)
+        ft = v.ft
+      }
+      const ftOut = ft ? { from_topic: ft.from_topic } : {}
       let target = String(a.target || '')
       if (target.startsWith('topic:')) {                 // topic targeting (T3): explicit prefix only -> owners
-        const r = await routeToTopicOwners(from, target.slice(6).trim(), a.verb, a.message, a.reply_to, subject, askerProjectOf(from))
-        return ok({ ...r, as: from ? from.session : SESSION, reminders: opReminders(from ? from.session : SESSION, 'send', { topic: r.topic || target.slice(6).trim(), project: r.project }) })
+        const r = await routeToTopicOwners(from, target.slice(6).trim(), a.verb, a.message, a.reply_to, subject, askerProjectOf(from), ft)
+        return ok({ ...r, ...ftOut, as: from ? from.session : SESSION, reminders: opReminders(from ? from.session : SESSION, 'send', { topic: r.topic || target.slice(6).trim(), project: r.project }) })
       }
       if (!roster.has(target) && !ownerOf(target)) {
         const pt = resolvePageTarget(target)
@@ -2270,14 +2318,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         else {
           // §19: no LIVE peer by this name — if it has a durable registration (offline/gateway-restarted),
           // park for its return; otherwise fall through to a clear unknown-target.
-          const parked = await parkToOfflineName(from, target, a.verb, a.message, a.reply_to, subject, askerProjectOf(from))
-          if (parked) return ok({ ...parked, as: from ? from.session : SESSION })
+          const parked = await parkToOfflineName(from, target, a.verb, a.message, a.reply_to, subject, askerProjectOf(from), ft)
+          if (parked) return ok({ ...parked, ...ftOut, as: from ? from.session : SESSION })
         }
       }
-      const env = makeEnvelope({ to: target, verb: a.verb, body: a.message, reply_to: a.reply_to, from, subject })
+      const env = makeEnvelope({ to: target, verb: a.verb, body: a.message, reply_to: a.reply_to, from, subject, ...ft })
       const r = await routeEnvelope(env)
       const tOwner = ownerOf(target)   // #44: 'send' reminders match the TARGET's project/host
-      return ok({ ...r, envelope_id: env.id, to: target, as: from ? from.session : SESSION,
+      return ok({ ...r, envelope_id: env.id, to: target, ...ftOut, as: from ? from.session : SESSION,
         reminders: opReminders(from ? from.session : SESSION, 'send', { project: projectOfTarget(target), host: tOwner ? tOwner.host_label : undefined }) })
     }
     case 'inbox': {

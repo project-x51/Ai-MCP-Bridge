@@ -1114,6 +1114,45 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.51.0):** *send on behalf of a topic — `from_topic` attribution (#54).* **What was missing:** sender
+  attribution was always the PEER. The envelope's `topic` is set by ROUTING (the destination of a `topic:X` send, the
+  channel of a publish), never authorship, so there was no way to say "this came FROM topic X" — and "messages from the
+  Retail topic" should stay one coherent thread across an owner handoff or a peer-id rotation, where "messages from
+  Retally" do not. **Built:** `send_to_peer` takes an optional `from_topic`. New `fromTopicOf(holder, project, ref)`
+  validates it on the SENDING bridge before anything is routed or parked: the caller (the `as`/secret sub-peer, or the
+  process session) must hold a LIVE `role:'owner'` entry for that concrete topic in `myTopics`, in its own project —
+  any co-owner of a shared topic qualifies; a dormant durable record does not (it isn't holding the topic now).
+  Otherwise `{ok:false, code:'not-topic-owner', topic}` and nothing is sent; a wildcard is `wildcard-from-topic`; a
+  `@other/…` ref can't match (you own a topic only in your project). **Shape:** two FLAT cleartext envelope fields,
+  `from_topic` (the claim's own spelling) and `from_topic_icon` (the caller's claim icon, else a co-owner's via
+  `iconOf`, so a shared topic reads the same whichever owner speaks; omitted when there's none) — flat because the push
+  channel meta is flat strings, and the same two names are used everywhere (envelope, `inbox`, channel meta, traces).
+  **Additive, never replacing `from`:** accountability, default reply routing, reply-caps and the hop/loop guard all
+  still key off the real peer. `makeEnvelope` sets them before the id is computed; `envelopeId` hashes them only when
+  present, so a plain envelope's id is unchanged. Being on the envelope they survive every path untouched: local
+  (`deliver`/`deliverSub`), same-host pair-dial, cross-host splice, `topic:` fanout (`routeToTopicOwners` threads the
+  validated fields to every per-owner envelope), parking (`parkToOfflineOwners` incl. the #26 ownerless kept-alive
+  mailbox, `parkToOfflineName`) and durable redelivery (the stored record is the whole envelope; the kept-alive drain
+  spreads it). `inbox` shows them (via `decryptedView`), the push meta adds them (`fromTopicMeta`; absent ⇒ no keys),
+  `emitTrace` + the park traces carry them, and the dashboard trace row renders `⚡ Retail (via Retally)` with an "on
+  behalf of" detail. The shipped `receive` convention (`config.example.json`, 349/365 chars) now says: with
+  from_topic, write `🖂 from <from_topic_icon> <from_topic> (via <sender>) · …` (a host's own `config.json` keeps its
+  copy until edited). **Replies:** unchanged — to the peer; a receiver wanting continuity across a handoff can reply
+  to `topic:<from_topic>` (documented, no automatic rerouting). **Not on `publish`:** there the channel already IS the
+  topic. **Pages:** the WS `send` path accepts `from_topic` too, validated the same way against the page's only claim
+  — its auto-claimed `subject` (the refusal comes back as `sent {ok:false, code}`); `aimb-page-bridge.js`'s `send`
+  passes it through. **Mixed versions:** ≤1.50 bridges carry the unknown fields through untouched (every forward
+  spreads the envelope) and ≤1.50 receivers simply ignore them and show the peer; a ≤1.50 SENDER ignores `from_topic`
+  (so it can't stamp one — attribution is only as trustworthy as the realm, same as `from`). **Test:**
+  `test_from_topic_live` (46 checks, two gateways on 127.0.0.1/.2 with file persistence — owner sends locally and
+  cross-host with the icon and `from` intact, push meta too, a plain send has no field; a non-owner / the unclaimed
+  process / a wildcard / another project's ref are refused and nothing is delivered; a `topic:` fanout across both
+  hosts keeps it; a cross-host co-owner of a shared topic may speak for it; replies to the peer and to
+  `topic:<from_topic>`; parked-to-offline-owner and parked-by-name mail keeps it after re-register; handoff — the
+  released co-owner and old owner are refused, the new owner may send, mail parked on the ownerless topic drains with
+  its field; a page for its own subject but not another). Verified to FAIL against v1.50.0 (33 of 46 checks).
+  `test_lib_unit` +2 (`envelopeId` covers `from_topic`; a plain id is unchanged). Full suite 964 across 42 files,
+  green. No config or wire-protocol change.
 - **Built (v1.50.0):** *`claim_topic` re-claim keeps omitted fields instead of resetting them (#55).* **What was
   wrong:** a re-claim (same holder, same topic) rebuilt the claim from the call's arguments, so every field the caller
   left out (`description`, `icon`, `exclusive`, `announce_offline`, `grace_minutes`, `allow_other_user`, `keep_alive`,

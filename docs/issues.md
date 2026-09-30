@@ -6,9 +6,16 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.50.0) — read this first after a compact
-**Current version: v1.50.0.** All work committed to `main` (v1.42.0 – v1.50.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.51.0) — read this first after a compact
+**Current version: v1.51.0.** All work committed to `main` (v1.42.0 – v1.51.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.51.0):** Built **#54** — `send_to_peer {from_topic}` sends on behalf of a topic the caller currently
+owns (validated on the sending bridge, else `not-topic-owner`); carried as cleartext `from_topic` + `from_topic_icon`
+beside `from` (never replacing it) on every delivery path, in `inbox`, the push meta, traces and the dashboard. Pages
+may do it for their own `subject`; not on `publish`. The shipped receive convention in `config.example.json` renders
+`🖂 from ⚡ retail (via Retally)` — a host's live `config.json` keeps its own copy until someone edits it. Roll 1.51.0
+to a SENDING host to use it; older receivers ignore the fields.
 
 **2026-09-30 (v1.50.0):** Fixed **#55** — a `claim_topic` re-claim is now a PATCH: omitted fields keep the existing
 claim's values (live, rehydrated, or the holder's own dormant durable record) instead of resetting to the defaults,
@@ -434,7 +441,16 @@ LLM-in-the-loop poll costs input tokens (context-dominated), so continuous polli
 **Depends on origin detection** (see Bigger/in-flight): the gateway must know "this peer is Cowork → notify it,
 don't expect a local doorbell task." Same thread. Nothing built; feasibility read only.
 
-## #54 — send on behalf of a TOPIC (topic-as-sender attribution)  ·  **OPEN**
+## #54 — send on behalf of a TOPIC (topic-as-sender attribution)  ·  **DONE (v1.51.0)**
+**Built:** (v1.51.0) `send_to_peer {from_topic}` — only a CURRENT owner (a live owner claim held by the caller, in its
+project; any co-owner of a shared topic) may use it, checked on the sending bridge (`fromTopicOf`), else
+`{ok:false, code:'not-topic-owner'}` and nothing is sent (a wildcard → `wildcard-from-topic`). Carried as two flat
+cleartext envelope fields `from_topic` + `from_topic_icon` (the claim icon), ADDITIVE to `from`; they survive local,
+cross-host, `topic:` fanout, parked and redelivered paths and show in `inbox`, the push meta, traces and the
+dashboard. Receive convention: `🖂 from ⚡ retail (via Retally) · …`. Replies still go to the peer (reply to
+`topic:<from_topic>` for continuity across a handoff — documented, not automatic). `publish` does NOT take it (the
+channel already is the topic). Pages: the WS `send` accepts it for the page's own `subject`. Details in
+architecture.md §13; regression guard `test_from_topic_live`.
 Robin, 2026-07-23. **Today sender attribution is always the PEER.** `makeEnvelope` sets `from` to a peer
 identity, and `as` on `send_to_peer`/`publish` takes a registered sub-peer handle — there is no way to send "on
 behalf of" a topic. The envelope's `topic` field is populated by **routing**, not authorship: it is the

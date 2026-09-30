@@ -3,6 +3,7 @@
 // directly. (Behaviour is also covered end-to-end by the live suites; this pins the units in isolation.)
 import { splitTopic, isWildcard, topicMatch, patternsOverlap, patternKey, parseTopicRef } from '../lib/topics.js'
 import { envelopeId } from '../lib/envelope.js'
+import { createHash } from 'node:crypto'
 import { TOOLS } from '../lib/tool-schemas.js'
 import { createConsent, parseTtlMin } from '../lib/consent.js'
 import { createReminders, effectiveDefaults } from '../lib/reminders.js'
@@ -48,6 +49,8 @@ const e1 = { from: { session: 's1' }, to: 'd', verb: 'note', subject: 'hi', patt
 check('envelopeId is env_<12hex>', /^env_[0-9a-f]{12}$/.test(envelopeId(e1)))
 check('envelopeId stable for identical content', envelopeId(e1) === envelopeId({ ...e1 }))
 check('envelopeId differs when body changes', envelopeId(e1) !== envelopeId({ ...e1, body: 'y' }))
+check('#54: envelopeId covers from_topic (differs when present)', envelopeId(e1) !== envelopeId({ ...e1, from_topic: 'retail' }))
+check('#54: a plain envelope\'s id is unchanged by the from_topic term', envelopeId(e1) === 'env_' + createHash('sha1').update('s1|d|note|hi|send|null|x|2026-01-01T00:00:00Z').digest('hex').slice(0, 12))
 
 // tool-schemas: every entry well-formed + names unique (a moved-but-broken schema would surface here)
 check('TOOLS all have name + object inputSchema', Array.isArray(TOOLS) && TOOLS.length > 10 && TOOLS.every(t => typeof t.name === 'string' && t.inputSchema && t.inputSchema.type === 'object'))

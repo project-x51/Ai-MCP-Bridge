@@ -149,7 +149,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 ## MCP tools
 `my_identity` • `set_name {name}` • `list_sessions` • `register_self {name, secret, project?, user?, parent?, client?, mode?, ttl_minutes?}`
 • `deregister {peer_id, secret}` • `recover_secret {name, project?}` (§21 vault — recover a lost secret, presence-gated)
-• `send_to_peer {target, subject, message, verb?, reply_to?, park?, as?, secret?}`
+• `send_to_peer {target, subject, message, verb?, reply_to?, from_topic?, park?, as?, secret?}`
 (target = session/sub-peer id, unique friendly name, or `topic:<topic>` — a bare topic auto-routes cross-project when granted; `topic:@project/…` targets a specific one) • `publish {topic, subject, message, verb?, retain?, as?, secret?}`
 • `inbox {cursor?, for?, secret?}` • `claim_topic {topic, description?, exclusive?, icon?, persistent?, keep_alive?, grace_minutes?, allow_other_user?, force?, as?, secret?}`
 • `release_topic {topic, keep_alive?, as?, secret?}` (#26 `keep_alive`: keep an ownerless topic alive so directed sends park during a handoff)
@@ -221,6 +221,16 @@ topic **vanishes with its holder**; with persistence on (§12, v1.9) a claim is 
   act; zero subscribers is ok (`subscribers: 0`).
 - **Send** = directed work to the OWNER(S) only: `send_to_peer {target:"topic:<topic>"}` (prefix
   REQUIRED, no bare-topic fallback; unowned topic → `no-owner`). Subscribers never see sends.
+- **Send on behalf of a topic (#54, v1.51.0):** `send_to_peer {…, from_topic:"retail"}` — the CURRENT owner of a
+  topic (any co-owner of a shared one) speaks for it. The sending bridge checks the caller holds a live owner claim
+  on it in its own project (else `not-topic-owner`, nothing sent; a wildcard → `wildcard-from-topic`) and stamps the
+  envelope with `from_topic` + `from_topic_icon` (the claim icon) — cleartext metadata the receiver can trust like
+  `from`, and ADDITIVE: `from` is still the real peer (accountability, replies, reply-caps and the loop guard use it).
+  It rides every path (local, cross-host, `topic:` fanout, parked/redelivered mail) and shows in `inbox`, the push
+  channel meta and the dashboard traces; the shipped receive convention renders `🖂 from ⚡ retail (via Retally)`.
+  A page may do the same for its own `subject` (WS `send` with `from_topic`). **Replies** still go to the peer by
+  default; for continuity across an owner handoff reply to `topic:<from_topic>` instead. Not on `publish` — there the
+  channel already IS the topic. Older (≤1.50) receivers ignore the fields and just show the peer.
 - **Subject (mandatory):** every send/publish carries `subject` — a short PUBLIC one-line
   description shown in traces/dashboard/channel meta. Omitting it errors (`subject-required`).
   Bodies are AES-256-GCM encrypted (key HKDF-derived from the config `token`); subject/verb/

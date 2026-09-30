@@ -588,6 +588,11 @@
     var icon = t.to_kind==='page' ? '[pg]' : '@';
     return icon+' '+esc(t.to_name?nm(t.to_name):t.to);
   }
+  // #54: a message sent ON BEHALF OF a topic shows topic-forward, the real sender still visible.
+  function fromLabel(t){
+    var who=esc(t.from_name?nm(t.from_name):t.from);
+    return t.from_topic ? esc(t.from_topic_icon||'#')+' '+esc(tc(t.from_topic))+' <span class="subj none">(via '+who+')</span>' : who;
+  }
   function addTrace(t){
     var tb=document.getElementById('traces');
     var dirBub='<span class="bub '+(t.dir==='send'?'b-send':t.dir==='recv'?'b-recv':t.dir==='con'?'b-con':'b-info')+'">'+esc(t.dir)+'</span>'
@@ -595,10 +600,11 @@
     var subj=t.subject?('<span class="subj">'+esc(t.subject)+'</span>'):('<span class="subj none">'+esc(t.note||'')+'</span>');
     var tr=document.createElement('tr'); tr.className='x-row';
     tr.innerHTML='<td><span class="x-chev">▸</span></td><td>'+esc((t.ts||'').replace('T',' ').slice(0,19))+'</td><td>'+dirBub+'</td>'+
-      '<td>'+esc(t.from_name?nm(t.from_name):t.from)+' → '+toLabel(t)+'</td><td>'+subj+'</td>';
+      '<td>'+fromLabel(t)+' → '+toLabel(t)+'</td><td>'+subj+'</td>';
     var det=document.createElement('tr'); det.className='x-det'; det.style.display='none';
     det.innerHTML='<td colspan="5">'+
       '<span class="kv"><b>from</b> <span class="mono">'+esc(t.from)+'</span></span>'+
+      (t.from_topic?'<span class="kv"><b>on behalf of</b> '+esc(t.from_topic)+'</span>':'')+
       '<span class="kv"><b>to</b> <span class="mono">'+esc(t.to)+'</span>'+(t.to_name?' ('+esc(nm(t.to_name))+')':'')+'</span>'+
       (t.topic?'<span class="kv"><b>topic</b> '+esc(tc(t.topic))+'</span>':'')+
       '<span class="kv"><b>verb</b> '+esc(t.verb)+'</span>'+
