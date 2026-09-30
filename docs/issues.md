@@ -331,6 +331,51 @@ node aimb-log.mjs --session <name> [--project P] [--agent <label>] [--ctx "@~Ctx
 - Anyone holding the realm token can report as any session via the script. That is the same trust as the doorbell,
   and was accepted (Robin); the bridge tool checks `as`/`secret`.
 
+### Limits and configuration (decided, Robin, 2026-09-30)
+**Fixed in code, versioned** (these change what crosses the mesh, so every bridge must agree):
+
+| Limit | Value |
+|---|---|
+| Message text | 240 chars |
+| Context name | 60 chars |
+| Agent path depth | 3 (`a/b/c`) |
+| Contexts per agent | 32 |
+| Agents per session | 128 |
+| `details` | 4 KB |
+| `data` | 16 KB |
+
+The tool description and the agent snippet encourage keeping details and data as small as possible. Changing a limit
+means a version bump, or later a realm-wide setting.
+
+**Configurable per host:** an `activity` block in `config.json`, each key with an `AI_BRIDGE_ACTIVITY_*` env override.
+
+| Key | Default |
+|---|---|
+| `log_retention_days` | 7 |
+| `log_entries_per_agent` | 200, kept in memory |
+| `stale_after_min` | 15. Also the dashboard slider's default; a viewer can still move it. |
+| `finished_visible_hours` | 24 |
+| `memory_budget_mb` | 64. Over budget, the oldest finished agents are evicted first. |
+| `enabled` | true |
+
+**Per-message stale override:** `stale_after` (e.g. `60m`, capped at 24h) on a message sets how long that agent or
+context may stay quiet before it counts as stale. It lasts until its next message. This is for legitimately long
+silent steps such as builds and downloads.
+
+**Memory model:** worst case, 128 agents × 200 entries × 20 KB is about 500 MB per session. So:
+- In memory, a log entry keeps text, state, time, context and the flags.
+- `details` and `data` stay in memory only for each context's CURRENT line.
+- Older entries' `details` and `data` are read back from the host's daily JSONL when expanded.
+
+### Build plan
+Each step is its own version.
+1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible.
+2. The `log` tool, local state and the daily JSONL.
+3. `tools/aimb-log.mjs`.
+4. Gossip, plus on-demand fetch of logs, details and data.
+5. The dashboard Activity tree.
+6. `{log_snippet}` plus a connect reminder.
+
 ### How sessions learn to use it (proposed)
 The same channels that taught sessions the doorbell (#64/#66b/#67):
 1. **A realm-wide connect reminder:** a `behaviors.realm` `connect` entry for `client:code`. It says: when you spawn
