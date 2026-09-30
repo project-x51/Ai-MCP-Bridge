@@ -108,7 +108,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.54.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.55.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1294,8 +1294,11 @@ function listenerState(watch) {
 function notifyOne(ws) {
   if (!ws || ws.readyState !== 1 || ws.kind !== 'listener') return
   const st = listenerState(ws.watch || {})
-  // a watched NAME that is no longer on the roster: say so, so the caller re-registers instead of waiting forever
-  if (ws.watch && ws.watch.name && !st.found) { try { ws.send(JSON.stringify({ type: 'gone', watch: ws.watch })) } catch {} ; return }
+  if (st.found) ws.watchSeen = true   // #73: the watched name was on the roster at some point while this listener was armed
+  // a watched NAME that is not on the roster: say so, so the caller re-registers instead of waiting forever.
+  // #73: `unknown` = never seen since this listener armed (e.g. not re-registered after a bridge restart) — re-register,
+  // don't silently re-arm (that looped); `gone` = it WAS here during this watch and then left.
+  if (ws.watch && ws.watch.name && !st.found) { try { ws.send(JSON.stringify({ type: ws.watchSeen ? 'gone' : 'unknown', watch: ws.watch })) } catch {} ; return }
   const total = st.direct + Object.values(st.topics).reduce((a, b) => a + b, 0)
   if (total > 0) { try { ws.send(JSON.stringify({ type: 'mail', peer: st.found, unread_direct: st.direct, topics: st.topics, total })) } catch {} }
 }

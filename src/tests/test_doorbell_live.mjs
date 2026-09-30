@@ -6,11 +6,15 @@
 // AIMB_DOORBELL_CHECKIN_EVERY moves the mark (every k-th boundary) so both sides are provable in seconds.
 // AIMB_DOORBELL_TEST_TOOLS=<dir> points the script + clock-helper checks at another tools/ dir (used to prove the
 // new checks FAIL on a pre-change copy); default = this tree's tools/.
+// #73: a name NOT on the roster when the listener arms gets {type:"unknown"} (script: reason "peer-unknown", exit 0,
+// re-register guidance, NOT silent); one that was there and LEFT while armed keeps `gone`/"peer-gone". A tiny fake
+// listener server stands in for a <1.55 bridge (no `unknown` frame) to prove the script's early-gone hot-loop guard.
+// AIMB_DOORBELL_TEST_BRIDGE=<path to bridge.mjs> runs the bridge half against another copy (pre-change proof).
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
-import WebSocket from 'ws'
+import WebSocket, { WebSocketServer } from 'ws'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -18,6 +22,7 @@ import path from 'node:path'
 const SRCDIR = fileURLToPath(new URL('../', import.meta.url))
 const TOOLSDIR = process.env.AIMB_DOORBELL_TEST_TOOLS ? path.resolve(process.env.AIMB_DOORBELL_TEST_TOOLS) : path.join(SRCDIR, 'tools')
 const DOORBELL = path.join(TOOLSDIR, 'aimb-doorbell.mjs')
+const BRIDGE = process.env.AIMB_DOORBELL_TEST_BRIDGE ? path.resolve(process.env.AIMB_DOORBELL_TEST_BRIDGE) : path.join(SRCDIR, 'bridge.mjs')
 const PORT = '7190', WSPORT = '7191', TOKEN = 'doorbelltok'
 const PDIR = path.join(os.tmpdir(), 'aimb-doorbell-' + Date.now())
 fs.mkdirSync(PDIR, { recursive: true })
@@ -26,7 +31,7 @@ let pass = 0, fail = 0
 const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
 
 const t = new StdioClientTransport({
-  command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR,
+  command: 'node', args: [BRIDGE], cwd: path.dirname(BRIDGE),
   env: { ...process.env, AI_BRIDGE_NAME: 'GW', AI_BRIDGE_PORT: PORT, AI_BRIDGE_WS_PORT: WSPORT, AI_BRIDGE_TOKEN: TOKEN,
          AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: PDIR, AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none',
          AI_BRIDGE_DOORBELL_PING_MS: '400' },
@@ -93,10 +98,29 @@ const L3 = listen({ name: 'Owner', project: 'DBTEST' })
 const mail3 = await L3.waitFor('mail')
 check('arming with mail already waiting fires at once', !!mail3)
 
-// ---- 6. a watch on a name that is not on the roster reports `gone` ----
+// ---- 6. #73: a watch on a name that is NOT on the roster when it arms reports `unknown` (not `gone`) ----
 const L4 = listen({ name: 'NoSuchPeer', project: 'DBTEST' })
-const gone = await L4.waitFor('gone')
-check('unknown/departed peer reports gone', !!gone)
+const unk = await L4.waitFor('unknown')
+check('#73 never-registered peer reports unknown', !!unk, JSON.stringify(L4.seen.map(m => m.type)))
+check('#73 never-registered peer does NOT report gone', !L4.seen.some(m => m.type === 'gone'), JSON.stringify(L4.seen.map(m => m.type)))
+
+// ---- 6b. #73: a name that IS registered when the listener arms and then LEAVES still reports `gone` ----
+const leaver = await call('register_self', { name: 'Leaver', secret: 's-lv', project: 'DBTEST', user: 'robin', client: 'claude-code' })
+const L6 = listen({ name: 'Leaver', project: 'DBTEST' })
+await L6.waitFor('welcome')
+await sleep(200)
+check('#73 registered peer: no unknown/gone while it is there', !L6.seen.some(m => m.type === 'unknown' || m.type === 'gone'), JSON.stringify(L6.seen.map(m => m.type)))
+await call('deregister', { peer_id: leaver.peer_id, secret: 's-lv' })
+const gone = await L6.waitFor('gone')
+check('#73 departed peer (left while armed) reports gone', !!gone, JSON.stringify(L6.seen.map(m => m.type)))
+check('#73 departed peer does NOT report unknown', !L6.seen.some(m => m.type === 'unknown'), JSON.stringify(L6.seen.map(m => m.type)))
+// project scoping unchanged: the right name in the WRONG project is not a match -> unknown
+const L7 = listen({ name: 'Owner', project: 'OTHERPROJ' })
+check('#73 name in another project is unknown here (project scoping kept)', !!(await L7.waitFor('unknown')), JSON.stringify(L7.seen.map(m => m.type)))
+// a topic-only watch never gets unknown/gone
+const L8 = listen({ topic: 'virtualization' })
+await L8.waitFor('welcome'); await sleep(300)
+check('#73 topic-only watch gets no unknown/gone', !L8.seen.some(m => m.type === 'unknown' || m.type === 'gone'), JSON.stringify(L8.seen.map(m => m.type)))
 
 // ---- 7. a listener with no watch is rejected ----
 const L5 = listen({})
@@ -104,7 +128,7 @@ const err = await L5.waitFor('error')
 check('listener without a watch is rejected', !!(err && err.code === 'watch-required'), JSON.stringify(err))
 
 // ---- 8. the shipped SCRIPT exits 0 with a JSON summary when mail lands ----
-for (const l of [L, L2, L3, L4, L5]) { try { l.sock.close() } catch {} }
+for (const l of [L, L2, L3, L4, L5, L6, L7, L8]) { try { l.sock.close() } catch {} }
 await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })   // clear
 await sleep(400)
 const statusFile = path.join(PDIR, 'doorbell-status.json')
@@ -253,6 +277,68 @@ check('#69 pure: the boundary after 17:59:59.998 is 18:00 and a check-in; after 
 check('#69 pure: a test period p marks every 6th multiple of p since local midnight (p=2: 00:00:12 yes, 00:00:10 no)',
   !!clock && clock.isCheckinMark(at(0, 0, 12), 2) && !clock.isCheckinMark(at(0, 0, 10), 2) && clock.isCheckinMark(at(0, 0, 10), 2, 5) && clock.isCheckinMark(at(0, 0, 3), 1, 1),
   'no helper or mismatch')
+
+// ---- 14. #73 the SCRIPT: peer-unknown vs peer-gone, and the legacy-bridge early-gone hot-loop guard ----
+function runWatch(name, url, extraArgs = [], env = {}, killAfterMs = 15000) {
+  const p = spawn('node', [DOORBELL, '--name', name, '--project', 'DBTEST', '--token', TOKEN, '--url', url, '--timeout', '10', ...extraArgs],
+    { cwd: SRCDIR, env: { ...process.env, ...env } })
+  let o = ''
+  p.stdout.on('data', d => { o += d.toString() })
+  const guard = setTimeout(() => { try { p.kill() } catch {} }, killAfterMs)
+  const exited = new Promise(r => p.on('exit', code => {
+    clearTimeout(guard)
+    let j = null; try { j = JSON.parse(o.trim().split('\n').pop()) } catch {}
+    r({ code, out: o.trim(), j })
+  }))
+  return { p, exited }
+}
+const REREG = /register_self/i
+const unkStatus = path.join(PDIR, 'doorbell-unknown.json')
+const u1 = await runWatch('Ghost', `ws://127.0.0.1:${WSPORT}`, ['--status', unkStatus]).exited
+check('#73 script: never-registered name -> exit 0, reason "peer-unknown"', u1.code === 0 && !!u1.j && u1.j.reason === 'peer-unknown', `exit ${u1.code} ${u1.out}`)
+check('#73 script: peer-unknown guidance says re-register (register_self + secret) then re-arm, NOT a silent re-arm',
+  !!(u1.j && typeof u1.j.guidance === 'string' && REREG.test(u1.j.guidance) && /secret/i.test(u1.j.guidance) && /re-arm/i.test(u1.j.guidance) && !/silent/i.test(u1.j.guidance)), u1.j && u1.j.guidance)
+let stu = null; try { stu = JSON.parse(fs.readFileSync(unkStatus, 'utf8')) } catch {}
+check('#73 script: status file exit write says unknown (state/reason/guidance)',
+  !!(stu && stu.state === 'unknown' && stu.reason === 'peer-unknown' && u1.j && stu.guidance === u1.j.guidance), stu && JSON.stringify(stu))
+// a name that registers, then leaves while the script is armed -> still peer-gone (silent re-arm + re-register hint)
+const lv2 = await call('register_self', { name: 'Leaver2', secret: 's-lv2', project: 'DBTEST', user: 'robin', client: 'claude-code' })
+const lvStatus = path.join(PDIR, 'doorbell-leaver.json')
+const g1p = runWatch('Leaver2', `ws://127.0.0.1:${WSPORT}`, ['--status', lvStatus])
+for (let i = 0; i < 50; i++) { let s1 = null; try { s1 = JSON.parse(fs.readFileSync(lvStatus, 'utf8')) } catch {} ; if (s1 && s1.state === 'armed') break; await sleep(100) }
+await call('deregister', { peer_id: lv2.peer_id, secret: 's-lv2' })
+const g1 = await g1p.exited
+check('#73 script: a name that left while armed -> exit 0, reason "peer-gone"', g1.code === 0 && !!g1.j && g1.j.reason === 'peer-gone', `exit ${g1.code} ${g1.out}`)
+check('#73 script: peer-gone keeps the silent re-arm and mentions re-registering after a restart',
+  !!(g1.j && /silent re-arm/i.test(g1.j.guidance || '') && REREG.test(g1.j.guidance || '')), g1.j && g1.j.guidance)
+
+// a fake listener server stands in for an OLD bridge (no `unknown` frame): welcome{bridge_version}, then `gone` after goneMs
+const FAKE_PORT = 13690
+let fakeMode = { version: '1.54.0', goneMs: 0 }
+const fake = new WebSocketServer({ host: '127.0.0.1', port: FAKE_PORT })
+fake.on('connection', sock => sock.on('message', r => {
+  let m = null; try { m = JSON.parse(r.toString()) } catch { return }
+  if (m.type !== 'hello') return
+  sock.send(JSON.stringify({ type: 'welcome', instance: 'fake', gateway: 'FAKE', bridge_version: fakeMode.version, capabilities: {}, watch: m.watch }))
+  const g = () => { try { sock.send(JSON.stringify({ type: 'gone', watch: m.watch })) } catch {} }
+  fakeMode.goneMs ? setTimeout(g, fakeMode.goneMs) : g()
+}))
+await new Promise(r => fake.on('listening', r))
+const FAKE_URL = `ws://127.0.0.1:${FAKE_PORT}`
+fakeMode = { version: '1.54.0', goneMs: 0 }
+const e1 = await runWatch('Ferret', FAKE_URL).exited
+check('#73 legacy guard: an old bridge\'s instant gone after welcome -> exit 0, reason "peer-unknown" (no hot loop)',
+  e1.code === 0 && !!e1.j && e1.j.reason === 'peer-unknown' && e1.j.inferred_from === 'early-gone', `exit ${e1.code} ${e1.out}`)
+check('#73 legacy guard: carries the re-register guidance, not the silent re-arm',
+  !!(e1.j && REREG.test(e1.j.guidance || '') && !/silent/i.test(e1.j.guidance || '')), e1.j && e1.j.guidance)
+fakeMode = { version: '1.54.0', goneMs: 700 }
+const e2 = await runWatch('Ferret', FAKE_URL, [], { AIMB_DOORBELL_EARLY_GONE_MS: '200' }).exited
+check('#73 legacy guard: a LATE gone from an old bridge stays "peer-gone"', e2.code === 0 && !!e2.j && e2.j.reason === 'peer-gone', `exit ${e2.code} ${e2.out}`)
+fakeMode = { version: '1.55.0', goneMs: 0 }
+const e3 = await runWatch('Ferret', FAKE_URL).exited
+check('#73 legacy guard is gated on the bridge version: an instant gone from a >=1.55 bridge is a real "peer-gone"',
+  e3.code === 0 && !!e3.j && e3.j.reason === 'peer-gone', `exit ${e3.code} ${e3.out}`)
+await new Promise(r => fake.close(r))
 
 console.log(`\n${pass} passed, ${fail} failed`)
 await c.close()

@@ -36,13 +36,20 @@
 // stdout + the --status file, so a caller still branches on it:
 //   0  did its job    -> if reason=="mail" poll the inbox & handle it; if "hourly" show the user the time (and if
 //                        inbox_check:true, call the inbox tool first even with nothing waiting — #69); then re-arm.
-//                        reason ∈ { mail, hourly, timeout, peer-gone, link-closed(after arming) }
+//                        reason ∈ { mail, hourly, timeout, peer-gone, peer-unknown, link-closed(after arming) }
+//                        peer-unknown (#73): the watched name isn't registered on this bridge (it probably restarted)
+//                        -> call register_self with your name + secret, THEN re-arm (a bare re-arm would loop).
 //   4  couldn't do it -> never armed / a bridge error frame; investigate rather than hot-loop
 //  64  bad usage
 // A routine NO-MAIL wake (timeout / peer-gone / a post-arm link drop) also carries guidance:"silent re-arm…"
 // so a doorbell LOOP doesn't burn tokens narrating uneventful re-arms — the agent stays quiet unless it STOPS
-// looping (or mail needs handling). stdout is a single JSON line. Every exit carries `exited_at` (local ISO-8601
-// with tz offset) + `exited_at_unix` (#51); the same two fields land in the --status file's exit write.
+// looping (or mail needs handling). peer-unknown (#73) is NOT silent: it carries re-register guidance instead.
+// A ≥1.55 bridge sends {type:"unknown"} for a name never on its roster during this watch and keeps {type:"gone"}
+// for one that was there and left. An OLDER bridge sends `gone` for both, so a `gone` within
+// AIMB_DOORBELL_EARLY_GONE_MS (default 2000) of `welcome` from a <1.55 bridge is reported as peer-unknown too —
+// the hot-loop guard (re-arm → instant gone → re-arm …) for a mesh that still runs old bridges.
+// stdout is a single JSON line. Every exit carries `exited_at` (local ISO-8601 with tz offset) + `exited_at_unix`
+// (#51); the same two fields land in the --status file's exit write.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -70,6 +77,8 @@ const TIMEOUT_MS = TIMEOUT_ARG != null ? Number(TIMEOUT_ARG) * 1000 : null
 const PERIOD_SEC = Number(process.env.AIMB_DOORBELL_PERIOD_SEC) > 0 ? Number(process.env.AIMB_DOORBELL_PERIOD_SEC) : 3600   // test hook
 const CHECKIN_EVERY = Number(process.env.AIMB_DOORBELL_CHECKIN_EVERY) > 0 ? Math.floor(Number(process.env.AIMB_DOORBELL_CHECKIN_EVERY)) : 6   // #69 test/tuning knob
 const STATUS = arg('status')
+const EARLY_GONE_ENV = process.env.AIMB_DOORBELL_EARLY_GONE_MS
+const EARLY_GONE_MS = EARLY_GONE_ENV != null && EARLY_GONE_ENV !== '' && Number(EARLY_GONE_ENV) >= 0 ? Number(EARLY_GONE_ENV) : 2000   // #73 legacy-bridge hot-loop guard window (test/tuning knob)
 
 if (!NAME && !TOPIC) { console.error('usage: --name <peer> [--project P] [--topic T] [--timeout sec] [--status file]   (no --timeout = chime at the top of the next hour; 00/06/12/18:00 chimes add inbox_check:true — call your inbox tool)'); process.exit(64) }
 if (!TOKEN) { console.error('no realm token: pass --token, set AI_BRIDGE_TOKEN, or run beside src/config.json'); process.exit(64) }
@@ -104,9 +113,16 @@ function status(state, extra) {
 }
 
 let finished = false, armed = false   // armed flips true on the bridge's `welcome` — a pre-arm link failure is real trouble, a post-arm one is a benign re-arm
+let armedAt = 0, bridgeVersion = null   // #73: when `welcome` landed + who sent it (the early-gone guard only applies to a <1.55 bridge)
 // A brief, imperative wake-guidance for a routine (no-mail) exit — deliberately terse because it rides EVERY
 // idle re-arm and the agent reads it each time. Tells the loop to stay silent unless it's actually stopping.
 const REARM_GUIDANCE = "silent re-arm — don't mention this wake unless you're stopping the loop"
+// #73: peer-gone keeps the silent re-arm but reminds a session that may have missed a bridge restart to re-register.
+const GONE_GUIDANCE = "silent re-arm — don't mention this wake unless you're stopping the loop; if the bridge restarted since your last register_self, call it first"
+// #73: an unknown name is NOT a silent re-arm — re-arming without re-registering just loops.
+const UNKNOWN_GUIDANCE = "Your name isn't registered on this bridge (it probably restarted). Call register_self with your name + secret, then re-arm the doorbell."
+// #73: bridges before 1.55.0 have no `unknown` frame — they send `gone` for a never-registered name too.
+const legacyBridge = v => { const p = String(v || '').split('.').map(Number); if (p.length < 2 || p.some(n => !Number.isFinite(n))) return true; return p[0] < 1 || (p[0] === 1 && (p[1] || 0) < 55) }
 // #67: the hourly chime is the opposite — a visible wake whose whole point is to show the user the time.
 const chimeGuidance = t => `Top of the hour: display the current time (${t}) to the user, then re-arm the doorbell.`
 // #69: on the 6-hour marks the chime also makes the agent touch the bridge, so an idle session keeps it loaded.
@@ -120,13 +136,15 @@ function done(reason, extra) {
   // outcome the caller re-arms from, so exit 0 and let `reason` carry the specifics.
   const trouble = reason === 'error' || ((reason === 'link-closed' || reason === 'link-error') && !armed)
   const code = trouble ? 4 : 0
-  const state = reason === 'mail' ? 'mail' : reason === 'hourly' ? 'hourly' : reason === 'timeout' ? 'timeout' : reason === 'peer-gone' ? 'gone' : 'lost'
-  const routineNoMail = !trouble && reason !== 'mail' && reason !== 'hourly'   // uneventful wake -> tell the agent to re-arm silently
+  const state = reason === 'mail' ? 'mail' : reason === 'hourly' ? 'hourly' : reason === 'timeout' ? 'timeout' : reason === 'peer-gone' ? 'gone' : reason === 'peer-unknown' ? 'unknown' : 'lost'
+  const routineNoMail = !trouble && reason !== 'mail' && reason !== 'hourly' && reason !== 'peer-unknown'   // uneventful wake -> tell the agent to re-arm silently
+  const guidance = reason === 'hourly' ? (extra.inbox_check ? checkinGuidance(extra.time) : chimeGuidance(extra.time))
+    : reason === 'peer-unknown' ? UNKNOWN_GUIDANCE : reason === 'peer-gone' ? GONE_GUIDANCE : routineNoMail ? REARM_GUIDANCE : null
   const now = new Date()
   // #51: stamp EVERY exit centrally, so both the stdout line and the status file's exit write carry it.
   const payload = { reason, ...(extra || {}), watch,
     exited_at: localIso(now), exited_at_unix: Math.floor(now.getTime() / 1000),
-    ...(reason === 'hourly' ? { guidance: extra.inbox_check ? checkinGuidance(extra.time) : chimeGuidance(extra.time) } : routineNoMail ? { guidance: REARM_GUIDANCE } : {}) }
+    ...(guidance ? { guidance } : {}) }
   console.log(JSON.stringify(payload))
   status(state, payload)
   try { ws.close() } catch {}
@@ -159,10 +177,14 @@ ws.on('open', () => {
 ws.on('message', raw => {
   let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
   switch (m.type) {
-    case 'welcome': armed = true; status('armed', { bridge_version: m.bridge_version, gateway: m.gateway }); break
+    case 'welcome': armed = true; armedAt = Date.now(); bridgeVersion = m.bridge_version || null; status('armed', { bridge_version: m.bridge_version, gateway: m.gateway }); break
     case 'ping':    status('alive', { pings: true }); break
     case 'mail':    done('mail', { peer: m.peer, unread_direct: m.unread_direct, topics: m.topics, total: m.total }); break
-    case 'gone':    done('peer-gone', {}); break
+    case 'unknown': done('peer-unknown', {}); break   // #73: ≥1.55 bridge — name not registered here (e.g. not since a restart)
+    case 'gone':    // #73 hot-loop guard: an OLD bridge says `gone` for an unknown name too, right after welcome
+      if (legacyBridge(bridgeVersion) && (!armed || Date.now() - armedAt <= EARLY_GONE_MS)) done('peer-unknown', { inferred_from: 'early-gone', bridge_version: bridgeVersion })
+      else done('peer-gone', {})
+      break
     case 'error':   done('error', { code: m.code, what: m.what }); break
   }
 })

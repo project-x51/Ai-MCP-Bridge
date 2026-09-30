@@ -6,8 +6,9 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.54.0) — read this first after a compact
-**Current version: v1.54.0.** All work committed AND pushed to `main` (see `git log`). Everything below is durable;
+## RESUME STATE (updated 2026-09-30, v1.55.0) — read this first after a compact
+**Current version: v1.55.0** (#73; code done, NOT yet deployed — live hosts run v1.54.0). Work is committed AND pushed
+to `main` (see `git log`). Everything below is durable;
 nothing important is only in chat.
 
 **DEPLOYED (2026-09-30):** every live host runs **v1.54.0**: ROBIN-Z790, LITTLE-001, Robins-Mac, phub-lnx-01 (checked
@@ -22,9 +23,14 @@ with `list_sessions`).
 Optional tidy: live configs still carry ignored `compatPorts` keys (harmless). Not done: the optional
 `from_topic`-aware receive line in `behaviors.realm` (#54).
 
-**Still open:** #73 doorbell peer-unknown after restart, #72 grant notices, #71 project-name case, #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #72 grant notices, #71 project-name case, #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
+
+**2026-09-30 (v1.55.0):** Fixed **#73** — the doorbell no longer loops on a name not re-registered since a bridge
+restart: the bridge sends `{type:"unknown"}` (script: `reason:"peer-unknown"`, exit 0, "call register_self … then
+re-arm" guidance) and keeps `gone` for a name that left while watched; the script also maps an old bridge's instant
+`gone` to `peer-unknown`. Deploy = restart each bridge on 1.55.0 (the doorbell script ships beside it).
 
 **2026-09-30 (v1.54.0):** Built **#69** — the doorbell's hourly chimes at 00:00/06:00/12:00/18:00 (local) add
 `inbox_check:true` + guidance to call the inbox tool NOW even if nothing is waiting (keeps the Ai MCP Bridge loaded in
@@ -146,8 +152,20 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
-## #73 — doorbell reports `peer-gone` for a name not re-registered since a bridge restart (re-arm loop)  ·  **OPEN (fixing first)**
+## #73 — doorbell reports `peer-gone` for a name not re-registered since a bridge restart (re-arm loop)  ·  **DONE (v1.55.0)**
 Reported by Ferret : PC.1 (Ferret project, 2026-09-30).
+**Built:** the listener tracks whether its watched name has been on the roster at any point while it was armed
+(`ws.watchSeen`, set in `notifyOne` whenever `listenerState` finds it). A name that is missing and was never seen gets
+the new `{type:"unknown"}` frame; one that was seen and then left keeps `{type:"gone"}`. Project scoping and topic-only
+watches are unchanged. The script maps `unknown` → `reason:"peer-unknown"`, exit 0, `--status` state `unknown`,
+`guidance:"Your name isn't registered on this bridge (it probably restarted). Call register_self with your name +
+secret, then re-arm the doorbell."` (no silent re-arm). `peer-gone` keeps the silent re-arm and adds "if the bridge
+restarted since your last register_self, call it first". **Old bridges** send `gone` for both cases, so a `gone`
+within 2 s of `welcome` (`AIMB_DOORBELL_EARLY_GONE_MS`) from a bridge that reports <1.55.0 becomes `peer-unknown` with
+`inferred_from:"early-gone"` (the hot-loop guard); a later `gone` stays `peer-gone`. README exit-code table and the
+listener protocol updated. Tests: `test_doorbell_live` 56 → 71 (listener `unknown` vs `gone`, project scoping, topic
+watch; script `peer-unknown`/`peer-gone` + status file; the guard against a fake old listener server: early gone,
+late gone, version gate); 9 of the new checks FAIL on the pre-change bridge + script.
 - **What happens:** after a bridge restart (the queue epoch changes), a session's name is unknown until it calls
   `register_self` again. A doorbell armed before that exits at once with `reason:"peer-gone"`, and its guidance says
   "silent re-arm". Re-arming exits again, so the session loops without ever re-registering. The v1.54.0 rollout

@@ -96,14 +96,17 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   caught up on subscribe, survives a restart, last-value-wins (4); `test_vault_live.mjs` — secret recovery
   (§21): a sealed secret is recovered via the vault (presence-gated) + reattaches with resync, deny path
   leaks nothing, unknown/unsupported handled (5); `test_doorbell_live.mjs` — the doorbell (#39): a `listener`
-  leaf is pushed `mail` on a direct send and on a topic send (counts kept separate), gets `gone` for an unknown
-  peer and `watch-required` with no watch, heartbeats, fires immediately when armed with mail already waiting,
+  leaf is pushed `mail` on a direct send and on a topic send (counts kept separate), gets `unknown` for a name not
+  on the roster when it arms and `gone` for one that leaves while armed (#73), `watch-required` with no watch,
+  heartbeats, fires immediately when armed with mail already waiting,
   and is proven ISOLATED (never sees roster/traces/persistence/sender) — plus the shipped
   `tools/aimb-doorbell.mjs` exit codes (0 mail / 0 timeout), its status file, and the #67 hourly chime (a
   shortened test period chimes `hourly` with the boundary time + display guidance, never early, re-arm targets the
   next boundary; mail still fires first; an explicit `--timeout` keeps `timeout` + silent guidance), and the #69
   6-hour check-in (an on-mark chime adds `inbox_check:true` + call-your-inbox guidance, stdout and status file; an
-  off-mark chime, mail and `--timeout` carry none; pure checks of the 00/06/12/18:00 mark incl. midnight) (56);
+  off-mark chime, mail and `--timeout` carry none; pure checks of the 00/06/12/18:00 mark incl. midnight), and #73
+  (`peer-unknown` + re-register guidance vs `peer-gone`, and the legacy-bridge early-gone guard against a fake old
+  listener server) (71);
   `test_parked_live.mjs` — out-of-band parked mail surfaces
   on a plain poll and on reattach, and is **acked on serve** so a re-register never redelivers it (#23/#34, 8);
   `test_keepalive_live.mjs` — `release_topic {keep_alive}` keeps an ownerless topic alive, parks directed
@@ -381,23 +384,31 @@ stdout and in the `--status` exit write. Branch on `reason`:
 | **0** | `mail` | Poll `inbox` once, handle the mail, re-arm. |
 | **0** | `hourly` | Show the user `time`, re-arm. If `inbox_check:true` (00/06/12/18:00, #69), call `inbox` first even if nothing is waiting. |
 | **0** | `timeout` | Only with an explicit `--timeout`. Silent re-arm. |
-| **0** | `peer-gone` | The watched name left the mesh. Silent re-arm; re-register first if it was you. |
+| **0** | `peer-gone` | The watched name was here and left the mesh. Silent re-arm; re-register first if the bridge restarted since your last `register_self`. |
+| **0** | `peer-unknown` | The watched name isn't registered on this bridge (it probably restarted, #73). Call `register_self` with your name + secret, **then** re-arm. Not a silent re-arm: re-arming alone just loops. |
 | **0** | `link-closed` / `link-error` | The bridge link dropped **after** arming, e.g. a bridge restart. Silent re-arm. |
 | **4** | `error` | The bridge sent an error frame (`code`, `what`). Investigate; don't hot-loop re-arming. |
 | **4** | `link-closed` / `link-error` | The link failed **before** it ever armed (bridge down, wrong port/token). Investigate. |
 | **64** | — | Bad usage, e.g. no `--name`/`--topic`, or no realm token found. Fix the command. |
 
-Routine no-mail wakes (exit 0 and anything but `mail`/`hourly`) also carry a terse `guidance:"silent re-arm…"`, so a
-doorbell loop doesn't burn tokens narrating uneventful re-arms. The agent stays quiet unless it's stopping the loop.
+Routine no-mail wakes (exit 0 and anything but `mail`/`hourly`/`peer-unknown`) also carry a terse
+`guidance:"silent re-arm…"`, so a doorbell loop doesn't burn tokens narrating uneventful re-arms. The agent stays
+quiet unless it's stopping the loop. `peer-unknown` instead carries
+`guidance:"Your name isn't registered on this bridge (it probably restarted). Call register_self with your name +
+secret, then re-arm the doorbell."` (`--status` state `unknown`).
 `--status` writes a heartbeat file, so you can confirm the doorbell is alive without spending a turn. Every exit is
 **self-timestamped** (#51): `exited_at` (local ISO-8601 with tz offset) and `exited_at_unix`, on stdout and in the
 `--status` exit write.
 
 Protocol: `hello {kind:"listener", token, watch:{name?, project?, topic?}}` → `welcome`, then
 `{type:"mail", peer, unread_direct, topics{}, total}` when the v1.24.17 waiting counts rise above zero,
-`{type:"gone"}` if the watched name disappears, `{type:"ping"}` heartbeats. It is **counts-only** — no roster,
-traces, persistence or sender identities — so it needs **no per-peer secret** (the realm token gates the socket,
-and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
+`{type:"unknown"}` if the watched name is not on the roster and hasn't been since the listener armed (v1.55.0, #73:
+e.g. not re-registered after a bridge restart), `{type:"gone"}` if it was there during the watch and then left,
+`{type:"ping"}` heartbeats. Project scoping applies to both; a topic-only watch gets neither. A bridge before
+1.55.0 sends `gone` in both cases, so the script treats a `gone` within 2 s of `welcome` from a <1.55 bridge as
+`peer-unknown` (`inferred_from:"early-gone"`) — the hot-loop guard; knob `AIMB_DOORBELL_EARLY_GONE_MS`.
+It is **counts-only** — no roster, traces, persistence or sender identities — so it needs **no per-peer secret**
+(the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
 ## Behaviour reminders (#29 / #32 / #44)

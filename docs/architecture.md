@@ -1114,6 +1114,29 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.55.0):** *doorbell `peer-unknown` — no re-arm loop after a bridge restart (#73).* Reported by Ferret :
+  PC.1. **What was wrong:** after a bridge restart a session's sub-peer name is unknown until it calls `register_self`
+  again, but a doorbell armed on it got `{type:"gone"}` at once → `reason:"peer-gone"` + the silent-re-arm guidance →
+  re-arm → instant `gone` again: a loop that never re-registered. **Fix (bridge):** the listener remembers whether its
+  watched name was on the roster at any point while armed (`ws.watchSeen`, set by `notifyOne` whenever
+  `listenerState` finds it). Missing and never seen → new `{type:"unknown", watch}`; seen then missing →
+  `{type:"gone", watch}` as before. Project scoping unchanged; a topic-only watch gets neither. **Fix (script):**
+  `unknown` → `reason:"peer-unknown"`, exit 0 (not a bridge fault), status state `unknown`, and
+  `guidance:"Your name isn't registered on this bridge (it probably restarted). Call register_self with your name +
+  secret, then re-arm the doorbell."` — deliberately NOT the silent re-arm. `peer-gone` keeps the silent re-arm and
+  now adds "if the bridge restarted since your last register_self, call it first". **Mixed mesh:** a <1.55 bridge
+  has no `unknown` frame and sends `gone` for a never-registered name, so the script treats a `gone` within
+  `AIMB_DOORBELL_EARLY_GONE_MS` (default 2000) of `welcome` from a bridge whose `welcome.bridge_version` is <1.55.0
+  (or absent) as `peer-unknown` + `inferred_from:"early-gone"` — the hot-loop guard; later, or from a ≥1.55 bridge,
+  it stays `peer-gone`. Trade-off: on an old bridge a name that genuinely leaves within 2 s of arming reads as
+  `peer-unknown` (harmless: re-registering is the right move then too). An OLD script on a NEW bridge ignores
+  `unknown` and simply waits (chime / timeout; it rings if the name re-registers) — no loop either way. Tests:
+  `test_doorbell_live` 56 → 71 — listener `unknown` for a never-registered name (no `gone`), `gone` (no `unknown`) for
+  one that deregisters while armed, the name in another project is `unknown`, a topic watch gets neither; the script's
+  `peer-unknown` (exit 0, re-register guidance, not silent, status file) vs `peer-gone` (silent + re-register hint);
+  and a fake old listener server proving the guard (instant `gone` from 1.54.0 → `peer-unknown`, a late one →
+  `peer-gone`, an instant one from 1.55.0 → `peer-gone`). New hook `AIMB_DOORBELL_TEST_BRIDGE` runs the bridge half
+  against another copy; against the pre-change bridge + script 9 of the new checks FAIL.
 - **Built (v1.54.0, tray):** *Task Tray "Restart Bridges…" menu item.* Sits above Quit; a Yes/No confirmation (default No) then stops every `bridge.mjs` process on the machine, waits up to 10s for them to exit (ports free), re-reads version/ports and launches a fresh headless gateway, pausing the keep-alive monitor meanwhile. Tray-only — bridge version unchanged; rebuild with `tray/windows/build.cmd`.
 - **Built (v1.54.0):** *doorbell 6-hour inbox check-in keeps the bridge loaded (#69).* Robin's request: an idle
   session that only loops the doorbell makes no bridge tool call for hours, so the host may unload the MCP bridge
