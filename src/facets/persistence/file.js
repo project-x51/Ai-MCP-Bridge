@@ -438,6 +438,17 @@ export function create(ctx) {
     },
   }
 
+  // ---- #71 canonical project display names: the replicated first-seen map (projKey -> { name, first_seen }), ONE file
+  // per writing host holding that host's whole map (small: one entry per project); the bridge folds all() at startup. ----
+  const projectNames = {
+    async put(writer, list) { await writeAtomic(dir('project-names', `${lslug(writer || 'host', 80)}.pnames`), JSON.stringify(Array.isArray(list) ? list : [])) },
+    async all() {   // every host's list: [[{ name, first_seen }, ...], ...]
+      const pdir = dir('project-names'), out = []
+      for (const f of await readDirSafe(pdir)) { if (!f.endsWith('.pnames')) continue; const j = await readJson(path.join(pdir, f)); if (Array.isArray(j)) out.push(j) }
+      return out
+    },
+  }
+
   // a read-only summary of every store for the dashboard's persistence view. Records are self-describing,
   // so this shows real identities/topics (not opaque hashes). Capped per store to bound the payload.
   async function snapshot() {
@@ -476,7 +487,7 @@ export function create(ctx) {
   }
 
   return {
-    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, behaviors, realmDefaults, snapshot,
+    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, behaviors, realmDefaults, projectNames, snapshot,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,

@@ -6,8 +6,8 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.56.0) — read this first after a compact
-**Current version: v1.56.0** (#72; code done, NOT yet deployed — live hosts run v1.54.0). Work is committed AND pushed
+## RESUME STATE (updated 2026-09-30, v1.57.0) — read this first after a compact
+**Current version: v1.57.0** (#71; code done, NOT yet deployed — live hosts run v1.54.0). Work is committed AND pushed
 to `main` (see `git log`). Everything below is durable;
 nothing important is only in chat.
 
@@ -23,9 +23,14 @@ with `list_sessions`).
 Optional tidy: live configs still carry ignored `compatPorts` keys (harmless). Not done: the optional
 `from_topic`-aware receive line in `behaviors.realm` (#54).
 
-**Still open:** #71 project-name case, #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
+
+**2026-09-30 (v1.57.0):** Fixed **#71** — one canonical project spelling mesh-wide (the first-seen one; matching stays
+case-insensitive): `allow`, `access`, `list_sessions`, `my_identity`, the #72 notices and the dashboard all show it; a
+replicated `project_names` map rides the roster gossip. Also fixed: a reply-cap now survives the replier re-registering
+in another case. Deploy = restart each bridge on 1.57.0 (older bridges ignore the map and keep showing declared spellings).
 
 **2026-09-30 (v1.56.0):** Built **#72** — `allow_project` announces every grant change to the granted project
 (`project_access_granted`: live members mesh-wide, parked for offline durable registrations; a pending requester's copy
@@ -209,8 +214,24 @@ the pre-change bridge.
   - Grants federate as a last-writer-wins set since #62, so decide which host sends the notice (the granting bridge)
     to avoid duplicates.
 
-## #71 — project names show inconsistent case (`AIMB` vs `aimb`, `Marz` vs `marz`)  ·  **OPEN**
+## #71 — project names show inconsistent case (`AIMB` vs `aimb`, `Marz` vs `marz`)  ·  **DONE (v1.57.0)**
 Reported by Ferret : PC.1 (2026-09-30).
+**Built:** one canonical DISPLAY spelling per project, mesh-wide — the **first-seen** one. A new `lib/project-names.js`
+holds a replicated map `projKey → {name, first_seen}`: a sighting (a `register_self`, a page, the bridge's own identity,
+an `allow_project` naming a project, and on a gateway every roster entry, so ≤1.56 hosts' sessions are covered) folds in
+as `{name, now}`, and merge keeps the earliest `first_seen` (tie → lexically smaller: `AIMB` beats `aimb`). It rides
+`PEER_ROSTER` / `ROSTER` as `project_names`, goes up from a follower in a `PROJECT_NAMES` frame, and persists one file
+per host (`project-names/<host>.pnames`). Shown through it: `list_sessions` (sessions, sub-peers, topics, pages),
+`register_self` (`identity.project`, `access`), `my_identity`, `allow_project` (`allow.from` was the projKey `"aimb"`),
+`revoke_project`, `request_project_access` (`to` was lower-cased), topic send/publish results, the #72 notices (subject
++ body) and the dashboard (roster, groups, persistence view). Identities and the wire roster are never rewritten.
+**Audit** (matching was already `projKey` almost everywhere — consent, topics/`@project/`, claims, parked mail,
+registrations, retained, reminders, stable ids, egress, doorbell, `from_topic`; the file store lower-cases every key).
+Real case bugs found + fixed: the **reply-cap** bound the two projects by their declared spelling, so a replier that
+re-registered as `BETA` (was `Beta`) got `project-denied` on an invited reply (now projKey'd; the old form is still
+accepted); `allow_project` let a caller declared `UNCLASSIFIED` grant (compared `=== 'unclassified'`); a page declared
+`Unclassified` got a scoped roster; `isIdentityLive` compared user + name exact-case. Tests: new
+`test_project_case_live` (27 checks; 23 FAIL on the pre-change bridge) + 14 unit checks in `test_lib_unit`. Full suite 1104 passed (45 files).
 - **What happens:**
   - A Ferret session called `allow_project(project:"AIMB")` and got a grant shown as `{from:"aimb", to:"Ferret"}`;
     `register_self` then listed `access:["aimb"]`.

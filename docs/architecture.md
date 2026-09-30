@@ -128,6 +128,30 @@ first. Only bridge code sets it, for those fixed verbs; no tool, page or `send_t
 general bypass (a realm member forging raw frames is outside the model anyway — the realm is one trust domain). A
 system notice skips `all`-scope receive reminders; project/host-scoped ones (matching the sender) still ride it.
 
+### Project names: case-insensitive, first-seen spelling is canonical (v1.57.0, #71)
+
+A project is identified by its **case-insensitive key** (`projKey` = trimmed + lower-cased; empty = `unclassified`).
+Every place a project is compared or keyed uses it — consent edges and grants, topic ownership and `@project/` targets,
+durable claims / parked mail / registrations / subscriptions / vault (the file store lower-cases every key), retained
+values, reminder scopes, stable `peer:` ids, egress allowlists and the reply-cap (§5). So `AIMB` and `aimb` are one
+project; a different case never splits one.
+
+What is **shown** uses ONE spelling per project, mesh-wide: the **first-seen** one. Each bridge holds a small map
+`projKey → {name, first_seen}` (`lib/project-names.js`); a sighting — a `register_self`, a page, the bridge's own
+identity, an `allow_project` naming a project, and (on a gateway) any roster entry, which covers sessions of hosts too
+old to send a map — folds in as `{name, first_seen: now}`. Merge keeps the **earliest `first_seen`**, then (a tie) the
+lexically **smaller** name (`AIMB` < `aimb`, so an uppercase spelling beats its lowercase twin seen together). The
+order is total, so merge is idempotent + commutative and every host re-gossips the whole map — the #62 / #66b pattern:
+it rides `PEER_ROSTER` / `ROSTER` as `project_names`, a follower sends its sightings up in a `PROJECT_NAMES` frame, and
+it persists one file per host (`project-names/<host>.pnames`), folded at startup. All hosts converge on the same
+spelling. Display surfaces map through it: `list_sessions`, `register_self` (`identity.project`, `access`),
+`my_identity`, `allow_project` / `revoke_project` / `request_project_access` results, topic send/publish results, the
+#72 grant notices and the dashboard (roster + persistence view, via the `project_names` map on its roster). A later
+registration in another case adopts the canonical spelling in what it is shown. Identities are **never rewritten**
+(`identity.id` keeps the declared spelling, the roster the wire carries stays raw), so nothing may compare the display
+name — code keeps using `projKey`. Limit: `first_seen` is wall-clock, so on a skewed clock "first" is approximate — the
+agreement (every host showing the same spelling) does not depend on it.
+
 ### Policy file discipline
 
 The realm's shared config is **read-only to the bridge** — static policy is hand-edited. This
@@ -156,6 +180,9 @@ return-traffic allowance into a project that never consented.
 - On the **return**, the original sender's bridge recomputes the HMAC with its `capKey` and
   constant-time compares; valid + sender-project matches the bound `counterpartyProject` → allow
   across the boundary. Nothing is stored.
+- Both projects are bound by their **case-insensitive key** (`projKey`, v1.57.0, #71) — like every other project
+  comparison — so a replier that re-registered as `BETA` (was `Beta`) still answers. A cap minted by a ≤1.56
+  process bound the declared spellings; the verifier accepts that form too.
 
 `envId` (already a content hash) makes each cap **unique per message** and binds it to that exact
 message; `counterpartyProject` stops a leaked cap being replayed by a *different* project. `expiry`
@@ -1127,6 +1154,50 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.57.0):** *one canonical project spelling mesh-wide — the first-seen one (#71).* Reported by Ferret :
+  PC.1. **What was wrong:** matching was case-insensitive, but surfaces showed whatever spelling they held:
+  `allow_project(project:"AIMB")` returned `{from:"aimb"}` (consent stores projKey'd edges and the handler echoed the
+  key), `register_self` listed `access:["aimb"]` (`consent.reachable()` returns keys), `request_project_access` echoed a
+  lower-cased `to`, and `list_sessions` showed `Marz` (MapGuy2, Lighter) beside `marz` (MapSeeder) — two projects to a
+  reader. **Fix:** `lib/project-names.js`, a replicated map `projKey → {name, first_seen}` (§4 "Project names"): a
+  sighting — `register_self`, a page hello, the bridge's own identity at startup, an `allow_project` naming a project,
+  and on a gateway every roster project in `broadcastRoster()` (`noteRosterProjects`, one timestamp per batch, so ≤1.56
+  hosts' sessions get a spelling too) — folds in as `{name, first_seen: now}`; merge keeps the earliest `first_seen`,
+  tie → the lexically smaller name. Total order ⇒ idempotent + commutative, so every host re-gossips the whole map:
+  `project_names` on `PEER_ROSTER` (in the gossip dedupe signature) and `ROSTER`, a follower→gateway `PROJECT_NAMES`
+  frame (on connect + on a new local sighting), persisted one file per host (`project-names/<host>.pnames`, new
+  `persistence.projectNames` in file/none/_template) and folded at startup. **Display only:** `displayRoster()` maps
+  sessions / sub-peers / topics / pages for `list_sessions` and every WS leaf roster (+ `project_names` for the
+  dashboard); `displayIdent()` / `accessOf()` for `register_self` and `my_identity`; `allow_project` (`allow.from/to`,
+  trace), `revoke_project`, `request_project_access` (`to`, the request's `from_project`), topic send/publish/park
+  results (`project`, `cross_project`, `owner_projects`), `recover_secret` / park candidates, and the #72 notices
+  (subject + every body field). The dashboard's `pj()` shows the canonical spelling (roster, project groups, sub-peer
+  captions, persistence view: grants, claims, registrations, retained, kept), falling back to its Title case for a
+  project the map doesn't know. The ROSTER sent to followers and `PEER_ROSTER` slices stay raw and identities are never
+  rewritten (`identity.id` keeps the declared spelling), so a ≤1.56 follower's routing/caps see exactly what they did.
+  **Audit** — every project compare/key, checked: consent (`mayInitiate` / `reachable` / `allow` / `revoke` / pending,
+  static edges) projKey; topics (`ownersOf` / `subscribersOf` / `iconOf`, claim conflicts, `@project/` refs, the
+  cross-project fallback) projKey; durable claims / kept topics / retained / mailboxes / registrations / subscriptions /
+  vault / behaviors — the file facet lower-cases every key (`lslug`, `identityKeys`); retained set (`retainedKey`,
+  `forProject`) projKey; reminders' project scope projKey; stable `peer:` ids and cap-key input projKey; egress
+  allowlist projKey; doorbell watch projKey; `from_topic` projKey; #72 audience + parking projKey; dashboard grouping
+  lower-cased. **Real case bugs, fixed:** (1) the **reply-cap** (§5) was minted/verified over the DECLARED spellings, so
+  a replier that re-registered as `BETA` (was `Beta`) had its invited cross-project reply `project-denied` — now bound
+  by projKey, and the verifier also accepts the raw form a ≤1.56 process minted; (2) `allow_project` compared
+  `=== 'unclassified'`, so a caller declared `UNCLASSIFIED` could grant as the infrastructure bucket
+  (now `caller-unclassified`); (3) `rosterFor` did the same for a page declared `Unclassified` (it got a scoped roster
+  instead of the full one); (4) `isIdentityLive` compared user + name exact-case (a live owner could read as dormant
+  for §16). **Compat:** a ≤1.56 peer ignores `project_names` / `PROJECT_NAMES` and keeps showing declared spellings;
+  the #72 notice's legacy `to`/`from` fields now carry canonical spellings instead of the projKey (compare them
+  case-insensitively). **Limit:** `first_seen` is wall-clock, so "first" is approximate under clock skew (agreement
+  doesn't depend on it); the map is capped at 1000 projects. Tests: new `test_project_case_live` (27 checks — two hosts +
+  a follower: `Marz`/`marz`/`MARZ` shown as one spelling on all three bridges and in the registrant's own
+  `register_self`, concurrent `ops`/`Ops` converge to one spelling on both hosts, `allow_project` "AIMB"/"aimb" →
+  `allow.from` "AIMB", the grantee's + granter's `access`, notice subject/body, `request_project_access` / revoke echo,
+  the dashboard roster + map, the reply-cap survives a `Beta`→`BETA` re-register, `UNCLASSIFIED` can't grant); against
+  the pre-change bridge 23 of the 27 FAIL. +14 `test_lib_unit` checks (first-seen, earlier wins, tie rule, junk,
+  commutative/idempotent across orders, durable round-trip). `test_grants_federate_live` now expects `access` "Marz".
+  Full suite 1104 passed, 0 failed (45 files).
 - **Built (v1.56.0):** *grants are announced to the granted project (#72).* Reported by Ferret : PC.1. **What was
   wrong:** `allow_project` told only a PENDING `request_project_access` requester (`notified: 0` otherwise), and pending
   requests live only in the bridge where the request was made — so when Ferret granted AIMB bidirectional access, no AIMB

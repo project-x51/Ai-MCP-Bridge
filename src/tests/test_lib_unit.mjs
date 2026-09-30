@@ -15,6 +15,11 @@ import { hostOf } from '../facets/discovery/tailscale.js'
 import { makeResolver, envResolver } from '../lib/secret-resolver.js'
 import { parseRegQuery } from '../lib/win-env.js'
 import { procCapKeyInput, pageCapKeyInput } from '../lib/capkeys.js'
+import { createProjectNames, normProjectName, beatsName } from '../lib/project-names.js'
+import { create as createFilePersistence } from '../facets/persistence/file.js'
+import fs from 'node:fs'
+import nodeOs from 'node:os'
+import path from 'node:path'
 let pass = 0, fail = 0
 const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
 
@@ -477,6 +482,51 @@ check('#43 page cap input still rotates per instance (a browser tab IS ephemeral
   pageCapKeyInput({ token: 't', instance: 'a1' }) !== pageCapKeyInput({ token: 't', instance: 'b2' }))
 check('#43 page cap input is token-gated too',
   pageCapKeyInput({ token: 't', instance: 'a1' }) !== pageCapKeyInput({ token: 'other', instance: 'a1' }))
+
+// ---- #71: one canonical DISPLAY spelling per project — the replicated first-seen map ----
+{
+  const N = (name, first_seen) => ({ name, first_seen })
+  const mk = () => createProjectNames({ persistence: null, persist: false, writer: 'h' })
+  const p = mk()
+  check('#71 note: the first spelling of a project is adopted', p.note('Marz', 100) === true && p.display('marz') === 'Marz' && p.display('MARZ') === 'Marz')
+  check('#71 note: a LATER sighting in another case changes nothing (first-seen wins)', p.note('marz', 200) === false && p.display('marz') === 'Marz')
+  check('#71 merge: an EARLIER first_seen replaces it (the true first spelling)', p.merge([N('marz', 50)]) === 1 && p.display('Marz') === 'marz')
+  check('#71 display: an unknown project keeps its declared spelling (trimmed); empty/null pass through',
+    p.display(' Ops ') === 'Ops' && p.display('') === '' && p.display(null) === null && p.display(undefined) === undefined)
+  check('#71 unclassified is never given a spelling', p.note('Unclassified', 1) === false && !p.has('unclassified') && p.display('UNCLASSIFIED') === 'UNCLASSIFIED')
+  check('#71 junk records are ignored (no name / bad first_seen / non-object)', p.merge([{ name: '', first_seen: 1 }, { name: 'X', first_seen: 0 }, { name: 'Y' }, null, 'Z', [1]]) === 0 && !p.has('x') && !p.has('y'))
+  check('#71 merge: a non-array (a ≤1.56 peer sends no map) is a no-op', p.merge(undefined) === 0 && p.merge({ name: 'Q', first_seen: 1 }) === 0)
+  // tie rule: same first_seen -> the lexically smaller name ("AIMB" < "aimb"), in either order
+  const t1 = mk(); t1.merge([N('aimb', 500)]); t1.merge([N('AIMB', 500)])
+  const t2 = mk(); t2.merge([N('AIMB', 500)]); t2.merge([N('aimb', 500)])
+  check('#71 tie: equal first_seen -> the smaller spelling, whichever arrives first', t1.display('aimb') === 'AIMB' && t2.display('aimb') === 'AIMB')
+  check('#71 beatsName: never beats itself; earlier beats later; tie -> smaller name',
+    !beatsName(N('A', 1), N('A', 1)) && beatsName(N('b', 1), N('A', 2)) && beatsName(N('A', 3), N('a', 3)) && !beatsName(N('a', 3), N('A', 3)))
+  // commutative + idempotent: every order of a batch converges to one map (what makes re-gossip safe)
+  const recs = [N('Marz', 300), N('marz', 200), N('MARZ', 200), N('AIMB', 100), N('aimb', 50), N('Ops', 10), N('ops', 10)]
+  const perms = [[0, 1, 2, 3, 4, 5, 6], [6, 5, 4, 3, 2, 1, 0], [2, 0, 4, 6, 1, 3, 5], [3, 6, 1, 5, 0, 2, 4]]
+  const outs = perms.map(order => { const m = mk(); for (const i of order) m.merge([recs[i]]); m.merge(recs); return JSON.stringify(m.list()) })
+  check('#71 merge: commutative + idempotent (every order -> the same map)', outs.every(o => o === outs[0]), JSON.stringify(outs))
+  const one = mk(); one.merge(recs)
+  check('#71 merge: the winners are the earliest spellings (tie -> smaller)', one.display('marz') === 'MARZ' && one.display('AIMB') === 'aimb' && one.display('ops') === 'Ops', JSON.stringify(one.list()))
+  check('#71 list: key-sorted copies (stable gossip signature); names() maps projKey -> spelling',
+    JSON.stringify(one.list().map(r => r.name)) === JSON.stringify(['aimb', 'MARZ', 'Ops']) && one.names().marz === 'MARZ' && one.names().aimb === 'aimb')
+  check('#71 normProjectName: trims + caps the name, floors first_seen', normProjectName({ name: '  Marz  ', first_seen: 12.7 }).name === 'Marz' && normProjectName({ name: 'Marz', first_seen: 12.7 }).first_seen === 12
+    && normProjectName({ name: 'x'.repeat(500), first_seen: 1 }).name.length === 100)
+}
+// #71: the durable copy round-trips through the file store (one file per writing host; rehydrate folds them all)
+{
+  const dir = fs.mkdtempSync(path.join(nodeOs.tmpdir(), 'aimb-pnames-'))
+  const store = createFilePersistence({ CFG: {}, HERE: dir, env: { AI_BRIDGE_PERSIST_DIR: dir } })
+  const h1 = createProjectNames({ persistence: store, persist: true, writer: 'HOST-1' })
+  const h2 = createProjectNames({ persistence: store, persist: true, writer: 'HOST-2' })
+  h1.note('Marz', 100); h2.note('marz', 50); h2.note('AIMB', 70)
+  await new Promise(r => setTimeout(r, 150))   // put() is fire-and-forget
+  const back = createProjectNames({ persistence: store, persist: true, writer: 'HOST-3' })
+  await back.rehydrate()
+  check('#71 durable: rehydrate folds every host\'s file (earliest first_seen wins)', back.display('MARZ') === 'marz' && back.display('aimb') === 'AIMB' && back.size() === 2, JSON.stringify(back.list()))
+  try { fs.rmSync(dir, { recursive: true, force: true }) } catch { }
+}
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

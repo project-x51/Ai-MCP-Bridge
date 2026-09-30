@@ -82,7 +82,7 @@ let got = await inboxF()
 check('... and it actually LANDED in the follower-hosted target\'s inbox', got.includes(`ab-${n}`), JSON.stringify(got))
 check('... and the denied one did not', !got.includes('ab-1'), JSON.stringify(got))
 const fReg = await call(F, 'register_self', { name: 'Probe', secret: 'pr', project: 'AIMB' })
-check('the FOLLOWER\'s own consent now lists AIMB -> marz (register_self access)', Array.isArray(fReg.access) && fReg.access.includes('marz'), JSON.stringify(fReg.access))
+check('the FOLLOWER\'s own consent now lists AIMB -> Marz (register_self access; #71: canonical spelling)', Array.isArray(fReg.access) && fReg.access.includes('Marz'), JSON.stringify(fReg.access))
 
 // 3. revoke on B propagates -> denied again
 const rv = await call(B, 'revoke_project', { project: 'AIMB', as: 'MarzB', secret: 'mb' })
@@ -123,7 +123,7 @@ F = await spawn('HostAF', '127.0.0.1', A_PORT, { ...fileA, AI_BRIDGE_SEEDS: '127
 await sleep(900)
 mapGuy = await call(F, 'register_self', { name: 'MapGuy', secret: 'mg', project: 'Marz' })
 const aimbA = await call(A, 'register_self', { name: 'AimbLocal', secret: 'al', project: 'AIMB' })
-check('after A restarts (B down): A\'s gateway still knows AIMB -> marz', Array.isArray(aimbA.access) && aimbA.access.includes('marz'), JSON.stringify(aimbA.access))
+check('after A restarts (B down): A\'s gateway still knows AIMB -> Marz', Array.isArray(aimbA.access) && aimbA.access.includes('Marz'), JSON.stringify(aimbA.access))
 await sleep(500)
 const s4 = await call(A, 'send_to_peer', { as: 'AimbLocal', secret: 'al', target: mapGuy.peer_id, verb: 'test', subject: 'after-restart', message: 'x' })
 check('after A restarts (B down): AIMB -> the Marz sub-peer on the restarted follower is ok:true', isOk(s4), JSON.stringify(s4))

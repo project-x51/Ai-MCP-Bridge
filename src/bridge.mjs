@@ -30,6 +30,7 @@ import { procCapKeyInput, pageCapKeyInput } from './lib/capkeys.js'
 import { createConsent, parseTtlMin } from './lib/consent.js'
 import { createReminders } from './lib/reminders.js'
 import { createRealmDefaults, realmFromConfig } from './lib/realm-defaults.js'
+import { createProjectNames } from './lib/project-names.js'
 import { createRetainedSet, envBytes, RETAIN_REPLICATE_MAX_BYTES, RETAIN_GOSSIP_MAX_BYTES } from './lib/retained.js'
 import { createTraces } from './lib/traces.js'
 import { create as createEgress } from './services/egress.js'
@@ -108,7 +109,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.56.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.57.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -262,7 +263,11 @@ function verifyReplyCap(env, toProject, targetCapKey) {
   // stable, signed stamp — it no longer gates delivery. Trade-off: a party you revoke can still answer
   // messages you already sent it (per-thread, no new traffic), until one side restarts.
   const fromProject = env.from?.project || 'unclassified'
-  return profile.capSigner.verify(targetCapKey, env.reply_cap, `${toProject}|${fromProject}|${env.reply_to}|${exp}`)
+  // #71: the cap binds the two projects by projKey (minted that way in makeEnvelope), so a replier that re-registered
+  // in another case ("Beta" -> "BETA") still gets its reply through. The declared-case form is still accepted: a cap
+  // minted by a ≤1.56 process (an identity-derived capKey outlives the process, #43) was bound to the raw spellings.
+  return profile.capSigner.verify(targetCapKey, env.reply_cap, `${projKey(toProject)}|${projKey(fromProject)}|${env.reply_to}|${exp}`)
+    || profile.capSigner.verify(targetCapKey, env.reply_cap, `${toProject}|${fromProject}|${env.reply_to}|${exp}`)
 }
 function deliveryAllowed(env, toProject, toRealm, targetCapKey) {
   if (env.system) return true                      // system control messages (e.g. project_access_request)
@@ -378,6 +383,18 @@ function seedRealmDefaults(cfg, why) {
 }
 await realmDefaults.rehydrate()   // the latest record this host learned survives a restart (when persistence is on)
 seedRealmDefaults(CFG, 'startup')
+// #71: ONE canonical DISPLAY spelling per project, mesh-wide — the first-seen spelling (lib/project-names.js). Matching
+// stays projKey (case-insensitive) everywhere; this only maps what is SHOWN (allow/access/grant notices, list_sessions,
+// my_identity, register_self, topic results, the dashboard). Sightings: a registration, a page, this bridge's own
+// identity, a grant naming a project, and (on a gateway) every roster entry — so a ≤1.56 host's sessions get a spelling
+// too. The map rides PEER_ROSTER / ROSTER as `project_names` and goes up from a follower in a PROJECT_NAMES frame;
+// identities, persistence keys and the roster the wire carries keep the declared spelling.
+const projectNames = createProjectNames({ persistence, persist: PERSIST, writer: HOSTNAME })
+await projectNames.rehydrate()   // the spellings this host knew survive a restart (when persistence is on)
+if (PROC_IDENT) projectNames.note(PROC_IDENT.project)
+const projName = p => projectNames.display(p)
+const displayIdent = i => (i && typeof i === 'object') ? { ...i, project: projName(i.project) } : i   // a display COPY — never the stored identity
+const accessOf = p => { const r = consent.reachable(p); return Array.isArray(r) ? r.map(projName) : r }   // consent keys are projKey'd; show the canonical spelling
 // #66c: RETAINED topic values replicate mesh-wide as a last-writer-wins set keyed by (realm, project, topic) — see
 // lib/retained.js. Every process holds the set in RAM (so a gateway without persistence still relays it), rides it on
 // PEER_ROSTER / ROSTER as `retained` (only to a link/follower that hasn't had the current version — it can be MBs) and
@@ -557,6 +574,30 @@ function announceRealmDefaults() {
   if (role === 'gateway') broadcastRoster()
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'REALM_DEFAULTS', session: SESSION, realm_defaults: realmDefaults.current() })
 }
+// #71: a new project spelling must reach the whole mesh — same shape as announceGrants.
+function announceProjectNames() {
+  if (role === 'gateway') broadcastRoster()
+  else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'PROJECT_NAMES', session: SESSION, project_names: projectNames.list() })
+}
+function noteProject(name) { if (name && !projectNames.has(name) && projectNames.note(name)) announceProjectNames() }   // a local sighting (registration / page / grant)
+// #71 (gateway): every project on the roster — followers', peer hubs', pages' (a ≤1.56 host sends no map) — gets a
+// spelling if it has none yet. One timestamp for the batch, so two spellings first seen together tie → the smaller wins.
+function noteRosterProjects() {
+  const now = Date.now(), fresh = []
+  const add = p => { if (p && !projectNames.has(p)) fresh.push({ name: String(p), first_seen: now }) }
+  for (const s of roster.values()) { add(s.project); for (const sp of (s.subpeers || [])) add(sp.project) }
+  for (const p of [...pages.values(), ...remotePages.values()]) add(p.identity?.project || p.project)
+  if (fresh.length) projectNames.merge(fresh)
+}
+// #71: a DISPLAY copy of a roster payload with every project in its canonical spelling (+ the map itself, for the
+// dashboard's persistence view). Only what a caller/leaf is SHOWN — the ROSTER frame to followers stays raw.
+function displayRoster(pl) {
+  const pj = x => (x && typeof x === 'object' && x.project != null) ? { ...x, project: projName(x.project) } : x
+  return { ...pl,
+    sessions: (pl.sessions || []).map(s => ({ ...pj(s), ...(s.subpeers ? { subpeers: s.subpeers.map(pj) } : {}), ...(s.topics ? { topics: s.topics.map(pj) } : {}) })),
+    pages: (pl.pages || []).map(p => { const q = pj(p); return q && q.identity ? { ...q, identity: displayIdent(q.identity) } : q }),
+    project_names: projectNames.names() }
+}
 // #66c: a retained value published HERE must reach the whole mesh. A gateway re-broadcasts (the set rides ROSTER to
 // followers + PEER_ROSTER gossip, whose dedupe signature includes the set's version); a follower sends the changed
 // record(s) UP so its gateway merges + spreads them.
@@ -621,10 +662,10 @@ function claimIdentity(rec, project) {
 }
 // is the identity behind a durable claim record currently REGISTERED (live) on this host? (a live owner is
 // governed by the in-RAM `blocker` check; only a NOT-live owner is "dormant" for §16 takeover purposes)
-function isIdentityLive(rec) {
-  const want = `${projKey(rec.project)}|${rec.user || ''}|${rec.name || ''}`
-  for (const sp of subpeers.values()) if (sp.identity && `${projKey(sp.identity.project)}|${sp.identity.user || ''}|${sp.name || ''}` === want) return true
-  if (PROC_IDENT && `${projKey(PROC_IDENT.project)}|${PROC_IDENT.user || ''}|${HOSTNAME}` === want) return true
+function isIdentityLive(rec) {   // #71 audit: user + name compared lower-case too (they were exact-case here only), like sameClaimHolder
+  const want = `${projKey(rec.project)}|${lc(rec.user)}|${lc(rec.name)}`
+  for (const sp of subpeers.values()) if (sp.identity && `${projKey(sp.identity.project)}|${lc(sp.identity.user)}|${lc(sp.name)}` === want) return true
+  if (PROC_IDENT && `${projKey(PROC_IDENT.project)}|${lc(PROC_IDENT.user)}|${lc(HOSTNAME)}` === want) return true
   return false
 }
 // is a durable claim record held by this identity? user is the OS login — compare case-INSENSITIVELY (project
@@ -1087,7 +1128,7 @@ function makeEnvelope({ to, verb, body, reply_to, from, subject, pattern, topic,
     const ck = localCapKey(f.session), tp = projectOfTarget(to)
     if (ck && tp) {
       const exp = Date.now() + CAP_TTL_MS
-      env.reply_cap = profile.capSigner.mint(ck, `${f.project || 'unclassified'}|${tp}|${env.id}|${exp}`)
+      env.reply_cap = profile.capSigner.mint(ck, `${projKey(f.project || 'unclassified')}|${projKey(tp)}|${env.id}|${exp}`)   // #71: projKey'd — case-insensitive like every other project comparison
       env.reply_exp = exp
     }
   }
@@ -1155,13 +1196,13 @@ async function parkToOfflineOwners(from, project, path, verb, body, reply_to, su
       emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
         to: `topic:${path}`, to_name: path, to_kind: 'topic', subject: subject || null, pattern: 'send', topic: path,
         size: String(body || '').length, note: 'parked for ownerless kept-alive topic', envelope_id: env.id, ...ft })
-      return { ok: true, parked: true, ownerless: true, topic: path, project: kept.project || project, envelope_id: env.id,
+      return { ok: true, parked: true, ownerless: true, topic: path, project: projName(kept.project || project), envelope_id: env.id,
         ...(kept.announce_offline ? { offline: true } : {}) }
     }
     return { ok: false, code: 'no-owner', topic: ref }
   }
-  if (announce.length) return { ok: true, parked: true, offline: true, topic: path, project, owners: parked.length, offline_owners: announce }
-  return { ok: true, topic: path, project }   // owner chose silence: looks like a normal accept
+  if (announce.length) return { ok: true, parked: true, offline: true, topic: path, project: projName(project), owners: parked.length, offline_owners: announce }
+  return { ok: true, topic: path, project: projName(project) }   // owner chose silence: looks like a normal accept
 }
 // §19: a directed send to a peer BY NAME that has no LIVE registration but DOES have a durable one (it's
 // just offline / its gateway restarted) parks to that peer's mailbox instead of bouncing unknown-target.
@@ -1174,7 +1215,7 @@ async function parkToOfflineName(from, name, verb, body, reply_to, subject, aske
   const ap = projKey(askerProject || 'unclassified')
   const reachable = regs.filter(r => consent.mayInitiate(ap, projKey(r.project)))   // only park what you could send live
   if (!reachable.length) return null
-  if (reachable.length > 1) return { ok: false, code: 'ambiguous-name', candidates: reachable.map(r => `${r.project}:${r.name}`) }
+  if (reachable.length > 1) return { ok: false, code: 'ambiguous-name', candidates: reachable.map(r => `${projName(r.project)}:${r.name}`) }
   const r = reachable[0]
   const ident = { realm: r.realm || REALM, project: r.project, user: r.user, name: r.name }
   const env = makeEnvelope({ to: `name:${r.name}`, verb, body, reply_to, from, subject, ...ft })
@@ -1182,7 +1223,7 @@ async function parkToOfflineName(from, name, verb, body, reply_to, subject, aske
   emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
     to: r.name, to_name: r.name, to_kind: 'subpeer', subject: subject || null, pattern: 'send',
     size: String(body || '').length, note: `parked for offline peer ${r.name}`, envelope_id: env.id, ...ft })
-  return { ok: true, parked: true, offline: true, to: r.name, project: r.project, envelope_id: env.id }
+  return { ok: true, parked: true, offline: true, to: r.name, project: projName(r.project), envelope_id: env.id }
 }
 async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, askerProject, ft) {   // ft: #54 validated from_topic fields (or undefined)
   const explicit = String(ref || '').trim().startsWith('@')   // "@project/path" names a project — respect it, no cross-project fallback
@@ -1203,10 +1244,10 @@ async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, aske
     if (foreign.size) {
       const reachable = [...foreign].filter(([pk]) => consent.mayInitiate(ap, pk))
       if (!reachable.length) return { ok: false, code: 'cross-project-no-grant', topic: path,
-        owner_projects: [...foreign.values()].map(f => f.name),
+        owner_projects: [...foreign.values()].map(f => projName(f.name)),
         hint: `"${path}" is owned in another project — request_project_access first, or target it explicitly as @<project>/${path}` }
       if (reachable.length > 1) return { ok: false, code: 'cross-project-ambiguous', topic: path,
-        owner_projects: reachable.map(([, f]) => f.name),
+        owner_projects: reachable.map(([, f]) => projName(f.name)),
         hint: `"${path}" is owned in several projects you can reach — target one explicitly as @<project>/${path}` }
       owners = reachable[0][1].owners; routedProject = reachable[0][1].name
     }
@@ -1218,8 +1259,8 @@ async function routeToTopicOwners(from, ref, verb, body, reply_to, subject, aske
     const r = await routeEnvelope(env)
     fanout.push({ to: h.holder, holder_name: h.holder_name || null, ok: !!r.ok, code: r.code || null, envelope_id: env.id })
   }
-  return { ok: fanout.some(f => f.ok), topic: path, project: routedProject,
-    ...(routedProject !== project ? { cross_project: routedProject } : {}), fanout,
+  return { ok: fanout.some(f => f.ok), topic: path, project: projName(routedProject),   // #71: canonical spelling
+    ...(projKey(routedProject) !== projKey(project) ? { cross_project: projName(routedProject) } : {}), fanout,
     ...(fanout.length === 1 ? { envelope_id: fanout[0].envelope_id, to: fanout[0].to } : {}) }
 }
 // publish (T3/T5): event to every subscriber in the target project (wildcards + owners included).
@@ -1237,7 +1278,7 @@ async function publishToTopic(from, ref, verb, body, subject, askerProject) {
   if (!subs.length) emitTraceRaw({ dir: 'send', verb: verb || 'message', from: from?.session || SESSION, from_name: from?.name || NAME,
     to: `topic:${path}`, to_name: path, to_kind: 'topic', subject: subject || null, pattern: 'publish', topic: path,
     size: String(body || '').length, note: 'no subscribers', envelope_id: null })
-  return { ok: true, topic: path, project, subscribers: subs.length, fanout }
+  return { ok: true, topic: path, project: projName(project), subscribers: subs.length, fanout }   // #71: canonical spelling
 }
 
 // ---------------------------------------------------------------- roster sync
@@ -1283,11 +1324,12 @@ function rosterPayloadFor(viewerProject, viewerRealm) {
   return { ...base, sessions, pages: base.pages.filter(p => reach(p.project)) }
 }
 function rosterFor(ws) {
-  return (ws.kind === 'dashboard' || ws.seeAll || !ws.project || ws.project === 'unclassified')
-    ? rosterPayload() : rosterPayloadFor(ws.project, ws.realm)
+  return displayRoster((ws.kind === 'dashboard' || ws.seeAll || !ws.project || projKey(ws.project) === 'unclassified')   // #71: "Unclassified" is unclassified too
+    ? rosterPayload() : rosterPayloadFor(ws.project, ws.realm))
 }
 function broadcastRoster() {
-  const frame = { type: 'ROSTER', ...rosterPayload(), grants: consent.grantSet(), realm_defaults: realmDefaults.current() }   // #62: followers merge the grant set (consent is checked in the process hosting the target); #66b: and the realm defaults
+  noteRosterProjects()   // #71: give every roster project a canonical spelling before it goes out
+  const frame = { type: 'ROSTER', ...rosterPayload(), grants: consent.grantSet(), realm_defaults: realmDefaults.current(), project_names: projectNames.list() }   // #62: followers merge the grant set (consent is checked in the process hosting the target); #66b: and the realm defaults
   // #66c: the retained set rides a follower's ROSTER only when that follower hasn't had the current version (a new
   // follower has none → the whole set); a follower computes its own sub-peers' subscribe-time catch-up.
   const rv = retainedSet.version()
@@ -1409,7 +1451,8 @@ const refreshCap = () => TEST_GOSSIP === 'legacy' ? {} : { gossip_refresh: true,
 // even though the roster slice is one-hop. LWW makes re-gossip safe; a ≤1.44 receiver ignores the field.
 // #66b: `realm_defaults` = the winning realm-wide default-reminders record (or null) — same transitive LWW spread; a
 // ≤1.46 receiver ignores it.
-const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, realm_defaults: rd, ...refreshCap() })
+// #71: `project_names` = the canonical project-spelling map (same transitive spread; a ≤1.56 receiver ignores it).
+const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), pn = projectNames.list()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, realm_defaults: rd, project_names: pn, ...refreshCap() })
 const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap() })
 // #66c: `retained` (the replicated retained-value set) is NOT in gossipFrame — it can be MBs and the roster is re-gossiped
 // on every unread-count change — so it rides a PEER_ROSTER only when that link hasn't had the set's current version yet
@@ -1422,13 +1465,13 @@ function sendGossip(p, frame) {
 }
 function gossipToPeers(force) {
   if (role !== 'gateway' || !peerGw.size || TEST_GOSSIP === 'silent') return
-  const slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), sig = JSON.stringify([slice, pg, gr, rd, retainedSet.version()])
-  if (!force && sig === lastGossip) return                         // only send when MY locals (or the grant set / realm defaults / retained set) changed (breaks the merge→broadcast→gossip loop)
+  const slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), pn = projectNames.list(), sig = JSON.stringify([slice, pg, gr, rd, pn, retainedSet.version()])
+  if (!force && sig === lastGossip) return                         // only send when MY locals (or the grant set / realm defaults / project names / retained set) changed (breaks the merge→broadcast→gossip loop)
   lastGossip = sig
-  const frame = gossipFrame(slice, pg, gr, rd)
+  const frame = gossipFrame(slice, pg, gr, rd, pn)
   for (const p of peerGw.values()) sendGossip(p, frame)
 }
-function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, realmDefs, retained) {
+function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, realmDefs, retained, projNames) {
   if (!fromGw || fromGw === SESSION) return
   // #63: only the CURRENT link for that gateway may write its slice — a late frame on a retired/replaced socket
   // would otherwise resurrect entries that no peerGw entry owns, and nothing would ever clean them up again.
@@ -1440,8 +1483,9 @@ function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, re
   const grantsChanged = consent.merge(grants) > 0
   const realmChanged = realmDefaults.merge(realmDefs)   // #66b: likewise the realm defaults (a ≤1.46 peer sends none → no-op)
   const retainedChanged = retainedSet.merge(retained) > 0   // #66c: and retained values (learned ones are persisted; absent field → no-op)
+  const namesChanged = projectNames.merge(projNames) > 0     // #71: and the canonical project spellings (a ≤1.56 peer sends none → no-op)
   const sig = JSON.stringify([host, port, sessions, pages])
-  if (sig === peer.sig) { if (grantsChanged || realmChanged || retainedChanged) broadcastRoster(); return }   // a periodic refresh of an unchanged slice: stamp only, no broadcast
+  if (sig === peer.sig) { if (grantsChanged || realmChanged || retainedChanged || namesChanged) broadcastRoster(); return }   // a periodic refresh of an unchanged slice: stamp only, no broadcast
   peer.sig = sig
   for (const [k, v] of [...roster]) if (v.origin === fromGw) roster.delete(k)   // replace this gateway's slice wholesale
   for (const s of (sessions || [])) {
@@ -1520,7 +1564,7 @@ function connectToPeer(host, port) {
       linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || port, f.name, f, true)
       sendGossip(peerGw.get(f.session), gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted (#66c: + the retained set)
     }
-    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained)
+    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained, f.project_names)
     else if (f.t === 'PING') { if (!TEST_GOSSIP) sendFrame(sock, { t: 'PONG', seq: f.seq }) }   // #63: the accepting hub probes us too (<=1.43 dialers ignore PING — 'legacy' mimics that)
     else if (f.t === 'PONG') touchPeer(sock)
     else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
@@ -1648,6 +1692,9 @@ function onControlConn(sock) {
       } else if (f.t === 'REALM_DEFAULTS') {                // #66b: a follower's realm-defaults record (from its own config) goes UP
         if (!who) return                                     // policy frame: only on an authenticated (HELLO'd) connection
         if (realmDefaults.merge(f.realm_defaults)) broadcastRoster()   // LWW: an older record changes nothing
+      } else if (f.t === 'PROJECT_NAMES') {                 // #71: a follower's project sightings go UP to be merged + spread
+        if (!who) return                                     // only on an authenticated (HELLO'd) connection
+        if (projectNames.merge(f.project_names) > 0) broadcastRoster()   // earliest first_seen wins: a later spelling changes nothing
       } else if (f.t === 'RETAINED') {                      // #66c: a follower's retained publish(es) go UP to be merged + spread
         if (!who) return                                     // policy frame: only on an authenticated (HELLO'd) connection
         if (retainedSet.merge(f.retained) > 0) broadcastRoster()   // LWW: an older value changes nothing
@@ -1690,7 +1737,7 @@ function onControlConn(sock) {
         sendGossip(peerGw.get(f.session), gossipFrame())   // #63: full slice on every (re)link, independent of lastGossip (#66c: + the retained set)
         sock.on('close', () => { if (peerGw.get(f.session)?.sock === sock) dropPeer(f.session) })
       } else if (f.t === 'PEER_ROSTER') {
-        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained)
+        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained, f.project_names)
       } else if (f.t === 'PONG') {
         touchPeer(sock)
       } else if (f.t === 'PING') { if (TEST_GOSSIP !== 'silent') sendFrame(sock, { t: 'PONG', seq: f.seq }) }
@@ -1757,6 +1804,7 @@ function onWsConnection(ws) {
               icon: m.icon || null, kind: 'page', capKey: capKeyFrom(pageCapKeyInput({ token: TOKEN, instance: ws.instance })),   // #43: not derivable from the published instance
               identity: pident, project: pident.project, user: pident.user })
             ws.project = pident.project; ws.realm = pident.realm; ws.seeAll = !!m.seeAll   // visibility scope (§4)
+            if (projKey(pident.project) !== 'unclassified') noteProject(pident.project)   // #71: a page is a sighting too (broadcastRoster below spreads it)
           }
           leaves.add(ws)
           log(`${ws.kind} connected: ${m.page_kind || ws.kind} "${m.title || ''}" (${ws.instance})`)
@@ -1840,6 +1888,7 @@ function becomeFollower() {
     sendFrame(sock, { t: 'GRANTS', session: SESSION, grants: consent.grantSet() })   // #62: anything granted/learned while not following (a ≤1.44 gateway ignores it)
     if (realmDefaults.current()) sendFrame(sock, { t: 'REALM_DEFAULTS', session: SESSION, realm_defaults: realmDefaults.current() })   // #66b: likewise (a ≤1.46 gateway ignores it)
     if (retainedSet.size()) sendFrame(sock, { t: 'RETAINED', session: SESSION, retained: retainedSet.list() })   // #66c: likewise (a ≤1.47 gateway ignores it)
+    if (projectNames.size()) sendFrame(sock, { t: 'PROJECT_NAMES', session: SESSION, project_names: projectNames.list() })   // #71: likewise (a ≤1.56 gateway ignores it)
     log(`follower registered with gateway on :${PORT}`)
   })
   onFrames(sock, f => {
@@ -1852,6 +1901,7 @@ function becomeFollower() {
       consent.merge(f.grants)   // #62: consent for MY sub-peers is checked here, so learn the realm's grants from the gateway
       realmDefaults.merge(f.realm_defaults)   // #66b: MY sub-peers' reminders are computed here too
       retainedSet.merge(f.retained)   // #66c: and MY sub-peers' subscribe-time retained catch-up (only sent when it changed)
+      projectNames.merge(f.project_names)   // #71: and the realm's canonical project spellings (for what MY tools show)
     }
   })
   const reelect = () => { if (role !== 'stopping') { gwSock = null; setTimeout(election, backoff + Math.random() * 100); backoff = Math.min(backoff * 2, 3000) } }
@@ -1928,9 +1978,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   if (a.as && a.secret != null) { const r = authSub(String(a.as), a.secret); if (!r.err) callerId = r.sp.id }   // identify the caller for the hint
   switch (req.params.name) {
     case 'my_identity': return ok({ session: SESSION, name: NAME, role, host: SESSION.split('/')[0], gateway: gatewayId, pair_port: pairPort, gateway_port: PORT,
-      bridge_version: BRIDGE_VERSION, capabilities: CAPS, facet_probe: FACET_PROBE, realm: REALM, profile: profile.names, identity: PROC_IDENT,
-      client: CLIENT, mode_override: MODE_OVERRIDE, subpeers: [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, project: s.identity?.project, user: s.identity?.user })),
-      topics: topicList() })
+      bridge_version: BRIDGE_VERSION, capabilities: CAPS, facet_probe: FACET_PROBE, realm: REALM, profile: profile.names, identity: displayIdent(PROC_IDENT),   // #71: canonical project spelling
+      client: CLIENT, mode_override: MODE_OVERRIDE, subpeers: [...subpeers.values()].map(s => ({ id: s.id, name: s.name, parent: s.parent, project: projName(s.identity?.project), user: s.identity?.user })),
+      topics: topicList().map(t => t.project != null ? { ...t, project: projName(t.project) } : t) })
     case 'set_name': {
       NAME = String(a.name || NAME)
       if (role === 'gateway') { const r = roster.get(SESSION); if (r) r.name = NAME; broadcastRoster() }
@@ -1948,7 +1998,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         await syncDurableMailbox(existing)   // §23: a returning peer also picks up out-of-band parked mail
         callerId = existing.id   // §20 resync on reattach too: hand back current topics + access + the inbox hint
         const reTopics = [...myTopics.values()].filter(e => e.holder === existing.id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: consent.reachable(existing.identity?.project), behaviors: reminders.list(existing.id), default_behaviors: reminders.defaultList(), connect_reminders: connectReminders(existing) })
+        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: displayIdent(existing.identity), topics: reTopics, access: accessOf(existing.identity?.project), behaviors: reminders.list(existing.id), default_behaviors: reminders.defaultList(), connect_reminders: connectReminders(existing) })
       }
       let parent = null
       if (a.parent) {
@@ -2011,15 +2061,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           try { const sealed = await vault.seal(secret); if (sealed) await persistence.vault.put(pid, { sealed }) } catch { }
         }
       }
+      noteProject(ident.project)   // #71: a registration is a sighting — the first spelling of a project becomes its canonical one
       announceSubpeers()
       emitTraceRaw({ dir: 'con', verb: 'connect', from: id, from_name: name, to: SESSION, size: 0,
-        note: (parent ? `child of ${parent.split('/').pop()}` : 'sub-peer registered') + (ckind ? ` [${ckind}]` : '') + ` {${ident.project}/${ident.user}}`, envelope_id: null })
+        note: (parent ? `child of ${parent.split('/').pop()}` : 'sub-peer registered') + (ckind ? ` [${ckind}]` : '') + ` {${projName(ident.project)}/${ident.user}}`, envelope_id: null })
       const q = subQueues.get(id)
       callerId = id   // so the response's inbox hint reflects any rehydrated parked mail this returning peer has waiting
       // §20 resync: hand back the identity's current topics (owned + subscribed, post-rehydration) and the
       // projects it may reach — so a reconnecting/compacted session relearns its state without re-attaching.
       const myTopicsNow = [...myTopics.values()].filter(e => e.holder === id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: consent.reachable(ident.project), behaviors: reminders.list(id), default_behaviors: reminders.defaultList(), connect_reminders: connectReminders(subpeers.get(id)) })
+      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: displayIdent(ident), topics: myTopicsNow, access: accessOf(ident.project), behaviors: reminders.list(id), default_behaviors: reminders.defaultList(), connect_reminders: connectReminders(subpeers.get(id)) })
     }
     case 'deregister': {
       const { sp, err } = authSub(String(a.peer_id || ''), a.secret)
@@ -2041,7 +2092,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const wantProj = a.project ? projKey(a.project) : null
       const cands = regs.filter(r => !wantProj || projKey(r.project) === wantProj)
       if (!cands.length) return ok({ ok: false, code: 'unknown-identity', name })
-      if (cands.length > 1) return ok({ ok: false, code: 'ambiguous-name', candidates: cands.map(r => `${r.project}:${r.name}`) })
+      if (cands.length > 1) return ok({ ok: false, code: 'ambiguous-name', candidates: cands.map(r => `${projName(r.project)}:${r.name}`) })
       const r = cands[0]
       const ident = { realm: r.realm || REALM, project: r.project, user: r.user, name: r.name }
       const v = await persistence.vault.get(ident)
@@ -2049,10 +2100,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const res = await vault.unseal(v.sealed, { subject: `Recover the Ai MCP Bridge secret for session "${r.name}" (${r.project}).` })
       if (!res || !res.ok) return ok({ ok: false, code: 'recovery-denied', reason: res ? res.reason : 'unseal-failed', ...(res && res.detail ? { detail: res.detail } : {}) })
       emitTraceRaw({ dir: 'con', verb: 'recover_secret', from: SESSION, from_name: NAME, to: SESSION, size: 0, note: `secret recovered for "${r.name}" (${res.by})`, envelope_id: null })
-      return ok({ ok: true, name: r.name, project: r.project, secret: res.plaintext, by: res.by,
+      return ok({ ok: true, name: r.name, project: projName(r.project), secret: res.plaintext, by: res.by,
         hint: 're-register with name + this secret to reattach (you get your topics + parked mail back), then use it as as/secret on send_to_peer and for/secret on inbox' })
     }
-    case 'list_sessions': return ok({ role, host: SESSION.split('/')[0], ...rosterPayload() })
+    case 'list_sessions': return ok({ role, host: SESSION.split('/')[0], ...displayRoster(rosterPayload()) })   // #71: one spelling per project
     case 'claim_topic': {
       const topic = String(a.topic || '').trim()
       if (!topic) return ok({ ok: false, code: 'topic-required' })
@@ -2260,9 +2311,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }, holderId = SESSION
       let by = { session: SESSION, name: NAME, kind: 'session' }   // #72: the granter — the notice's `from` (so from.project = the granting project)
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user }; holderId = sp.id; by = { session: sp.id, name: sp.name, kind: 'subpeer' } }
-      if (!me0.project || me0.project === 'unclassified') return ok({ ok: false, code: 'caller-unclassified' })
+      if (!me0.project || projKey(me0.project) === 'unclassified') return ok({ ok: false, code: 'caller-unclassified' })   // #71: any case of it
       if (!a.project) return ok({ ok: false, code: 'project-required' })
       const from = projKey(a.project), to = projKey(me0.project)
+      noteProject(String(a.project).trim())   // #71: a grant naming a project is a sighting (its spelling is canonical only if the project is new)
+      const fromName = projName(String(a.project).trim()), toName = projName(me0.project)   // #71: what is SHOWN (the edge itself stays projKey'd)
       const mode = a.mode === 'bidirectional' ? 'bidirectional' : 'send'
       // §14 TTL: the operator may CAP (shorten) what the requester asked for. Effective = the operator's ttl
       // if given, else the matching pending request's ttl, else forever; with both present, the operator can
@@ -2280,8 +2333,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const unchanged = !!prev && prev.live && prev.mode === mode && (effTtl == null ? !prev.exp : prevTtl != null && Math.abs(prevTtl - effTtl) < 0.05)
       consent.allow(from, to, mode, exp)         // §14: runtime grant + durable copy (survives a restart)
       announceGrants()                           // #62: replicate mesh-wide (+ visibility may widen)
-      emitTraceRaw({ dir: 'con', verb: 'allow', from: me0.project, from_name: me0.user || NAME, to: from, size: 0,
-        note: `allow ${from} -> ${me0.project} (${mode}, ${exp ? effTtl + 'm' : 'forever'})`, envelope_id: null })
+      emitTraceRaw({ dir: 'con', verb: 'allow', from: toName, from_name: me0.user || NAME, to: fromName, size: 0,
+        note: `allow ${fromName} -> ${toName} (${mode}, ${exp ? effTtl + 'm' : 'forever'})`, envelope_id: null })
       // Bug 3: the original requester(s) are told their access landed, echoing request_id + the permitted TTL — they ride
       // the #72 announcement as `extra` targets (one notice each, never a second copy), and still get it on an unchanged re-grant.
       const extra = new Map()
@@ -2289,17 +2342,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const expiresAt = exp ? new Date(exp).toISOString() : null
       let sent = { live: 0, extra: 0, parked: 0 }
       if (from !== to && (!unchanged || extra.size)) {
-        const granted = String(a.project).trim(), oneWay = mode !== 'bidirectional'
-        const body = { action: 'granted', granting_project: me0.project, granted_project: granted, mode, one_way: oneWay,
-          direction: oneWay ? `${granted} -> ${me0.project}` : `${granted} <-> ${me0.project}`,
-          ttl_minutes: effTtl, expires_at: expiresAt, granted_by: { name: by.name, session: by.session, project: me0.project, user: me0.user || null },
-          note: `${granted} sessions may now initiate messages to ${me0.project}` + (oneWay ? ` (one-way: ${me0.project} may not initiate to ${granted} through this grant)` : ` and ${me0.project} sessions may initiate to ${granted} (bidirectional)`) + (expiresAt ? `, until ${expiresAt}` : ''),
-          to: me0.project, from }   // `to`/`from`: the Bug-3 ack's original fields, kept for older readers
+        const granted = fromName, granting = toName, oneWay = mode !== 'bidirectional'   // #71: canonical spellings in the notice
+        const body = { action: 'granted', granting_project: granting, granted_project: granted, mode, one_way: oneWay,
+          direction: oneWay ? `${granted} -> ${granting}` : `${granted} <-> ${granting}`,
+          ttl_minutes: effTtl, expires_at: expiresAt, granted_by: { name: by.name, session: by.session, project: granting, user: me0.user || null },
+          note: `${granted} sessions may now initiate messages to ${granting}` + (oneWay ? ` (one-way: ${granting} may not initiate to ${granted} through this grant)` : ` and ${granting} sessions may initiate to ${granted} (bidirectional)`) + (expiresAt ? `, until ${expiresAt}` : ''),
+          to: granting, from: granted }   // `to`/`from`: the Bug-3 ack's original fields, kept for older readers (compare them case-insensitively)
         sent = await announceProjectAccess({ verb: 'project_access_granted', from: by, project: granted, body,
-          subject: `${me0.project} granted ${granted} access (${oneWay ? 'one-way' : 'bidirectional'}${effTtl != null ? `, ${effTtl}m` : ''})`,
+          subject: `${granting} granted ${granted} access (${oneWay ? 'one-way' : 'bidirectional'}${effTtl != null ? `, ${effTtl}m` : ''})`,
           extra, onlyExtra: unchanged })
       }
-      return ok({ ok: true, allow: { from, to: me0.project, mode, ttl_minutes: effTtl, expires_at: expiresAt },
+      return ok({ ok: true, allow: { from: fromName, to: toName, mode, ttl_minutes: effTtl, expires_at: expiresAt },   // #71: was { from: projKey } — "aimb" for an "AIMB" grant
         notified: sent.extra + sent.live + sent.parked, notified_pending: sent.extra, announced: sent.live, parked: sent.parked,   // #72: notified = every notice sent (was: pending requesters only)
         ...(unchanged ? { announce: 'unchanged' } : {}), reminders: opReminders(holderId, 'allow_project', { project: a.project }) })
     }
@@ -2313,16 +2366,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // #72: announce the revoke to the granted project — same path + rules as the grant notice; a revoke of an edge that
       // wasn't live here (already revoked / expired / never seen) changes nothing and is not announced
       let sent = { live: 0, extra: 0, parked: 0 }
+      const fromName = projName(String(a.project || '').trim()), toName = projName(myProj)   // #71: canonical spellings for what is shown
       if (had && from !== to) {
-        const granted = String(a.project).trim(), mode = (prev && prev.mode) || 'send'
+        const granted = fromName, granting = toName, mode = (prev && prev.mode) || 'send'
         sent = await announceProjectAccess({ verb: 'project_access_revoked', from: by, project: granted,
-          subject: `${myProj} revoked ${granted} access`,
-          body: { action: 'revoked', granting_project: myProj, granted_project: granted, mode, one_way: mode !== 'bidirectional',
-            revoked_by: { name: by.name, session: by.session, project: myProj, user: myUser || null },
-            note: `the runtime grant letting ${granted} initiate to ${myProj}` + (mode === 'bidirectional' ? ' (and the reverse direction)' : '') + ' was revoked; a static config edge or another grant may still allow it',
-            to: myProj, from } })
+          subject: `${granting} revoked ${granted} access`,
+          body: { action: 'revoked', granting_project: granting, granted_project: granted, mode, one_way: mode !== 'bidirectional',
+            revoked_by: { name: by.name, session: by.session, project: granting, user: myUser || null },
+            note: `the runtime grant letting ${granted} initiate to ${granting}` + (mode === 'bidirectional' ? ' (and the reverse direction)' : '') + ' was revoked; a static config edge or another grant may still allow it',
+            to: granting, from: granted } })
       }
-      return ok({ ok: true, revoked: had, from, to: myProj, notified: sent.live + sent.parked, announced: sent.live, parked: sent.parked,
+      return ok({ ok: true, revoked: had, from: fromName, to: toName, notified: sent.live + sent.parked, announced: sent.live, parked: sent.parked,
         reminders: opReminders(holderId, 'revoke_project', { project: a.project }) })
     }
     case 'request_project_access': {
@@ -2334,9 +2388,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const reqId = 'req_' + crypto.randomBytes(5).toString('hex')
       const fromProj = projKey(me0.project || 'unclassified')
       consent.addPending(reqId, { reqId, from: fromProj, to, requester, requesterName: me0.user || NAME, ttlMin, ts: Date.now() })
-      const payload = JSON.stringify({ from_project: me0.project || 'unclassified', from_user: me0.user || 'unknown', reason: String(a.reason || ''), request_id: reqId, ttl_minutes: ttlMin })
+      const payload = JSON.stringify({ from_project: projName(me0.project || 'unclassified'), from_user: me0.user || 'unknown', reason: String(a.reason || ''), request_id: reqId, ttl_minutes: ttlMin })
       const reached = await deliverSystemToProject(to, 'project_access_request', payload)
-      return ok({ ok: true, request_id: reqId, to, ttl_minutes: ttlMin, delivered_to: reached, reminders: opReminders(requester, 'request_project_access', { project: to }) })
+      return ok({ ok: true, request_id: reqId, to: projName(String(a.to).trim()), ttl_minutes: ttlMin, delivered_to: reached, reminders: opReminders(requester, 'request_project_access', { project: to }) })   // #71: `to` was lower-cased
     }
     case 'set_wake': {   // T14 wake is unsupported (CAPS.wake=false); tell the caller their fallback, RESOLVED BY SESSION TYPE
       const kind = (callerId && subpeers.get(callerId)?.client_kind) || clientKind(CLIENT && CLIENT.name)

@@ -62,6 +62,10 @@ export function create(ctx) {
       async put(writer, record) {},                // #66b: the realm-wide default-reminders LWW record, one per writing host
       async all() { return [] },                   // every host's copy; the bridge keeps the LWW winner at startup
     },
+    projectNames: {
+      async put(writer, list) {},                  // #71: this host's canonical project-name map [{ name, first_seen }], one per writing host
+      async all() { return [] },                   // every host's list; the bridge folds them (earliest first_seen wins) at startup
+    },
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
   }
 }

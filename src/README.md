@@ -26,6 +26,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `${service:…}` as explicit seams). **Encapsulated stateful modules** that OWN their data behind an API
   (bridge.mjs calls the API, never the Maps): `consent.js` (runtime grants + pending requests;
   `mayInitiate`/`allow`/`revoke`/…), `reminders.js` (#29 per-session behaviours; `remindersFor`/`set`/`clear`/…),
+  `project-names.js` (#71 the replicated first-seen canonical spelling per project; `note`/`merge`/`display`),
   `traces.js` (the observation-plane ring buffer + dashboard fan-out; `collect`/`history`), and `egress-auth.js`
   (#36 server-side auth token sources — mint/cache/refresh a bearer token for an egress backend). `win-env.js`
   rehydrates environment variables that an MCP host stripped at launch (Windows registry) so `${env:…}` secret
@@ -199,13 +200,26 @@ bridge-generated **system** messages exempt from consent (the grant may be one-w
 so an ordinary send in the closed direction is still `project-denied`. Enforced **receiver-side**
 at delivery (cross-project sends are dropped `project-denied`). **Replies** to a thread you opened are
 allowed back without a reverse grant, gated by an unforgeable **reply capability** — an HMAC keyed by
-the session's secret-derived `capKey`, bound to `(senderProject|targetProject|envId|expiry)`, verified
+the session's secret-derived `capKey`, bound to `(senderProject|targetProject|envId|expiry)` (projects by case-insensitive key, v1.57.0), verified
 by recomputation (no stored state; survives a Cowork re-attach). **Decision B:** a valid reply-cap
 **always gets through** — it is not time-expired and a later `revoke_project` does not cancel replies
 on already-opened threads (the cap is an independent allow, OR'd after the consent check). It dies
 only when a process restarts (`capKey` rotates). **Topics are project-scoped**: two
 projects can each own `svc/api`; bare `topic:x` is your project, `topic:@other/x` targets another
 (then consent-gated). Policy **live-reloads** when the shared config file changes.
+
+**Project names are case-insensitive; the first-seen spelling is canonical** (v1.57.0, #71). `AIMB`, `aimb` and
+`Aimb` are ONE project everywhere a project is compared or keyed — consent and grants, topics and `@project/` targets,
+claims, parked mail and registrations, retained values, reminders, stable ids and the reply-cap (all via `projKey`).
+What is SHOWN uses one spelling per project, mesh-wide: the **first-seen** one (the earliest registration, page,
+bridge identity or grant naming it; a tie → the lexically smaller, so `AIMB` beats `aimb`). Each bridge keeps a small
+replicated map (`projKey → {name, first_seen}`, earliest wins) that rides the roster gossip and persists like the other
+durable state, and every surface maps through it: `list_sessions` (sessions, sub-peers, topics, pages), `register_self`
+(`identity.project`, `access`), `my_identity`, `allow_project` (`allow.from`/`to`), `revoke_project`,
+`request_project_access` (`to`), topic send/publish results, the #72 grant notices (subject + body) and the dashboard.
+A later registration in another case adopts it: `register_self {project:"marz"}` shows `"Marz"` once `Marz` is
+canonical. The stored identity is never rewritten (`identity.id` keeps the declared spelling; only `project` is mapped
+for display), so matching code must keep using `projKey`, never the display name.
 
 **Visibility is enforced too:** a page is served a roster filtered to the projects it may reach
 (can't see → can't address), matching the delivery gate. Opt out with `AIMB_BRIDGE_CFG.seeAll = true`.
