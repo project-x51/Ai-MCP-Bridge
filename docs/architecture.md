@@ -1114,6 +1114,7 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.54.0, tray):** *Task Tray "Restart Bridges…" menu item.* Sits above Quit; a Yes/No confirmation (default No) then stops every `bridge.mjs` process on the machine, waits up to 10s for them to exit (ports free), re-reads version/ports and launches a fresh headless gateway, pausing the keep-alive monitor meanwhile. Tray-only — bridge version unchanged; rebuild with `tray/windows/build.cmd`.
 - **Built (v1.54.0):** *doorbell 6-hour inbox check-in keeps the bridge loaded (#69).* Robin's request: an idle
   session that only loops the doorbell makes no bridge tool call for hours, so the host may unload the MCP bridge
   from it. The hourly chimes (#67) whose boundary falls on 00:00, 06:00, 12:00 or 18:00 LOCAL now keep

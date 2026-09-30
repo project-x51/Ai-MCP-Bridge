@@ -1,9 +1,10 @@
 // Ai MCP Bridge — Windows system-tray component.
-// A standalone tray icon with "Open Dashboard" and "Quit". It supervises the bridge:
+// A standalone tray icon with "Open Dashboard", "Restart Bridges..." and "Quit". It supervises the bridge:
 //   --ephemeral : launched BY the first bridge instance; exits when all bridges are gone.
 //   (default)   : launched by the user / at startup; launches a bridge if none is running and
 //                 keeps one alive (persistent gateway), staying resident across bridge restarts.
 // Quit weighs what is connected and offers: Cancel / Close tray only / Shut down all bridges.
+// Restart Bridges (confirmed) stops every bridge process on this machine and starts a fresh gateway.
 //
 // Built with the in-box .NET Framework compiler (no SDK / runtime install) — see build.cmd.
 // C# 5 compatible (no string interpolation / null-conditional) so legacy csc.exe accepts it.
@@ -33,6 +34,7 @@ class TrayApp : ApplicationContext
     string _version = "";  // bridge version (from the managed bridge's package.json) shown in the menu
     Icon _onIcon, _offIcon;
     int _emptyTicks;
+    ToolStripMenuItem _header;
 
     [STAThread]
     static void Main(string[] args)
@@ -62,7 +64,9 @@ class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Open Dashboard", null, delegate { OpenDashboard(); });
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Restart Bridges...", null, delegate { OnRestart(); });
         menu.Items.Add("Quit", null, delegate { OnQuit(); });
+        _header = header;
 
         _icon = new NotifyIcon();
         _icon.Icon = _offIcon;
@@ -109,6 +113,38 @@ class TrayApp : ApplicationContext
         if (choice == 0) return;                       // cancel
         if (choice == 2) ShutdownAllBridges();         // kill bridges too
         ExitApp();                                     // choice 1 or 2: close the tray
+    }
+
+    // Restart = stop EVERY bridge process on this machine (gateway + per-session followers), wait for them to
+    // exit so the gateway ports are free, then launch a fresh headless gateway from the current code. Session
+    // bridges belong to their client app (Claude Code / Desktop) and come back when that client reconnects its
+    // MCP server. Typical use: after a `git pull` / Dropbox sync delivered a new bridge version.
+    void OnRestart()
+    {
+        int n = CountBridges();
+        string msg = (n > 0
+            ? (n + " bridge process" + (n == 1 ? " is" : "es are") + " running on this machine.\n\n" +
+               "Restart ALL of them? Every AI session and page on this machine drops off the mesh briefly. " +
+               "A fresh gateway starts immediately; AI sessions whose app started their bridge may need to " +
+               "reconnect the ai-mcp-bridge MCP server.")
+            : "No bridge processes are running.\n\nStart a fresh gateway?");
+        if (MessageBox.Show(msg, "Restart Ai MCP Bridges", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+
+        _monitor.Stop();                               // no keep-alive relaunch racing the shutdown
+        try
+        {
+            ShutdownAllBridges();
+            DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+            while (CountBridges() > 0 && DateTime.UtcNow < deadline) Thread.Sleep(250);
+            if (CountBridges() > 0)
+                MessageBox.Show("Some bridge processes did not exit; starting a gateway anyway.", "Ai MCP Bridge");
+            LoadConfig();                              // pick up a new version / ports from the updated checkout
+            if (_header != null) _header.Text = _version.Length > 0 ? ("Ai MCP Bridge  v" + _version) : "Ai MCP Bridge";
+            LaunchBridge();
+            _emptyTicks = 0;
+        }
+        finally { _monitor.Start(); Tick(); }
     }
 
     void ExitApp()

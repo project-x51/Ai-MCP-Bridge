@@ -1,6 +1,6 @@
 # Ai MCP Bridge — tray component
 
-A small system-tray app that supervises the bridge and gives you **Open Dashboard** and **Quit**.
+A small system-tray app that supervises the bridge and gives you **Open Dashboard**, **Restart Bridges…** and **Quit**.
 The bridge itself is OS-agnostic; the tray is per-OS, so each platform has its own folder
 implementing the same contract:
 
@@ -14,6 +14,11 @@ tray/
 ## What it does
 
 - **Open Dashboard** — opens `dashboard.html` in your browser with the token + ws port filled in.
+- **Restart Bridges…** — after a Yes/No confirmation (default No), stops **every** bridge process on
+  this machine (gateway and per-session followers), waits for them to exit, re-reads the version/ports
+  from the checkout and starts a fresh headless gateway. Use it after a `git pull` / Dropbox sync
+  delivers a new bridge version. AI sessions whose app started their bridge may need to reconnect the
+  `ai-mcp-bridge` MCP server afterwards.
 - **Quit** — weighs what is connected and asks: **Cancel** / **Close tray only** (leave bridges
   running) / **Shut down all bridges** (disconnects every session + page on the machine).
 - The icon shows green when at least one bridge is running, grey when none.
