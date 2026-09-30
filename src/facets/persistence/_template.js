@@ -55,6 +55,7 @@ export function create(ctx) {
       async put(project, topic, identity, record) {},
       async read(project, topic) { return null },  // the newest publisher value
       async allForProject(project) { return [] },  // newest value per topic: [{topic, record}] (for subscribe-time catch-up)
+      async all() { return [] },                   // #66c: newest value per (project, topic): [{project, topic, record}] (rehydrate)
       async gcAll(opts) { return 0 },              // drop retained values older than ttlMs; return count dropped
     },
     realmDefaults: {

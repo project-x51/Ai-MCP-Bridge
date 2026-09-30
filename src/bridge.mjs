@@ -30,6 +30,7 @@ import { procCapKeyInput, pageCapKeyInput } from './lib/capkeys.js'
 import { createConsent, parseTtlMin } from './lib/consent.js'
 import { createReminders } from './lib/reminders.js'
 import { createRealmDefaults, realmFromConfig } from './lib/realm-defaults.js'
+import { createRetainedSet, envBytes, RETAIN_REPLICATE_MAX_BYTES, RETAIN_GOSSIP_MAX_BYTES } from './lib/retained.js'
 import { createTraces } from './lib/traces.js'
 import { create as createEgress } from './services/egress.js'
 
@@ -107,7 +108,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.47.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.48.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -236,7 +237,7 @@ function localCapKey(sessionId) {                  // reply-cap signing key for 
 function projectOfTarget(to) {                     // resolve a target id's project from local state + roster
   if (to === SESSION) return PROC_IDENT?.project || 'unclassified'
   if (subpeers.has(to)) return subpeers.get(to).identity?.project || 'unclassified'
-  if (String(to).startsWith('page:')) { const p = pages.get(String(to).slice(5)); return p?.identity?.project || 'unclassified' }
+  if (String(to).startsWith('page:')) { const p = pageEntry(String(to).slice(5)); return p?.identity?.project || p?.project || 'unclassified' }   // #66d: remote pages carry a bare project
   if (roster.has(to)) return roster.get(to).project || 'unclassified'
   if (String(to).startsWith('peer:')) { const hit = rosterSub(to); return hit ? (hit.sp.project || 'unclassified') : null }
   const owner = roster.get(String(to).split('/').slice(0, 2).join('/'))   // legacy id: session is embedded
@@ -296,6 +297,7 @@ let gatewayId = null             // session id of the current gateway (both role
 const inbox = []                  // process inbox: delivered envelopes (cursor = index)
 const seen = new Set()            // envelope dedupe (LRU-ish)
 const followers = new Map()       // gateway: session -> control socket
+const followerRetainedV = new Map()   // gateway: follower session -> the retained-set version it last got (#66c)
 const leaves = new Set()          // gateway: ws clients (dashboards + page leaves)
 // fan a JSON string out to every connected dashboard (the observation sink) — shared by traces + persistence push
 const dashSend = msg => { for (const ws of leaves) if (ws.kind === 'dashboard' && ws.readyState === 1) { try { ws.send(msg) } catch {} } }
@@ -376,6 +378,18 @@ function seedRealmDefaults(cfg, why) {
 }
 await realmDefaults.rehydrate()   // the latest record this host learned survives a restart (when persistence is on)
 seedRealmDefaults(CFG, 'startup')
+// #66c: RETAINED topic values replicate mesh-wide as a last-writer-wins set keyed by (realm, project, topic) — see
+// lib/retained.js. Every process holds the set in RAM (so a gateway without persistence still relays it), rides it on
+// PEER_ROSTER / ROSTER as `retained` (only to a link/follower that hasn't had the current version — it can be MBs) and
+// sends a follower's own publishes UP in a RETAINED frame; what a process LEARNS it persists (when persistence is on),
+// and the subscribe-time catch-up reads the store AND the set. A value over RETAIN_MAX_BYTES stays on the publishing
+// host and replicates as a too-large marker instead. TTL = the store's retainedTtlDays (default 14), from publish time.
+const RETAIN_MAX_BYTES = Number(process.env.AI_BRIDGE_RETAIN_REPLICATE_MAX_BYTES) || RETAIN_REPLICATE_MAX_BYTES
+const retainedSet = createRetainedSet({ persistence, persist: PERSIST, writer: HOSTNAME, realm: REALM,
+  ttlMs: persistence.limits.retainedTtlMs || 14 * 86400000, maxBytes: RETAIN_MAX_BYTES,
+  gossipMaxBytes: Number(process.env.AI_BRIDGE_RETAIN_GOSSIP_MAX_BYTES) || RETAIN_GOSSIP_MAX_BYTES, log })
+await retainedSet.rehydrate()   // own + learned values survive a restart, and are re-gossiped even if their publisher is gone
+setInterval(() => retainedSet.gc(), Number(process.env.AI_BRIDGE_RETAIN_GC_MS) || 600000).unref()   // age out expired values
 
 // envelopeId() (pure content hash) lives in lib/envelope.js (imported above).
 function remember(id) {
@@ -412,7 +426,7 @@ function flushPendingTraces() {
 function nameOf(id) {                       // best-effort display name for a mesh id (trace plane)
   const s = String(id || '')
   if (!s) return null
-  if (s.startsWith('page:')) { const p = pages.get(s.slice(5)); return p ? (p.title || p.page_kind) : s }
+  if (s.startsWith('page:')) { const p = pageEntry(s.slice(5)); return p ? (p.title || p.page_kind) : s }
   if (roster.has(s)) return roster.get(s).name
   if (subpeers.has(s)) return subpeers.get(s).name
   if (s.startsWith('peer:')) { const hit = rosterSub(s); return hit ? hit.sp.name : s.slice(5).replace(/-[0-9a-f]{8}$/, '') }
@@ -542,6 +556,13 @@ function announceRealmDefaults() {
   if (role === 'gateway') broadcastRoster()
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'REALM_DEFAULTS', session: SESSION, realm_defaults: realmDefaults.current() })
 }
+// #66c: a retained value published HERE must reach the whole mesh. A gateway re-broadcasts (the set rides ROSTER to
+// followers + PEER_ROSTER gossip, whose dedupe signature includes the set's version); a follower sends the changed
+// record(s) UP so its gateway merges + spreads them.
+function announceRetained(recs) {
+  if (role === 'gateway') broadcastRoster()
+  else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'RETAINED', session: SESSION, retained: recs || retainedSet.list() })
+}
 function announceTopics() {
   if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.topics = topicList() }; broadcastRoster() }
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'TOPICS', session: SESSION, topics: topicList() })
@@ -561,8 +582,12 @@ function allTopicEntries() {
   const seenKeys = new Set()
   const add = e => { const k = `${e.holder}|${e.role}|${patternKey(e.pattern)}`; if (!seenKeys.has(k)) { seenKeys.add(k); out.push(e) } }
   for (const s of roster.values()) for (const e of (s.topics || [])) add(e)
-  for (const p of pages.values()) {
-    const pp = p.identity?.project || 'unclassified', pr = p.identity?.realm || REALM
+  // #66d: pages on OTHER hosts count too (a gateway keeps them in remotePages; a follower's `pages` already holds them,
+  // tagged `origin`) — but only those whose owning gateway accepts cross-host page delivery (`page_ingress`, 1.48+).
+  // A page on an older gateway is display-only: it can't be reached, so it must not look like a subscriber/owner.
+  for (const p of [...pages.values(), ...remotePages.values()]) {
+    if (p.origin && !p.page_ingress) continue
+    const pp = p.identity?.project || p.project || 'unclassified', pr = p.identity?.realm || p.realm || REALM
     if (p.subject) {
       add({ pattern: p.subject, role: 'owner', description: `Page: ${p.title || p.page_kind}`, exclusive: false,
         icon: p.icon || null, holder: 'page:' + p.instance, holder_name: p.title || p.page_kind, project: pp, realm: pr })
@@ -847,13 +872,28 @@ function deliverPage(env) {
   emitTrace('send', env, 'to-page')
   return { ok: true }
 }
+// #66d: a page by instance — a LOCAL leaf first, else one gossiped from a peer hub (a gateway keeps those in
+// remotePages; a follower's `pages` mirror already holds both, the remote ones tagged `origin`).
+function pageEntry(inst) { return pages.get(inst) || remotePages.get(inst) || null }
 function resolvePageTarget(target) {
   // 'page:<instance>' | bare instance | unique title | unique page_kind -> 'page:<instance>' or null
   const t = String(target)
   const inst = t.startsWith('page:') ? t.slice(5) : t
-  if (pages.has(inst)) return 'page:' + inst
+  if (pageEntry(inst)) return 'page:' + inst
   const cand = [...pages.values()].filter(p => p.title === t || p.page_kind === t)
-  return cand.length === 1 ? 'page:' + cand[0].instance : null
+  if (cand.length === 1) return 'page:' + cand[0].instance
+  // #66d: no local match — a unique title/kind among REMOTE pages (a gateway's view; local ones keep precedence)
+  const rc = cand.length ? [] : [...remotePages.values()].filter(p => p.title === t || p.page_kind === t)
+  return rc.length === 1 ? 'page:' + rc[0].instance : null
+}
+// #66d: deliver to a page owned by ANOTHER host's gateway: dial that gateway (its well-known port, like a remote
+// session) with CONNECT page:<instance>; it hands the envelope to its deliverPage (consent checked THERE, where the
+// page lives) and returns the real outcome in the #61 CLOSE code. A page whose gateway is ≤1.47 (no `page_ingress`)
+// can't be reached across hosts — say so, don't dial it for a silent/misleading answer.
+function routeRemotePage(p, env) {
+  if (!p.page_ingress) { emitTrace('send', env, 'page-remote-unsupported'); return { ok: false, code: 'page-remote-unsupported' } }
+  emitTrace('send', env, `to-page via ${p.host_label || p.origin}`)
+  return dialAndSend(p.port, p.host || HOST, env.to, env)
 }
 
 // ---------------------------------------------------------------- outbound routing
@@ -895,8 +935,14 @@ function dialAndSend(port, host, target, env) {
 
 async function routeEnvelope(env) {
   if (String(env.to).startsWith('page:')) {
-    if (role === 'gateway') return deliverPage(env)
-    if (gwSock && !gwSock.destroyed && pages.has(String(env.to).slice(5))) {
+    const inst = String(env.to).slice(5)
+    if (role === 'gateway') {
+      if (!pages.has(inst) && remotePages.has(inst)) return routeRemotePage(remotePages.get(inst), env)   // #66d: another host's page
+      return deliverPage(env)
+    }
+    const rp = pages.get(inst)
+    if (rp && rp.origin) return routeRemotePage(rp, env)   // #66d: a follower dials the owning gateway itself (like a remote session)
+    if (gwSock && !gwSock.destroyed && pages.has(inst)) {
       sendFrame(gwSock, { t: 'PAGE_MSG', env })
       emitTrace('send', env, 'to-page via gateway')
       return { ok: true, forwarded: 'gateway' }
@@ -1151,7 +1197,13 @@ function rosterFor(ws) {
 }
 function broadcastRoster() {
   const frame = { type: 'ROSTER', ...rosterPayload(), grants: consent.grantSet(), realm_defaults: realmDefaults.current() }   // #62: followers merge the grant set (consent is checked in the process hosting the target); #66b: and the realm defaults
-  for (const sock of followers.values()) sendFrame(sock, frame)   // bridges get full; each filters its own leaves
+  // #66c: the retained set rides a follower's ROSTER only when that follower hasn't had the current version (a new
+  // follower has none → the whole set); a follower computes its own sub-peers' subscribe-time catch-up.
+  const rv = retainedSet.version()
+  for (const [fs0, sock] of followers) {
+    if (followerRetainedV.get(fs0) !== rv) { followerRetainedV.set(fs0, rv); sendFrame(sock, { ...frame, retained: retainedSet.list() }) }
+    else sendFrame(sock, frame)   // bridges get full; each filters its own leaves
+  }
   // listeners are deliberately EXCLUDED from the roster fan-out — a doorbell gets counts, not the mesh (see below)
   for (const ws of leaves) if (ws.readyState === 1 && ws.kind !== 'listener') { try { ws.send(JSON.stringify({ type: 'roster', ...rosterFor(ws) })) } catch {} }
   notifyListeners()
@@ -1248,8 +1300,12 @@ const PEER_PROBE_MS = Number(process.env.AI_BRIDGE_PEER_PROBE_MS) || 5000   // s
 const TEST_GOSSIP = process.env.AI_BRIDGE_TEST_GOSSIP || ''   // test-only: 'silent' = link up, then no gossip/refresh/PONG; 'legacy' = behave like <=1.43 (no flag, no refresh)
 const selfAddr = () => `${ADVERTISE}:${PORT}`
 const localRosterSlice = () => [...roster.values()].filter(s => !s.origin)   // my own session + my followers (never relayed entries)
-// pages live only on a gateway; gossip DISPLAY fields only (never capKey or other secrets) so remote dashboards can show web sessions
-const localPagesSlice = () => [...pages.values()].map(p => ({ instance: p.instance, page_kind: p.page_kind, title: p.title || '', subject: p.subject || null, icon: p.icon || null, project: p.project || null, user: p.user || null }))
+// pages live only on a gateway; gossip DISPLAY fields only (never capKey or other secrets) so remote dashboards can show web sessions.
+// #66d: plus what a peer needs to ADDRESS the page — its `subscriptions` and `realm` (so allTopicEntries/subscribersOf
+// see it) and `page_ingress:true` (this gateway accepts CONNECT page:<instance> from another host). The owning
+// gateway's dial address comes from the PEER_ROSTER frame itself. ('legacy' test gossip mimics a ≤1.47 gateway.)
+const localPagesSlice = () => [...pages.values()].map(p => ({ instance: p.instance, page_kind: p.page_kind, title: p.title || '', subject: p.subject || null, icon: p.icon || null, project: p.project || null, user: p.user || null,
+  ...(TEST_GOSSIP === 'legacy' ? {} : { realm: p.identity?.realm || REALM, subscriptions: (p.subscriptions || []).slice(0, 32), page_ingress: true }) }))
 const refreshCap = () => TEST_GOSSIP === 'legacy' ? {} : { gossip_refresh: true, refresh_ms: GOSSIP_REFRESH_MS }   // #63 capability flag
 // #62: `grants` = the FULL replicated grant set this hub knows (local + learned), so a grant spreads transitively
 // even though the roster slice is one-hop. LWW makes re-gossip safe; a ≤1.44 receiver ignores the field.
@@ -1257,15 +1313,24 @@ const refreshCap = () => TEST_GOSSIP === 'legacy' ? {} : { gossip_refresh: true,
 // ≤1.46 receiver ignores it.
 const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, realm_defaults: rd, ...refreshCap() })
 const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap() })
+// #66c: `retained` (the replicated retained-value set) is NOT in gossipFrame — it can be MBs and the roster is re-gossiped
+// on every unread-count change — so it rides a PEER_ROSTER only when that link hasn't had the set's current version yet
+// (a fresh link has none → it gets the whole set). LWW makes a repeat harmless; a ≤1.47 receiver ignores the field.
+function sendGossip(p, frame) {
+  if (!p || !p.sock || p.sock.destroyed) return
+  const v = retainedSet.version()
+  if (p.retainedV !== v) { p.retainedV = v; frame = { ...frame, retained: retainedSet.list() } }
+  sendFrame(p.sock, frame)
+}
 function gossipToPeers(force) {
   if (role !== 'gateway' || !peerGw.size || TEST_GOSSIP === 'silent') return
-  const slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), sig = JSON.stringify([slice, pg, gr, rd])
-  if (!force && sig === lastGossip) return                         // only send when MY locals (or the grant set / realm defaults) changed (breaks the merge→broadcast→gossip loop)
+  const slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), sig = JSON.stringify([slice, pg, gr, rd, retainedSet.version()])
+  if (!force && sig === lastGossip) return                         // only send when MY locals (or the grant set / realm defaults / retained set) changed (breaks the merge→broadcast→gossip loop)
   lastGossip = sig
   const frame = gossipFrame(slice, pg, gr, rd)
-  for (const p of peerGw.values()) if (p.sock && !p.sock.destroyed) sendFrame(p.sock, frame)
+  for (const p of peerGw.values()) sendGossip(p, frame)
 }
-function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, realmDefs) {
+function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, realmDefs, retained) {
   if (!fromGw || fromGw === SESSION) return
   // #63: only the CURRENT link for that gateway may write its slice — a late frame on a retired/replaced socket
   // would otherwise resurrect entries that no peerGw entry owns, and nothing would ever clean them up again.
@@ -1276,8 +1341,9 @@ function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, re
   // A change re-broadcasts (followers get it in ROSTER) and re-gossips it onward; an idempotent merge ends the loop.
   const grantsChanged = consent.merge(grants) > 0
   const realmChanged = realmDefaults.merge(realmDefs)   // #66b: likewise the realm defaults (a ≤1.46 peer sends none → no-op)
+  const retainedChanged = retainedSet.merge(retained) > 0   // #66c: and retained values (learned ones are persisted; absent field → no-op)
   const sig = JSON.stringify([host, port, sessions, pages])
-  if (sig === peer.sig) { if (grantsChanged || realmChanged) broadcastRoster(); return }   // a periodic refresh of an unchanged slice: stamp only, no broadcast
+  if (sig === peer.sig) { if (grantsChanged || realmChanged || retainedChanged) broadcastRoster(); return }   // a periodic refresh of an unchanged slice: stamp only, no broadcast
   peer.sig = sig
   for (const [k, v] of [...roster]) if (v.origin === fromGw) roster.delete(k)   // replace this gateway's slice wholesale
   for (const s of (sessions || [])) {
@@ -1286,7 +1352,7 @@ function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, re
   }
   for (const [k, v] of [...remotePages]) if (v.origin === fromGw) remotePages.delete(k)
   const rhost = String(fromGw).split('/')[0]
-  for (const p of (pages || [])) if (p && p.instance) remotePages.set(p.instance, { ...p, origin: fromGw, host_label: rhost })
+  for (const p of (pages || [])) if (p && p.instance) remotePages.set(p.instance, { ...p, origin: fromGw, host_label: rhost, host: host || HOST, port: port || PORT })   // #66d: dial the page via its owning gateway
   broadcastRoster()
 }
 function touchPeer(sock) { for (const p of peerGw.values()) if (p.sock === sock) p.seen = Date.now() }
@@ -1354,9 +1420,9 @@ function connectToPeer(host, port) {
   onFrames(sock, f => {
     if (f.t === 'PEER_HELLO') {
       linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || port, f.name, f, true)
-      sendFrame(sock, gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted
+      sendGossip(peerGw.get(f.session), gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted (#66c: + the retained set)
     }
-    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults)
+    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained)
     else if (f.t === 'PING') { if (!TEST_GOSSIP) sendFrame(sock, { t: 'PONG', seq: f.seq }) }   // #63: the accepting hub probes us too (<=1.43 dialers ignore PING — 'legacy' mimics that)
     else if (f.t === 'PONG') touchPeer(sock)
     else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
@@ -1421,7 +1487,7 @@ setInterval(() => {
   const frame = gossipFrame(), ping = { t: 'PING', seq: ++pingSeq }
   for (const p of peerGw.values()) {
     if (!p.sock || p.sock.destroyed) continue
-    if (p.refresh) sendFrame(p.sock, frame)   // an older receiver would re-merge + re-broadcast an unchanged slice; it can't expire, so skip it
+    if (p.refresh) sendGossip(p, frame)   // an older receiver would re-merge + re-broadcast an unchanged slice; it can't expire, so skip it
     sendFrame(p.sock, ping)
   }
 }, GOSSIP_REFRESH_MS).unref()
@@ -1449,6 +1515,7 @@ function becomeGateway(server) {
 // is honoured).
 function onControlConn(sock) {
     let who = null
+    let pageTarget = null   // #66d: set by an accepted CONNECT page:<instance>
     onFrames(sock, async f => {
       if (f.t === 'HELLO') {
         if (!profile.auth.verify(f.auth)) { sendFrame(sock, { t: 'REJECT', code: 'unauthorized' }); sock.end(); return }
@@ -1456,11 +1523,11 @@ function onControlConn(sock) {
       } else if (f.t === 'REGISTER') {                       // follower control connection
         if (!who) { sendFrame(sock, { t: 'REJECT', code: 'no-hello' }); sock.end(); return }
         roster.set(f.session, { session: f.session, name: f.name, port: f.port, kind: 'session', subpeers: f.subpeers || [], topics: f.topics || [], bridge_version: f.bridge_version || null, capabilities: f.capabilities || null, connected_at: new Date().toISOString(), realm: f.realm || REALM, project: f.project || null, user: f.user || null, client: f.client || null, client_kind: clientKind(f.client) })
-        followers.set(f.session, sock)
+        followers.set(f.session, sock); followerRetainedV.delete(f.session)   // #66c: a (re)registered follower gets the whole retained set
         emitTraceRaw({ dir: 'con', verb: 'connect', from: f.session, from_name: f.name, to: SESSION, size: 0,
           note: `session joined${f.client ? ' (' + f.client + ')' : ''}`, envelope_id: null })
         sock.on('close', () => {
-          followers.delete(f.session); const gone = roster.get(f.session); roster.delete(f.session)
+          followers.delete(f.session); followerRetainedV.delete(f.session); const gone = roster.get(f.session); roster.delete(f.session)
           emitTraceRaw({ dir: 'con', verb: 'offline', from: f.session, from_name: gone ? gone.name : f.name, to: SESSION, size: 0,
             note: 'session offline', envelope_id: null })
           broadcastRoster()
@@ -1483,12 +1550,26 @@ function onControlConn(sock) {
       } else if (f.t === 'REALM_DEFAULTS') {                // #66b: a follower's realm-defaults record (from its own config) goes UP
         if (!who) return                                     // policy frame: only on an authenticated (HELLO'd) connection
         if (realmDefaults.merge(f.realm_defaults)) broadcastRoster()   // LWW: an older record changes nothing
+      } else if (f.t === 'RETAINED') {                      // #66c: a follower's retained publish(es) go UP to be merged + spread
+        if (!who) return                                     // policy frame: only on an authenticated (HELLO'd) connection
+        if (retainedSet.merge(f.retained) > 0) broadcastRoster()   // LWW: an older value changes nothing
       } else if (f.t === 'TRACE') {
         traces.collect(f.trace)
       } else if (f.t === 'PAGE_MSG') {                       // follower forwarding an envelope to a page leaf
-        if (f.env && String(f.env.to || '').startsWith('page:')) deliverPage(f.env)
+        // #66d: routeEnvelope = deliverPage for a local page, or the cross-host dial for a remote one (a ≤1.47 follower
+        // forwards every page it sees here, remote ones included)
+        if (f.env && String(f.env.to || '').startsWith('page:')) routeEnvelope(f.env).catch(() => {})
       } else if (f.t === 'CONNECT') {                        // cross-host ingress: splice to local target
         if (!who) { sendFrame(sock, { t: 'REJECT', code: 'no-hello' }); sock.end(); return }
+        // #66d: a PAGE target is delivered by THIS gateway (pages live here, not behind a pair port): ACCEPT, then the
+        // MSG below goes to deliverPage and its real outcome returns in the #61 CLOSE code. ('legacy' mimics ≤1.47,
+        // which fell through to ownerOf → unknown-target.)
+        if (String(f.target || '').startsWith('page:') && TEST_GOSSIP !== 'legacy') {
+          if (!pages.has(String(f.target).slice(5))) { sendFrame(sock, { t: 'REJECT', code: 'page-gone' }); sock.end(); return }
+          pageTarget = String(f.target)
+          sendFrame(sock, { t: 'ACCEPT', connId: crypto.randomBytes(4).toString('hex') })
+          return
+        }
         const peer = ownerOf(f.target)
         if (!peer) { sendFrame(sock, { t: 'REJECT', code: 'unknown-target' }); sock.end(); return }
         const out = profile.transport.connect(peer.port, peer.host || HOST)
@@ -1498,15 +1579,20 @@ function onControlConn(sock) {
           sock.removeAllListeners('data'); out.pipe(sock); sock.pipe(out)   // splice-opaque from here
         })
         out.on('error', () => { sendFrame(sock, { t: 'REJECT', code: 'target-unreachable' }); sock.end() })
+      } else if (f.t === 'MSG') {                            // #66d: the envelope for an ACCEPTed page target
+        if (!pageTarget) return
+        const env = f.body
+        const r = /** @type {any} */ (env && env.id && env.to === pageTarget ? deliverPage(env) : { ok: false, code: 'target-mismatch' })
+        sendFrame(sock, { t: 'CLOSE', code: r && r.ok ? 'ok' : ((r && r.code) || 'failed') })
       } else if (f.t === 'PEER_HELLO') {                     // inbound cross-host hub link (§7)
         if (!who) { sendFrame(sock, { t: 'REJECT', code: 'no-hello' }); sock.end(); return }
         if (f.realm && f.realm !== REALM) { sendFrame(sock, { t: 'REJECT', code: 'realm-mismatch' }); sock.end(); return }
         adoptPeer(f.session, sock, f.host, f.port, f.name, f, false)
         sendFrame(sock, peerHello())
-        sendFrame(sock, gossipFrame())   // #63: full slice on every (re)link, independent of lastGossip
+        sendGossip(peerGw.get(f.session), gossipFrame())   // #63: full slice on every (re)link, independent of lastGossip (#66c: + the retained set)
         sock.on('close', () => { if (peerGw.get(f.session)?.sock === sock) dropPeer(f.session) })
       } else if (f.t === 'PEER_ROSTER') {
-        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults)
+        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained)
       } else if (f.t === 'PONG') {
         touchPeer(sock)
       } else if (f.t === 'PING') { if (TEST_GOSSIP !== 'silent') sendFrame(sock, { t: 'PONG', seq: f.seq }) }
@@ -1612,7 +1698,7 @@ function onWsConnection(ws) {
           let r
           if (m.to === SESSION) { r = await deliver(env); emitTrace('send', env, 'leaf->gateway') }
           else if (isLocalSubId(m.to)) { r = deliverSub(m.to, env); emitTrace('send', env, 'leaf->subpeer') }
-          else if (String(m.to || '').startsWith('page:')) { r = deliverPage(env) }   // page -> page (gateway-side)
+          else if (String(m.to || '').startsWith('page:')) { r = await routeEnvelope(env) }   // page -> page (gateway-side; #66d: a remote page via its owning gateway)
           else {
             const peer = ownerOf(m.to)
             if (!peer) r = { ok: false, code: 'unknown-target' }
@@ -1648,6 +1734,7 @@ function becomeFollower() {
       client: CLIENT ? CLIENT.name : null })
     sendFrame(sock, { t: 'GRANTS', session: SESSION, grants: consent.grantSet() })   // #62: anything granted/learned while not following (a ≤1.44 gateway ignores it)
     if (realmDefaults.current()) sendFrame(sock, { t: 'REALM_DEFAULTS', session: SESSION, realm_defaults: realmDefaults.current() })   // #66b: likewise (a ≤1.46 gateway ignores it)
+    if (retainedSet.size()) sendFrame(sock, { t: 'RETAINED', session: SESSION, retained: retainedSet.list() })   // #66c: likewise (a ≤1.47 gateway ignores it)
     log(`follower registered with gateway on :${PORT}`)
   })
   onFrames(sock, f => {
@@ -1659,6 +1746,7 @@ function becomeFollower() {
       if (f.gateway) gatewayId = f.gateway
       consent.merge(f.grants)   // #62: consent for MY sub-peers is checked here, so learn the realm's grants from the gateway
       realmDefaults.merge(f.realm_defaults)   // #66b: MY sub-peers' reminders are computed here too
+      retainedSet.merge(f.retained)   // #66c: and MY sub-peers' subscribe-time retained catch-up (only sent when it changed)
     }
   })
   const reelect = () => { if (role !== 'stopping') { gwSock = null; setTimeout(election, backoff + Math.random() * 100); backoff = Math.min(backoff * 2, 3000) } }
@@ -1980,11 +2068,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         note: `subscribed "${pattern}"`, envelope_id: null })
       if (PERSIST && !existed) {   // §12 retain: catch the NEW subscriber up on retained values it matches
         try {
-          const rl = await persistence.retained.allForProject(holderProject)
+          // #66c: this host's store (its own publishes + what it learned) AND the replicated set (values published on
+          // other hosts, possibly not yet on disk) — newest per topic; on a tie the store's copy (a too-large value is
+          // there on its publishing host, while the set holds only its marker). A marker (env:null) delivers nothing.
+          const best = new Map()
+          for (const { topic: rt, record } of await persistence.retained.allForProject(holderProject)) {
+            if (!record || !rt) continue
+            const ts = Date.parse(record.ts || (record.env && record.env.ts) || '') || 0, k = patternKey(rt), cur = best.get(k)
+            if (!cur || ts > cur.ts) best.set(k, { topic: rt, ts, env: record.env || null })
+          }
+          for (const r of retainedSet.forProject(holderRealm, holderProject)) {
+            const k = patternKey(r.topic), cur = best.get(k)
+            if (!cur || r.ts > cur.ts) best.set(k, { topic: r.topic, ts: r.ts, env: r.env })
+          }
           let n = 0
-          for (const { topic: rt, record } of rl) {
-            if (!record || !record.env || !rt || !topicMatch(pattern, rt)) continue
-            const env0 = record.env
+          for (const { topic: rt, env: env0 } of best.values()) {
+            if (!env0 || !rt || !topicMatch(pattern, rt)) continue
             const env = makeEnvelope({ to: holder, verb: env0.verb, body: plainBody(env0), from: env0.from, subject: env0.subject, pattern: 'publish', topic: rt })
             env.retained = true
             await routeEnvelope(env); n++
@@ -2022,14 +2121,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const ref = String(a.topic || '').trim()
       const r = await publishToTopic(from, ref, a.verb, a.message, subject, askerProjectOf(from))
       const retain = PERSIST && !!a.retain
+      let retainInfo = {}
       if (retain) {   // §12 retain: keep the last event per CONCRETE topic; delivered to a (re)subscriber on subscribe
-        const { project, path } = parseTopicRef(ref, askerProjectOf(from), REALM)
+        const { project, path, realm } = parseTopicRef(ref, askerProjectOf(from), REALM)
         if (path && !isWildcard(path) && fromIdentity) {
           const env = makeEnvelope({ to: `topic:${path}`, verb: a.verb, body: a.message, from, subject, pattern: 'publish', topic: path })
           persistence.retained.put(project, path, fromIdentity, { ts: env.ts, env }).catch(() => {})
+          // #66c: replicate mesh-wide (the set is LWW by publish time). Over the size cap the value stays on THIS host's
+          // store only and a too-large marker replicates instead (it retires any older value elsewhere) — said honestly.
+          const bytes = envBytes(env)
+          if (retainedSet.merge([{ realm: realm || REALM, project, topic: path, ts: Date.parse(env.ts), env, origin: HOSTNAME }], { persist: false }) > 0) announceRetained([retainedSet.get(realm || REALM, project, path)])
+          if (bytes > RETAIN_MAX_BYTES) {
+            log(`retained value for ${project}/${path} is ${bytes} bytes > the ${RETAIN_MAX_BYTES}-byte replication cap — kept on this host only (other hosts get a too-large marker)`)
+            retainInfo = { retained_replicated: false, retained_bytes: bytes, retained_cap_bytes: RETAIN_MAX_BYTES,
+              retained_note: 'value exceeds the replication cap: retained on this host only; subscribers on other hosts will not get it' }
+          }
         }
       }
-      return ok({ ...r, retained: retain || undefined, as: from ? from.session : SESSION, reminders: opReminders(from ? from.session : SESSION, 'publish', { topic: r.topic, project: r.project }) })
+      return ok({ ...r, retained: retain || undefined, ...retainInfo, as: from ? from.session : SESSION, reminders: opReminders(from ? from.session : SESSION, 'publish', { topic: r.topic, project: r.project }) })
     }
     case 'allow_project': {
       let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }, holderId = SESSION

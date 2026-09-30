@@ -1114,6 +1114,85 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.48.0):** *retained values + remote page subscriptions federate (#66c/d).* **(c) What was wrong:** a
+  `publish {retain:true}` was stored only in the PUBLISHING host's persistence store, and the subscribe-time catch-up
+  read only the subscriber's own store — so a subscriber that joined later on another machine never got the value.
+  **Design (the #62 pattern):** new `lib/retained.js` holds a replicated last-writer-wins SET keyed by
+  `(realm, project, topic)` (project/topic case-insensitive): `{ realm, project, topic, ts (ms = the publish time),
+  env (the stored, body-ciphered envelope), origin }`. `beatsRetained`: greater `ts`, then the greater envelope id — a
+  total order, so merge is idempotent + commutative; no tombstones (a newer publish simply replaces the value). Every
+  process holds the set in RAM (so a gateway without persistence still relays it). A local retained publish is still
+  written under the publisher (unchanged) and merged into the set; a win on a gateway → `broadcastRoster`, on a
+  follower → a new follower→gateway frame `RETAINED {session, retained:[…]}` (just the changed record; the whole set on
+  every (re)connect after `REGISTER`; accepted only after `HELLO`). The set rides `PEER_ROSTER.retained` and
+  `ROSTER.retained` — but, unlike grants, ONLY to a peer link / follower that hasn't had the set's current `version()`
+  yet (`sendGossip` / `followerRetainedV`): the set can be MBs and the roster is re-sent on every unread-count change.
+  A fresh link or (re)registered follower has no version, so it gets the whole set; the version is in the
+  `gossipToPeers` dedupe signature, so a change goes at once. `mergeRemoteRoster` merges it BEFORE the #63
+  unchanged-slice return (as grants/realm defaults). **Persistence:** what a process LEARNS it writes into its own
+  store under a synthetic identity `{user:'#replicated', name:<host>}` (one file per writing host per topic, as #66b);
+  the store's newest-per-topic read makes it just another candidate. New `retained.all()` on the store facets;
+  `rehydrate()` loads it at startup, so a restarted host keeps serving AND re-gossiping a value whose publisher is
+  offline. **Catch-up:** `subscribe` now takes, per topic, the newest of the store (own + learned) and the set (values
+  not yet on disk), preferring the store on a tie, and delivers exactly as before (a fresh envelope via
+  `routeEnvelope` → `deliverSub`), still gated by `PERSIST` as today. **Size cap:** a record whose envelope serialises
+  to more than 64KB (`RETAIN_REPLICATE_MAX_BYTES`; env `AI_BRIDGE_RETAIN_REPLICATE_MAX_BYTES`) is NOT replicated: the
+  publisher keeps it in its own store (local subscribers still get it) and the set gossips a small MARKER instead,
+  `{…, env:null, too_large:<bytes>}`, which beats any older replicated value, so no other host keeps serving a stale
+  one; there a later subscriber gets nothing for that topic. The publish reply says so: `retained_replicated:false,
+  retained_bytes, retained_cap_bytes, retained_note`, plus a log line. The whole gossiped set is also budgeted at 4MB
+  per frame (`AI_BRIDGE_RETAIN_GOSSIP_MAX_BYTES`; frames die above 8MB): newest first, older values beyond it stay
+  local (logged). The file store prefers a file that holds the value over a marker on a ts tie. **TTL:** the store's
+  `retainedTtlDays` (default 14) from the ORIGINAL publish time — an expired record is refused on merge, never listed
+  or served, and `gc()` (every 10 min, `AI_BRIDGE_RETAIN_GC_MS`) drops it; the store's own `gcAll` ages learned copies
+  the same way. **Consent unchanged:** the catch-up considers only records in the SUBSCRIBER's project + realm, and
+  each delivery still goes through `deliverSub` → `deliveryAllowed(publisher project → subscriber project)` on the
+  subscriber's host (grants federate since #62), so replication widens nothing. **Why gossip, not on-demand:** a
+  request to the owning host at subscribe time needs a new request/response protocol with timeouts through followers
+  and gateways, and fails exactly when the publisher is offline; the LWW set reuses the proven #62 machinery and keeps
+  working with the publisher gone. **(d) What was wrong:** gossiped pages carried display fields only
+  (`localPagesSlice`) and page delivery was local-only, so a publish on host A never reached a page on host B's gateway
+  even though A could see it (on a follower, remote pages even showed up as `unclassified` owners and a send to one was
+  a blind `PAGE_MSG` reported `ok:true`). **Design:** `localPagesSlice` now also gossips each page's `subscriptions`
+  (≤32 patterns), `realm` and a capability flag `page_ingress:true` — never its `capKey`. `mergeRemoteRoster` stores
+  remote pages with the owning gateway's `host`/`port` (like remote sessions), and followers get them in `ROSTER`.
+  `allTopicEntries` (hence `subscribersOf`/`ownersOf`/`iconOf`) now walks remote pages too, with their bare
+  `project`/`realm`, but ONLY those flagged `page_ingress` — a page behind an older gateway can't be reached, so it
+  must not look like a subscriber. **Routing:** `routeEnvelope` sends a `page:<instance>` that isn't local to
+  `routeRemotePage`: dial the owning gateway's well-known port with `CONNECT page:<instance>` (a follower dials it
+  directly, as it does for remote sessions); without `page_ingress` it returns `ok:false page-remote-unsupported`
+  without dialing. **Ingress:** `onControlConn` answers a `CONNECT` for a page target itself (pages live on the
+  gateway, not behind a pair port): an unknown page → `REJECT page-gone`; else `ACCEPT`, and the `MSG` goes to the
+  unchanged `deliverPage` — whose socket check (`page-gone`), consent check (`project-denied`, run on the page's
+  host) and send check (`page-send-failed`) now come back to the sender in the #61 `CLOSE` code (`target-mismatch` if
+  the envelope names another target). So a publish fanout entry for a remote page is honest (`ok:true` only when
+  delivered). **send_to_peer** to a remote page falls out: `resolvePageTarget` also resolves remote instances (and a
+  unique remote title/kind when no local page matches), then `routeEnvelope` routes it. A page→page send from a leaf
+  and the gateway's `PAGE_MSG` handler now go through `routeEnvelope` too (a ≤1.47 follower forwards every page it sees
+  there). `projectOfTarget`/`nameOf` read remote pages. **Frames/fields:** `PEER_ROSTER.retained`, `ROSTER.retained`,
+  new `RETAINED` frame; page slice `subscriptions`/`realm`/`page_ingress`; remote page entries gain `host`/`port`;
+  `CONNECT page:<instance>` + `MSG` + `CLOSE` on a gateway's control port. **Mixed versions:** ≤1.47 bridges ignore
+  the new fields and the `RETAINED` frame, so retained values spread only among 1.48+ hosts (a ≤1.47 host serves only
+  its own store, as before), and a ≤1.47 gateway's pages carry no `page_ingress` — they are skipped as subscribers and
+  a directed send fails `page-remote-unsupported` (a ≤1.47 gateway given a page `CONNECT` answers `unknown-target`).
+  A ≤1.47 sender still can't reach a remote page (unchanged). Test-only: `AI_BRIDGE_TEST_GOSSIP=legacy` now also
+  mimics a ≤1.47 gateway's pages (no new slice fields, page `CONNECT` → `unknown-target`). **Trust:** any realm member
+  can gossip a retained value — the same level as the existing unsigned roster/grant gossip; a far-future `ts` would
+  win (and never age out, since the TTL counts from `ts`) until a later one beats it. **Tests:** 19 new unit checks in `test_lib_unit`
+  (key case-insensitivity, junk refused, marker conversion, LWW order + tie, idempotent, persist-on-learn only, TTL on
+  merge/list/gc, marker retires an older value, gossip budget, commutative, rehydrate incl. markers). New
+  `test_retain_federate_live` (20 checks; two gateways + a follower with its OWN store, file persistence, temp
+  configs): a later subscriber on A's follower and gateway gets B's value; a newer publish from A's follower
+  replaces it on B and A; another project's subscriber gets nothing; a cross-project value is withheld until a
+  (federated) grant, then delivered; an oversized value reports `retained_replicated:false`, retires the older value
+  on A and is still served on B; a learned value survives A restarting with B down. New `test_page_remote_live`
+  (18 checks; A + follower, B with a WS page leaf, C an older gateway): publishes from A's gateway and follower reach
+  B's page with fanout `ok:true`; `send_to_peer` by instance, by title and from the follower land (a real outcome, not
+  the blind forward); an Other-project publish/send is `project-denied` and never lands; C's page is not in the
+  fanout and a directed send is `page-remote-unsupported`; B rejects `CONNECT page:<unknown>` with `page-gone`. The
+  page test also passes with host C spawned from the real 1.47.0 bridge (`AIMB_TEST_LEGACY_BRIDGE`). Against the
+  pre-change bridge (`AIMB_TEST_BRIDGE`) 10 of 20 retained and 14 of 18 page checks FAIL (the passes are harness
+  checks and negatives). Suite 858 across 39.
 - **Built (v1.47.0):** *realm-wide default reminders replicate mesh-wide (#66b).* **What was wrong:** default
   reminders (`config.behaviors.default`) are per config FILE — ROBIN and LITTLE share the Dropbox config, the Mac and
   phub-lnx-01 each have their own — so a default added once (v1.43's doorbell connect reminder) reached only hosts

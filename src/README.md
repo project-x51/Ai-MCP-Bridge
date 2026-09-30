@@ -227,7 +227,9 @@ topic **vanishes with its holder**; with persistence on (§12, v1.9) a claim is 
   delivery, redelivered to a returning peer), **claims** (durable by default; rehydrate on return),
   **grants** (durable cross-project consent + TTL, §14), **registrations** (a send to an offline peer by
   name parks, §19), and **retained** (`publish {retain:true}` keeps the last value per topic; a new
-  subscriber gets it on subscribe). Records are self-describing; bodies stay encrypted at rest. Still
+  subscriber gets it on subscribe — on ANY 1.48+ host since #66c: retained values replicate mesh-wide as a
+  last-writer-wins set; a value over the 64KB replication cap stays on its publishing host and the publish
+  reply says `retained_replicated:false`). Records are self-describing; bodies stay encrypted at rest. Still
   **reserved** (`unsupported`): explicit `park` to a *never-registered* identity, `force` claim takeover, and
   the `set_wake` tool. The WS `kind:"listener"` half of wake/doorbell is **BUILT** (v1.25.0 — see Doorbell
   below). `capabilities{}` on my_identity/roster is the feature-detection surface (its
@@ -395,5 +397,8 @@ is still accepted as a legacy alias — from a stale client or an existing durab
   addressing `send_to_peer {target:"page:<instance>"}` (or a unique page title), and the page
   receives via `aimbBridge.onMessage(cb)`. Routing: the gateway delivers straight to the page
   socket; a follower forwards via a `PAGE_MSG` control frame (ack is optimistic — watch for reply
-  envelopes to confirm). `tools/research_client.js` is a worked example leaf: it runs a
+  envelopes to confirm). A page on ANOTHER host (#66d, v1.48.0) is reachable too — by publish (its
+  `subscribe` patterns are gossiped) and by `send_to_peer`: the sender dials the page's owning gateway, which
+  delivers and returns the real outcome (`ok:true`, `project-denied`, `page-gone`); a page behind a ≤1.47
+  gateway fails with `page-remote-unsupported`. `tools/research_client.js` is a worked example leaf: it runs a
   worklist sent by a session and streams progress/result envelopes back to the requester's inbox.

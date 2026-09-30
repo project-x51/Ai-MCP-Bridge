@@ -289,7 +289,10 @@ export function create(ctx) {
   }
 
   // ---- retained: one file per publisher; effective value = newest ts. The topic is stored in-body (the
-  // dir slug is lossy) so allForProject can recover it for wildcard subscribe-time catch-up. ----
+  // dir slug is lossy) so allForProject can recover it for wildcard subscribe-time catch-up. #66c: a value LEARNED
+  // from the mesh is written under a synthetic '#replicated' identity (one file per writing host); a too-large value
+  // replicates as a marker (env:null) — on a ts tie the file that actually holds the value wins. ----
+  const newer = (j, best) => !best || j.ts > best.ts || (j.ts === best.ts && !(best.record && best.record.env) && !!(j.record && j.record.env))
   const retained = {
     async put(project, topic, identity, record) {
       const { primary } = identityKeys(identity, readable)
@@ -298,15 +301,24 @@ export function create(ctx) {
     },
     async read(project, topic) {
       const rdir = dir('retained', lslug(project), lslug(topic)); let best = null
-      for (const f of await readDirSafe(rdir)) { if (!f.endsWith('.val')) continue; const j = await readJson(path.join(rdir, f)); if (j && (!best || j.ts > best.ts)) best = j }
+      for (const f of await readDirSafe(rdir)) { if (!f.endsWith('.val')) continue; const j = await readJson(path.join(rdir, f)); if (j && newer(j, best)) best = j }
       return best ? best.record : null
     },
     async allForProject(project) {   // newest value per topic in this project: [{ topic, record }]
       const pdir = dir('retained', lslug(project)), out = []
       for (const topicSlug of await readDirSafe(pdir)) {
         const tdir = path.join(pdir, topicSlug); let best = null
-        for (const f of await readDirSafe(tdir)) { if (!f.endsWith('.val')) continue; const j = await readJson(path.join(tdir, f)); if (j && (!best || j.ts > best.ts)) best = j }
+        for (const f of await readDirSafe(tdir)) { if (!f.endsWith('.val')) continue; const j = await readJson(path.join(tdir, f)); if (j && newer(j, best)) best = j }
         if (best) out.push({ topic: best.topic, record: best.record })
+      }
+      return out
+    },
+    async all() {   // #66c: newest value per (project, topic) across the whole store: [{ project, topic, record }] (rehydrate)
+      const base = dir('retained'), out = []
+      for (const proj of await readDirSafe(base)) for (const topicSlug of await readDirSafe(path.join(base, proj))) {
+        const tdir = path.join(base, proj, topicSlug); let best = null
+        for (const f of await readDirSafe(tdir)) { if (!f.endsWith('.val')) continue; const j = await readJson(path.join(tdir, f)); if (j && newer(j, best)) best = j }
+        if (best && best.project && best.topic) out.push({ project: best.project, topic: best.topic, record: best.record })
       }
       return out
     },

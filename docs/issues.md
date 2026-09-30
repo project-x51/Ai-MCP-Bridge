@@ -6,9 +6,19 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.47.0) — read this first after a compact
-**Current version: v1.47.0.** All work committed to `main` (v1.42.0 – v1.47.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.48.0) — read this first after a compact
+**Current version: v1.48.0.** All work committed to `main` (v1.42.0 – v1.48.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.48.0):** Did **#66(c)+(d)** and closed **#66**. (c) Retained topic values now replicate mesh-wide
+as a last-writer-wins set keyed by (realm, project, topic) (`lib/retained.js`; `PEER_ROSTER.retained` /
+`ROSTER.retained`, sent only to a link/follower that lacks the current version, + a follower→gateway `RETAINED`
+frame), persisted where learned, so a later subscriber on ANY host is caught up. A value over the 64KB replication cap
+stays on its publishing host (the publish reply says `retained_replicated:false`) and a too-large marker retires the
+older value elsewhere. (d) Pages gossip their `subscriptions` + `page_ingress`; a publish/`send_to_peer` to a page on
+another host dials the owning gateway, which delivers via `deliverPage` (consent checked there) and returns the real
+outcome in the #61 CLOSE code. **Rollout:** both need 1.48.0 on the publishing/sending host AND the host that holds
+the subscriber/page; a page behind a ≤1.47 gateway fails `page-remote-unsupported`. No live config was edited.
 
 **2026-09-30 (v1.47.0):** Did **#66(b)** — realm-wide default reminders. A `behaviors.realm` block
 `{ "updated_at": "<ISO>", "default": [...] }` in ANY one host's config is now a single last-writer-wins record gossiped
@@ -107,7 +117,7 @@ entry (on older bridges a `{doorbell_cmd}` would reach the agent unexpanded). Li
 NOT edited. Tests: `test_doorbell_live` (40), `test_connect_reminders_live` (17), both verified to fail on the
 pre-change code.
 
-## #66 — replication audit: what federates mesh-wide vs what's bridge-local  ·  **OPEN (audit — Robin, 2026-09-29; (a) grants DONE v1.45.0; (b) default reminders DONE v1.47.0; (c)+(d) remain)**
+## #66 — replication audit: what federates mesh-wide vs what's bridge-local  ·  **DONE (v1.48.0)** (audit — Robin, 2026-09-29; (a) grants DONE v1.45.0; (b) default reminders DONE v1.47.0; (c) retained values + (d) remote page subscriptions DONE v1.48.0; (e) parked mail, the vault and durable registrations stay store-local BY DESIGN)
 Triggered by #62 (a consent grant not rippling past one bridge). Audit of bridge state, classified by whether it
 replicates across the mesh. **The routing + observation plane FEDERATES; the policy + durability plane does NOT.**
 
@@ -119,7 +129,8 @@ things in the gossip are `sessions` and `pages`):
   so `allTopicEntries()` (which walks the whole `roster`, remote entries included) sees them everywhere. Hence
   directed `topic:` sends to an owner, publish fan-out to subscribers (`subscribersOf` → `routeEnvelope` dials
   cross-host), and roster visibility all work cross-host. ✓
-- Pages — but DISPLAY FIELDS ONLY (`localPagesSlice`: instance, kind, title, subject, icon, project, user).
+- Pages — but DISPLAY FIELDS ONLY (`localPagesSlice`: instance, kind, title, subject, icon, project, user). *(Since
+  v1.48.0 (#66d) also `subscriptions`, `realm` and `page_ingress`, and a remote page is routable — item 6.)*
 - Host aliases (gateway's `rosterPayload.hosts`).
 
 **Does NOT replicate** — local to a bridge PROCESS (RAM) or to a persistence STORE (shared only where the store
@@ -137,11 +148,13 @@ is, e.g. the Windows Dropbox pair; never across separate machines):
    `behaviors.realm` block replicates mesh-wide as one LWW record; `behaviors.default` and `config.projects` stay
    per-config.)*
 4. **Retained topic values** (last-value-per-topic) — per store; a new subscriber gets the retained value only
-   from the store that holds it (so cross-host retained delivery is not guaranteed).
+   from the store that holds it (so cross-host retained delivery is not guaranteed). *(Since v1.48.0 (#66c)
+   replicated mesh-wide as a last-writer-wins set; a value over the 64KB replication cap stays on its publishing host.)*
 5. **Durable registrations** (name→identity offline-park), **parked mailboxes**, **vault** (sealed secrets) — per
    store, keyed to the recipient's home bridge BY DESIGN (federating these = shared durable storage, big change).
 6. **Remote page subscriptions** — gossiped pages carry display fields only, so a cross-host publish does NOT
-   reach a remote page's subscription (edge case).
+   reach a remote page's subscription (edge case). *(Since v1.48.0 (#66d) subscriptions are gossiped and a remote
+   page is delivered through its owning gateway, with an honest #61 outcome.)*
 
 **The bug class:** routing federates but policy doesn't, so a peer is reachable everywhere while the rule that
 governs the interaction (consent, behaviour) lives only where it was set. **Fix candidates, priority order:**
@@ -150,9 +163,17 @@ pushed to/from followers, persisted where learned (static `config.projects` edge
 `behaviors.realm` block `{updated_at, default:[...]}` in any host's config is one replicated last-writer-wins record
 (explicit operator `updated_at`, never mtime), gossiped in `PEER_ROSTER`/`ROSTER` + a follower→gateway `REALM_DEFAULTS`
 frame, persisted where learned, layered UNDER each host's local `behaviors.default` (local key wins; realm fills gaps).
-Needs 1.47.0 on every host; rollout note in RESUME STATE; (c) **retained values** + (d) **remote page subscriptions**
-— include in gossip — **still OPEN**;
-(e) leave parked-mail/vault/registrations store-local by design. #61 (ok:true masks a denied/dropped send) makes
+Needs 1.47.0 on every host; rollout note in RESUME STATE; (c) **retained values** — **DONE (v1.48.0):** a
+last-writer-wins set keyed by (realm, project, topic), newest publish time wins, carried in `PEER_ROSTER`/`ROSTER`
+(only to a link/follower lacking the current version) + a follower→gateway `RETAINED` frame, persisted where learned,
+honouring the retained TTL; the subscribe-time catch-up reads store + set and still delivers via `deliverSub`
+(consent unchanged); a value over the 64KB cap stays on its publishing host and a too-large marker retires older
+copies; (d) **remote page subscriptions** — **DONE (v1.48.0):** pages gossip `subscriptions` + `page_ingress`,
+`allTopicEntries`/`subscribersOf` include remote pages, and a `page:` target on another host is dialed to its owning
+gateway (`CONNECT page:<instance>` → `deliverPage` → #61 CLOSE code); `send_to_peer` to a remote page works; a page on
+a ≤1.47 gateway fails `page-remote-unsupported`;
+(e) leave parked-mail/vault/registrations store-local by design — **this is the remainder, and it is intentional**:
+they are keyed to the recipient's home bridge, and federating them would mean shared durable storage. #61 (ok:true masks a denied/dropped send) makes
 every one of these fail SILENTLY, so #61 is a prerequisite for trusting any of it.
 
 ## #65 — self-updating bridge (message-triggered upgrade)  ·  **DESIRABLE (spec before build — Robin, 2026-09-29)**

@@ -7,6 +7,7 @@ import { TOOLS } from '../lib/tool-schemas.js'
 import { createConsent, parseTtlMin } from '../lib/consent.js'
 import { createReminders, effectiveDefaults } from '../lib/reminders.js'
 import { createRealmDefaults, normRealmDefaults, mergeRealm, beatsRealm, realmFromConfig } from '../lib/realm-defaults.js'
+import { createRetainedSet, normRetained, beatsRetained, retainedKey } from '../lib/retained.js'
 import { createTraces } from '../lib/traces.js'
 import { create as createEgress } from '../services/egress.js'
 import { hostOf } from '../facets/discovery/tailscale.js'
@@ -273,6 +274,49 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   check('#66b reminders: a session\'s OWN reminder beats the realm default', s0.length === 1 && s0[0].behavior === 'MY-SEND' && !s0[0].default)
   r.setRealmDefaults([])
   check('#66b reminders: an empty realm list clears the realm entries only', r.defaultList().length === 1 && r.defaultList()[0].behavior === 'LOCAL-CONNECT')
+}
+
+// #66c retained values: a replicated last-writer-wins set keyed by (realm, project, topic)
+{
+  const env = (id, body = 'x') => ({ id, ts: 'z', body })
+  const R = (ts, id, o = {}) => ({ realm: 'default', project: 'News', topic: 'news/live', ts, env: env(id), origin: 'H', ...o })
+  check('#66c key: project + topic are case-insensitive', retainedKey(R(1, 'a')) === retainedKey(R(1, 'a', { project: 'NEWS', topic: 'News/Live' })))
+  check('#66c norm: junk / wildcard / no-ts / no-env records are refused',
+    [null, 5, [], {}, R(0, 'a'), R(NaN, 'a'), R(1, 'a', { topic: 'news/#' }), R(1, 'a', { project: '' }), R(1, 'a', { env: null }), R(1, 'a', { env: { body: 1 } })].every(r => normRetained(r) === null))
+  const big = normRetained(R(5, 'b', { env: env('b', 'y'.repeat(2000)) }), 1000)
+  check('#66c norm: an envelope over the cap becomes a too-large MARKER (no env)', big && big.env === null && big.too_large > 1000, JSON.stringify(big && { ...big, env: !!big.env }))
+  check('#66c beats: newer ts wins, older loses, identical never beats', beatsRetained(normRetained(R(2, 'a')), normRetained(R(1, 'z'))) && !beatsRetained(normRetained(R(1, 'z')), normRetained(R(2, 'a'))) && !beatsRetained(normRetained(R(1, 'a')), normRetained(R(1, 'a'))))
+  check('#66c beats: a ts tie is broken by envelope id (both orders agree)', beatsRetained(normRetained(R(1, 'b')), normRetained(R(1, 'a'))) && !beatsRetained(normRetained(R(1, 'a')), normRetained(R(1, 'b'))))
+  const stored = []
+  const mk = (o = {}) => createRetainedSet({ persistence: { retained: { put: async (p, t, id, rec) => { stored.push({ p, t, id, rec }) }, all: async () => [] } }, persist: true, writer: 'HOSTX', ttlMs: 60000, ...o })
+  const s = mk()
+  check('#66c set: a learned record is adopted + persisted under the #replicated/<writer> identity', s.merge([R(Date.now() - 10, 'a')]) === 1 && stored.length === 1 && stored[0].id.user === '#replicated' && stored[0].id.name === 'HOSTX' && stored[0].rec.env.id === 'a')
+  const v0 = s.version()
+  check('#66c set: an older value changes nothing (no write, same version)', s.merge([R(Date.now() - 5000, 'z')]) === 0 && stored.length === 1 && s.version() === v0)
+  check('#66c set: a re-merge of the same record is idempotent', s.merge([R(stored[0].rec ? Date.parse(stored[0].rec.ts) : 0, 'a')]) === 0 && s.version() === v0)
+  check('#66c set: a newer publish replaces it (version bumps)', s.merge([R(Date.now(), 'n')]) === 1 && s.version() === v0 + 1 && s.forProject('default', 'news')[0].env.id === 'n')
+  check('#66c set: a local publish (persist:false) is held but not re-written', s.merge([R(Date.now() + 5, 'loc', { topic: 'news/other' })], { persist: false }) === 1 && stored.length === 2 && s.size() === 2)
+  check('#66c set: forProject filters by realm + project', s.forProject('default', 'Other').length === 0 && s.forProject('realm2', 'News').length === 0 && s.forProject('default', 'NEWS').length === 2)
+  check('#66c set: get() returns the held record', s.get('default', 'news', 'NEWS/OTHER').env.id === 'loc' && s.get('default', 'news', 'nope') === null)
+  check('#66c TTL: an expired record is refused on merge', s.merge([R(Date.now() - 120000, 'old', { topic: 'news/stale' })]) === 0 && !s.get('default', 'news', 'news/stale'))
+  const t = mk({ ttlMs: 50 })
+  t.merge([R(Date.now(), 'a')])
+  await new Promise(r => setTimeout(r, 80))
+  check('#66c TTL: a record that ages out is not listed or served, and gc() drops it', t.list().length === 0 && t.forProject('default', 'news').length === 0 && t.gc() === 1 && t.size() === 0)
+  const m = mk({ maxBytes: 1000 })
+  m.merge([R(Date.now() - 50, 'small')])
+  check('#66c cap: a too-large newer value replaces the older one with a marker (no stale value survives)', m.merge([R(Date.now(), 'huge', { env: env('huge', 'y'.repeat(5000)) })]) === 1 && m.get('default', 'news', 'news/live').env === null && m.get('default', 'news', 'news/live').too_large > 1000)
+  const g = mk({ gossipMaxBytes: 300 })
+  g.merge([R(Date.now() - 20, 'o1', { topic: 'a/1', env: env('o1', 'p'.repeat(200)) }), R(Date.now() - 10, 'o2', { topic: 'a/2', env: env('o2', 'p'.repeat(200)) })])
+  check('#66c gossip budget: newest first, older beyond the budget stay local', g.list().length === 1 && g.list()[0].env.id === 'o2' && g.size() === 2)
+  const orders = [[R(3, 'c'), R(1, 'a'), R(2, 'b')], [R(1, 'a'), R(2, 'b'), R(3, 'c')], [R(2, 'b'), R(3, 'c'), R(1, 'a')]].map(l => { const x = mk({ ttlMs: 0 }); for (const r of l) x.merge([r]); return x.get('default', 'news', 'news/live').env.id })
+  check('#66c merge: commutative (every order converges)', orders.every(o => o === 'c'), JSON.stringify(orders))
+  const rh = createRetainedSet({ persistence: { retained: { put: async () => {}, all: async () => [
+    { project: 'News', topic: 'news/live', record: { ts: new Date(Date.now() - 1000).toISOString(), env: env('st') } },
+    { project: 'News', topic: 'news/big', record: { ts: new Date(Date.now() - 1000).toISOString(), env: null, too_large: 99999 } },
+    { junk: 1 }] } }, persist: true, writer: 'W', realm: 'default', ttlMs: 60000 })
+  await rh.rehydrate()
+  check('#66c rehydrate: stored values + markers come back from the store', rh.get('default', 'news', 'news/live')?.env?.id === 'st' && rh.get('default', 'news', 'news/big')?.too_large === 99999 && rh.size() === 2)
 }
 
 // ---- traces module (owns the ring buffer + dashboard fan-out) ----

@@ -11,7 +11,7 @@ export function create() {
     registrations: { async put() {}, async all() { return [] }, async byName() { return [] }, async remove() {}, async gcAll() { return 0 } },
     subscriptions: { async put() {}, async byHolder() { return [] }, async remove() {}, async gcAll() { return 0 } },
     vault: { async put() {}, async get() { return null }, async remove() {} },
-    retained: { async put() {}, async read() { return null }, async allForProject() { return [] }, async gcAll() { return 0 } },
+    retained: { async put() {}, async read() { return null }, async allForProject() { return [] }, async all() { return [] }, async gcAll() { return 0 } },
     keptTopics: { async put() {}, async get() { return null }, async remove() {}, async all() { return [] }, async gcAll() { return [] } },
     behaviors: { async put() {}, async byHolder() { return [] }, async remove() {}, async clear() {}, async all() { return [] } },
     realmDefaults: { async put() {}, async all() { return [] } },

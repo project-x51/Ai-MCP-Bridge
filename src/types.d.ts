@@ -73,6 +73,9 @@ export interface KeptTopic { realm?: string; project: string; topic: string; des
 /** #66b: the realm-wide default reminders — ONE replicated last-writer-wins record (lib/realm-defaults.js). updated_at is
  *  the operator's explicit timestamp (ms epoch on the wire; ISO in config); origin = the host whose config published it. */
 export interface RealmDefaults { updated_at: number; default: Behavior[]; origin: string }
+/** #66c: one replicated retained value (lib/retained.js), keyed by (realm, project, topic); ts = the publish time (ms
+ *  epoch). env is null for a too-large MARKER (the value stays on its publishing host; too_large = its size in bytes). */
+export interface RetainedRecord { realm: string; project: string; topic: string; ts: number; env: Envelope | null; too_large?: number; origin: string }
 /** A per-session behaviour reminder (#29). */
 export interface Behavior { operation?: string; scope: 'topic' | 'host' | 'project' | 'subscription' | 'all'; match: string | null; behavior: string; set_at?: string }
 /** The per-sub-peer in-RAM delivery queue. */
