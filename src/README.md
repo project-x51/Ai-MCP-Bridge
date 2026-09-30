@@ -213,7 +213,9 @@ topic **vanishes with its holder**; with persistence on (§12, v1.9) a claim is 
   a subtree (`team/#`); an exclusive claim conflicts with ANY overlapping claim (above or below).
   On `code:"held"` never seize: send the holder verb `request_responsibility {topic, reason}`;
   the holder replies `grant_responsibility` (after releasing) / `refuse_responsibility`, or asks
-  its human operator. Re-claims are idempotent updates. Owners are auto-subscribed. The optional
+  its human operator. A re-claim of a topic you hold is a PATCH (#55): every field you omit keeps its
+  current value — the defaults (`exclusive`, `announce_offline`, `persistent` on) apply only to a NEW
+  claim — so pass just what you want to change. Owners are auto-subscribed. The optional
   `icon` (short markdown, e.g. an emoji) shows wherever the topic renders.
 - **Publish** = event to ALL subscribers (`publish {topic, subject, message}`): nobody obliged to
   act; zero subscribers is ok (`subscribers: 0`).

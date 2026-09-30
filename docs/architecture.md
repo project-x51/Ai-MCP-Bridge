@@ -1114,6 +1114,30 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.50.0):** *`claim_topic` re-claim keeps omitted fields instead of resetting them (#55).* **What was
+  wrong:** a re-claim (same holder, same topic) rebuilt the claim from the call's arguments, so every field the caller
+  left out (`description`, `icon`, `exclusive`, `announce_offline`, `grace_minutes`, `allow_other_user`, `keep_alive`,
+  `persistent`) fell back to its default. Since #64 (v1.41.0) flipped the defaults to `exclusive:true`/
+  `announce_offline:true`, a plain `claim_topic {topic}` — routine after a compact or restart — silently turned a
+  SHARED topic EXCLUSIVE (or was refused `held` against its own co-owner) and wiped the description, icon and
+  continuity settings. The kept-alive (#26) fallback didn't help: that marker is null while the topic is owned.
+  **Fix:** a re-claim is a PATCH. The handler first finds the EXISTING claim — the live one in `myTopics` (which
+  includes one `rehydrateClaim` restored after the holder re-registered), else this holder's own DORMANT durable
+  record (new `ownDurableClaim`: on disk but not in RAM, e.g. a rehydrate refused by a then-live exclusive owner, or a
+  process claim racing the async process rehydrate; that record is exactly what a rehydrate would restore, so it is
+  treated as the existing claim and its `claimed_at` kept). Per field the precedence is **explicit arg > existing
+  claim > kept-alive marker (new claims only) > default**; an explicit `false`/`""`/`null` is a real value (it
+  clears). The conflict checks (the live `blocker` and `resolveDormantConflict`) run on the EFFECTIVE `exclusive`:
+  a plain re-claim of a co-owned shared topic stays shared and succeeds, an explicit flip to `exclusive:true` with
+  a co-owner is still refused `held`. A re-claim with `persistent:false` now also removes the durable record (before,
+  it lingered and the claim came back after a restart). The identity match `resolveDormantConflict` used is factored
+  into `sameClaimHolder` so both paths agree (case-insensitive user/name). Tool-schema text + `src/README.md` say
+  the defaults apply to NEW claims and a re-claim keeps what it omits. **Test:** `test_reclaim_preserve_live` (28
+  checks — new-claim defaults; a full claim re-claimed with only `topic` unchanged on the roster + response; a
+  one-field re-claim changes only that field; the shared co-owner / flip-to-exclusive conflict; a planted own
+  dormant record is patched; `persistent:false` drops the record; restart → re-register → rehydrate → plain
+  re-claim keeps every field, and a second restart still restores them). Verified to FAIL against v1.49.0 (15 of
+  28 checks). Full suite 916 across 41 files, green. No config or wire change; per-host only (each host's own claims).
 - **Built (v1.49.0):** *stop leaking page reply-cap keys in the roster (#68).* **What was wrong:** each page leaf's
   entry in the gateway's `pages` map holds `capKey`, its reply-cap SIGNING key (`makeEnvelope` mints a page's caps
   with it; `verifyReplyCap` checks a reply to the page against it). `rosterPayload()` built its page list by

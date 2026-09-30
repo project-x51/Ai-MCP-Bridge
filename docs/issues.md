@@ -6,9 +6,14 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.49.0) — read this first after a compact
-**Current version: v1.49.0.** All work committed to `main` (v1.42.0 – v1.49.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.50.0) — read this first after a compact
+**Current version: v1.50.0.** All work committed to `main` (v1.42.0 – v1.50.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.50.0):** Fixed **#55** — a `claim_topic` re-claim is now a PATCH: omitted fields keep the existing
+claim's values (live, rehydrated, or the holder's own dormant durable record) instead of resetting to the defaults,
+so a plain re-claim after a compact/restart no longer flips a shared topic exclusive. No config change; roll 1.50.0
+to each host at leisure (each host governs its own claims).
 
 **2026-09-30 (v1.49.0):** Fixed **#68** (security) — page reply-cap signing keys (`capKey`) no longer leak in
 `list_sessions`, the follower `ROSTER` or the WS `welcome`/`roster`; pages go out through an allow-list
@@ -448,7 +453,14 @@ thread while "messages from Retally" do not. Same instinct as preferring topic a
 - Receivers render topic-forward, peer still visible — e.g. `🖂 from ⚡ Retail (via Retally)`.
 - Decide whether `publish` should carry it too (probably redundant there — the channel already is the topic).
 
-## #55 — `claim_topic` re-claim SILENTLY RESETS omitted fields  ·  **OPEN**
+## #55 — `claim_topic` re-claim SILENTLY RESETS omitted fields  ·  **DONE (v1.50.0)**
+**Fixed:** (v1.50.0) a re-claim is a PATCH: every omitted field keeps the EXISTING claim's value — the live claim
+(incl. one rehydrated after a restart) or else the holder's own dormant durable record; defaults apply only to a NEW
+claim. Precedence: explicit arg > existing claim > kept-alive marker (new claims) > default; an explicit
+`false`/`""`/`null` clears. Conflict checks use the effective `exclusive` (a plain re-claim of a shared co-owned
+topic stays shared; an explicit flip to exclusive with a co-owner is refused `held`). A re-claim with
+`persistent:false` also drops the durable record. Details in architecture.md §13; regression guard
+`test_reclaim_preserve_live`.
 Found 2026-07-24 while telling Bolletta how to flip `bills` to exclusive. Re-claiming a topic you already hold
 updates it in place (good — `claimed_at` is preserved, no release needed), **but every field you don't pass is
 reset rather than preserved**: `description` → `''`, `icon` → `null`, `keep_alive` → `false`,

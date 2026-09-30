@@ -108,7 +108,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.49.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.50.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -626,6 +626,22 @@ function isIdentityLive(rec) {
   if (PROC_IDENT && `${projKey(PROC_IDENT.project)}|${PROC_IDENT.user || ''}|${HOSTNAME}` === want) return true
   return false
 }
+// is a durable claim record held by this identity? user is the OS login — compare case-INSENSITIVELY (project
+// already is): an older claim recorded under declared "Robin" must match the OS-authenticated "robin", else the
+// owner is locked out of its own dormant topic as a phantom "different user". Name is also case-insensitive
+// (presented in original case but stored/compared lower-case) so "Bolletta"/"bolletta" re-claim, not conflict.
+const claimUserKey = u => String(u || '').trim().toLowerCase()
+function sameClaimHolder(rec, ident) {
+  return !!(rec && ident) && projKey(rec.project) === projKey(ident.project) && claimUserKey(rec.user) === claimUserKey(ident.user) && ciEq(rec.name, ident.name)
+}
+// #55: this holder's OWN durable record for exactly `topic` (an unidentifiable legacy record never matches), or null.
+// claim_topic uses it as the existing claim when the claim is on disk but not in RAM, so a re-claim patches it.
+async function ownDurableClaim(topic, holderIdentity, holderProject) {
+  if (!(PERSIST && holderIdentity)) return null
+  let recs = []
+  try { recs = await persistence.claims.read(holderProject, topic) } catch { return null }
+  return recs.find(rec => rec && rec.pattern === topic && rec.user && rec.name && sameClaimHolder(rec, holderIdentity)) || null
+}
 // §16 re-claim conflict: a claimant wants `topic`, but a DORMANT (offline) durable owner holds an
 // overlapping exclusive claim. Same-user -> human confirmation via the authorizer (Hello in prod, script in
 // tests). Cross-user -> grace-then-displaceable, governed by the per-claim policy then the global config.
@@ -641,16 +657,10 @@ async function resolveDormantConflict(topic, holderIdentity, holderProject, excl
     // that would wrongly read a returning owner's own dormant topic as another user's. Skip it; the claim
     // proceeds and rewrites a proper (identified) record over the top.
     if (!rec.user || !rec.name) continue
-    // user is the OS login — compare case-INSENSITIVELY (project already is): an older claim recorded
-    // under declared "Robin" must match the OS-authenticated "robin", else the owner is locked out of its
-    // own dormant topic as a phantom "different user". Name is also case-insensitive (presented in original
-    // case but stored/compared lower-case) so "Bolletta"/"bolletta" re-claim, not conflict.
-    const userKey = u => String(u || '').trim().toLowerCase()
-    const sameIdentity = projKey(rec.project) === projKey(holderIdentity.project) && userKey(rec.user) === userKey(holderIdentity.user) && ciEq(rec.name, holderIdentity.name)
-    if (sameIdentity) continue                          // my own durable claim — a re-claim, not a conflict
+    if (sameClaimHolder(rec, holderIdentity)) continue  // my own durable claim — a re-claim, not a conflict
     if (isIdentityLive(rec)) continue                   // a live owner — the in-RAM blocker check governs that
     if (!(rec.exclusive || exclusive)) continue         // only exclusive overlaps conflict
-    const sameUser = userKey(rec.user) === userKey(holderIdentity.user)
+    const sameUser = claimUserKey(rec.user) === claimUserKey(holderIdentity.user)
     if (sameUser) {                                     // taking over your OWN dormant topic — confirm presence
       const v = await authorizer.confirm({ action: 'topic-takeover', topic, user: holderIdentity.user, requester: holderIdentity.name,
         subject: `Take over "${topic}" from your other session "${rec.name}"?`, details: `held by ${rec.name} (offline)` })
@@ -1974,22 +1984,31 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // watching a subtree is fine; owning one is not.) Decision 2026-06-16 (design review).
       if (isWildcard(topic)) return ok({ ok: false, code: 'wildcard-claim', hint: "claim the concrete base instead, e.g. 'retail' not 'retail/#'" })
       if (a.force) return ok({ ok: false, code: 'unsupported', what: 'forced takeover (offline delivery, T14)' })
-      // §12: when persistence is on a claim is durable BY DEFAULT (responsibilities survive a restart);
-      // opt out with persistent:false. Without persistence the flag is a no-op (nothing to write).
-      const persistent = PERSIST && a.persistent !== false                // durable BY DEFAULT (opt out: persistent:false)
-      const description = String(a.description || '')
-      const exclusive = a.exclusive != null ? !!a.exclusive : true         // §6: single-owner BY DEFAULT (opt out: exclusive:false for a shared topic)
-      const icon = String(a.icon || '').trim().slice(0, 16) || null
-      const announce_offline = a.announce_offline != null ? !!a.announce_offline : true   // §16: tell senders when I'm offline BY DEFAULT (pass false to park silently)
-      const grace_minutes = a.grace_minutes != null ? Number(a.grace_minutes) : null   // §16: per-claim takeover grace
-      const allow_other_user = a.allow_other_user != null ? !!a.allow_other_user : null // §16: per-claim cross-user takeover
       let holder = SESSION, holderName = NAME, holderProject = PROC_IDENT?.project || 'unclassified', holderRealm = REALM, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)
       if (a.as) {
         const { sp, err } = authSub(String(a.as), a.secret)
         if (err) return ok(err)
         holder = sp.id; holderName = sp.name; holderProject = sp.identity?.project || 'unclassified'; holderRealm = sp.identity?.realm || REALM; holderIdentity = pIdent(sp.identity, sp.name)
       }
-      // T6/§6: an exclusive claim conflicts with overlapping claims IN THE SAME PROJECT only
+      // #55: a RE-CLAIM (same holder, same topic) is a PATCH, not a replace — every field the caller omits keeps the
+      // EXISTING claim's value, and the defaults below apply only to a NEW claim. The existing claim is the live one
+      // (incl. one rehydrateClaim restored after a restart) or else this holder's own DORMANT durable record (ours on
+      // disk but not in RAM — e.g. its rehydrate was refused, or a process claim raced the async rehydrate): that
+      // record is exactly what a rehydrate would restore, so it is treated the same. Per field the precedence is
+      // explicit arg > existing claim > kept-alive marker (#26, new claims only; read below) > default. An explicit
+      // false / '' / null is a real value (it clears), not "omitted".
+      const k = `${holder}|owner|${patternKey(topic)}`
+      const prev = myTopics.get(k) || await ownDurableClaim(topic, holderIdentity, holderProject)
+      const reclaim = !!prev
+      const given = f => a[f] !== undefined                                // passed at all (null included: it clears)
+      // §12: when persistence is on a claim is durable BY DEFAULT (responsibilities survive a restart);
+      // opt out with persistent:false. Without persistence the flag is a no-op (nothing to write).
+      const persistent = PERSIST && (a.persistent != null ? a.persistent !== false : prev ? prev.persistent !== false : true)
+      const exclusive = a.exclusive != null ? !!a.exclusive : prev ? !!prev.exclusive : true   // §6: single-owner BY DEFAULT (opt out: exclusive:false for a shared topic)
+      const grace_minutes = given('grace_minutes') ? (a.grace_minutes == null ? null : Number(a.grace_minutes)) : prev ? (prev.grace_minutes ?? null) : null   // §16: per-claim takeover grace
+      const allow_other_user = given('allow_other_user') ? (a.allow_other_user == null ? null : !!a.allow_other_user) : prev ? (prev.allow_other_user ?? null) : null   // §16: per-claim cross-user takeover
+      // T6/§6: an exclusive claim conflicts with overlapping claims IN THE SAME PROJECT only (judged on the EFFECTIVE
+      // exclusive: a re-claim that keeps a shared topic shared stays compatible; one that flips it exclusive is refused)
       const others = allTopicEntries().filter(e => e.role === 'owner' && e.holder !== holder && projKey(e.project) === projKey(holderProject) && patternsOverlap(e.pattern, topic))
       const blocker = others.find(e => e.exclusive) || (exclusive && others.length ? others[0] : null)
       if (blocker) return ok({ ok: false, code: 'held', topic,
@@ -2002,20 +2021,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const verdict = await resolveDormantConflict(topic, holderIdentity, holderProject, exclusive)
         if (verdict && !verdict.ok) return ok(verdict)
       }
-      // #26: if this topic was kept ALIVE (ownerless) it has a durable marker — inherit its metadata where the
-      // claimer left a field unset, preserve the keep_alive intent unless overridden, and drain its parked queue below.
+      // #26: if this topic was kept ALIVE (ownerless) it has a durable marker — a NEW claim inherits its metadata where
+      // the claimer left a field unset (a re-claim's existing claim outranks it), and its parked queue drains below.
       let kept = null
       if (persistent) { try { kept = await persistence.keptTopics.get(holderProject, topic) } catch { } }
-      const keep_alive = a.keep_alive != null ? !!a.keep_alive : !!kept   // claim-time property: this topic should survive handoffs
-      const eDesc = description || (kept && kept.description) || ''
-      const eIcon = icon || (kept && kept.icon) || null
-      const eAnnounce = a.announce_offline != null ? announce_offline : (kept && kept.announce_offline != null ? !!kept.announce_offline : true)   // explicit > kept-alive inheritance > default ON
-      const k = `${holder}|owner|${patternKey(topic)}`
-      const reclaim = myTopics.has(k)
+      const keep_alive = a.keep_alive != null ? !!a.keep_alive : prev ? !!prev.keep_alive : !!kept   // claim-time property: this topic should survive handoffs
+      const eDesc = given('description') ? String(a.description || '') : prev ? (prev.description || '') : ((kept && kept.description) || '')
+      const eIcon = given('icon') ? (String(a.icon || '').trim().slice(0, 16) || null) : prev ? (prev.icon || null) : ((kept && kept.icon) || null)
+      const eAnnounce = a.announce_offline != null ? !!a.announce_offline : prev ? !!prev.announce_offline   // §16: tell senders when I'm offline BY DEFAULT (pass false to park silently)
+        : (kept && kept.announce_offline != null ? !!kept.announce_offline : true)
       myTopics.set(k, { pattern: topic, role: 'owner', description: eDesc, exclusive, icon: eIcon, holder, holder_name: holderName, project: holderProject, realm: holderRealm,
         announce_offline: eAnnounce, grace_minutes, allow_other_user, keep_alive, persistent,   // `persistent` rides the roster so the dashboard can show durability (it was only ever written to the .claim file)
-        claimed_at: reclaim ? myTopics.get(k).claimed_at : new Date().toISOString() })
+        claimed_at: (prev && prev.claimed_at) || new Date().toISOString() })
       if (persistent) await persistClaim(holderIdentity, holderProject, topic, myTopics.get(k))   // §12: durable responsibility (awaited so a later release reliably sees + removes it)
+      else if (prev && prev.persistent !== false && PERSIST && holderIdentity) {   // #55: a re-claim with persistent:false drops the durable record, else it would rehydrate after a restart
+        try { await persistence.claims.remove(holderProject, topic, holderIdentity) } catch { }
+      }
       // #26: a (re)claim of a kept-alive topic drains its ownerless parked queue to the new owner and clears the marker.
       let drained = 0
       if (kept) {
