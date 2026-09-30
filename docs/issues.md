@@ -10,6 +10,11 @@ project's `#NN` sequence.
 **Current version: v1.43.0.** All work committed to `main` (v1.42.0 + v1.43.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
 
+**2026-09-30 (v1.44.0):** Fixed **#63**. Cross-host federation now self-heals: a full slice is sent on every
+(re)link; a same-host peer with a new session retires the old one; and a 60s refresh+PING heartbeat expires
+provably-quiet peers (default 180s). Older (≤1.43) peers are never expired for being quiet. The heal on a host
+needs THAT host upgraded to 1.44.0, so roll it out to LITTLE, the Mac and the Linux boxes.
+
 **2026-09-30 (v1.43.0):** Shipped **#67**. The doorbell now chimes at the top of each hour by default
 (`reason:"hourly"`, display the time, then re-arm). Connect reminders and the code-session `set_wake` hint now carry
 a ready-to-run `{doorbell_cmd}` with this host's absolute node + script paths. Rollout: the connect default only
@@ -160,7 +165,11 @@ idea (not built):** `connect` currently fires in the `register_self` RESPONSE (p
 `wake` (push a non-running session awake) remains impossible — the doorbell is the fallback and is what #64 wires
 in by default.
 
-## #63 — stale cross-host federation state after a peer's port-migration doesn't self-heal  ·  **OPEN (needed a manual restart)**
+## #63 — stale cross-host federation state after a peer's port-migration doesn't self-heal  ·  **DONE (v1.44.0)**
+**Fixed:** (v1.44.0) a full slice on every (re)link; a restarted same-host peer (new session) retires the old one
+(same port at once, other port after a PING probe); a refresh+PING heartbeat expires provably-quiet peers; and
+only the current link may write a peer's slice. Mixed-version-safe via a `gossip_refresh` flag. Details are in
+architecture.md §13; the regression guard is `test_federation_heal_live`.
 After the Mac flipped 7000→12317 (and churned through several restarts), **LITTLE-001 kept stale delivery state for
 the Mac**: Testy (on LITTLE) couldn't reach MacDaddy (on the Mac), while ROBIN-hosted senders (Bridget, Analysiz2)
 could — because ROBIN's link to the Mac was fresh and LITTLE's was not. The Mac↔LITTLE TCP link showed ESTABLISHED

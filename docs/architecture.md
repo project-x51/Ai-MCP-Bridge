@@ -1112,6 +1112,46 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.44.0):** *cross-host federation self-heals after a peer restarts or moves port (#63).* **What broke:**
+  after the Mac flipped 7000→12317 and restarted several times, LITTLE-001 kept the Mac's OLD roster slice behind a
+  TCP link that still showed ESTABLISHED, so LITTLE's sessions dialed the dead old port for Mac peers while ROBIN's
+  (fresh link) worked; only restarting LITTLE's bridges fixed it. **Root cause:** a receiver replaces a peer's slice
+  only on a `PEER_ROSTER` from the SAME gateway session, gossip only fires when the sender's local slice changes
+  (`lastGossip`), and a slice is only dropped when that link's socket closes. A restarted peer has a NEW session,
+  and a half-open link never closes, so the old slice stayed forever. With stable ids the old and new sub-peer share
+  one id and `rosterSub` returns the FIRST (stale) owner, so delivery went to the old port. **Fix (four parts):**
+  (1) *Re-link sends fresh state:* both link directions send a full slice on adopt, independent of `lastGossip`;
+  the dialer now re-sends after `PEER_HELLO`, because its connect-time frame can predate a change that
+  `gossipToPeers` sent before the link was adopted. (2) *Replace a restarted peer:* `adoptPeer` compares the new hub
+  with existing entries. **Same machine** means the same hostname prefix of the session id AND the same advertised
+  host, so different machines never match. Same advertised port ⇒ certainly a restart (two live gateways can't share
+  one host:port) ⇒ `retirePeer` at once (drop slice + destroy socket). Different port ⇒ possibly a live rival
+  (split-brain, or two loopback test "hosts"), so the old link is PINGed and retired only if a provable peer (below)
+  stays silent for `PEER_PROBE_MS`. Single-process dual-port (#57) is one session, so it never triggers this.
+  (3) *Heartbeat + expiry:* every `GOSSIP_REFRESH_MS` a gateway re-sends its full slice to each refresh-capable
+  peer and PINGs every link. A receiver stamps `seen` on each `PEER_ROSTER`/`PONG`. An unchanged slice is stamp-only
+  (per-peer signature), so there is no `broadcastRoster` spam. A provable peer not heard from within
+  `expiryOf(p) = max(PEER_EXPIRY_MS, 2×refresh, 3×the peer's advertised refresh_ms)` is retired. Its socket is
+  destroyed, so an outbound link frees `peerByAddr` and discovery re-dials it. The refreshed slice also re-stamps
+  every remote session's host/port from the frame. (4) *Stale-socket guard:* `mergeRemoteRoster` now accepts a slice
+  only from the CURRENT `peerGw` socket for that gateway. A late frame on a retired or replaced socket used to
+  resurrect entries that no `peerGw` entry owned, so nothing would ever clean them up. **Mixed-version handling
+  (1.39–1.43 peers):** `PEER_HELLO`/`PEER_ROSTER` now carry `gossip_refresh:true, refresh_ms`. A peer is only
+  *provable* (expirable, probe-retirable) if it DECLARES the flag (so it really refreshes and PONGs), OR if it is a
+  link WE dialed: every bridge since 1.0 answers `PING` on its control port, and older `connectToPeer` dialers
+  ignore it. So an older peer that dialed us is NEVER expired for being quiet; for it, our periodic PING writes still
+  surface a truly dead TCP link as an RST. Refresh rosters go only to declared peers: an older receiver can't
+  expire, and would needlessly re-merge and re-broadcast. Older bridges ignore the new fields and the `PING`. The
+  heal on an older RECEIVER still needs it upgraded. **Knobs:** `AI_BRIDGE_GOSSIP_REFRESH_MS` (default 60000),
+  `AI_BRIDGE_PEER_EXPIRY_MS` (default 3× refresh = 180000), `AI_BRIDGE_PEER_PROBE_MS` (default 5000); test-only
+  `AI_BRIDGE_TEST_GOSSIP=silent|legacy`. **Tests:** new `test_federation_heal_live` (19 checks). A TCP relay on
+  127.0.0.3 simulates the half-open link: whichever end dies, the other is kept open with writes swallowed. The
+  checks cover: restart on a NEW port behind an outbound half-open link (no old-origin entries, one owner at the new
+  port, delivery verified via the target's inbox); restart on the SAME port behind an inbound link; a silent
+  refresh-capable peer expired within the window with its socket destroyed; and a quiet 1.44 peer plus two legacy
+  peers (one we dialed, one that dialed us) still linked after 3× expiry. `AIMB_TEST_LEGACY_BRIDGE` runs the legacy
+  peers on a real 1.43 copy (19/19). Against the pre-fix bridge (`AIMB_TEST_BRIDGE`) 7 checks FAIL, including the
+  production symptom exactly: `ECONNREFUSED` to B's old port.
 - **Built (v1.43.0):** *the doorbell chimes hourly by default, and a connect reminder carries the script's location
   (#67).* Two of Robin's asks. (1) **Hourly chime.** With no `--timeout`, `tools/aimb-doorbell.mjs` now exits at the
   top of the next LOCAL hour (or earlier on mail) with `reason:"hourly"`, `time:"14:00"`, the usual `exited_at`

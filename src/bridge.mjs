@@ -105,7 +105,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.43.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.44.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1195,25 +1195,47 @@ setInterval(() => {
 // peer-to-peer. Remote sessions are merged in tagged with `origin` + their owning gateway's address, so
 // the existing CONNECT-splice (gateway ingress) delivers to them with no special routing. No central
 // node; the smaller ADVERTISE:PORT initiates each link, so there is exactly one connection per pair.
-const peerGw = new Map()        // peerGatewaySession -> { sock, host, port, name }
+const peerGw = new Map()        // peerGatewaySession -> { sock, host, port, name, outbound, refresh, refresh_ms, seen, sig }
 const peerByAddr = new Set()    // "host:port" we hold an OUTBOUND link to (dedupe re-dials)
 const remotePages = new Map()   // instance -> page (display fields only) gossiped from a peer hub, tagged with origin + host
 let lastGossip = ''
+// #63 self-healing federation. Gossip is change-driven and a slice used to go only when its link's socket closed,
+// so a peer that restarted/moved port behind a half-open link left stale routing on other hubs FOREVER (LITTLE kept
+// the Mac's old port until a manual restart). Now: every link gets a full slice on (re)link; a same-host peer with
+// a new session RETIRES the old one; and every GOSSIP_REFRESH_MS each hub re-sends its full slice (+ a PING) to
+// every linked peer, and expires a peer not heard from within PEER_EXPIRY_MS. Mixed-version rule: expire ONLY a peer
+// that can be proven quiet — one that DECLARES `gossip_refresh` (1.44+, so it really does refresh + PONG), or a link
+// WE dialed (every bridge since 1.0 answers PING on its control port). An older peer that dialed US is never expired
+// for being quiet (it can neither refresh nor PONG); our periodic writes still surface a truly dead TCP link as RST.
+const GOSSIP_REFRESH_MS = Number(process.env.AI_BRIDGE_GOSSIP_REFRESH_MS) || 60000
+const PEER_EXPIRY_MS = Number(process.env.AI_BRIDGE_PEER_EXPIRY_MS) || 3 * GOSSIP_REFRESH_MS
+const PEER_PROBE_MS = Number(process.env.AI_BRIDGE_PEER_PROBE_MS) || 5000   // same-host/other-port rival: PONG deadline before it's retired
+const TEST_GOSSIP = process.env.AI_BRIDGE_TEST_GOSSIP || ''   // test-only: 'silent' = link up, then no gossip/refresh/PONG; 'legacy' = behave like <=1.43 (no flag, no refresh)
 const selfAddr = () => `${ADVERTISE}:${PORT}`
 const localRosterSlice = () => [...roster.values()].filter(s => !s.origin)   // my own session + my followers (never relayed entries)
 // pages live only on a gateway; gossip DISPLAY fields only (never capKey or other secrets) so remote dashboards can show web sessions
 const localPagesSlice = () => [...pages.values()].map(p => ({ instance: p.instance, page_kind: p.page_kind, title: p.title || '', subject: p.subject || null, icon: p.icon || null, project: p.project || null, user: p.user || null }))
-const gossipFrame = () => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: localRosterSlice(), pages: localPagesSlice() })
+const refreshCap = () => TEST_GOSSIP === 'legacy' ? {} : { gossip_refresh: true, refresh_ms: GOSSIP_REFRESH_MS }   // #63 capability flag
+const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, ...refreshCap() })
+const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap() })
 function gossipToPeers(force) {
-  if (role !== 'gateway' || !peerGw.size) return
+  if (role !== 'gateway' || !peerGw.size || TEST_GOSSIP === 'silent') return
   const slice = localRosterSlice(), pg = localPagesSlice(), sig = JSON.stringify([slice, pg])
   if (!force && sig === lastGossip) return                         // only send when MY locals changed (breaks the merge→broadcast→gossip loop)
   lastGossip = sig
-  const frame = { t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg }
+  const frame = gossipFrame(slice, pg)
   for (const p of peerGw.values()) if (p.sock && !p.sock.destroyed) sendFrame(p.sock, frame)
 }
-function mergeRemoteRoster(fromGw, host, port, sessions, pages) {
+function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock) {
   if (!fromGw || fromGw === SESSION) return
+  // #63: only the CURRENT link for that gateway may write its slice — a late frame on a retired/replaced socket
+  // would otherwise resurrect entries that no peerGw entry owns, and nothing would ever clean them up again.
+  const peer = peerGw.get(fromGw)
+  if (!peer || peer.sock !== sock) return
+  peer.seen = Date.now()
+  const sig = JSON.stringify([host, port, sessions, pages])
+  if (sig === peer.sig) return                                     // a periodic refresh of an unchanged slice: stamp only, no broadcast
+  peer.sig = sig
   for (const [k, v] of [...roster]) if (v.origin === fromGw) roster.delete(k)   // replace this gateway's slice wholesale
   for (const s of (sessions || [])) {
     if (!s || s.session === SESSION || s.origin) continue          // never let a peer override my own / never re-host a relayed entry
@@ -1224,23 +1246,52 @@ function mergeRemoteRoster(fromGw, host, port, sessions, pages) {
   for (const p of (pages || [])) if (p && p.instance) remotePages.set(p.instance, { ...p, origin: fromGw, host_label: rhost })
   broadcastRoster()
 }
-function adoptPeer(peerSession, sock, host, port, name) {
+function touchPeer(sock) { for (const p of peerGw.values()) if (p.sock === sock) p.seen = Date.now() }
+// #63: can we PROVE this peer quiet? A declared refresher PONGs + refreshes; any bridge PONGs on its control port,
+// which is the far end of a link WE dialed. An undeclared peer that dialed us can do neither -> never expired.
+const provable = p => !!(p.refresh || p.outbound)
+const expiryOf = p => Math.max(PEER_EXPIRY_MS, 2 * GOSSIP_REFRESH_MS, 3 * (Number(p.refresh_ms) || 0))   // never tighter than the sender's own cadence
+function adoptPeer(peerSession, sock, host, port, name, hello, outbound) {
   if (!peerSession || peerSession === SESSION) return
   const existing = peerGw.get(peerSession)
   if (existing && existing.sock && existing.sock !== sock) { try { existing.sock.destroy() } catch {} }
-  peerGw.set(peerSession, { sock, host, port, name: name || peerSession })
+  const now = Date.now()
+  peerGw.set(peerSession, { sock, host, port, name: name || peerSession, outbound: !!outbound,
+    refresh: !!(hello && hello.gossip_refresh), refresh_ms: (hello && hello.refresh_ms) || 0, seen: now, sig: null })
   emitTraceRaw({ dir: 'con', verb: 'peer', from: peerSession, from_name: name || peerSession, to: SESSION, size: 0,
     note: `peer hub linked (${host}:${port})`, envelope_id: null })
+  // #63: a RESTARTED peer (same machine = same hostname prefix AND same advertised host, new gateway session) makes
+  // its old entry stale — retire it NOW rather than whenever that socket finally dies. Same port ⇒ certainly a
+  // restart (two live gateways can't both hold one host:port). Other port ⇒ it may be a live rival (split-brain /
+  // two loopback test "hosts"), so PING it and retire only if a provable peer stays silent. Different machines never match.
+  const hn = s => String(s).split('/')[0]
+  for (const [id, p] of [...peerGw]) {
+    if (id === peerSession || hn(id) !== hn(peerSession) || p.host !== host) continue
+    if (Number(p.port) === Number(port)) { retirePeer(id, `replaced by restarted ${peerSession}`); continue }
+    if (!provable(p) || !p.sock || p.sock.destroyed) continue
+    const t0 = Date.now()
+    sendFrame(p.sock, { t: 'PING', seq: 0 })
+    const tm = setTimeout(() => { if (peerGw.get(id) === p && p.seen < t0) retirePeer(id, `silent after same-host peer ${peerSession} linked`) }, PEER_PROBE_MS)
+    if (tm.unref) tm.unref()
+  }
 }
-function dropPeer(peerSession) {
+function dropPeer(peerSession, why) {
   if (!peerGw.has(peerSession)) return
   peerGw.delete(peerSession)
   let changed = false
   for (const [k, v] of [...roster]) if (v.origin === peerSession) { roster.delete(k); changed = true }
   for (const [k, v] of [...remotePages]) if (v.origin === peerSession) { remotePages.delete(k); changed = true }
   emitTraceRaw({ dir: 'con', verb: 'offline', from: peerSession, from_name: peerSession, to: SESSION, size: 0,
-    note: 'peer hub offline', envelope_id: null })
+    note: why ? `peer hub offline (${why})` : 'peer hub offline', envelope_id: null })
   if (changed) broadcastRoster()
+}
+// #63: drop a peer's slice AND its socket (an outbound close frees peerByAddr, so discovery re-dials it)
+function retirePeer(peerSession, why) {
+  const p = peerGw.get(peerSession)
+  if (!p) return
+  log(`peer hub ${peerSession} retired: ${why}`)
+  dropPeer(peerSession, why)
+  try { p.sock && p.sock.destroy() } catch {}
 }
 function connectToPeer(host, port) {
   const addr = `${host}:${port}`
@@ -1261,12 +1312,17 @@ function connectToPeer(host, port) {
     if (giveUp.unref) giveUp.unref()
     sock.on('connect', () => {
       sendFrame(sock, { t: 'HELLO', ver: VER, fromBridge: SESSION, fromSession: SESSION, name: NAME, auth: TOKEN })
-      sendFrame(sock, { t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM })
+      sendFrame(sock, peerHello())
       sendFrame(sock, gossipFrame())
     })
     onFrames(sock, f => {
-      if (f.t === 'PEER_HELLO') { linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || p, f.name) }
-      else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages)
+      if (f.t === 'PEER_HELLO') {
+        linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || p, f.name, f, true)
+        sendFrame(sock, gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted
+      }
+      else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock)
+      else if (f.t === 'PING') { if (!TEST_GOSSIP) sendFrame(sock, { t: 'PONG', seq: f.seq }) }   // #63: the accepting hub probes us too (<=1.43 dialers ignore PING — 'legacy' mimics that)
+      else if (f.t === 'PONG') touchPeer(sock)
       else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
     })
     sock.on('close', () => {
@@ -1320,6 +1376,22 @@ function teardownPeers() {
   for (const p of peerGw.values()) { try { p.sock && p.sock.destroy() } catch {} }
   peerGw.clear(); peerByAddr.clear(); lastGossip = ''
 }
+// #63 peer-link heartbeat: expire provably-quiet peers, then re-send the full slice to every refresh-capable peer
+// (re-stamping its view of our port) and PING every link (liveness for links we dialed; any write also surfaces a
+// dead half-open TCP link as RST). A receiver stamps only on an unchanged slice, so this costs ~2 frames/peer/min.
+let pingSeq = 0
+setInterval(() => {
+  if (role !== 'gateway' || !peerGw.size || TEST_GOSSIP === 'legacy') return   // test-only 'legacy' mimics <=1.43: no expiry, no refresh
+  const now = Date.now()
+  for (const [id, p] of [...peerGw]) if (provable(p) && now - p.seen > expiryOf(p)) retirePeer(id, `expired: nothing heard for ${now - p.seen}ms`)
+  if (TEST_GOSSIP) return   // test-only: a silent/legacy peer sends no refreshes and no probes
+  const frame = gossipFrame(), ping = { t: 'PING', seq: ++pingSeq }
+  for (const p of peerGw.values()) {
+    if (!p.sock || p.sock.destroyed) continue
+    if (p.refresh) sendFrame(p.sock, frame)   // an older receiver would re-merge + re-broadcast an unchanged slice; it can't expire, so skip it
+    sendFrame(p.sock, ping)
+  }
+}, GOSSIP_REFRESH_MS).unref()
 
 // ---------------------------------------------------------------- gateway role
 function becomeGateway(servers) {
@@ -1390,13 +1462,15 @@ function onControlConn(sock) {
       } else if (f.t === 'PEER_HELLO') {                     // inbound cross-host hub link (§7)
         if (!who) { sendFrame(sock, { t: 'REJECT', code: 'no-hello' }); sock.end(); return }
         if (f.realm && f.realm !== REALM) { sendFrame(sock, { t: 'REJECT', code: 'realm-mismatch' }); sock.end(); return }
-        adoptPeer(f.session, sock, f.host, f.port, f.name)
-        sendFrame(sock, { t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM })
-        sendFrame(sock, gossipFrame())
+        adoptPeer(f.session, sock, f.host, f.port, f.name, f, false)
+        sendFrame(sock, peerHello())
+        sendFrame(sock, gossipFrame())   // #63: full slice on every (re)link, independent of lastGossip
         sock.on('close', () => { if (peerGw.get(f.session)?.sock === sock) dropPeer(f.session) })
       } else if (f.t === 'PEER_ROSTER') {
-        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages)
-      } else if (f.t === 'PING') sendFrame(sock, { t: 'PONG', seq: f.seq })
+        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock)
+      } else if (f.t === 'PONG') {
+        touchPeer(sock)
+      } else if (f.t === 'PING') { if (TEST_GOSSIP !== 'silent') sendFrame(sock, { t: 'PONG', seq: f.seq }) }
     })
     sock.on('error', () => {})
 }
