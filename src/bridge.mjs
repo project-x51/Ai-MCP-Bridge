@@ -105,7 +105,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.42.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.43.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -324,6 +324,27 @@ function opReminders(holderId, operation, subject) {
   if (!holderId) return undefined
   const rems = reminders.remindersFor(holderId, { operation, ...(subject || {}) })
   return rems.length ? rems : undefined
+}
+// #67: tell a session WHERE the doorbell is. Agents often don't know the script's path (and on macOS `node` may not
+// be on PATH for a non-login shell), so a connect reminder may carry placeholders the bridge fills at EMIT time —
+// {doorbell_cmd} {doorbell_path} {node} {name} {project} — from THIS bridge's own location, so each host hands out
+// its own correct path. Forward slashes (node accepts them; the command runs from bash everywhere, Git Bash
+// included) and double-quoted paths (they contain spaces). Unknown {tokens} are left untouched; the STORED reminder
+// is never modified.
+const DOORBELL_PATH = path.join(HERE, 'tools', 'aimb-doorbell.mjs').replace(/\\/g, '/')
+const NODE_PATH = process.execPath.replace(/\\/g, '/')
+const dq = v => `"${String(v).replace(/"/g, '\\"')}"`
+function doorbellCmd(name, project) {
+  return `${dq(NODE_PATH)} ${dq(DOORBELL_PATH)} --name ${dq(name)}` + (project ? ` --project ${dq(project)}` : '')
+}
+function expandPlaceholders(text, name, project) {
+  const vars = { doorbell_cmd: doorbellCmd(name, project), doorbell_path: DOORBELL_PATH, node: NODE_PATH, name, project: project || '' }
+  return String(text).replace(/\{(\w+)\}/g, (m, k) => Object.prototype.hasOwnProperty.call(vars, k) ? vars[k] : m)
+}
+// register_self's connect_reminders (#64), placeholder-expanded for the registering session (#67).
+function connectReminders(sp) {
+  return (opReminders(sp.id, 'connect', { client_kind: sp.client_kind }) || [])
+    .map(r => ({ ...r, behavior: expandPlaceholders(r.behavior, sp.name, sp.identity?.project) }))
 }
 // the context an ARRIVING message presents to the reminder matcher (operation 'receive' — matches the SENDER).
 function receiveCtx(id, env) {
@@ -1629,7 +1650,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         await syncDurableMailbox(existing)   // §23: a returning peer also picks up out-of-band parked mail
         callerId = existing.id   // §20 resync on reattach too: hand back current topics + access + the inbox hint
         const reTopics = [...myTopics.values()].filter(e => e.holder === existing.id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: consent.reachable(existing.identity?.project), behaviors: reminders.list(existing.id), default_behaviors: reminders.defaultList(), connect_reminders: opReminders(existing.id, 'connect', { client_kind: existing.client_kind }) || [] })
+        return ok({ ok: true, peer_id: existing.id, name, queue_epoch: q.epoch, next_cursor: q.base + q.items.length, reattached: true, identity: existing.identity, topics: reTopics, access: consent.reachable(existing.identity?.project), behaviors: reminders.list(existing.id), default_behaviors: reminders.defaultList(), connect_reminders: connectReminders(existing) })
       }
       let parent = null
       if (a.parent) {
@@ -1700,7 +1721,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       // §20 resync: hand back the identity's current topics (owned + subscribed, post-rehydration) and the
       // projects it may reach — so a reconnecting/compacted session relearns its state without re-attaching.
       const myTopicsNow = [...myTopics.values()].filter(e => e.holder === id).map(e => ({ pattern: e.pattern, role: e.role, exclusive: e.exclusive || undefined, icon: e.icon || undefined }))
-      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: consent.reachable(ident.project), behaviors: reminders.list(id), default_behaviors: reminders.defaultList(), connect_reminders: opReminders(id, 'connect', { client_kind: ckind }) || [] })
+      return ok({ ok: true, peer_id: id, name, queue_epoch: q.epoch, next_cursor: 0, client: declaredClient, client_kind: ckind, mode, identity: ident, topics: myTopicsNow, access: consent.reachable(ident.project), behaviors: reminders.list(id), default_behaviors: reminders.defaultList(), connect_reminders: connectReminders(subpeers.get(id)) })
     }
     case 'deregister': {
       const { sp, err } = authSub(String(a.peer_id || ''), a.secret)
@@ -1957,11 +1978,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     case 'set_wake': {   // T14 wake is unsupported (CAPS.wake=false); tell the caller their fallback, RESOLVED BY SESSION TYPE
       const kind = (callerId && subpeers.get(callerId)?.client_kind) || clientKind(CLIENT && CLIENT.name)
       const fallback = kind === 'code'   // only a code session can run the doorbell script + be re-woken by its harness
+      const wsp = callerId ? subpeers.get(callerId) : null
+      const cmd = fallback ? doorbellCmd(wsp ? wsp.name : NAME, wsp ? wsp.identity?.project : PROC_IDENT?.project) : null   // #67: ready-to-run, for THIS caller
       return ok({ ok: false, code: 'unsupported',
         what: fallback ? 'Not implemented, but you can use the doorbell service as a fallback'
                        : 'Not implemented for your session with no fallback supported',
         fallback: fallback ? 'doorbell' : null,
-        ...(fallback ? { hint: 'run tools/aimb-doorbell.mjs backgrounded (--name <you> --project <proj>); it blocks on a socket at ~zero cost and wakes you when mail is waiting (token/port default from ../config.json)' } : {}) })
+        ...(fallback ? { hint: `run this backgrounded: ${cmd} — it blocks on a socket at ~zero cost and wakes you when mail is waiting, or at the top of each hour by default (a chime: display the time to the user, then re-arm); token/port default from the bridge's config.json`, command: cmd } : {}) })
     }
     case 'send_to_peer': {
       if (!String(a.subject || '').trim()) return ok({ ok: false, code: 'subject-required' })   // T7: no lazy callers

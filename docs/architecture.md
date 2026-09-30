@@ -1112,6 +1112,31 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.43.0):** *the doorbell chimes hourly by default, and a connect reminder carries the script's location
+  (#67).* Two of Robin's asks. (1) **Hourly chime.** With no `--timeout`, `tools/aimb-doorbell.mjs` now exits at the
+  top of the next LOCAL hour (or earlier on mail) with `reason:"hourly"`, `time:"14:00"`, the usual `exited_at`
+  stamps and `guidance:"Top of the hour: display the current time (14:00) to the user, then re-arm the doorbell."`.
+  That is deliberately NOT the silent-re-arm wake: the point is a clock the user sees. Same fields in the `--status`
+  exit write (`state:"hourly"`). **No double chime / hot loop:** a `setTimeout` can fire a few ms early relative to
+  `Date.now()`, so the timer re-checks and waits out any remainder, always exiting at/after the boundary. A re-arm
+  then computes the NEXT boundary, and the reported time is the boundary's, never a drifted "13:59". The boundary
+  is `setHours(h+1)` on the local clock (so DST and non-whole-hour offsets are handled). An explicit `--timeout <sec>`
+  is unchanged (`reason:"timeout"`, silent guidance). Test hook: env `AIMB_DOORBELL_PERIOD_SEC=<n>` chimes on the
+  next multiple of *n* local seconds. (2) **Where is the doorbell?** Agents often don't know the path, and on macOS
+  `node` may be off PATH for a non-login shell. `register_self` now expands placeholders in each emitted
+  `connect_reminders[].behavior` (fresh + reattach paths): `{doorbell_cmd}` →
+  `"<process.execPath>" "<HERE>/tools/aimb-doorbell.mjs" --name "<name>" --project "<project>"`, plus
+  `{doorbell_path}`, `{node}`, `{name}`, `{project}`. The values come from THIS bridge's own location, so each host
+  hands out its own correct path, with forward slashes and double-quoted paths (spaces), runnable from bash on every
+  platform including Git Bash. Unknown `{tokens}` pass through; expansion is emit-time only, so the stored reminder
+  keeps the raw tokens. `set_wake` for a code session now returns the same ready-to-run `command` in its `hint` and
+  mentions the hourly default. The shipped connect default in `config.example.json` uses `{doorbell_cmd}` (322
+  chars, under the 365 cap). **Rollout:** the default only reaches a session once its host runs 1.43.0 AND that
+  host's config carries the connect entry; live configs were not edited. Tests: `test_doorbell_live` +10 (40:
+  hourly exit, time, display guidance, stamps, never-early, status file, next-boundary re-arm, mail before the chime,
+  explicit `--timeout` wins); `test_connect_reminders_live` +7 (17: `{doorbell_cmd}`/`{doorbell_path}`/`{node}`/
+  `{name}`/`{project}` expansion, unknown token untouched, stored reminder unmodified, `set_wake` hint carries the
+  path). Verified to FAIL against the pre-change code (7 + 5 fails).
 - **Built (v1.42.0):** *a cross-host send reports the receiver's REAL outcome — `ok:true` no longer masks a
   denied or dead-lettered delivery (#61).* **What broke:** `send_to_peer` to a sub-peer on ANOTHER host returned
   `ok:true` even when that host refused (`project-denied`) or dead-lettered the message — which hid #62 (grants don't

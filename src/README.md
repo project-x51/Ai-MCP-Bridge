@@ -98,7 +98,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   leaf is pushed `mail` on a direct send and on a topic send (counts kept separate), gets `gone` for an unknown
   peer and `watch-required` with no watch, heartbeats, fires immediately when armed with mail already waiting,
   and is proven ISOLATED (never sees roster/traces/persistence/sender) — plus the shipped
-  `tools/aimb-doorbell.mjs` exit codes (0 mail / 2 timeout) and its status file (25);
+  `tools/aimb-doorbell.mjs` exit codes (0 mail / 0 timeout), its status file, and the #67 hourly chime (a
+  shortened test period chimes `hourly` with the boundary time + display guidance, never early, re-arm targets the
+  next boundary; mail still fires first; an explicit `--timeout` keeps `timeout` + silent guidance) (40);
   `test_parked_live.mjs` — out-of-band parked mail surfaces
   on a plain poll and on reattach, and is **acked on serve** so a re-register never redelivers it (#23/#34, 8);
   `test_keepalive_live.mjs` — `release_topic {keep_alive}` keeps an ownerless topic alive, parks directed
@@ -312,16 +314,31 @@ An idle session that polls `inbox` every ~10s spends a **model turn per poll** (
 "nothing arrived". Instead, attach a **`listener`** leaf and block:
 
 ```bash
-node tools/aimb-doorbell.mjs --name Bridget --project AIMB --timeout 1800 --status /tmp/db.json
+node tools/aimb-doorbell.mjs --name Bridget --project AIMB --status /tmp/db.json
 ```
+
+**You don't need to know that path:** `set_wake` (for a code session) returns a ready-to-run `command`, and a
+`connect` reminder may say `{doorbell_cmd}`, which the bridge expands per session when it emits the reminder
+(#67): `"<abs node>" "<abs path to this host's tools/aimb-doorbell.mjs>" --name "<you>" --project "<proj>"`.
+Forward slashes and double quotes, so it runs from bash everywhere, Git Bash on Windows included, and it works on
+macOS where `node` may not be on a non-login shell's PATH. Also: `{doorbell_path}`, `{node}`, `{name}`,
+`{project}`. Unknown `{tokens}` pass through, and the stored reminder is never modified.
+
+**Hourly chime (#67), the default:** with no `--timeout`, the doorbell exits at the **top of the next hour**
+(local wall-clock, e.g. 14:00:00), or earlier if mail arrives, with `reason:"hourly"`, `time:"14:00"` and
+`guidance:"Top of the hour: display the current time (14:00) to the user, then re-arm the doorbell."`. That wake is
+meant to be **seen**, not a silent re-arm. It never exits before the boundary (an early timer waits out the
+remainder), so a re-arm always targets the *next* hour, with no double chime and no hot loop. An explicit
+`--timeout <sec>` keeps the fixed timeout (`reason:"timeout"`, silent guidance). Test hook:
+`AIMB_DOORBELL_PERIOD_SEC=<n>` chimes on the next multiple of *n* seconds instead of the hour (tests only).
 
 Run it **backgrounded**; it costs no tokens and ~no CPU while waiting, and exits the moment there is
 something to collect — the caller wakes, polls `inbox` **once**, and re-arms. The **exit code is a plain
 success/failure signal** for the harness (which paints any non-zero background exit as "failed"): **0** = it did
-its job — re-arm, and if `reason=="mail"` poll the inbox first (#52; a benign timeout no longer reads as a
-failure) · **4** = it *couldn't* do its job (never armed / bridge error — investigate, don't hot-loop) · **64**
-bad usage. The **specific outcome is in `reason`** on stdout + `--status` (`mail` / `timeout` / `peer-gone` /
-`link-closed`), so a caller still branches on it. A routine **no-mail** wake also carries a terse
+its job — re-arm, and if `reason=="mail"` poll the inbox first, if `"hourly"` show the user the time (#52; a
+benign timeout no longer reads as a failure) · **4** = it *couldn't* do its job (never armed / bridge error — investigate, don't hot-loop) · **64**
+bad usage. The **specific outcome is in `reason`** on stdout + `--status` (`mail` / `hourly` / `timeout` /
+`peer-gone` / `link-closed`), so a caller still branches on it. A routine **no-mail** wake also carries a terse
 `guidance:"silent re-arm…"` so a doorbell loop doesn't burn tokens narrating uneventful re-arms — the agent
 stays quiet unless it's stopping the loop. `--status` writes a heartbeat file so you can confirm it's alive
 without spending a turn. Every exit line is **self-timestamped** (#51): `exited_at` (local ISO-8601 with tz

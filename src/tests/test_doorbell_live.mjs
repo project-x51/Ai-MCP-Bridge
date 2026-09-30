@@ -1,5 +1,7 @@
 // Doorbell (#39) — live proof that a `listener` leaf is pushed waiting-mail COUNTS and nothing else,
 // and that the shipped client script exits with the right code so a caller can be woken by it.
+// #67: with no --timeout the script chimes at the top of the next hour (reason:"hourly" + display guidance);
+// the AIMB_DOORBELL_PERIOD_SEC test hook shortens that period so the chime is provable in seconds.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +23,7 @@ const t = new StdioClientTransport({
   command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR,
   env: { ...process.env, AI_BRIDGE_NAME: 'GW', AI_BRIDGE_PORT: PORT, AI_BRIDGE_WS_PORT: WSPORT, AI_BRIDGE_TOKEN: TOKEN,
          AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: PDIR, AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_DISCOVERY: 'none',
-         AI_BRIDGE_DOORBELL_PING_MS: '400' },
+         AI_BRIDGE_DOORBELL_PING_MS: '400', AI_BRIDGE_COMPAT_PORTS: '', AI_BRIDGE_COMPAT_WS_PORTS: '' },
   stderr: 'pipe',
 })
 const c = new Client({ name: 'doorbell-test', version: '0' }, { capabilities: {} })
@@ -138,6 +140,57 @@ check('timeout summary is self-timestamped too (#51)',
   out2.trim())
 // #52: a routine no-mail wake carries the brief, built-in re-arm guidance so a doorbell loop stays quiet
 check('timeout carries the silent re-arm guidance', !!(parsed2 && typeof parsed2.guidance === 'string' && /silent re-arm/i.test(parsed2.guidance)), parsed2 && parsed2.guidance)
+
+// ---- 10. #67 hourly chime: NO --timeout => exit at the next boundary with reason:"hourly", the boundary's local
+// time and DISPLAY guidance (not a silent re-arm). The test hook shortens the hour to a 2-second period. A guard
+// kills a script that never chimes (the pre-#67 script would sit on its 1800s default).
+function runDoorbell(extraArgs, env = {}, killAfterMs = 15000) {
+  const p = spawn('node', [path.join(SRCDIR, 'tools', 'aimb-doorbell.mjs'),
+    '--name', 'Owner', '--project', 'DBTEST', '--token', TOKEN, '--url', `ws://127.0.0.1:${WSPORT}`, ...extraArgs],
+    { cwd: SRCDIR, env: { ...process.env, ...env } })
+  let o = ''
+  p.stdout.on('data', d => { o += d.toString() })
+  const guard = setTimeout(() => { try { p.kill() } catch {} }, killAfterMs)
+  const exited = new Promise(r => p.on('exit', code => {
+    clearTimeout(guard)
+    let j = null; try { j = JSON.parse(o.trim().split('\n').pop()) } catch {}
+    r({ code, out: o.trim(), j })
+  }))
+  return { p, exited }
+}
+await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })
+await sleep(300)
+const chimeStatus = path.join(PDIR, 'doorbell-chime.json')
+const h1 = await runDoorbell(['--status', chimeStatus], { AIMB_DOORBELL_PERIOD_SEC: '2' }).exited
+check('hourly chime (no --timeout): exits 0 with reason "hourly"', h1.code === 0 && !!h1.j && h1.j.reason === 'hourly', `exit ${h1.code} ${h1.out}`)
+check('hourly chime carries the boundary\'s local time (HH:MM[:SS])', !!(h1.j && /^\d\d:\d\d(:\d\d)?$/.test(h1.j.time || '')), h1.out)
+check('hourly chime guidance says DISPLAY the time (not a silent re-arm)',
+  !!(h1.j && typeof h1.j.guidance === 'string' && /display the current time/i.test(h1.j.guidance) && h1.j.guidance.includes(h1.j.time) && !/silent/i.test(h1.j.guidance)), h1.j && h1.j.guidance)
+check('hourly chime is self-timestamped (#51)', !!(h1.j && /T\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d$/.test(h1.j.exited_at || '') && Number.isInteger(h1.j.exited_at_unix)), h1.out)
+// never early: the exit's local wall clock is AT/AFTER the reported boundary (so a re-arm targets the NEXT one)
+const clk = j => (j.exited_at || '').slice(11, 19), lbl = t => t.length === 5 ? t + ':00' : t
+check('hourly chime never exits before its boundary', !!(h1.j && h1.j.time && clk(h1.j) >= lbl(h1.j.time)), h1.j && `${clk(h1.j)} vs ${h1.j.time}`)
+let stc = null; try { stc = JSON.parse(fs.readFileSync(chimeStatus, 'utf8')) } catch {}
+check('status file exit write carries the chime (state/reason/time/guidance)',
+  !!(stc && stc.state === 'hourly' && stc.reason === 'hourly' && h1.j && stc.time === h1.j.time && /display/i.test(stc.guidance || '')), stc && JSON.stringify(stc))
+// an immediate re-arm must chime at the NEXT boundary — no double chime for the same one
+const h2 = await runDoorbell([], { AIMB_DOORBELL_PERIOD_SEC: '2' }).exited
+check('re-arm chimes at the NEXT boundary (no double chime)', !!(h1.j && h2.j && h2.j.reason === 'hourly' && h2.j.time && h2.j.time !== h1.j.time), `${h1.j && h1.j.time} then ${h2.j && h2.j.time}`)
+
+// ---- 11. mail still fires BEFORE the chime (default hourly mode: no --timeout, no test hook) ----
+const m1 = runDoorbell([])
+await sleep(900)
+await call('send_to_peer', { target: owner.peer_id, subject: 'wake2', message: 'ring2', as: sender.peer_id, secret: 's-snd' })
+const r1 = await m1.exited
+check('default (hourly) mode: mail still wakes it first, reason "mail"', r1.code === 0 && !!r1.j && r1.j.reason === 'mail' && r1.j.unread_direct === 1, `exit ${r1.code} ${r1.out}`)
+check('mail wake carries no chime fields / guidance', !!(r1.j && r1.j.time === undefined && r1.j.guidance === undefined), r1.out)
+await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })
+await sleep(300)
+
+// ---- 12. an explicit --timeout keeps the old behaviour exactly, even with the period hook set ----
+const t1 = await runDoorbell(['--timeout', '3'], { AIMB_DOORBELL_PERIOD_SEC: '1' }).exited
+check('explicit --timeout wins over the chime: reason "timeout" + silent re-arm guidance',
+  t1.code === 0 && !!t1.j && t1.j.reason === 'timeout' && /silent re-arm/i.test(t1.j.guidance || '') && t1.j.time === undefined, `exit ${t1.code} ${t1.out}`)
 
 console.log(`\n${pass} passed, ${fail} failed`)
 await c.close()

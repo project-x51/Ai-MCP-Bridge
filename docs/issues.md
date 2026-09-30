@@ -6,9 +6,14 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.42.0) — read this first after a compact
-**Current version: v1.42.0.** All work committed to `main` (v1.42.0 committed locally, not yet pushed). Everything
-below is durable; nothing important is only in chat.
+## RESUME STATE (updated 2026-09-30, v1.43.0) — read this first after a compact
+**Current version: v1.43.0.** All work committed to `main` (v1.42.0 + v1.43.0 committed locally, not yet pushed).
+Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.43.0):** Shipped **#67**. The doorbell now chimes at the top of each hour by default
+(`reason:"hourly"`, display the time, then re-arm). Connect reminders and the code-session `set_wake` hint now carry
+a ready-to-run `{doorbell_cmd}` with this host's absolute node + script paths. Rollout: the connect default only
+takes effect once a host runs 1.43.0 AND its config carries the connect entry. Live config was not edited.
 
 **2026-09-30 (v1.42.0):** Fixed **#61** — a cross-host `send_to_peer` now reports the receiver's real outcome
 (`project-denied` → `ok:false`; dead-letter → `ok:true, dead_lettered:true`) instead of a blanket `ok:true`. Hosts
@@ -62,6 +67,22 @@ inbox/send — the bridge restarts often during this migration, so re-register w
 `unknown-subpeer`.
 
 ---
+
+## #67 — doorbell hourly chime + connect reminder carries the script location  ·  **DONE (v1.43.0)**
+Robin's request (2026-09-30), two parts. **(a) Hourly chime as the default.** With no `--timeout` the doorbell exits
+at the top of the next LOCAL hour (or earlier on mail) with `reason:"hourly"`, `time:"14:00"`, the `exited_at`
+stamps and guidance to DISPLAY the time to the user and then re-arm. It is a visible wake, not the silent re-arm.
+It never exits before the boundary (an early timer waits out the remainder), so a re-arm targets the next hour,
+with no double chime or hot loop. An explicit `--timeout <sec>` keeps the old `timeout` + silent-guidance behaviour
+exactly. Test hook: `AIMB_DOORBELL_PERIOD_SEC`. **(b) Tell agents WHERE the doorbell is.** Agents often didn't know
+the script path, and on macOS `node` may not be on PATH for non-login shells. `register_self` now expands
+`{doorbell_cmd}` / `{doorbell_path}` / `{node}` / `{name}` / `{project}` in emitted `connect_reminders` from this
+bridge's own location, emit-time only (stored reminders untouched, unknown tokens left as-is). `set_wake` for a code
+session returns the same command. The shipped connect default in `config.example.json` uses `{doorbell_cmd}`.
+**Rollout:** the connect default only takes effect once a host runs 1.43.0 AND its config carries the connect
+entry (on older bridges a `{doorbell_cmd}` would reach the agent unexpanded). Live/shared config was intentionally
+NOT edited. Tests: `test_doorbell_live` (40), `test_connect_reminders_live` (17), both verified to fail on the
+pre-change code.
 
 ## #66 — replication audit: what federates mesh-wide vs what's bridge-local  ·  **OPEN (audit — Robin, 2026-09-29)**
 Triggered by #62 (a consent grant not rippling past one bridge). Audit of bridge state, classified by whether it

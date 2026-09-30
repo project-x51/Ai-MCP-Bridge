@@ -2,6 +2,7 @@
 // an unsupported message RESOLVED BY SESSION TYPE (code → doorbell fallback, else → no fallback); (3) the new
 // 'connect' operation + 'client' scope — a connect reminder rides the register_self response, filtered by the
 // session's client kind. Client kind is set per sub-peer via register_self {client}, so one bridge covers all cases.
+// (4) #67: connect-reminder placeholders ({doorbell_cmd} etc.) expand per session at emit time; set_wake carries the command.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { fileURLToPath } from 'node:url'
@@ -57,6 +58,29 @@ await call('set_behavior', { operation: 'connect', scope: 'client', match: 'code
 const reCow = await call('register_self', { name: 'Coworker', secret: 'w', project: 'PH', client: 'cowork' })
 const crW = (reCow.connect_reminders || []).map(r => r.behavior)
 check('connect reminder: client:code does NOT match a cowork session', !crW.includes('CODE-ONLY-HINT'), JSON.stringify(crW))
+
+// (4) #67: placeholders in a connect reminder are expanded AT EMIT time for the registering session — the doorbell's
+// absolute path on THIS host, the node binary, and the session's own name/project — while the stored reminder keeps
+// the raw tokens and an unknown {token} passes through untouched.
+const DOORBELL = path.join(SRCDIR, 'tools', 'aimb-doorbell.mjs').replace(/\\/g, '/')
+await call('set_behavior', { operation: 'connect', scope: 'client', match: 'code', behavior: 'RUN: {doorbell_cmd} | P={doorbell_path} | N={node} | {name}@{project} | {unknown_tok}', as: 'Coder', secret: 'c' })
+const reCoder2 = await call('register_self', { name: 'Coder', secret: 'c', project: 'PH', client: 'claude-code' })
+const proj = reCoder2.identity && reCoder2.identity.project
+const exp = ((reCoder2.connect_reminders || []).find(r => /^RUN: /.test(r.behavior)) || {}).behavior || ''
+console.log('  expanded:', exp)
+const cmdPart = exp.split(' | ')[0].slice(5)
+check('{doorbell_cmd} expands to "<node>" "<abs doorbell path>" --name "<name>" --project "<project>"',
+  /^"[^"]*node(\.exe)?" /i.test(cmdPart) && cmdPart.includes(`"${DOORBELL}"`) && cmdPart.endsWith(`--name "Coder" --project "${proj}"`), cmdPart)
+check('{doorbell_path} = the absolute script path (forward slashes)', exp.includes(`P=${DOORBELL} `) && path.isAbsolute(DOORBELL) && !exp.includes('\\'), exp)
+const nodeSeg = (exp.split(' | N=')[1] || '').split(' | ')[0]
+check('{node} = an absolute node path', /node(\.exe)?$/i.test(nodeSeg) && path.isAbsolute(nodeSeg), nodeSeg)
+check('{name}/{project} = the session\'s own values', exp.includes(`Coder@${proj}`), exp)
+check('an unknown {token} is left untouched', exp.includes('{unknown_tok}'), exp)
+const stored = ((await call('list_behaviors', { as: 'Coder', secret: 'c' })).behaviors || []).find(b => b.operation === 'connect' && b.scope === 'client' && b.match === 'code')
+check('the STORED reminder is not modified (raw {doorbell_cmd})', !!stored && stored.behavior.includes('{doorbell_cmd}'), JSON.stringify(stored))
+const wCode2 = await call('set_wake', { as: 'Coder', secret: 'c' })
+check('set_wake code hint carries the ready-to-run doorbell command (abs path + this session)',
+  typeof wCode2.hint === 'string' && wCode2.hint.includes(`"${DOORBELL}"`) && wCode2.hint.includes('--name "Coder"') && /hour/i.test(wCode2.hint), JSON.stringify(wCode2))
 
 console.log(`\n${pass} passed, ${fail} failed`)
 await B.transport.close()
