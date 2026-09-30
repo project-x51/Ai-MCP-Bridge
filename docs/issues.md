@@ -7,8 +7,29 @@ project's `#NN` sequence.
 ---
 
 ## RESUME STATE (updated 2026-09-30, v1.54.0) — read this first after a compact
-**Current version: v1.54.0.** All work committed to `main` (v1.42.0 – v1.54.0 committed locally, not yet pushed).
-Everything below is durable; nothing important is only in chat.
+**Current version: v1.54.0.** All work committed AND pushed to `main` (HEAD `2be5989`). Everything below is durable;
+nothing important is only in chat.
+
+**>>> NEXT: DEPLOY — none of v1.42.0–v1.54.0 is running live yet.** As of 2026-09-30 ROBIN-Z790, LITTLE-001 and
+Robins-Mac run **1.40.0**; phub-lnx-01 runs **1.44.0**. Most fixes (#61/#62/#63/#66) need BOTH ends upgraded. Robin has
+been asked to OK the rollout (it restarts every live bridge; sessions drop briefly and reconnect). Order:
+1. **Rebuild `tray/windows/Tpm.exe`** on ROBIN-Z790: run `tray/windows/build-tpm.cmd` (builds in place; Dropbox syncs
+   it to LITTLE). Verify `Tpm.exe --pubkey` prints `PROVIDER=Microsoft Platform Crypto Provider`. Key-compatible —
+   no re-registration (#42).
+2. **Upgrade + restart every host.** ROBIN + LITTLE share this Dropbox checkout → restart via the Task Tray / Claude
+   app. Mac: `ssh mac`, `git pull` in `/Users/robin/Ai-MCP-Bridge`, restart its Claude sessions (node is
+   `/opt/homebrew/bin/node`; non-login shells lack it on PATH). phub-lnx-01: `ssh phub1`, `git pull --ff-only` in
+   `~/Ai-MCP-Bridge`, `systemctl --user restart aimb-bridge.service` (token lives in `~/.aimb/bridge.env`, port in
+   `src/config.json`). Then `list_sessions` to confirm versions. Deploy `tools/aimb-doorbell.mjs` together with
+   `tools/aimb-doorbell-clock.mjs` (#69 — the script imports it).
+3. **Once every host is ≥1.47.0:** add a `behaviors.realm` block (fresh `updated_at`) to the shared Dropbox
+   `config.json` carrying the doorbell connect reminder (as in `config.example.json`) and, if wanted, the
+   `from_topic`-aware receive line (#54). It spreads realm-wide (#66b). Never echo that file's token.
+4. Optional tidy: live configs still carry ignored `compatPorts` keys (harmless).
+
+**Still open:** #65 self-updating bridge (desirable, spec first — would automate step 2), #53 Cowork doorbell,
+#50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
+sender is a gossiped owner of that topic (#54 hardening).
 
 **2026-09-30 (v1.54.0):** Built **#69** — the doorbell's hourly chimes at 00:00/06:00/12:00/18:00 (local) add
 `inbox_check:true` + guidance to call the inbox tool NOW even if nothing is waiting (keeps the Ai MCP Bridge loaded in
@@ -109,17 +130,11 @@ Tray bridge, Bridget is a follower), LITTLE-001 (reads the shared Dropbox config
 MacDaddy) and phub-lnx-01 (migrated 2026-09-30 on v1.44.0). **phub-lnx-02 is RETIRED.** Versions vary per host
 (roll-outs of 1.42–1.47 are pending), so re-run `list_sessions` before trusting version details.
 
-**"Mac never receives Bridget's messages" — real cause is #62 (cross-project consent), NOT #60.** The Mac is
-now fully migrated (v1.40.0 / 12317 / bind 0.0.0.0). The actual block: `deliveryAllowed` is receiver-side +
-directional and the Mac's bridge lacks an `AIMB→PowerHub` grant (ROBIN/LITTLE have it via shared Dropbox
-persistence; the Mac, a separate machine, doesn't). So AIMB (Bridget) → PowerHub (MacDaddy/Mac-2) is
-`project-denied` and dropped — while **#61** makes the sender see `ok:true`, which masked it and sent me chasing
-#60/ports for an hour. #60 was a real latent bug (tailnet-IP `pairServer` bind) and its v1.40.0 fix stands, but it
-was NOT this symptom's cause. **Immediate fix:** add to the Mac's `config.json` (live-reloads, no restart) —
-`"projects":{"default":"strict","allow":[{"from":"AIMB","to":"PowerHub","mode":"bidirectional"}]}`. Diagnosed via
-SSH: **`ssh mac` now works** (key auth over Tailscale + macOS Remote Login; alias in `~/.ssh/config`, key
-`~/.ssh/robins_mac_ed25519`, user `robin`, host `robins-macbook-pro.tail14b1ac.ts.net`). NB the Mac App Store
-Tailscale build can't run Tailscale's own SSH server — we use macOS Remote Login instead.
+**Remote admin + history:** `ssh mac` (robin@robins-macbook-pro.tail14b1ac.ts.net, key `~/.ssh/robins_mac_ed25519`,
+macOS Remote Login — the App Store Tailscale build can't run Tailscale SSH) and `ssh phub1` (robin@phub-lnx-01, key
+`~/.ssh/phub_lnx_01_ed25519`). The old "Mac never receives Bridget" saga (2026-07-25) was #62 (per-host consent) masked
+by #61; MacDaddy fixed it live with `allow_project`, and both bugs are now fixed in code (v1.42.0 / v1.45.0).
+Writing a remote config over SSH can trip the auto-mode classifier — hand Robin the command if it does.
 
 **The port migration (#56) is DONE:** default ports moved 7000/7001 → **12317/12318** (macOS AirPlay clash), every
 host is on them, and v1.46.0 (#59) removed the compat window. **Restarting a
@@ -128,12 +143,9 @@ relaunches a dead bridge on next MCP use. **Use the doorbell** (`node tools/aimb
 --project AIMB --status <file>`, backgrounded) to wait for mail instead of manually polling `@` — it wakes on
 real mail only and costs no tokens idle.
 
-**Immediate pickups:** (a) add the `AIMB→PowerHub` `projects` edge to the Mac's `config.json` to unblock delivery
-to MacDaddy/Mac-2 (#62; live-reloads); (b) ~~fix #61~~ DONE v1.42.0 — roll 1.42.0 to every host so denied sends
-stop reading ok:true; (c) ~~#59~~ DONE v1.46.0. **Bridget reconnect ritual:** `register_self`
-first (name Bridget, secret `bridget-aimb-2026`, project AIMB, user Robin), use the returned `peer_id` for
-inbox/send — the bridge restarts often, so re-register whenever a send returns
-`unknown-subpeer`.
+**Bridget reconnect ritual:** `register_self` first (name Bridget, secret `bridget-aimb-2026`, project AIMB), use
+the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) if `topics` comes back empty; re-register
+whenever a send returns `unknown-subpeer`.
 
 ---
 
