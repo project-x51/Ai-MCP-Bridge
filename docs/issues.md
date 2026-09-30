@@ -6,9 +6,14 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.51.0) — read this first after a compact
-**Current version: v1.51.0.** All work committed to `main` (v1.42.0 – v1.51.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.52.0) — read this first after a compact
+**Current version: v1.52.0.** All work committed to `main` (v1.42.0 – v1.52.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.52.0):** Fixed **#58** (dashboard only) — a CLI host's per-session follower `code` bridge that hosts
+exactly one sub-peer now renders ONCE, as that sub-peer, in the sessions list (both views), the mesh map and the
+Computers counts; bare code sessions, 2+-sub-peer bridges, gateways and agent/tray bridges are unchanged. The bridge
+serves `dashboard.html` from disk, so a pull is enough — no restart, no config change.
 
 **2026-09-30 (v1.51.0):** Built **#54** — `send_to_peer {from_topic}` sends on behalf of a topic the caller currently
 owns (validated on the sending bridge, else `not-topic-owner`); carried as cleartext `from_topic` + `from_topic_icon`
@@ -516,7 +521,12 @@ finds it held and follows rather than standing up a rival. Extracted `onControlC
 both start orders + ws compat). This is what makes #56 restart-free. Opt-in (not default-on) so loopback-simulated
 multi-host tests don't collide on a shared compat port.
 
-## #58 — code sessions on a CLI host show TWICE (follower-bridge + sub-peer)  ·  **OPEN** (dashboard clarity)
+## #58 — code sessions on a CLI host show TWICE (follower-bridge + sub-peer)  ·  **DONE (v1.52.0)**
+**Fixed:** (v1.52.0, dashboard only) `soloSub` in `dashboard.html` collapses a FOLLOWER `code` bridge that hosts
+exactly ONE sub-peer (and owns no topic itself) into that sub-peer — one row in both sessions views, one node on the
+mesh map, one Connection (not also a Session) in Computers; the bridge's id/version/connected time are on hover and in
+the expander. Gateways, bare code sessions with no sub-peer, 2+-sub-peer followers and agent/cowork/tray bridges are
+unchanged. Details in architecture.md §13; regression guard `test_dashboard_collapse`.
 Robin spotted on phub-lnx-01: each Claude Code CLI session there appears as a full bridge-sized (orange, not
 blue) bubble AND a top-level sessions-list row (`62bd6ec7`, `9e0b6a8d` — bare hex ids, `claude-code` client, no
 topics), while its actual conversation shows separately as a sub-peer (Modell, Renda). Root cause is not a bug in

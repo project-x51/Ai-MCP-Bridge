@@ -1114,6 +1114,23 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.52.0):** *the dashboard shows a CLI code session ONCE, not as bridge + sub-peer (#58).* **What was
+  wrong:** the desktop app shares ONE bridge across conversations (N conversations = 1 bridge + N sub-peers, and the
+  connections view hides that agent bridge), but a CLI host spawns one follower bridge PER Claude Code session (MCP
+  stdio), so each conversation drew twice: a bare-hex, `claude-code`, topic-less bridge row/orange bubble AND the
+  sub-peer it registered (Modell, Renda). Not a routing bug — a presentation one. **Built (dashboard only, no
+  bridge/protocol change):** `soloSub(s)` in `dashboard.html` names the pair: a FOLLOWER (not `is_gateway`) with
+  `client_kind==='code'`, exactly ONE sub-peer, and no topic OWNED by the bridge itself (collapsing would hide the
+  claim). Such a pair renders as the sub-peer alone — it carries the name, topics and project — everywhere: the
+  connections view (no bridge row), the show-bridges view (one top-level row instead of bridge + ↳ leaf), the mesh
+  map (one sub-peer-styled node in the bridge row with the edge to its gateway; `nodePos` maps BOTH ids, so a trace
+  naming either pulses it; the edge takes the sub-peer's id) and the Computers counts (the pair is one Connection,
+  not also a Session). The bridge's session id, version, client and connected time go on the hover title and the row
+  expander (`bridgeNote`). **Unchanged by design:** gateways (even a `claude-code` gateway with one sub-peer), a
+  bare code session with NO sub-peer (a standalone MCP connection, e.g. `Robins-Mac.local/43cbd85c`), a follower
+  hosting 2+ sub-peers (shown like the desktop's shared bridge today), and agent/cowork/tray bridges. Regression guard
+  `test_dashboard_collapse` (jsdom, three-machine fixture covering each case, 30 checks); verified to FAIL 12 checks
+  against the pre-change `dashboard.html` (it reads `DASHBOARD_HTML` to point at another copy).
 - **Built (v1.51.0):** *send on behalf of a topic — `from_topic` attribution (#54).* **What was missing:** sender
   attribution was always the PEER. The envelope's `topic` is set by ROUTING (the destination of a `topic:X` send, the
   channel of a publish), never authorship, so there was no way to say "this came FROM topic X" — and "messages from the

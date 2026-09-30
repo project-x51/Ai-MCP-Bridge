@@ -221,13 +221,13 @@
   }
   // Computers: one row per machine on the mesh (this machine first). Address = the tailnet advertise host
   // gossiped on that machine's sessions (— / "local" when none). Sessions = bridge processes; Connections =
-  // sub-peers + pages riding them.
+  // sub-peers + pages riding them. A #58 collapsed CLI pair (soloSub) is ONE conversation: a connection, not also a session.
   function setComputers(m){
     var cb=document.getElementById('computers'); if(!cb) return; cb.innerHTML='';
     var gwHost=(m.gateway||'').split('/')[0];
     var mach={}, order=[];
     function ens(h){ if(!mach[h]){ mach[h]={ sessions:0, conns:0, addr:null, vers:{} }; order.push(h); } return mach[h]; }
-    (m.sessions||[]).forEach(function(s){ var e=ens(machineOf(s)); e.sessions++; e.conns+=(s.subpeers||[]).length; if(s.host) e.addr=e.addr||s.host;
+    (m.sessions||[]).forEach(function(s){ var e=ens(machineOf(s)); if(!soloSub(s)) e.sessions++; e.conns+=(s.subpeers||[]).length; if(s.host) e.addr=e.addr||s.host;
       if(s.bridge_version) e.vers[s.bridge_version]=1; });   // a machine CAN run several bridges — keep every distinct version
     (m.pages||[]).forEach(function(p){ ens(p.host_label||gwHost||order[0]||'?').conns++; });
     order.sort(function(a,b){ return (a===gwHost?0:1)-(b===gwHost?0:1); });   // this machine (local gateway's host) first
@@ -245,6 +245,20 @@
       cb.appendChild(tr);
     });
   }
+  // #58: a CLI host spawns its OWN follower bridge per Claude Code session (MCP stdio), and that conversation
+  // registers ONE sub-peer — one logical thing that would otherwise show twice (a bare-hex bridge row/bubble AND its
+  // sub-peer). Such a pair collapses into the sub-peer (it carries the name, topics and project); the bridge's detail
+  // rides along on hover/expand. Never collapsed: gateways; non-code (agent/cowork/tray) bridges; a bare code session
+  // with NO sub-peer (a standalone connection); a bridge hosting 2+ sub-peers (shown as today, like the desktop's
+  // shared bridge); one that itself OWNS a topic (collapsing would hide the claim). Returns the sub-peer, or null.
+  function soloSub(s){
+    var sps=s.subpeers||[];
+    if(s.is_gateway || s.client_kind!=='code' || sps.length!==1) return null;
+    if((s.topics||[]).some(function(r){ return r.holder===s.session && r.role==='owner'; })) return null;
+    return sps[0];
+  }
+  function bridgeNote(s){ return 'bridge '+s.session+' · v'+(s.bridge_version||'?')+(s.client?' · '+s.client:'')+
+    (s.connected_at?' · connected '+String(s.connected_at).replace('T',' ').slice(0,19):''); }
   // badge colour by role: gateway green, code orange, everything else blue
   function sessClass(s){ return s.is_gateway ? 'b-gw' : (s.client_kind==='code' ? 'b-code' : 'b-sess'); }
   function sessDetail(s,tops){
@@ -288,9 +302,10 @@
         '<span class="kv"><b>project</b> '+esc(p.project||'(infra)')+'</span>'+
         '<span class="kv"><b>user</b> '+esc(p.user||'—')+'</span>',null,'page/'+p.instance);
     };
-    var renderSub=function(sp,tops,flat){
+    // br = the hosting bridge when it was collapsed into this sub-peer (#58): its detail goes on hover + in the expander
+    var renderSub=function(sp,tops,flat,br){
       expandable(sb,[
-        (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'">'+esc(nm(sp.name))+'</span>'+waitBadge(sp.unread_direct||0),
+        (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'"'+(br?' title="'+esc(bridgeNote(br)).replace(/"/g,'&quot;')+'"':'')+'>'+esc(nm(sp.name))+'</span>'+waitBadge(sp.unread_direct||0),
         '<span class="mono">'+esc(sp.id)+'</span>',
         '<span class="mono">'+esc((sp.client_kind||sp.client||'')+((sp.channel_capable&&sp.mode==='push')?' · push':''))+'</span>',
         pu(sp.project,sp.user),
@@ -301,6 +316,8 @@
         '<span class="kv"><b>parent</b> '+(sp.parent?esc(sp.parent.split('/').pop()):'—')+'</span>'+
         '<span class="kv"><b>client</b> '+esc(sp.client||'?')+'</span>'+
         '<span class="kv"><b>mode</b> '+esc(sp.mode||'poll')+'</span>'+
+        (br?'<span class="kv"><b>bridge</b> <span class="mono">'+esc(br.session)+'</span> v'+esc(br.bridge_version||'?')+'</span>'+
+          (br.connected_at?'<span class="kv"><b>connected</b> '+esc(String(br.connected_at).replace('T',' ').slice(0,19))+'</span>':''):'')+
         '<div style="margin-top:5px">'+topicDetail(tops,sp.id)+'</div>',null,'sp/'+sp.id);
     };
     var renderSess=function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
@@ -324,7 +341,9 @@
         groupHeader('🖥',(m.hosts&&m.hosts[h])?(m.hosts[h]+' ('+h+')'):h);
         var sess=box.sessions.slice().sort(function(a,b){ return (b.is_gateway?1:0)-(a.is_gateway?1:0); });
         var hasGw=sess.some(function(s){ return s.is_gateway; });
-        sess.forEach(function(s){ renderSess(s);
+        sess.forEach(function(s){ var one=soloSub(s);
+          if(one){ renderSub(one,s.topics||[],true,s); return; }   // #58: a CLI bridge + its one conversation = one row
+          renderSess(s);
           (s.subpeers||[]).forEach(function(sp){ renderSub(sp,s.topics||[],false); });
           if(s.is_gateway) box.pages.forEach(function(p){ renderPage(p,false); });   // pages hang off the gateway
         });
@@ -334,9 +353,9 @@
       // connections view: flatten to the participants, group by pc/user/none, order code/cowork/browser in each
       var projOf=function(x){ return (x&&x.project&&x.project!=='unclassified')?x.project:null; };
       var items=[];
-      (m.sessions||[]).forEach(function(s){
-        if(isConn(s)) items.push({ pc:machineOf(s), user:userOf(s), project:projOf(s), r:connRank(s.client_kind), f:function(){ renderSess(s); } });
-        (s.subpeers||[]).forEach(function(sp){ items.push({ pc:machineOf(s), user:userOf(sp), project:projOf(sp), r:connRank(sp.client_kind), f:function(){ renderSub(sp,s.topics||[],true); } }); });
+      (m.sessions||[]).forEach(function(s){ var br=soloSub(s)?s:null;   // #58: collapsed pair -> only its sub-peer row
+        if(isConn(s) && !br) items.push({ pc:machineOf(s), user:userOf(s), project:projOf(s), r:connRank(s.client_kind), f:function(){ renderSess(s); } });
+        (s.subpeers||[]).forEach(function(sp){ items.push({ pc:machineOf(s), user:userOf(sp), project:projOf(sp), r:connRank(sp.client_kind), f:function(){ renderSub(sp,s.topics||[],true,br); } }); });
       });
       (m.pages||[]).forEach(function(p){ items.push({ pc:(p.host_label||gwHost||'?'), user:userOf(p), project:projOf(p), r:connRank('browser'), f:function(){ renderPage(p,true); } }); });
       if(groupBy==='none'){
@@ -424,6 +443,8 @@
   // ------------------------------------------------ map
   var SVG='http://www.w3.org/2000/svg';
   function el(t,attrs,parent){ var e=document.createElementNS(SVG,t); for(var k in attrs) e.setAttribute(k,attrs[k]); if(parent) parent.appendChild(e); return e; }
+  // a sub-peer node's small caption: project · user when classified, else its client kind (+ push)
+  function subTag(sp){ return (sp.project&&sp.project!=='unclassified')?(tc(sp.project)+(sp.user?' · '+tc(sp.user):'')):(sp.client_kind+((sp.channel_capable&&sp.mode==='push')?' · push':'')); }
   function alias(scope,target,current){
     var a=prompt('Alias for '+target+':', current||'');
     if(a!=null && sock && sock.readyState===1) sock.send(JSON.stringify({type:'set_alias',scope:scope,target:target,alias:a}));
@@ -459,7 +480,10 @@
     names.forEach(function(h){
       var hh=hosts[h];
       var nSess=hh.sessions.length, nPage=hh.pages.length;
-      var nSub=hh.sessions.reduce(function(n,s){return n+((s.subpeers||[]).length);},0);
+      // #58: a collapsed CLI pair is drawn as ONE node in the bridge row, so its sub-peer is not in the sub-peer row
+      var solo={}; hh.sessions.forEach(function(s){ var one=soloSub(s); if(one) solo[s.session]=one; });
+      var subsOf=function(s){ return solo[s.session]?[]:(s.subpeers||[]); };
+      var nSub=hh.sessions.reduce(function(n,s){return n+subsOf(s).length;},0);
       var hgt=70 + (nSess?80:0) + (nSub?72:0) + (nPage?70:0);
       // gateway in the middle, followers either side
       var gwS=null, fol=[];
@@ -473,8 +497,8 @@
       sess.forEach(function(s){ if(s.is_gateway) gwLx=lx[s.session]; });
       if(nSub){
         var subTot={}, subCnt={};
-        sess.forEach(function(s){ (s.subpeers||[]).forEach(function(sp){ var k=(sp.parent&&lx[sp.parent]!=null)?sp.parent:s.session; subTot[k]=(subTot[k]||0)+1; }); });
-        sess.forEach(function(s){ (s.subpeers||[]).forEach(function(sp){
+        sess.forEach(function(s){ subsOf(s).forEach(function(sp){ var k=(sp.parent&&lx[sp.parent]!=null)?sp.parent:s.session; subTot[k]=(subTot[k]||0)+1; }); });
+        sess.forEach(function(s){ subsOf(s).forEach(function(sp){
           var k=(sp.parent&&lx[sp.parent]!=null)?sp.parent:s.session;
           var j=subCnt[k]||0; subCnt[k]=j+1;
           lx[sp.id]=lx[k]+(j-(subTot[k]-1)/2)*120; ext(lx[sp.id],62);
@@ -501,7 +525,20 @@
       }
       var y1=boxTops+70;
       sess.forEach(function(s,i){
-        var x=off+lx[s.session], isGw=s.is_gateway;
+        var x=off+lx[s.session], isGw=s.is_gateway, one=solo[s.session];
+        if(one){
+          // #58: a CLI follower bridge + its one conversation -> ONE node: the sub-peer, sitting in the bridge row
+          // (edge to the gateway); the bridge's session id / version / connected time go on the hover title.
+          var g1=el('g',{'class':'n-subp solo'+(one.client_kind==='code'?' code':''),id:'n-'+one.id},gNode);
+          el('title',{},g1).textContent=bridgeNote(s);
+          el('circle',{cx:x,cy:y1,r:16},g1);
+          var l1=el('text',{x:x,y:y1+40,'class':'n-label'},g1); l1.textContent=nm(one.name);
+          var s1=el('text',{x:x,y:y1+52,'class':'n-sub'},g1); s1.textContent=one.id.split('/').pop();
+          var t1=subTag(one); if(t1){ var c1=el('text',{x:x,y:y1+63,'class':'n-client'},g1); c1.textContent=t1; }
+          if(s.bridge_version){ var v1=el('text',{x:x,y:y1-27,'class':'n-ver '+verStatus(s.bridge_version,latest)},g1); v1.textContent='v'+s.bridge_version; }
+          nodePos[s.session]=nodePos[one.id]={x:x,y:y1,el:g1};   // traces name either id
+          return;
+        }
         var g=el('g',{'class':'n-sess'+(isGw?' gw':'')+(s.client_kind==='code'?' code':''),id:'n-'+s.session},gNode);
         el('circle',{cx:x,cy:y1,r:22},g);
         var lbl=el('text',{x:x,y:y1+40,'class':'n-label'},g); lbl.textContent=nm(s.name);
@@ -519,13 +556,13 @@
       var gwc=gwCenters.filter(function(c){return c.host===h;})[0];
       sess.forEach(function(s){
         if(gwc && !s.is_gateway){
-          var p=nodePos[s.session], e;
+          var p=nodePos[s.session], e, eid='e-'+(solo[s.session]?solo[s.session].id:s.session);   // #58: collapsed edge pulses with its sub-peer
           if(Math.abs(p.x-gwc.x)>160){
             // non-adjacent follower: arc over the row so it doesn't read as a relay chain
             var mx=(p.x+gwc.x)/2, my=y1-54;
-            e=el('path',{d:'M '+p.x+' '+(p.y-18)+' Q '+mx+' '+my+' '+gwc.x+' '+(gwc.y-18),'class':'edge',fill:'none',id:'e-'+s.session},gEdge);
+            e=el('path',{d:'M '+p.x+' '+(p.y-18)+' Q '+mx+' '+my+' '+gwc.x+' '+(gwc.y-18),'class':'edge',fill:'none',id:eid},gEdge);
           } else {
-            e=el('line',{x1:p.x,y1:p.y,x2:gwc.x,y2:gwc.y,'class':'edge',id:'e-'+s.session},gEdge);
+            e=el('line',{x1:p.x,y1:p.y,x2:gwc.x,y2:gwc.y,'class':'edge',id:eid},gEdge);
           }
         }
       });
@@ -535,7 +572,7 @@
       if(nSub){
         sess.forEach(function(s){
           var sp0=nodePos[s.session];
-          (s.subpeers||[]).forEach(function(sp){
+          subsOf(s).forEach(function(sp){
             var k=(sp.parent&&nodePos[sp.parent])?sp.parent:s.session;
             var anchor=nodePos[k]||sp0;
             var x=off+lx[sp.id];
@@ -543,7 +580,7 @@
             el('circle',{cx:x,cy:ySub,r:14},g);
             var lbl=el('text',{x:x,y:ySub+30,'class':'n-label'},g); lbl.textContent=nm(sp.name);
             var hsub=el('text',{x:x,y:ySub+42,'class':'n-sub'},g); hsub.textContent=sp.id.split('/').pop();
-            var sptag=(sp.project&&sp.project!=='unclassified')?(tc(sp.project)+(sp.user?' · '+tc(sp.user):'')):(sp.client_kind+((sp.channel_capable&&sp.mode==='push')?' · push':''));
+            var sptag=subTag(sp);
             if(sptag){ var ck=el('text',{x:x,y:ySub+53,'class':'n-client'},g); ck.textContent=sptag; }
             el('line',{x1:x,y1:ySub-14,x2:anchor.x,y2:anchor.y+(anchor===sp0?22:14),'class':'edge subp',id:'e-'+sp.id},gEdge);
             nodePos[sp.id]={x:x,y:ySub,el:g};
