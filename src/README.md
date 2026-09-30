@@ -28,7 +28,11 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `mayInitiate`/`allow`/`revoke`/…), `reminders.js` (#29 per-session behaviours; `remindersFor`/`set`/`clear`/…),
   `project-names.js` (#71 the replicated first-seen canonical spelling per project; `note`/`merge`/`display`),
   `traces.js` (the observation-plane ring buffer + dashboard fan-out; `collect`/`history`), and `egress-auth.js`
-  (#36 server-side auth token sources — mint/cache/refresh a bearer token for an egress backend). `win-env.js`
+  (#36 server-side auth token sources — mint/cache/refresh a bearer token for an egress backend). `activity.js` is the
+  pure core of the #70 agent activity board (no I/O, no clock — `now` is a parameter; not wired in yet): report
+  parsing (`@ctx`/`@~ctx`, progress/eta/stale_after, the locked limits), `apply` over a plain state object, the
+  derived views (stale/gone, rollup, visibility), the per-origin gossip `snapshot`/`mergeSnapshot`, the memory
+  budget and `resolveConfig` (the `activity` block + `AI_BRIDGE_ACTIVITY_*`); unit-tested in `tests/test_activity_unit.mjs`. `win-env.js`
   rehydrates environment variables that an MCP host stripped at launch (Windows registry) so `${env:…}` secret
   refs resolve. The bridge core (handlers, routing, delivery, gateway) deliberately stays in `bridge.mjs`.
 - `types.d.ts` — shared shapes for JSDoc + `checkJs` (see Type-checking below).
@@ -117,7 +121,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `test_http_egress_live.mjs` — real MCP → bridge → echo-server egress: backend/project/method gates, origin
   containment, header filter + server-side inject (#33, 9); and `test_lib_unit.mjs` — the fast pure-`lib/` +
   services units (topics/envelope/refs/consent/reminders/traces, egress incl. server-side auth mint/refresh/
-  inject and the secret-resolver, `win-env` reg-parsing, tailscale `hostOf`) (#31/#35/#36, 88). Tests run in
+  inject and the secret-resolver, `win-env` reg-parsing, tailscale `hostOf`) (#31/#35/#36, 88); and
+  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 287). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.

@@ -265,7 +265,7 @@ a bridge tool). The bridge gossips the current state, and each host keeps the fu
   deliberate `@~`.
 - A context is created by its first message. Quote names with spaces: `@~"CTX strip 17"`.
 - Progress and ETA take effect on `@~` messages (an `@` message only records them in its log entry).
-- Optional `details` (≤ 2 KB text) and `data` (≤ 4 KB JSON) are **not gossiped**; the dashboard fetches them on demand.
+- Optional `details` (≤ 4 KB text) and `data` (≤ 16 KB JSON) are **not gossiped**; the dashboard fetches them on demand.
 - Keyed update-in-place lines (an earlier idea) are dropped; `@~` replaces them.
 
 **States:**
@@ -313,12 +313,12 @@ to put secrets in it.
 ```
 log({ as, secret,                 // the reporting session (registered sub-peer)
       agent?,                     // agent label/path under it; omit = the session itself
-      text,                       // one-liner ≤ 120 chars; may start with @ctx / @~ctx
+      text,                       // one-liner ≤ 240 chars (longer is truncated); may start with @ctx / @~ctx
       context?,                   // "@root" (default) | "@Ctx" | "@~Ctx"; overrides a prefix in text
       state?,                     // running|blocked|failed|done|idle; default: the context's current, else running
       progress?,                  // "4812/12000 tiles" | "3/6" | "61%"
       eta?,                       // "15m" | "1h25m" | "19:27"
-      details?, data? })          // ≤ 2 KB text / ≤ 4 KB JSON, fetched on demand
+      details?, data? })          // ≤ 4 KB text / ≤ 16 KB JSON, fetched on demand
   → { ok, id, ts, agent, context, current, stale_at }
 ```
 
@@ -369,7 +369,12 @@ silent steps such as builds and downloads.
 
 ### Build plan
 Each step is its own version.
-1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible.
+1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible. **BUILT (2026-09-30)** — `src/lib/activity.js`
+   (parse, `apply`, stale/gone/rollup/visibility views, per-origin `snapshot`/`mergeSnapshot`, memory budget,
+   `resolveConfig`) + `src/tests/test_activity_unit.mjs` (287 checks). Not wired into the bridge, so **no version
+   bump** (still v1.57.0). Decisions: text over 240 is truncated with a warning (everything else over a limit is
+   rejected); done > total clamps; a clock ETA resolves at parse time (`now` + tz offset); the 129th agent evicts
+   the session's oldest finished agent and is rejected only when none has finished.
 2. The `log` tool, local state and the daily JSONL.
 3. `tools/aimb-log.mjs`.
 4. Gossip, plus on-demand fetch of logs, details and data.
