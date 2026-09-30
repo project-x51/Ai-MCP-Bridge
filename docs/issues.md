@@ -235,6 +235,21 @@ node aimb-log.mjs --session <name> [--project P] [--agent <label>] [--ctx "@~Ctx
 - Anyone holding the realm token can report as any session via the script. That is the same trust as the doorbell,
   and was accepted (Robin); the bridge tool checks `as`/`secret`.
 
+### How sessions learn to use it (proposed)
+The same channels that taught sessions the doorbell (#64/#66b/#67):
+1. **A realm-wide connect reminder:** a `behaviors.realm` `connect` entry for `client:code`. It says: when you spawn
+   agents, put `{log_snippet}` in each agent's prompt and report your own status with `@~root`.
+   - `{log_snippet}` is a new placeholder the bridge expands per session at emit time, like `{doorbell_cmd}`: the
+     absolute node and script paths plus `--session "<name>" --project "<proj>"`, followed by a two-line how-to
+     (`@`/`@~`, report at milestones, the final `--state done`).
+   - The orchestrator pastes it and adds `--agent <label>`.
+2. **The tool and the server instructions:** the `log` tool's own description, plus one line in the bridge's MCP
+   server instructions, cover sessions that have the bridge loaded. This includes Cowork, which can't run the script
+   but can call the tool.
+3. **Agents never see reminders.** They learn only from the orchestrator's prompt, which is why the snippet has to be
+   ready to paste.
+4. **Later:** check whether client hooks could inject the snippet into spawned agents automatically.
+
 ### Still to decide / build notes
 - The gossip frame shape and caps: current lines only, with per-agent and per-host limits and oldest-first eviction.
 - Where the log lives: on the originating host, in a daily JSONL file.
