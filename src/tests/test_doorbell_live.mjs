@@ -2,9 +2,13 @@
 // and that the shipped client script exits with the right code so a caller can be woken by it.
 // #67: with no --timeout the script chimes at the top of the next hour (reason:"hourly" + display guidance);
 // the AIMB_DOORBELL_PERIOD_SEC test hook shortens that period so the chime is provable in seconds.
+// #69: chimes on a 6-hour mark (00/06/12/18:00 local) add inbox_check:true + "call your inbox tool now" guidance;
+// AIMB_DOORBELL_CHECKIN_EVERY moves the mark (every k-th boundary) so both sides are provable in seconds.
+// AIMB_DOORBELL_TEST_TOOLS=<dir> points the script + clock-helper checks at another tools/ dir (used to prove the
+// new checks FAIL on a pre-change copy); default = this tree's tools/.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import WebSocket from 'ws'
 import fs from 'node:fs'
@@ -12,6 +16,8 @@ import os from 'node:os'
 import path from 'node:path'
 
 const SRCDIR = fileURLToPath(new URL('../', import.meta.url))
+const TOOLSDIR = process.env.AIMB_DOORBELL_TEST_TOOLS ? path.resolve(process.env.AIMB_DOORBELL_TEST_TOOLS) : path.join(SRCDIR, 'tools')
+const DOORBELL = path.join(TOOLSDIR, 'aimb-doorbell.mjs')
 const PORT = '7190', WSPORT = '7191', TOKEN = 'doorbelltok'
 const PDIR = path.join(os.tmpdir(), 'aimb-doorbell-' + Date.now())
 fs.mkdirSync(PDIR, { recursive: true })
@@ -102,7 +108,7 @@ for (const l of [L, L2, L3, L4, L5]) { try { l.sock.close() } catch {} }
 await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })   // clear
 await sleep(400)
 const statusFile = path.join(PDIR, 'doorbell-status.json')
-const script = spawn('node', [path.join(SRCDIR, 'tools', 'aimb-doorbell.mjs'),
+const script = spawn('node', [DOORBELL,
   '--name', 'Owner', '--project', 'DBTEST', '--token', TOKEN, '--url', `ws://127.0.0.1:${WSPORT}`,
   '--timeout', '20', '--status', statusFile], { cwd: SRCDIR })
 let out = ''
@@ -127,7 +133,7 @@ check('mail exit carries NO re-arm guidance', !!(parsed && parsed.guidance === u
 // ---- 9. a clean timeout is an EXPECTED termination: exit 0 (not "failed" in the harness), with re-arm guidance (#52) ----
 await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })
 await sleep(400)
-const script2 = spawn('node', [path.join(SRCDIR, 'tools', 'aimb-doorbell.mjs'),
+const script2 = spawn('node', [DOORBELL,
   '--name', 'Owner', '--project', 'DBTEST', '--token', TOKEN, '--url', `ws://127.0.0.1:${WSPORT}`, '--timeout', '1'], { cwd: SRCDIR })
 let out2 = ''
 script2.stdout.on('data', d => { out2 += d.toString() })
@@ -145,7 +151,7 @@ check('timeout carries the silent re-arm guidance', !!(parsed2 && typeof parsed2
 // time and DISPLAY guidance (not a silent re-arm). The test hook shortens the hour to a 2-second period. A guard
 // kills a script that never chimes (the pre-#67 script would sit on its 1800s default).
 function runDoorbell(extraArgs, env = {}, killAfterMs = 15000) {
-  const p = spawn('node', [path.join(SRCDIR, 'tools', 'aimb-doorbell.mjs'),
+  const p = spawn('node', [DOORBELL,
     '--name', 'Owner', '--project', 'DBTEST', '--token', TOKEN, '--url', `ws://127.0.0.1:${WSPORT}`, ...extraArgs],
     { cwd: SRCDIR, env: { ...process.env, ...env } })
   let o = ''
@@ -161,7 +167,9 @@ function runDoorbell(extraArgs, env = {}, killAfterMs = 15000) {
 await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })
 await sleep(300)
 const chimeStatus = path.join(PDIR, 'doorbell-chime.json')
-const h1 = await runDoorbell(['--status', chimeStatus], { AIMB_DOORBELL_PERIOD_SEC: '2' }).exited
+// #69: every = 43200 puts the check-in mark at 2 s x 43200 = local midnight only, so these chimes are OFF the mark
+const OFFMARK = { AIMB_DOORBELL_PERIOD_SEC: '2', AIMB_DOORBELL_CHECKIN_EVERY: '43200' }
+const h1 = await runDoorbell(['--status', chimeStatus], OFFMARK).exited
 check('hourly chime (no --timeout): exits 0 with reason "hourly"', h1.code === 0 && !!h1.j && h1.j.reason === 'hourly', `exit ${h1.code} ${h1.out}`)
 check('hourly chime carries the boundary\'s local time (HH:MM[:SS])', !!(h1.j && /^\d\d:\d\d(:\d\d)?$/.test(h1.j.time || '')), h1.out)
 check('hourly chime guidance says DISPLAY the time (not a silent re-arm)',
@@ -174,23 +182,77 @@ let stc = null; try { stc = JSON.parse(fs.readFileSync(chimeStatus, 'utf8')) } c
 check('status file exit write carries the chime (state/reason/time/guidance)',
   !!(stc && stc.state === 'hourly' && stc.reason === 'hourly' && h1.j && stc.time === h1.j.time && /display/i.test(stc.guidance || '')), stc && JSON.stringify(stc))
 // an immediate re-arm must chime at the NEXT boundary — no double chime for the same one
-const h2 = await runDoorbell([], { AIMB_DOORBELL_PERIOD_SEC: '2' }).exited
+const h2 = await runDoorbell([], OFFMARK).exited
 check('re-arm chimes at the NEXT boundary (no double chime)', !!(h1.j && h2.j && h2.j.reason === 'hourly' && h2.j.time && h2.j.time !== h1.j.time), `${h1.j && h1.j.time} then ${h2.j && h2.j.time}`)
+// #69: an OFF-mark chime is exactly today's chime — no inbox_check, display-the-time guidance, no inbox call asked for
+check('#69 off-mark chime carries NO inbox_check (stdout + status file)',
+  !!(h1.j && h2.j && !('inbox_check' in h1.j) && !('inbox_check' in h2.j) && stc && !('inbox_check' in stc)), `${h1.out} | ${h2.out}`)
+check('#69 off-mark chime keeps today\'s display-the-time guidance (no inbox call)',
+  !!(h1.j && h1.j.guidance === `Top of the hour: display the current time (${h1.j.time}) to the user, then re-arm the doorbell.`), h1.j && h1.j.guidance)
 
-// ---- 11. mail still fires BEFORE the chime (default hourly mode: no --timeout, no test hook) ----
-const m1 = runDoorbell([])
+// ---- 10b. #69 6-hour check-in ON the mark: every = 1 makes EVERY boundary a check-in mark, so the next chime is one.
+// It keeps reason:"hourly" + time, adds inbox_check:true, and tells the agent to call its inbox tool NOW. ----
+const secOfDay = t => { const [h, m, s = 0] = t.split(':').map(Number); return h * 3600 + m * 60 + s }
+const ckStatus = path.join(PDIR, 'doorbell-checkin.json')
+const k1 = await runDoorbell(['--status', ckStatus], { AIMB_DOORBELL_PERIOD_SEC: '1', AIMB_DOORBELL_CHECKIN_EVERY: '1' }).exited
+check('#69 on-mark chime: exit 0, reason still "hourly", time still HH:MM[:SS]',
+  k1.code === 0 && !!k1.j && k1.j.reason === 'hourly' && /^\d\d:\d\d(:\d\d)?$/.test(k1.j.time || ''), `exit ${k1.code} ${k1.out}`)
+check('#69 on-mark chime carries inbox_check:true', !!(k1.j && k1.j.inbox_check === true), k1.out)
+check('#69 on-mark guidance: call the inbox tool NOW even if nothing waits, keeps the bridge loaded, then display + re-arm',
+  !!(k1.j && typeof k1.j.guidance === 'string' && k1.j.guidance.includes(k1.j.time) && /call your inbox tool now even if nothing is waiting/i.test(k1.j.guidance)
+     && /keeps the Ai MCP Bridge loaded/i.test(k1.j.guidance) && /display the time to the user/i.test(k1.j.guidance) && /re-arm/i.test(k1.j.guidance) && !/silent/i.test(k1.j.guidance)),
+  k1.j && k1.j.guidance)
+check('#69 on-mark chime never exits before its boundary', !!(k1.j && k1.j.time && clk(k1.j) >= lbl(k1.j.time)), k1.j && `${clk(k1.j)} vs ${k1.j.time}`)
+let stk = null; try { stk = JSON.parse(fs.readFileSync(ckStatus, 'utf8')) } catch {}
+check('#69 status file exit write carries the check-in (state/reason hourly, time, inbox_check, guidance)',
+  !!(stk && k1.j && stk.state === 'hourly' && stk.reason === 'hourly' && stk.time === k1.j.time && stk.inbox_check === true && stk.guidance === k1.j.guidance), stk && JSON.stringify(stk))
+// the DEFAULT interval (no knob) is every 6th boundary: with a 2 s period the mark is seconds-since-midnight % 12 === 0
+const d1 = await runDoorbell([], { AIMB_DOORBELL_PERIOD_SEC: '2' }).exited
+check('#69 default interval: inbox_check exactly when the boundary\'s seconds-since-local-midnight divide by 6 x period',
+  !!(d1.j && d1.j.reason === 'hourly' && d1.j.time && ((secOfDay(d1.j.time) % 12 === 0) === (d1.j.inbox_check === true))
+     && (d1.j.inbox_check === true || !('inbox_check' in d1.j))), d1.out)
+
+// ---- 11. mail still fires BEFORE the chime (default hourly mode: no --timeout, no test hook). #69: with EVERY hour a
+// check-in mark (every = 1), a mail exit is still exactly a mail exit — no inbox_check, no guidance ----
+const m1 = runDoorbell([], { AIMB_DOORBELL_CHECKIN_EVERY: '1' })
 await sleep(900)
 await call('send_to_peer', { target: owner.peer_id, subject: 'wake2', message: 'ring2', as: sender.peer_id, secret: 's-snd' })
 const r1 = await m1.exited
 check('default (hourly) mode: mail still wakes it first, reason "mail"', r1.code === 0 && !!r1.j && r1.j.reason === 'mail' && r1.j.unread_direct === 1, `exit ${r1.code} ${r1.out}`)
 check('mail wake carries no chime fields / guidance', !!(r1.j && r1.j.time === undefined && r1.j.guidance === undefined), r1.out)
+check('#69 mail wake carries no inbox_check (even when every hour is a check-in mark)', !!(r1.j && !('inbox_check' in r1.j)), r1.out)
 await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })
 await sleep(300)
 
 // ---- 12. an explicit --timeout keeps the old behaviour exactly, even with the period hook set ----
-const t1 = await runDoorbell(['--timeout', '3'], { AIMB_DOORBELL_PERIOD_SEC: '1' }).exited
+const t1 = await runDoorbell(['--timeout', '3'], { AIMB_DOORBELL_PERIOD_SEC: '1', AIMB_DOORBELL_CHECKIN_EVERY: '1' }).exited
 check('explicit --timeout wins over the chime: reason "timeout" + silent re-arm guidance',
   t1.code === 0 && !!t1.j && t1.j.reason === 'timeout' && /silent re-arm/i.test(t1.j.guidance || '') && t1.j.time === undefined, `exit ${t1.code} ${t1.out}`)
+check('#69 explicit --timeout exit carries no inbox_check (even with every boundary a check-in mark)', !!(t1.j && !('inbox_check' in t1.j)), t1.out)
+
+// ---- 13. #69 pure clock maths (no waiting): the check-in mark is judged from the BOUNDARY's local wall time ----
+let clock = null
+try { clock = await import(pathToFileURL(path.join(TOOLSDIR, 'aimb-doorbell-clock.mjs')).href) } catch (e) { console.log('  (clock helper not importable:', String(e && e.message || e).split('\n')[0] + ')') }
+const at = (h, m = 0, s = 0, ms = 0) => new Date(2026, 8, 30, h, m, s, ms).getTime()   // LOCAL wall time
+const mk = ms => !!(clock && clock.isCheckinMark(ms))
+check('#69 pure: 00:00, 06:00, 12:00, 18:00 are check-in marks (1-hour period, every 6)', !!clock && [0, 6, 12, 18].every(h => mk(at(h))), clock ? [0, 6, 12, 18].map(h => mk(at(h))).join(',') : 'no helper')
+check('#69 pure: 01:00 and 23:00 are NOT check-in marks', !!clock && !mk(at(1)) && !mk(at(23)), clock ? `${mk(at(1))},${mk(at(23))}` : 'no helper')
+check('#69 pure: every other top-of-hour off the 6-hour marks is not a check-in',
+  !!clock && Array.from({ length: 24 }, (_, h) => h).every(h => mk(at(h)) === (h % 6 === 0)), 'no helper or mismatch')
+// midnight via the REAL boundary maths: armed at 23:59:59.998 the next boundary is the next day's 00:00 — labelled
+// "00:00" and a check-in, even though the clock at arm time reads hour 23 (drift must not decide it)
+const mid = clock ? clock.nextBoundary(at(23, 59, 59, 998), 3600) : NaN
+check('#69 pure: the boundary after 23:59:59.998 is midnight, labelled "00:00", and a check-in',
+  !!clock && new Date(mid).getHours() === 0 && new Date(mid).getMinutes() === 0 && clock.hhmm(mid) === '00:00' && clock.isCheckinMark(mid) && !clock.isCheckinMark(at(23, 59, 59, 998)),
+  clock ? `${new Date(mid).toString()} ${clock.hhmm(mid)}` : 'no helper')
+const six = clock ? clock.nextBoundary(at(17, 59, 59, 998), 3600) : NaN
+const aft = clock ? clock.nextBoundary(at(18, 0, 0, 1), 3600) : NaN
+check('#69 pure: the boundary after 17:59:59.998 is 18:00 and a check-in; after 18:00:00.001 it is 19:00 and not',
+  !!clock && clock.hhmm(six) === '18:00' && clock.isCheckinMark(six) && clock.hhmm(aft) === '19:00' && !clock.isCheckinMark(aft),
+  clock ? `${clock.hhmm(six)} / ${clock.hhmm(aft)}` : 'no helper')
+check('#69 pure: a test period p marks every 6th multiple of p since local midnight (p=2: 00:00:12 yes, 00:00:10 no)',
+  !!clock && clock.isCheckinMark(at(0, 0, 12), 2) && !clock.isCheckinMark(at(0, 0, 10), 2) && clock.isCheckinMark(at(0, 0, 10), 2, 5) && clock.isCheckinMark(at(0, 0, 3), 1, 1),
+  'no helper or mismatch')
 
 console.log(`\n${pass} passed, ${fail} failed`)
 await c.close()

@@ -108,7 +108,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.53.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.54.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -2280,7 +2280,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         what: fallback ? 'Not implemented, but you can use the doorbell service as a fallback'
                        : 'Not implemented for your session with no fallback supported',
         fallback: fallback ? 'doorbell' : null,
-        ...(fallback ? { hint: `run this backgrounded: ${cmd} — it blocks on a socket at ~zero cost and wakes you when mail is waiting, or at the top of each hour by default (a chime: display the time to the user, then re-arm); token/port default from the bridge's config.json`, command: cmd } : {}) })
+        ...(fallback ? { hint: `run this backgrounded: ${cmd} — it blocks on a socket at ~zero cost and wakes you when mail is waiting, or at the top of each hour by default (a chime: display the time to the user, then re-arm; the 00/06/12/18:00 chimes add inbox_check:true — call your inbox tool first even if nothing is waiting, which keeps the bridge loaded); token/port default from the bridge's config.json`, command: cmd } : {}) })
     }
     case 'send_to_peer': {
       if (!String(a.subject || '').trim()) return ok({ ok: false, code: 'subject-required' })   // T7: no lazy callers

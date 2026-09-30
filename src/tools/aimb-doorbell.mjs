@@ -22,10 +22,20 @@
 // old behaviour exactly (reason:"timeout", silent re-arm). TEST HOOK: env AIMB_DOORBELL_PERIOD_SEC=<n> chimes on
 // the next multiple of n seconds (local clock) instead of the hour — for tests only.
 //
+// 6-hour inbox check-in (#69): the hourly chimes at 00:00, 06:00, 12:00 and 18:00 (LOCAL) also carry
+// inbox_check:true and guidance telling the agent to call its inbox tool NOW even if nothing is waiting — that tool
+// call keeps the Ai MCP Bridge loaded in an otherwise idle session — then display the time and re-arm. reason stays
+// "hourly" and time stays the boundary's "HH:MM". The mark is judged from the BOUNDARY's local wall time (see
+// aimb-doorbell-clock.mjs isCheckinMark), never Date.now() drift, so midnight is "00:00" and a check-in. With the
+// period hook, the check-in lands on every boundary whose seconds since local midnight divide by EVERY × period.
+// TEST/TUNING KNOB: env AIMB_DOORBELL_CHECKIN_EVERY=<k> (default 6) makes it every k-th boundary instead. Mail
+// exits, explicit --timeout exits and the other hourly chimes are unchanged.
+//
 // Exit code is a SUCCESS/FAILURE signal for the harness (which paints any non-zero background exit as "failed",
 // so a benign 30-min timeout used to surface as a FAILURE — #52). The SPECIFIC outcome travels in `reason` on
 // stdout + the --status file, so a caller still branches on it:
-//   0  did its job    -> if reason=="mail" poll the inbox & handle it; if "hourly" show the user the time; then re-arm.
+//   0  did its job    -> if reason=="mail" poll the inbox & handle it; if "hourly" show the user the time (and if
+//                        inbox_check:true, call the inbox tool first even with nothing waiting — #69); then re-arm.
 //                        reason ∈ { mail, hourly, timeout, peer-gone, link-closed(after arming) }
 //   4  couldn't do it -> never armed / a bridge error frame; investigate rather than hot-loop
 //  64  bad usage
@@ -38,6 +48,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
+import { nextBoundary as boundaryAfter, hhmm, isCheckinMark } from './aimb-doorbell-clock.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const argv = process.argv.slice(2)
@@ -57,9 +68,10 @@ const NAME = arg('name'), PROJECT = arg('project'), TOPIC = arg('topic')
 const TIMEOUT_ARG = arg('timeout')   // explicit --timeout => the old fixed timeout; absent => the hourly chime (#67)
 const TIMEOUT_MS = TIMEOUT_ARG != null ? Number(TIMEOUT_ARG) * 1000 : null
 const PERIOD_SEC = Number(process.env.AIMB_DOORBELL_PERIOD_SEC) > 0 ? Number(process.env.AIMB_DOORBELL_PERIOD_SEC) : 3600   // test hook
+const CHECKIN_EVERY = Number(process.env.AIMB_DOORBELL_CHECKIN_EVERY) > 0 ? Math.floor(Number(process.env.AIMB_DOORBELL_CHECKIN_EVERY)) : 6   // #69 test/tuning knob
 const STATUS = arg('status')
 
-if (!NAME && !TOPIC) { console.error('usage: --name <peer> [--project P] [--topic T] [--timeout sec] [--status file]   (no --timeout = chime at the top of the next hour)'); process.exit(64) }
+if (!NAME && !TOPIC) { console.error('usage: --name <peer> [--project P] [--topic T] [--timeout sec] [--status file]   (no --timeout = chime at the top of the next hour; 00/06/12/18:00 chimes add inbox_check:true — call your inbox tool)'); process.exit(64) }
 if (!TOKEN) { console.error('no realm token: pass --token, set AI_BRIDGE_TOKEN, or run beside src/config.json'); process.exit(64) }
 
 const started = Date.now()
@@ -74,18 +86,9 @@ function localIso(d = new Date()) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}${sign}${pad(off / 60)}:${pad(off % 60)}`
 }
 
-// #67: the next chime boundary, strictly after `now` — the top of the next LOCAL hour (setHours handles DST and
-// non-whole-hour offsets), or with the test hook the next multiple of PERIOD_SEC on the local clock.
-function nextBoundary(now = Date.now()) {
-  if (PERIOD_SEC === 3600) { const d = new Date(now); d.setMinutes(0, 0, 0); d.setHours(d.getHours() + 1); return d.getTime() }
-  const offMs = -new Date(now).getTimezoneOffset() * 60000, p = PERIOD_SEC * 1000
-  return (Math.floor((now + offMs) / p) + 1) * p - offMs
-}
-// the boundary's local wall time — "14:00" (with :SS only when a test period lands off the minute)
-function hhmm(ms) {
-  const d = new Date(ms), pad = n => String(n).padStart(2, '0')
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}` + (d.getSeconds() ? `:${pad(d.getSeconds())}` : '')
-}
+// #67: the next chime boundary / its label live in aimb-doorbell-clock.mjs (pure, unit-tested); #69 adds the
+// check-in mark there too.
+const nextBoundary = (now = Date.now()) => boundaryAfter(now, PERIOD_SEC)
 
 // heartbeat/state file — lets a human (or the agent, cheaply) confirm the doorbell is still alive
 // WITHOUT spending a turn. Rewritten on connect, on every bridge ping, and on exit.
@@ -106,6 +109,8 @@ let finished = false, armed = false   // armed flips true on the bridge's `welco
 const REARM_GUIDANCE = "silent re-arm — don't mention this wake unless you're stopping the loop"
 // #67: the hourly chime is the opposite — a visible wake whose whole point is to show the user the time.
 const chimeGuidance = t => `Top of the hour: display the current time (${t}) to the user, then re-arm the doorbell.`
+// #69: on the 6-hour marks the chime also makes the agent touch the bridge, so an idle session keeps it loaded.
+const checkinGuidance = t => `6-hour check-in (${t}): call your inbox tool now even if nothing is waiting — it keeps the Ai MCP Bridge loaded in this session. Then display the time to the user and re-arm the doorbell.`
 function done(reason, extra) {
   if (finished) return
   finished = true
@@ -121,7 +126,7 @@ function done(reason, extra) {
   // #51: stamp EVERY exit centrally, so both the stdout line and the status file's exit write carry it.
   const payload = { reason, ...(extra || {}), watch,
     exited_at: localIso(now), exited_at_unix: Math.floor(now.getTime() / 1000),
-    ...(reason === 'hourly' ? { guidance: chimeGuidance(extra.time) } : routineNoMail ? { guidance: REARM_GUIDANCE } : {}) }
+    ...(reason === 'hourly' ? { guidance: extra.inbox_check ? checkinGuidance(extra.time) : chimeGuidance(extra.time) } : routineNoMail ? { guidance: REARM_GUIDANCE } : {}) }
   console.log(JSON.stringify(payload))
   status(state, payload)
   try { ws.close() } catch {}
@@ -137,7 +142,8 @@ else {
   const chime = () => {
     const left = target - Date.now()
     if (left > 0) { timer = setTimeout(chime, left); return }
-    done('hourly', { time: hhmm(target) })
+    // #69: the check-in is decided by the BOUNDARY's local time (target), not Date.now() — midnight reads "00:00"
+    done('hourly', { time: hhmm(target), ...(isCheckinMark(target, PERIOD_SEC, CHECKIN_EVERY) ? { inbox_check: true } : {}) })
   }
   timer = setTimeout(chime, target - started)
 }

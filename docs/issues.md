@@ -6,9 +6,16 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.53.0) — read this first after a compact
-**Current version: v1.53.0.** All work committed to `main` (v1.42.0 – v1.53.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.54.0) — read this first after a compact
+**Current version: v1.54.0.** All work committed to `main` (v1.42.0 – v1.54.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.54.0):** Built **#69** — the doorbell's hourly chimes at 00:00/06:00/12:00/18:00 (local) add
+`inbox_check:true` + guidance to call the inbox tool NOW even if nothing is waiting (keeps the Ai MCP Bridge loaded in
+an idle session), then display the time and re-arm. Other chimes, mail and `--timeout` exits unchanged. The script now
+imports `tools/aimb-doorbell-clock.mjs` (ships beside it). Nothing to restart: each re-armed doorbell picks it up.
+The `config.example.json` connect default mentions it; live configs were not edited (the realm connect default only
+changes where someone publishes a newer `behaviors.realm` block).
 
 **2026-09-30 (v1.53.0):** Fixed **#42** — the `tpm` vault now trusts a key only when `Tpm.exe` POSITIVELY reports the
 Microsoft Platform Crypto Provider + a `TPM-Version:` platform type; otherwise `recover_secret:false` (reason + hint in
@@ -129,6 +136,21 @@ inbox/send — the bridge restarts often, so re-register whenever a send returns
 `unknown-subpeer`.
 
 ---
+
+## #69 — doorbell 6-hour inbox check-in keeps the bridge loaded  ·  **DONE (v1.54.0)**
+Robin's request (2026-09-30). An idle session whose only activity is the doorbell loop makes no bridge tool call for
+hours, and the host can unload the MCP bridge from it. **Built:** the hourly chimes whose boundary falls on a 6-hour
+mark (00:00, 06:00, 12:00, 18:00 local) keep `reason:"hourly"` and `time`, and add `inbox_check:true` with
+`guidance:"6-hour check-in (18:00): call your inbox tool now even if nothing is waiting — it keeps the Ai MCP Bridge
+loaded in this session. Then display the time to the user and re-arm the doorbell."`; the `--status` exit write gets
+the same fields. Other hourly chimes, mail exits and explicit-`--timeout` exits are unchanged. The mark is decided from
+the BOUNDARY's local wall time (`isCheckinMark` in the new pure helper `tools/aimb-doorbell-clock.mjs`, which also now
+holds `nextBoundary`/`hhmm`), never `Date.now()` drift, so midnight reports `"00:00"` and is a check-in. Rule: the
+boundary's seconds since local midnight divide by `every × period` (1-hour period, every 6 → hour % 6 === 0). Knobs:
+`AIMB_DOORBELL_PERIOD_SEC` (existing test hook) and new `AIMB_DOORBELL_CHECKIN_EVERY` (default 6; test/tuning). The
+`config.example.json` realm connect default (356 chars) and the code-session `set_wake` hint mention it. Tests:
+`test_doorbell_live` 40 → 56 (on-mark, off-mark, default interval, mail/`--timeout` unchanged, status file, and pure
+checks of 00/06/12/18 vs 01/23 incl. midnight after 23:59:59.998); 9 of the new checks FAIL on the pre-change script.
 
 ## #68 — page capKey (reply-cap signing key) leaked in roster/list_sessions/WS  ·  **DONE (v1.49.0)**
 Found by the #66d agent (2026-09-30): `list_sessions` showed each page as `capKey: {type:'Buffer', data:[...]}`.

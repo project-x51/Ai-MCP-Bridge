@@ -47,7 +47,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
     `aimbBridgeUI.init({mount, buttons, verb, subject, payload})`. See "Pages".
   - `tools/aimb-doorbell.mjs` — **the doorbell (#39)**: a node CLI that blocks until mail is waiting for a peer
     (or topic) and then exits, so an idle AI session can be woken instead of polling `inbox` every few seconds.
-    See "Doorbell" below.
+    See "Doorbell" below. Its pure clock maths (next boundary, `HH:MM` label, the #69 6-hour check-in mark) is in
+    `tools/aimb-doorbell-clock.mjs`, which must sit beside it.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -100,7 +101,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   and is proven ISOLATED (never sees roster/traces/persistence/sender) — plus the shipped
   `tools/aimb-doorbell.mjs` exit codes (0 mail / 0 timeout), its status file, and the #67 hourly chime (a
   shortened test period chimes `hourly` with the boundary time + display guidance, never early, re-arm targets the
-  next boundary; mail still fires first; an explicit `--timeout` keeps `timeout` + silent guidance) (40);
+  next boundary; mail still fires first; an explicit `--timeout` keeps `timeout` + silent guidance), and the #69
+  6-hour check-in (an on-mark chime adds `inbox_check:true` + call-your-inbox guidance, stdout and status file; an
+  off-mark chime, mail and `--timeout` carry none; pure checks of the 00/06/12/18:00 mark incl. midnight) (56);
   `test_parked_live.mjs` — out-of-band parked mail surfaces
   on a plain poll and on reattach, and is **acked on serve** so a re-register never redelivers it (#23/#34, 8);
   `test_keepalive_live.mjs` — `release_topic {keep_alive}` keeps an ownerless topic alive, parks directed
@@ -348,10 +351,22 @@ remainder), so a re-arm always targets the *next* hour, with no double chime and
 `--timeout <sec>` keeps the fixed timeout (`reason:"timeout"`, silent guidance). Test hook:
 `AIMB_DOORBELL_PERIOD_SEC=<n>` chimes on the next multiple of *n* seconds instead of the hour (tests only).
 
+**6-hour inbox check-in (#69):** the chimes at **00:00, 06:00, 12:00 and 18:00** (local) keep `reason:"hourly"` and
+`time`, and add `inbox_check:true` with
+`guidance:"6-hour check-in (18:00): call your inbox tool now even if nothing is waiting — it keeps the Ai MCP Bridge
+loaded in this session. Then display the time to the user and re-arm the doorbell."` (same fields in the `--status`
+exit write). An idle session otherwise makes no bridge tool call for hours, and the host may unload the MCP bridge;
+that one inbox call keeps it loaded. The mark is judged from the **boundary's** local wall time, never `Date.now()`
+drift, so midnight reports `"00:00"` and is a check-in. Every other chime, mail exits and explicit-`--timeout` exits
+are unchanged. The maths lives in `tools/aimb-doorbell-clock.mjs` (pure, unit-tested; keep it beside the script).
+With the period hook, the check-in lands on each boundary whose seconds since local midnight divide by
+6 × period. Test/tuning knob: `AIMB_DOORBELL_CHECKIN_EVERY=<k>` (default 6) = every *k*-th boundary instead.
+
 Run it **backgrounded**; it costs no tokens and ~no CPU while waiting, and exits the moment there is
 something to collect — the caller wakes, polls `inbox` **once**, and re-arms. The **exit code is a plain
 success/failure signal** for the harness (which paints any non-zero background exit as "failed"): **0** = it did
-its job — re-arm, and if `reason=="mail"` poll the inbox first, if `"hourly"` show the user the time (#52; a
+its job — re-arm, and if `reason=="mail"` poll the inbox first, if `"hourly"` show the user the time (and with
+`inbox_check:true` call the inbox tool first, #69) (#52; a
 benign timeout no longer reads as a failure) · **4** = it *couldn't* do its job (never armed / bridge error — investigate, don't hot-loop) · **64**
 bad usage. The **specific outcome is in `reason`** on stdout + `--status` (`mail` / `hourly` / `timeout` /
 `peer-gone` / `link-closed`), so a caller still branches on it. A routine **no-mail** wake also carries a terse

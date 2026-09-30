@@ -40,7 +40,7 @@
     "realm": {
       "updated_at": "2026-09-30T00:00:00Z",
       "default": [
-        { "operation": "connect", "scope": "client", "match": "code", "behavior": "To receive messages while idle without polling, run this backgrounded: {doorbell_cmd} — it blocks on a socket at ~zero cost and wakes you when mail is waiting, and chimes at the top of each hour (display the time to the user, then re-arm). set_wake (bridge-initiated wake) is not implemented; the doorbell is the fallback." }
+        { "operation": "connect", "scope": "client", "match": "code", "behavior": "To receive messages while idle without polling, run this backgrounded: {doorbell_cmd} — it blocks on a socket at ~zero cost and wakes you when mail waits, and chimes hourly (show the user the time, then re-arm; at 00/06/12/18:00 call your inbox tool first even if empty: it keeps the bridge loaded). set_wake is unimplemented; the doorbell is the fallback." }
       ]
     }
   },

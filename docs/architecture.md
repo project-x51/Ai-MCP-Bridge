@@ -1114,6 +1114,28 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.54.0):** *doorbell 6-hour inbox check-in keeps the bridge loaded (#69).* Robin's request: an idle
+  session that only loops the doorbell makes no bridge tool call for hours, so the host may unload the MCP bridge
+  from it. The hourly chimes (#67) whose boundary falls on 00:00, 06:00, 12:00 or 18:00 LOCAL now keep
+  `reason:"hourly"` + `time` and add `inbox_check:true` with `guidance:"6-hour check-in (18:00): call your inbox tool
+  now even if nothing is waiting — it keeps the Ai MCP Bridge loaded in this session. Then display the time to the
+  user and re-arm the doorbell."` — the same fields land in the `--status` exit write. Every other chime, mail exits
+  and explicit-`--timeout` exits are byte-for-byte unchanged. **Mark from the boundary, not the clock:** the chime
+  already waits out an early timer and labels itself with the boundary; the check-in is decided the same way,
+  `isCheckinMark(target)` on the boundary's local wall time (seconds since local midnight divisible by
+  `every × period`; real period 3600 s and every 6 → hour % 6 === 0), so drift can't turn 00:00 into a "23:59"
+  non-check-in and midnight reports `"00:00"`. The pure maths (`nextBoundary`, `hhmm`, `isCheckinMark`) moved to
+  `tools/aimb-doorbell-clock.mjs`, imported by the script (ships beside it) and by the test — the script itself
+  runs on import, so a side-effect-free module is what makes it unit-testable. Knobs: `AIMB_DOORBELL_PERIOD_SEC`
+  (existing test hook) and `AIMB_DOORBELL_CHECKIN_EVERY=<k>` (default 6; test/tuning — every k-th boundary). The
+  realm connect default in `config.example.json` (356 chars, under the 365 cap) and the code-session `set_wake` hint
+  mention the check-in. Tests: `test_doorbell_live` 40 → 56 — on-mark chime (every = 1: `hourly` + time +
+  `inbox_check:true` + check-in guidance, never early, status file), off-mark chime (no `inbox_check`, exact #67
+  guidance), default interval consistency (period 2 s: `inbox_check` iff seconds-since-midnight % 12 === 0), mail and
+  `--timeout` carry no `inbox_check` even when every boundary is a mark, and pure checks (00/06/12/18 yes, 01/23 no,
+  all 24 hours, the boundary after 23:59:59.998 is "00:00" + a check-in, after 17:59:59.998 is 18:00, after
+  18:00:00.001 is 19:00 + not). Run against the pre-change script (`AIMB_DOORBELL_TEST_TOOLS` → a temp copy) 9 checks
+  FAIL (3 live on-mark + 6 pure).
 - **Built (v1.53.0):** *TPM probe requires the platform crypto provider — no software-key false positive (#42).*
   **What was wrong:** the #41 `tpm` probe asked "did `Tpm.exe --pubkey` exit 0 with a PUBKEY?", and `seal()` trusted
   the same answer — so on the field host with no usable TPM the bridge advertised `recover_secret:true` and would
