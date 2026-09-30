@@ -415,6 +415,17 @@ export function create(ctx) {
     },
   }
 
+  // ---- #66b realm-wide default reminders: the replicated last-writer-wins record, ONE file per writing host (so a
+  // shared store keeps one per machine, never two hosts on one file); the bridge takes the LWW winner of all(). ----
+  const realmDefaults = {
+    async put(writer, record) { await writeAtomic(dir('realm', `${lslug(writer || 'host', 80)}.rdef`), JSON.stringify(record)) },
+    async all() {
+      const rdir = dir('realm'), out = []
+      for (const f of await readDirSafe(rdir)) { if (!f.endsWith('.rdef')) continue; const j = await readJson(path.join(rdir, f)); if (j) out.push(j) }
+      return out
+    },
+  }
+
   // a read-only summary of every store for the dashboard's persistence view. Records are self-describing,
   // so this shows real identities/topics (not opaque hashes). Capped per store to bound the payload.
   async function snapshot() {
@@ -453,7 +464,7 @@ export function create(ctx) {
   }
 
   return {
-    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, behaviors, snapshot,
+    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, behaviors, realmDefaults, snapshot,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,

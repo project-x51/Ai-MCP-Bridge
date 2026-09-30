@@ -5,7 +5,8 @@ import { splitTopic, isWildcard, topicMatch, patternsOverlap, patternKey, parseT
 import { envelopeId } from '../lib/envelope.js'
 import { TOOLS } from '../lib/tool-schemas.js'
 import { createConsent, parseTtlMin } from '../lib/consent.js'
-import { createReminders } from '../lib/reminders.js'
+import { createReminders, effectiveDefaults } from '../lib/reminders.js'
+import { createRealmDefaults, normRealmDefaults, mergeRealm, beatsRealm, realmFromConfig } from '../lib/realm-defaults.js'
 import { createTraces } from '../lib/traces.js'
 import { create as createEgress } from '../services/egress.js'
 import { hostOf } from '../facets/discovery/tailscale.js'
@@ -195,6 +196,83 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   r.setDefaults([{ operation: 'send', scope: 'all', behavior: 'log every send' }])
   check('#44: a send-operation default fires on send', r.remindersFor('peer:any', { operation: 'send', project: 'Z' }).some(x => x.operation === 'send' && x.default === true))
   check('#44: that send default does NOT fire on receive', r.remindersFor('peer:any', dctx({ session: 'peer:s', project: 'Z' }, null)).length === 0)
+}
+
+// ---- #66b: realm-wide default reminders — ONE replicated last-writer-wins record ----
+{
+  const E = (op, scope, match, behavior) => ({ operation: op, scope, match, behavior })
+  const R = (ts, list, origin = 'h') => ({ updated_at: ts, default: list, origin })
+  const L1 = [E('connect', 'client', 'code', 'ring the doorbell')], L2 = [E('connect', 'client', 'code', 'ring it LOUDER')]
+  const text = r => r && r.default.map(d => d.behavior).join('|')
+  check('#66b merge: a first record is adopted', text(mergeRealm(null, R(100, L1))) === 'ring the doorbell')
+  check('#66b merge: a newer updated_at wins', text(mergeRealm(mergeRealm(null, R(100, L1)), R(200, L2))) === 'ring it LOUDER')
+  check('#66b merge: an OLDER updated_at does not override', text(mergeRealm(mergeRealm(null, R(200, L2)), R(100, L1))) === 'ring it LOUDER')
+  check('#66b merge: ISO updated_at (the config form) orders like ms', text(mergeRealm(mergeRealm(null, R('2026-09-30T10:00:00Z', L1)), R('2026-09-30T09:00:00Z', L2))) === 'ring the doorbell'
+    && normRealmDefaults(R('2026-09-30T10:00:00Z', L1)).updated_at === Date.parse('2026-09-30T10:00:00Z'))
+  const held = mergeRealm(null, R(300, L1))
+  check('#66b merge: idempotent (re-merging the held record keeps the SAME object)', mergeRealm(held, held) === held && mergeRealm(held, JSON.parse(JSON.stringify(held))) === held)
+  // tie rule: equal updated_at -> the greater canonical list JSON, then the greater origin; both orders agree
+  const a = R(500, L1, 'x'), b = R(500, L2, 'y'), c = R(500, L1, 'z')
+  const w1 = mergeRealm(mergeRealm(null, a), b), w2 = mergeRealm(mergeRealm(null, b), a)
+  check('#66b tie: equal updated_at -> the same survivor in both orders', JSON.stringify(w1) === JSON.stringify(w2))
+  const o1 = mergeRealm(mergeRealm(null, a), c), o2 = mergeRealm(mergeRealm(null, c), a)
+  check('#66b tie: same list -> the greater origin, deterministically', o1.origin === 'z' && o2.origin === 'z')
+  check('#66b tie: beatsRealm never lets a record beat itself', !beatsRealm(normRealmDefaults(a), normRealmDefaults(a)))
+  // commutative across every order of a batch
+  const recs = [R(100, L1, 'p'), R(700, L2, 'q'), R(700, L1, 'r'), R(400, [E('publish', 'all', null, 'p')], 's'), R(700, L2, 'a')]
+  const perms = [[0, 1, 2, 3, 4], [4, 3, 2, 1, 0], [2, 0, 4, 1, 3], [1, 4, 0, 3, 2], [3, 2, 1, 4, 0]]
+  const outs = perms.map(p => JSON.stringify(p.reduce((cur, i) => mergeRealm(cur, recs[i]), null)))
+  check('#66b merge: commutative (every order converges to one record)', outs.every(o => o === outs[0]), JSON.stringify(outs))
+  // canonical form: order-insensitive + normalised with the behaviors.default rules
+  const n1 = normRealmDefaults(R(1, [E('send', 'all', null, 's'), E('connect', 'client', 'code', 'c')])), n2 = normRealmDefaults(R(1, [E('connect', 'client', 'code', 'c'), E('send', 'all', null, 's')]))
+  check('#66b norm: entry order does not matter (canonical JSON)', JSON.stringify(n1) === JSON.stringify(n2))
+  const nv = normRealmDefaults(R(1, [{ behavior: 'bare' }, { scope: 'bogus', behavior: 'b2' }, { operation: 'deliver', scope: 'topic', match: 'a/b', behavior: 'd' }, { scope: 'all' }, 'junk']))
+  check('#66b norm: same validation as behaviors.default (op->receive, bad scope->all, deliver->receive, no-behavior dropped)',
+    nv.default.length === 2 && nv.default.every(d => d.operation === 'receive') && nv.default.some(d => d.scope === 'topic' && d.match === 'a/b'), JSON.stringify(nv))
+  check('#66b norm: a string default = one all-scope receive default', JSON.stringify(normRealmDefaults(R(1, 'be nice')).default) === JSON.stringify([E('receive', 'all', null, 'be nice')]))
+  check('#66b norm: text capped at 365, list capped at 64', normRealmDefaults(R(1, [E('receive', 'all', null, 'x'.repeat(999))])).default[0].behavior.length === 365
+    && normRealmDefaults(R(1, Array.from({ length: 90 }, (_, i) => E('receive', 'host', 'h' + i, 'b')))).default.length === 64)
+  // junk input: never adopted, never throws
+  const junk = [null, undefined, 5, 'x', [], {}, { default: L1 }, R(0, L1), R(-5, L1), R('not a date', L1), R(NaN, L1), R(100, null), R(100, 7), R(100, { a: 1 })]
+  check('#66b merge: junk records are ignored', junk.every(j => mergeRealm(null, j) === null) && junk.every(j => mergeRealm(held, j) === held))
+  // config candidate: needs an explicit updated_at; a block without `default` = an empty list (clears)
+  check('#66b config: behaviors.realm -> candidate tagged with this host as origin', (() => { const r = realmFromConfig({ behaviors: { realm: { updated_at: '2026-09-30T00:00:00Z', default: L1 } } }, 'ROBIN'); return r && r.origin === 'ROBIN' && text(r) === 'ring the doorbell' })())
+  check('#66b config: no updated_at -> ignored (never the file mtime)', realmFromConfig({ behaviors: { realm: { default: L1 } } }, 'h') === null && realmFromConfig({}, 'h') === null)
+  check('#66b config: a block with no default list = an empty realm list', JSON.stringify(realmFromConfig({ behaviors: { realm: { updated_at: 5 } } }, 'h').default) === '[]')
+  // the stateful wrapper: persists + fires onChange on a win only; rehydrate picks the LWW winner of the stored copies
+  const stored = [], seen = []
+  const rd = createRealmDefaults({ persistence: { realmDefaults: { put: async (w, r) => { stored.push([w, r]) }, all: async () => [] } }, persist: true, writer: 'HOST', onChange: r => seen.push(text(r)) })
+  check('#66b module: a win persists (per writer) + notifies', rd.merge(R(10, L1)) === true && stored.length === 1 && stored[0][0] === 'HOST' && seen.join() === 'ring the doorbell')
+  check('#66b module: a loss changes nothing (no write, no notify)', rd.merge(R(5, L2)) === false && stored.length === 1 && seen.length === 1)
+  check('#66b module: current() is a copy', (() => { const c1 = rd.current(); c1.default[0].behavior = 'mutated'; return text(rd.current()) === 'ring the doorbell' })())
+  const rd2 = createRealmDefaults({ persistence: { realmDefaults: { put: async () => {}, all: async () => [R(10, L1, 'a'), R(30, L2, 'b'), { junk: 1 }, R(20, L1, 'c')] } }, persist: true, writer: 'H', onChange: r => seen.push('re:' + text(r)) })
+  await rd2.rehydrate()
+  check('#66b module: rehydrate keeps the newest stored copy', rd2.current().updated_at === 30 && text(rd2.current()) === 'ring it LOUDER' && seen.at(-1) === 're:ring it LOUDER')
+}
+// #66b effective defaults: realm defaults layered UNDER the local behaviors.default (local key wins; realm fills gaps)
+{
+  const E = (op, scope, match, behavior) => ({ operation: op, scope, match, behavior })
+  const eff = effectiveDefaults([E('connect', 'client', 'code', 'LOCAL'), E('send', 'all', null, 'L-send')], [E('connect', 'client', 'CODE', 'REALM'), E('publish', 'all', null, 'R-pub')])
+  check('#66b effective: a LOCAL entry beats the realm one for the same (operation,scope,match) key (case-insensitive match)',
+    eff.filter(d => d.operation === 'connect').length === 1 && eff.find(d => d.operation === 'connect').behavior === 'LOCAL' && !eff.find(d => d.operation === 'connect').realm)
+  check('#66b effective: the realm fills the gaps (tagged realm:true)', eff.some(d => d.operation === 'publish' && d.behavior === 'R-pub' && d.realm === true) && eff.some(d => d.behavior === 'L-send' && !d.realm))
+  const r = createReminders({ persistence: {}, persist: false })
+  r.setRealmDefaults([E('connect', 'client', 'code', 'REALM-CONNECT'), E('send', 'all', null, 'REALM-SEND')])
+  const c0 = r.remindersFor('peer:x', { operation: 'connect', client_kind: 'code' })
+  check('#66b reminders: a realm default fires with default:true + realm:true', c0.length === 1 && c0[0].behavior === 'REALM-CONNECT' && c0[0].default === true && c0[0].realm === true)
+  r.setDefaults([E('connect', 'client', 'code', 'LOCAL-CONNECT')])
+  const c1 = r.remindersFor('peer:x', { operation: 'connect', client_kind: 'code' })
+  check('#66b reminders: a local default replaces the realm one for its key (and survives a later realm update)', (() => {
+    r.setRealmDefaults([E('connect', 'client', 'code', 'REALM-CONNECT-2'), E('send', 'all', null, 'REALM-SEND')])
+    const c2 = r.remindersFor('peer:x', { operation: 'connect', client_kind: 'code' })
+    return c1.length === 1 && c1[0].behavior === 'LOCAL-CONNECT' && !c1[0].realm && c2.length === 1 && c2[0].behavior === 'LOCAL-CONNECT'
+  })())
+  check('#66b reminders: defaultList() = the effective set (realm gap-filler tagged)', r.defaultList().length === 2 && r.defaultList().some(d => d.behavior === 'REALM-SEND' && d.realm === true) && r.defaultList().some(d => d.behavior === 'LOCAL-CONNECT' && !d.realm))
+  r.set('peer:own', { realm: 'default', project: 'P', user: 'u', name: 'O' }, 'send', 'all', null, 'MY-SEND')
+  const s0 = r.remindersFor('peer:own', { operation: 'send', project: 'Z' })
+  check('#66b reminders: a session\'s OWN reminder beats the realm default', s0.length === 1 && s0[0].behavior === 'MY-SEND' && !s0[0].default)
+  r.setRealmDefaults([])
+  check('#66b reminders: an empty realm list clears the realm entries only', r.defaultList().length === 1 && r.defaultList()[0].behavior === 'LOCAL-CONNECT')
 }
 
 // ---- traces module (owns the ring buffer + dashboard fan-out) ----

@@ -1114,6 +1114,61 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.47.0):** *realm-wide default reminders replicate mesh-wide (#66b).* **What was wrong:** default
+  reminders (`config.behaviors.default`) are per config FILE — ROBIN and LITTLE share the Dropbox config, the Mac and
+  phub-lnx-01 each have their own — so a default added once (v1.43's doorbell connect reminder) reached only hosts
+  whose config was hand-edited. **Config:** a new `behaviors.realm` block, `{ "updated_at": "<ISO>", "default": [
+  {operation, scope, match, behavior}, … ] }`, in ANY one host's config. `default` has the `behaviors.default` shape
+  and the SAME validation (`normDefaults`, now exported from `lib/reminders.js`: an unknown op → `receive`, an unknown
+  scope → `all`, 365-char cap, dedupe by key; a string = one all-scope receive default; at most 64 entries).
+  `updated_at` is EXPLICIT, never the file mtime, so an unrelated edit to another host's config can't win; a block
+  without a valid `updated_at` is ignored with a log line. **Design:** new `lib/realm-defaults.js` holds ONE
+  replicated last-writer-wins record for the whole realm, `{ updated_at (ms), default:[…], origin }` (`origin` = the
+  publishing host's name, stable across restarts). `beatsRealm`: greater `updated_at` wins; on a tie the greater
+  canonical JSON of the (sorted) list, then the greater origin — a total order, so merge is idempotent + commutative.
+  Unlike #62 there is no local stamp bump: the operator's timestamp IS the order, so an older block in a host's own
+  config never overrides a newer one it learned. A newer block replaces the WHOLE list (one record, not per entry); to
+  clear, publish a newer block with `"default": []`; deleting the block retracts nothing. bridge.mjs only calls
+  `merge()`/`current()`/`rehydrate()`; `onChange` hands the winner's list to `reminders.setRealmDefaults()`.
+  **Spreading:** each bridge seeds its candidate from its own config at start and on every live-reload
+  (`seedRealmDefaults`); a win on a gateway → `broadcastRoster`, on a follower → a new follower→gateway frame
+  `REALM_DEFAULTS {session, realm_defaults}` (also sent on every (re)connect after `REGISTER`/`GRANTS`; accepted only
+  after `HELLO`). The winner rides `PEER_ROSTER.realm_defaults` (included in the `gossipToPeers` dedupe signature, so
+  a change goes at once, and in the #63 refresh as anti-entropy) and `ROSTER.realm_defaults` to followers, which
+  merge it (a follower computes its own sub-peers' reminders). `mergeRemoteRoster` merges it BEFORE the #63
+  unchanged-slice early return, exactly as grants do; a change re-broadcasts, and an idempotent merge ends the loop.
+  **Persistence:** when on, every process writes the winner to a new `realmDefaults` store (`realm/<host>.rdef`, one
+  file per writing host, so a shared store never has two machines on one file) and `rehydrate()` takes the LWW winner
+  of all copies at startup, so a restarted host keeps the latest even if it can reach no one. **Precedence
+  (effective defaults, `effectiveDefaults(local, realm)`):** the host's own `behaviors.default` entries, plus every
+  realm entry whose `(operation, scope, match)` key no local entry has — a LOCAL entry wins its key, the realm fills
+  the gaps; a session's own `set_behavior` reminder still beats both. Realm-sourced reminders carry `default:true,
+  realm:true`; `register_self`'s `default_behaviors` is the effective set; #67 placeholder expansion applies (it runs
+  on the emitting host, so each host hands out its own doorbell path). **Config path override:** new env
+  `AI_BRIDGE_CONFIG=<path>` (absolute, cwd-relative, `~` expands) replaces `config.json` beside `bridge.mjs` for the
+  startup read, the live-reload watch (`facets/config/file.js` via `ctx.CONFIG_FILE`) and the alias write-back — a
+  general feature (several bridges from one checkout; config outside the code folder) that the live test needs.
+  **`config.example.json`:** the doorbell connect reminder (`connect`/`client`/`code`) MOVED from
+  `behaviors.default` into `behaviors.realm.default` (it is a realm-wide convention, the motivating case). The
+  receive/send presentation conventions stay LOCAL: they work on every bridge version with no federation (realm
+  defaults need 1.47+ everywhere), and a host can restyle them without a realm-wide timestamp race.
+  `_comment_behaviors` documents the block. **Mixed versions:** ≤1.46 bridges ignore `realm_defaults` and the
+  `REALM_DEFAULTS` frame, so realm defaults spread only among 1.47+ hosts (and followers of a 1.47+ gateway); a ≤1.46
+  host keeps using only its own `behaviors.default` (and ignores a `behaviors.realm` block in its config).
+  **Trust:** any realm member can publish realm defaults — the same trust level as the #62 grant gossip (the realm
+  token is the membership gate); a far-future `updated_at` would win until beaten by a later one. **Tests:** 29 new
+  unit checks in `test_lib_unit` (newer wins, older ignored, ISO == ms, idempotent, tie rules both orders, commutative
+  across permutations, canonical order, shared validation, caps, junk input, config parse, persist/notify only on a
+  win, rehydrate picks the newest; effective-defaults precedence incl. local-beats-realm, realm fills gaps, own beats
+  both, empty realm list). New `test_realm_defaults_live` (20 checks): gateways on 127.0.0.1/127.0.0.2 plus a
+  FOLLOWER on A, each on its own temp config via `AI_BRIDGE_CONFIG`, 60s refresh so propagation must be prompt:
+  (1) B's realm connect reminder reaches a code sub-peer on A's follower with `{doorbell_cmd}`/`{name}` expanded to
+  A's paths, tagged `realm:true`; (2) B raises `updated_at` (live-reload) → A's follower + gateway show the new text;
+  (3) an OLDER block in A's own configs overrides nothing, on A or B; (4) a local `behaviors.default` entry with the
+  same key wins on A's follower while the realm still fills other keys and B is unaffected; (5) a newer block in the
+  FOLLOWER's own config goes up (`REALM_DEFAULTS`) and out to B, replacing the whole record; (6) with file persistence,
+  A (gateway + follower) restarted with B down and no realm block left still has it. Against the pre-change bridge
+  (`AIMB_TEST_BRIDGE`) 18 of 20 FAIL (only the harness check and one negative pass). Suite 802 across 37.
 - **Built (v1.46.0):** *removed the dual-port compat capability — the realm port migration is complete (#59,
   closes #56).* The transitional #57 machinery (v1.37.0 bind/election + v1.38.0 cross-host dial fallback) existed
   only to carry the realm from 7000/7001 to 12317/12318 without a coordinated restart. Every online host (ROBIN-Z790,

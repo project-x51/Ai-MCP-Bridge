@@ -70,6 +70,9 @@ export interface Registration { name: string; realm?: string; project?: string; 
 export interface Grant { from: string; to: string; mode: 'send' | 'bidirectional'; exp?: number | null; granted_at?: string; updated_at?: number; revoked?: boolean; origin?: string }
 /** A kept-alive (ownerless) topic marker — sends park against it until reclaimed (#26). */
 export interface KeptTopic { realm?: string; project: string; topic: string; description?: string; icon?: string | null; exclusive?: boolean; announce_offline?: boolean; keep_alive?: boolean; behaviors?: string[]; ownerless_since?: string }
+/** #66b: the realm-wide default reminders — ONE replicated last-writer-wins record (lib/realm-defaults.js). updated_at is
+ *  the operator's explicit timestamp (ms epoch on the wire; ISO in config); origin = the host whose config published it. */
+export interface RealmDefaults { updated_at: number; default: Behavior[]; origin: string }
 /** A per-session behaviour reminder (#29). */
 export interface Behavior { operation?: string; scope: 'topic' | 'host' | 'project' | 'subscription' | 'all'; match: string | null; behavior: string; set_at?: string }
 /** The per-sub-peer in-RAM delivery queue. */
@@ -85,6 +88,7 @@ export interface FacetContext {
   CFG?: any
   env?: Record<string, string | undefined>
   HERE?: string
+  CONFIG_FILE?: string
   TOKEN?: string
   REALM?: string
   log?: (...a: any[]) => void

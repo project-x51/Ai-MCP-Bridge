@@ -1,10 +1,12 @@
 // ConfigSource — shared JSON file (default). The bridge only READS it, so a Dropbox/SMB-synced edit
 // propagates to the realm without a restart; watch() polls (cross-platform, idempotent re-read).
+// The file is config.json beside bridge.mjs unless env AI_BRIDGE_CONFIG names another path (ctx.CONFIG_FILE, resolved
+// in bridge.mjs) — load() and watch() both use that path, so live-reload follows the override.
 import fs from 'node:fs'
 import path from 'node:path'
 export const meta = { facet: 'config', name: 'file' }
 export function create(ctx) {
-  const file = path.join(ctx.HERE, 'config.json')
+  const file = ctx.CONFIG_FILE || path.join(ctx.HERE, 'config.json')
   function load() { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return {} } }
   return {
     load,

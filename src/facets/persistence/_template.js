@@ -57,6 +57,10 @@ export function create(ctx) {
       async allForProject(project) { return [] },  // newest value per topic: [{topic, record}] (for subscribe-time catch-up)
       async gcAll(opts) { return 0 },              // drop retained values older than ttlMs; return count dropped
     },
+    realmDefaults: {
+      async put(writer, record) {},                // #66b: the realm-wide default-reminders LWW record, one per writing host
+      async all() { return [] },                   // every host's copy; the bridge keeps the LWW winner at startup
+    },
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
   }
 }

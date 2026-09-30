@@ -36,10 +36,35 @@ const op0 = o => { const x = OP_ALIASES[o] || o; return BEHAVIOR_OPERATIONS.incl
 // identity key for a (operation, scope, match) so re-registering the same one replaces it (case-insensitive).
 const behKey = (operation, scope, match) => `${op0(operation)}|${scope}|${scope === 'topic' || scope === 'subscription' ? patternKey(match || '') : scope === 'all' ? '' : lc(match || '')}`
 
+/** Normalise a config DEFAULT list — the one validation shared by `behaviors.default` and (#66b) the realm-wide
+ *  `behaviors.realm.default`: an entry without a behavior is dropped, an unknown/absent operation folds to 'receive'
+ *  (aliases too), an unknown scope to 'all', text is capped at MAX_LEN, and duplicates collapse on
+ *  (operation,scope,match), last wins. */
+export function normDefaults(listIn) {
+  const byKey = new Map()
+  for (const d of (Array.isArray(listIn) ? listIn : [])) {
+    if (!d || typeof d !== 'object' || !d.behavior) continue
+    const operation = op0(d.operation)
+    const scope = BEHAVIOR_SCOPES.includes(d.scope) ? d.scope : 'all'
+    const match = scope === 'all' || d.match == null || d.match === '' ? null : String(d.match)
+    byKey.set(behKey(operation, scope, match), { operation, scope, match, behavior: String(d.behavior).slice(0, MAX_LEN) })
+  }
+  return [...byKey.values()]
+}
+/** #66b: the EFFECTIVE defaults — this host's LOCAL config defaults, plus every REALM default whose
+ *  (operation,scope,match) key no local entry has. A local entry wins its key; the realm fills the gaps.
+ *  Realm-sourced entries are tagged `realm:true`. (A session's own reminder still beats both — remindersFor.) */
+export function effectiveDefaults(local, realm) {
+  const loc = normDefaults(local), keys = new Set(loc.map(d => behKey(d.operation, d.scope, d.match)))
+  return [...loc, ...normDefaults(realm).filter(d => !keys.has(behKey(d.operation, d.scope, d.match))).map(d => ({ ...d, realm: true }))]
+}
+
 /** @param {{ persistence: any, persist: boolean }} ctx */
 export function createReminders({ persistence, persist }) {
   const behaviors = new Map()   // holderId -> [{ operation, scope, match, behavior, set_at }]
-  let defaults = []             // bridge-wide config defaults [{ operation, scope, match, behavior }]
+  let localDefaults = []        // this host's config defaults (behaviors.default)
+  let realmDefaults = []        // #66b: the realm-wide defaults (behaviors.realm.default, replicated mesh-wide)
+  let defaults = []             // the EFFECTIVE set = effectiveDefaults(local, realm) [{ operation, scope, match, behavior, realm? }]
   const listOf = id => behaviors.get(id) || []
   const view = b => ({ operation: op0(b.operation), scope: b.scope, match: b.match, behavior: b.behavior, set_at: b.set_at })
 
@@ -64,24 +89,23 @@ export function createReminders({ persistence, persist }) {
     const own = listOf(id), ownKeys = new Set(own.map(b => behKey(b.operation, b.scope, b.match)))
     const out = []
     for (const b of own) if (matches(b, id, ctx)) out.push({ operation: op0(b.operation), scope: b.scope, match: b.match, behavior: b.behavior })
-    for (const d of defaults) if (!ownKeys.has(behKey(d.operation, d.scope, d.match)) && matches(d, id, ctx)) out.push({ operation: op0(d.operation), scope: d.scope, match: d.match, behavior: d.behavior, default: true })
+    for (const d of defaults) if (!ownKeys.has(behKey(d.operation, d.scope, d.match)) && matches(d, id, ctx)) out.push({ operation: op0(d.operation), scope: d.scope, match: d.match, behavior: d.behavior, default: true, ...(d.realm ? { realm: true } : {}) })
     out.sort((a, b2) => (ORDER[a.scope] ?? 9) - (ORDER[b2.scope] ?? 9))
     return out
   }
 
   /** Set the bridge-wide default reminders (from config; live-reloadable). Deduped by (operation,scope,match). */
   function setDefaults(listIn) {
-    const byKey = new Map()
-    for (const d of (Array.isArray(listIn) ? listIn : [])) {
-      if (!d || !d.behavior) continue
-      const operation = op0(d.operation)
-      const scope = BEHAVIOR_SCOPES.includes(d.scope) ? d.scope : 'all'
-      const match = scope === 'all' ? null : (d.match || null)
-      byKey.set(behKey(operation, scope, match), { operation, scope, match, behavior: String(d.behavior).slice(0, MAX_LEN) })
-    }
-    defaults = [...byKey.values()]
+    localDefaults = normDefaults(listIn)
+    defaults = effectiveDefaults(localDefaults, realmDefaults)
   }
-  const defaultList = () => defaults.map(d => ({ operation: d.operation, scope: d.scope, match: d.match, behavior: d.behavior }))
+  /** #66b: set the realm-wide defaults (the replicated behaviors.realm record's list). A local key still wins. */
+  function setRealmDefaults(listIn) {
+    realmDefaults = normDefaults(listIn)
+    defaults = effectiveDefaults(localDefaults, realmDefaults)
+  }
+  /** The EFFECTIVE defaults (register_self's default_behaviors); realm-sourced ones carry `realm:true`. */
+  const defaultList = () => defaults.map(d => ({ operation: d.operation, scope: d.scope, match: d.match, behavior: d.behavior, ...(d.realm ? { realm: true } : {}) }))
 
   /** What this holder has registered (for list_behaviors + the resync). */
   const list = id => listOf(id).map(view)
@@ -158,5 +182,5 @@ export function createReminders({ persistence, persist }) {
     }
   }
 
-  return { remindersFor, list, set, clear, load, topicBehaviors, inherit, setDefaults, defaultList }
+  return { remindersFor, list, set, clear, load, topicBehaviors, inherit, setDefaults, setRealmDefaults, defaultList }
 }

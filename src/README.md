@@ -132,7 +132,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 > the realm token out of band.
 
 1. Install Node 20+. In this folder: `npm install`.
-2. `config.json`: set a long random `token` (already generated on first install).
+2. `config.json`: set a long random `token` (already generated on first install). The bridge reads the
+   `config.json` beside `bridge.mjs`; env **`AI_BRIDGE_CONFIG=<path>`** points it at another file instead (absolute,
+   or relative to the working directory; `~` expands) — live-reload and alias write-back follow that path too.
 3. Add the MCP entry (`claude_code_mcp.example.json`) to your Claude config and restart:
    - **Claude Code**: project `.mcp.json` or `~/.claude.json`. For channel push (messages arrive
      without polling), start sessions with:
@@ -362,7 +364,10 @@ message content, but in time for the transcript line / follow-up the agent compo
 scope matches the **sender**; for outbound operations it matches the **target**. Scopes: `topic` / `host` /
 `project` / `subscription` / `all`. A bridge-wide **default** (`config.behaviors.default`, tagged `default:true`;
 may itself name an `operation`) applies to every session unless that session sets its own for the same
-`operation`+`scope`+`match`. **No reminder and no default for an operation ⇒ it is silent** — so an operation
+`operation`+`scope`+`match`. **Realm-wide defaults (#66b, v1.47.0):** a `config.behaviors.realm` block
+`{ updated_at, default:[...] }` in ANY one host's config replicates to every 1.47+ bridge (last-writer-wins on the
+explicit `updated_at`); a host's own `behaviors.default` entry wins its key, realm entries fill the rest (tagged
+`realm:true`). **No reminder and no default for an operation ⇒ it is silent** — so an operation
 costs nothing until opted into. A `send` reminder never fires on `receive` (or vice-versa); to cover both
 directions register one per operation. *(#47: the incoming operation was renamed `deliver`→`receive`; `deliver`
 is still accepted as a legacy alias — from a stale client or an existing durable reminder — and folded to

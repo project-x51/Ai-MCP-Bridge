@@ -29,13 +29,21 @@ import { hydrateEnvFromRegistry } from './lib/win-env.js'
 import { procCapKeyInput, pageCapKeyInput } from './lib/capkeys.js'
 import { createConsent, parseTtlMin } from './lib/consent.js'
 import { createReminders } from './lib/reminders.js'
+import { createRealmDefaults, realmFromConfig } from './lib/realm-defaults.js'
 import { createTraces } from './lib/traces.js'
 import { create as createEgress } from './services/egress.js'
 
 // ---------------------------------------------------------------- config / identity
 const HERE = path.dirname(fileURLToPath(import.meta.url))
+// The config file is config.json beside this script unless env AI_BRIDGE_CONFIG names another path (absolute, or
+// relative to the working directory; a leading `~` expands to the home dir) — e.g. to run several bridges from one
+// checkout with different configs (tests), or to keep the config outside the code folder. The live-reload watch
+// (facets/config/file.js) and the alias write-back follow the same path.
+const CONFIG_FILE = process.env.AI_BRIDGE_CONFIG
+  ? path.resolve(process.env.AI_BRIDGE_CONFIG.startsWith('~') ? path.join(os.homedir(), process.env.AI_BRIDGE_CONFIG.slice(1)) : process.env.AI_BRIDGE_CONFIG)
+  : path.join(HERE, 'config.json')
 let CFG = {}
-try { CFG = JSON.parse(fs.readFileSync(path.join(HERE, 'config.json'), 'utf8')) } catch {}
+try { CFG = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) } catch {}
 const PORT = Number(process.env.AI_BRIDGE_PORT || CFG.port || 12317)     // default moved off 7000: macOS Control Center AirPlay Receiver binds *:7000, so bind 0.0.0.0 there fails EADDRINUSE (MacDaddy). 12317/12318 are clear on macOS/Windows/Linux.
 const WS_PORT = Number(process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 12318)
 // One well-known control port (+ ws port) per host, shared by the whole realm: cross-host discovery hands each
@@ -92,14 +100,14 @@ const PROC_USER = process.env.AI_BRIDGE_USER || OS_USER
 const ALIASES = CFG.aliases || {}          // hostname -> friendly alias (persisted)
 function persistAliases() {
   try {
-    const p = path.join(HERE, 'config.json')
+    const p = CONFIG_FILE
     const cfg = JSON.parse(fs.readFileSync(p, 'utf8'))
     cfg.aliases = ALIASES
     fs.writeFileSync(p, JSON.stringify(cfg, null, 2))
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.46.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.47.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -136,7 +144,7 @@ const sha = s => crypto.createHash('sha256').update(String(s)).digest('hex')
 // transport ONLY through `profile`, assembled from swappable facet modules in ./facets/. To change
 // auth/cipher/identity/transport, add a facet impl file and select it (config.profile) — see
 // facets/index.js. The locals below are the names the core uses, sourced from the active facets.
-const ctx = { TOKEN, REALM, CFG, HERE, SESSION, PORT, ADVERTISE, env: process.env, log }
+const ctx = { TOKEN, REALM, CFG, HERE, CONFIG_FILE, SESSION, PORT, ADVERTISE, env: process.env, log }
 const profile = buildProfile(ctx)
 const encryptEnvelope = profile.cipher.seal      // BodyCipher
 const plainBody = profile.cipher.open
@@ -209,6 +217,7 @@ consent.setPolicy((CFG.projects && typeof CFG.projects === 'object') ? CFG.proje
 profile.config.watch(c => {
   if (c && c.projects && typeof c.projects === 'object') { consent.setPolicy(c.projects, computeOpen(c.projects)); log('project policy reloaded from config') }
   reminders.setDefaults(defaultBehaviors(c))   // #29: default behaviour reminders are live-reloadable too
+  if (seedRealmDefaults(c, 'reload')) announceRealmDefaults()   // #66b: a newer behaviors.realm block spreads mesh-wide
 })
 await consent.rehydrate()   // §14: durable grants survive a restart
 setInterval(() => consent.gc(), Number(process.env.AI_BRIDGE_GRANT_GC_MS) || 600000).unref()   // §14: sweep expired grants + stale pending requests
@@ -350,6 +359,23 @@ function receiveCtx(id, env) {
     topic: env.topic, fromSelf: env.from?.session === id, system: !!env.system }
 }
 reminders.setDefaults(defaultBehaviors(CFG))
+// #66b: REALM-WIDE default reminders — one replicated last-writer-wins record (lib/realm-defaults.js), published by
+// writing a `behaviors.realm` block { updated_at, default:[...] } in ANY host's config. Each bridge seeds its local
+// candidate from its own config (start + live-reload); the winner rides PEER_ROSTER / ROSTER as `realm_defaults` and
+// goes up from a follower in a REALM_DEFAULTS frame. The reminders module layers it UNDER this host's own
+// behaviors.default (a local entry wins its (operation,scope,match) key; realm entries are tagged realm:true).
+const realmDefaults = createRealmDefaults({ persistence, persist: PERSIST, writer: HOSTNAME,
+  onChange: r => reminders.setRealmDefaults(r ? r.default : []) })
+function seedRealmDefaults(cfg, why) {
+  if (!(cfg && cfg.behaviors && cfg.behaviors.realm)) return false
+  const cand = realmFromConfig(cfg, HOSTNAME)
+  if (!cand) { log(`behaviors.realm ignored (${why}): it needs an explicit "updated_at" ISO timestamp`); return false }
+  const changed = realmDefaults.merge(cand)
+  if (changed) log(`realm default reminders adopted from this host's config (${why}; updated_at ${new Date(cand.updated_at).toISOString()})`)
+  return changed
+}
+await realmDefaults.rehydrate()   // the latest record this host learned survives a restart (when persistence is on)
+seedRealmDefaults(CFG, 'startup')
 
 // envelopeId() (pure content hash) lives in lib/envelope.js (imported above).
 function remember(id) {
@@ -510,6 +536,11 @@ function announceCaps() {
 function announceGrants() {
   if (role === 'gateway') broadcastRoster()
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'GRANTS', session: SESSION, grants: consent.grantSet() })
+}
+// #66b: a changed realm-defaults record must reach the whole mesh — same shape as announceGrants.
+function announceRealmDefaults() {
+  if (role === 'gateway') broadcastRoster()
+  else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'REALM_DEFAULTS', session: SESSION, realm_defaults: realmDefaults.current() })
 }
 function announceTopics() {
   if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.topics = topicList() }; broadcastRoster() }
@@ -1119,7 +1150,7 @@ function rosterFor(ws) {
     ? rosterPayload() : rosterPayloadFor(ws.project, ws.realm)
 }
 function broadcastRoster() {
-  const frame = { type: 'ROSTER', ...rosterPayload(), grants: consent.grantSet() }   // #62: followers merge the grant set (consent is checked in the process hosting the target)
+  const frame = { type: 'ROSTER', ...rosterPayload(), grants: consent.grantSet(), realm_defaults: realmDefaults.current() }   // #62: followers merge the grant set (consent is checked in the process hosting the target); #66b: and the realm defaults
   for (const sock of followers.values()) sendFrame(sock, frame)   // bridges get full; each filters its own leaves
   // listeners are deliberately EXCLUDED from the roster fan-out — a doorbell gets counts, not the mesh (see below)
   for (const ws of leaves) if (ws.readyState === 1 && ws.kind !== 'listener') { try { ws.send(JSON.stringify({ type: 'roster', ...rosterFor(ws) })) } catch {} }
@@ -1222,17 +1253,19 @@ const localPagesSlice = () => [...pages.values()].map(p => ({ instance: p.instan
 const refreshCap = () => TEST_GOSSIP === 'legacy' ? {} : { gossip_refresh: true, refresh_ms: GOSSIP_REFRESH_MS }   // #63 capability flag
 // #62: `grants` = the FULL replicated grant set this hub knows (local + learned), so a grant spreads transitively
 // even though the roster slice is one-hop. LWW makes re-gossip safe; a ≤1.44 receiver ignores the field.
-const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, ...refreshCap() })
+// #66b: `realm_defaults` = the winning realm-wide default-reminders record (or null) — same transitive LWW spread; a
+// ≤1.46 receiver ignores it.
+const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, realm_defaults: rd, ...refreshCap() })
 const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap() })
 function gossipToPeers(force) {
   if (role !== 'gateway' || !peerGw.size || TEST_GOSSIP === 'silent') return
-  const slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), sig = JSON.stringify([slice, pg, gr])
-  if (!force && sig === lastGossip) return                         // only send when MY locals (or the grant set) changed (breaks the merge→broadcast→gossip loop)
+  const slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), sig = JSON.stringify([slice, pg, gr, rd])
+  if (!force && sig === lastGossip) return                         // only send when MY locals (or the grant set / realm defaults) changed (breaks the merge→broadcast→gossip loop)
   lastGossip = sig
-  const frame = gossipFrame(slice, pg, gr)
+  const frame = gossipFrame(slice, pg, gr, rd)
   for (const p of peerGw.values()) if (p.sock && !p.sock.destroyed) sendFrame(p.sock, frame)
 }
-function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants) {
+function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, realmDefs) {
   if (!fromGw || fromGw === SESSION) return
   // #63: only the CURRENT link for that gateway may write its slice — a late frame on a retired/replaced socket
   // would otherwise resurrect entries that no peerGw entry owns, and nothing would ever clean them up again.
@@ -1242,8 +1275,9 @@ function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants) {
   // #62: fold the peer's grant set in BEFORE the slice dedupe — a grant-only change arrives with an unchanged slice.
   // A change re-broadcasts (followers get it in ROSTER) and re-gossips it onward; an idempotent merge ends the loop.
   const grantsChanged = consent.merge(grants) > 0
+  const realmChanged = realmDefaults.merge(realmDefs)   // #66b: likewise the realm defaults (a ≤1.46 peer sends none → no-op)
   const sig = JSON.stringify([host, port, sessions, pages])
-  if (sig === peer.sig) { if (grantsChanged) broadcastRoster(); return }   // a periodic refresh of an unchanged slice: stamp only, no broadcast
+  if (sig === peer.sig) { if (grantsChanged || realmChanged) broadcastRoster(); return }   // a periodic refresh of an unchanged slice: stamp only, no broadcast
   peer.sig = sig
   for (const [k, v] of [...roster]) if (v.origin === fromGw) roster.delete(k)   // replace this gateway's slice wholesale
   for (const s of (sessions || [])) {
@@ -1322,7 +1356,7 @@ function connectToPeer(host, port) {
       linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || port, f.name, f, true)
       sendFrame(sock, gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted
     }
-    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants)
+    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults)
     else if (f.t === 'PING') { if (!TEST_GOSSIP) sendFrame(sock, { t: 'PONG', seq: f.seq }) }   // #63: the accepting hub probes us too (<=1.43 dialers ignore PING — 'legacy' mimics that)
     else if (f.t === 'PONG') touchPeer(sock)
     else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
@@ -1446,6 +1480,9 @@ function onControlConn(sock) {
       } else if (f.t === 'GRANTS') {                        // #62: a follower's grant set (its own allow/revoke) goes UP to be merged + gossiped
         if (!who) return                                     // policy frame: only on an authenticated (HELLO'd) connection
         if (consent.merge(f.grants) > 0) broadcastRoster()   // → ROSTER to every follower + gossip to every peer hub
+      } else if (f.t === 'REALM_DEFAULTS') {                // #66b: a follower's realm-defaults record (from its own config) goes UP
+        if (!who) return                                     // policy frame: only on an authenticated (HELLO'd) connection
+        if (realmDefaults.merge(f.realm_defaults)) broadcastRoster()   // LWW: an older record changes nothing
       } else if (f.t === 'TRACE') {
         traces.collect(f.trace)
       } else if (f.t === 'PAGE_MSG') {                       // follower forwarding an envelope to a page leaf
@@ -1469,7 +1506,7 @@ function onControlConn(sock) {
         sendFrame(sock, gossipFrame())   // #63: full slice on every (re)link, independent of lastGossip
         sock.on('close', () => { if (peerGw.get(f.session)?.sock === sock) dropPeer(f.session) })
       } else if (f.t === 'PEER_ROSTER') {
-        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants)
+        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults)
       } else if (f.t === 'PONG') {
         touchPeer(sock)
       } else if (f.t === 'PING') { if (TEST_GOSSIP !== 'silent') sendFrame(sock, { t: 'PONG', seq: f.seq }) }
@@ -1610,6 +1647,7 @@ function becomeFollower() {
       realm: REALM, project: PROC_IDENT?.project || null, user: PROC_IDENT?.user || null,
       client: CLIENT ? CLIENT.name : null })
     sendFrame(sock, { t: 'GRANTS', session: SESSION, grants: consent.grantSet() })   // #62: anything granted/learned while not following (a ≤1.44 gateway ignores it)
+    if (realmDefaults.current()) sendFrame(sock, { t: 'REALM_DEFAULTS', session: SESSION, realm_defaults: realmDefaults.current() })   // #66b: likewise (a ≤1.46 gateway ignores it)
     log(`follower registered with gateway on :${PORT}`)
   })
   onFrames(sock, f => {
@@ -1620,6 +1658,7 @@ function becomeFollower() {
       pages = new Map((f.pages || []).map(p => [p.instance, p]))
       if (f.gateway) gatewayId = f.gateway
       consent.merge(f.grants)   // #62: consent for MY sub-peers is checked here, so learn the realm's grants from the gateway
+      realmDefaults.merge(f.realm_defaults)   // #66b: MY sub-peers' reminders are computed here too
     }
   })
   const reelect = () => { if (role !== 'stopping') { gwSock = null; setTimeout(election, backoff + Math.random() * 100); backoff = Math.min(backoff * 2, 3000) } }

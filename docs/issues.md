@@ -6,9 +6,21 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.46.0) — read this first after a compact
-**Current version: v1.46.0.** All work committed to `main` (v1.42.0 – v1.46.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.47.0) — read this first after a compact
+**Current version: v1.47.0.** All work committed to `main` (v1.42.0 – v1.47.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.47.0):** Did **#66(b)** — realm-wide default reminders. A `behaviors.realm` block
+`{ "updated_at": "<ISO>", "default": [...] }` in ANY one host's config is now a single last-writer-wins record gossiped
+mesh-wide (`PEER_ROSTER.realm_defaults`, `ROSTER.realm_defaults`, follower→gateway `REALM_DEFAULTS` frame) and
+persisted where learned. A host's own `behaviors.default` entry still wins its (operation,scope,match) key; realm
+entries fill the rest (tagged `realm:true`). New env `AI_BRIDGE_CONFIG=<path>` points a bridge at an alternate config
+file. **Rollout:** realm defaults spread only among 1.47.0+ hosts. Once EVERY host (and the bridge its followers run)
+is on 1.47.0, put the doorbell connect reminder (`connect`/`client`/`code`, as in `config.example.json`) in ONE
+config's `behaviors.realm` — e.g. the shared Dropbox `config.json` — with a fresh `updated_at`, and it will spread to
+the Mac and phub-lnx-01 without editing their configs. Remove any local `connect`/`client`/`code` entry from a host's
+`behaviors.default` if you want the realm text there (a local entry wins its key). Bump `updated_at` on every later
+edit. No live config was edited.
 
 **2026-09-30 (v1.46.0):** Did **#59** and closed **#56** — the realm port migration is COMPLETE. Every online host
 (ROBIN-Z790, LITTLE-001, Robins-Mac, phub-lnx-01) runs on 12317/12318; phub-lnx-02 is retired. The dual-port compat
@@ -49,7 +61,7 @@ note for #64: the `connect` default belongs in a host's config only AFTER it run
 **Live mesh (2026-09-30):** every online host is on port **12317** — ROBIN-Z790 (this machine; gateway is the Task
 Tray bridge, Bridget is a follower), LITTLE-001 (reads the shared Dropbox config), Robins-Mac (owns topic `mac`, runs
 MacDaddy) and phub-lnx-01 (migrated 2026-09-30 on v1.44.0). **phub-lnx-02 is RETIRED.** Versions vary per host
-(roll-outs of 1.42–1.46 are pending), so re-run `list_sessions` before trusting version details.
+(roll-outs of 1.42–1.47 are pending), so re-run `list_sessions` before trusting version details.
 
 **"Mac never receives Bridget's messages" — real cause is #62 (cross-project consent), NOT #60.** The Mac is
 now fully migrated (v1.40.0 / 12317 / bind 0.0.0.0). The actual block: `deliveryAllowed` is receiver-side +
@@ -95,7 +107,7 @@ entry (on older bridges a `{doorbell_cmd}` would reach the agent unexpanded). Li
 NOT edited. Tests: `test_doorbell_live` (40), `test_connect_reminders_live` (17), both verified to fail on the
 pre-change code.
 
-## #66 — replication audit: what federates mesh-wide vs what's bridge-local  ·  **OPEN (audit — Robin, 2026-09-29; (a) grants DONE v1.45.0)**
+## #66 — replication audit: what federates mesh-wide vs what's bridge-local  ·  **OPEN (audit — Robin, 2026-09-29; (a) grants DONE v1.45.0; (b) default reminders DONE v1.47.0; (c)+(d) remain)**
 Triggered by #62 (a consent grant not rippling past one bridge). Audit of bridge state, classified by whether it
 replicates across the mesh. **The routing + observation plane FEDERATES; the policy + durability plane does NOT.**
 
@@ -121,7 +133,9 @@ is, e.g. the Windows Dropbox pair; never across separate machines):
    identity only within a shared store. Applied on the holder's hosting bridge.
 3. **Default + connect reminders** (`config.behaviors.default`) and **static consent edges** (`config.projects`)
    — per CONFIG FILE. Shared only via a shared config. This is why the #64 connect-reminder default must be added
-   to each host's config (or a realm-wide config) to take effect everywhere.
+   to each host's config (or a realm-wide config) to take effect everywhere. *(Since v1.47.0 (#66b) a
+   `behaviors.realm` block replicates mesh-wide as one LWW record; `behaviors.default` and `config.projects` stay
+   per-config.)*
 4. **Retained topic values** (last-value-per-topic) — per store; a new subscriber gets the retained value only
    from the store that holds it (so cross-host retained delivery is not guaranteed).
 5. **Durable registrations** (name→identity offline-park), **parked mailboxes**, **vault** (sealed secrets) — per
@@ -132,8 +146,12 @@ is, e.g. the Windows Dropbox pair; never across separate machines):
 **The bug class:** routing federates but policy doesn't, so a peer is reachable everywhere while the rule that
 governs the interaction (consent, behaviour) lives only where it was set. **Fix candidates, priority order:**
 (a) **grants** (#62) — **DONE (v1.45.0):** gossiped in PEER_ROSTER as a last-writer-wins set (tombstone revokes),
-pushed to/from followers, persisted where learned (static `config.projects` edges remain per-config — item 3); (b) **default/connect reminders** — a realm-wide config or gossip, so a connect reminder
-set once reaches all hosts; (c) **retained values** + (d) **remote page subscriptions** — include in gossip;
+pushed to/from followers, persisted where learned (static `config.projects` edges remain per-config — item 3); (b) **default/connect reminders** — **DONE (v1.47.0):** a
+`behaviors.realm` block `{updated_at, default:[...]}` in any host's config is one replicated last-writer-wins record
+(explicit operator `updated_at`, never mtime), gossiped in `PEER_ROSTER`/`ROSTER` + a follower→gateway `REALM_DEFAULTS`
+frame, persisted where learned, layered UNDER each host's local `behaviors.default` (local key wins; realm fills gaps).
+Needs 1.47.0 on every host; rollout note in RESUME STATE; (c) **retained values** + (d) **remote page subscriptions**
+— include in gossip — **still OPEN**;
 (e) leave parked-mail/vault/registrations store-local by design. #61 (ok:true masks a denied/dropped send) makes
 every one of these fail SILENTLY, so #61 is a prerequisite for trusting any of it.
 
