@@ -27,7 +27,7 @@ been asked to OK the rollout (it restarts every live bridge; sessions drop brief
    `from_topic`-aware receive line (#54). It spreads realm-wide (#66b). Never echo that file's token.
 4. Optional tidy: live configs still carry ignored `compatPorts` keys (harmless).
 
-**Still open:** #65 self-updating bridge (desirable, spec first — would automate step 2), #53 Cowork doorbell,
+**Still open:** #70 agent activity board (idea, spec first), #65 self-updating bridge (desirable, spec first — would automate step 2), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -148,6 +148,50 @@ the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) 
 whenever a send returns `unknown-subpeer`.
 
 ---
+
+## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (idea — Robin, 2026-09-30; spec before build)**
+Robin's observation: sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows
+what those agents are doing right now. Idea: a new dashboard page listing sessions **grouped by project**, each
+session's **agents underneath**, and under each agent its **progress**, reported by the agent itself through a
+doorbell-style script. The bridge gossips it so the page shows what is happening across the whole bridge, and may
+also log it.
+
+**Proposed shape (Bridget, for review):**
+- **Hierarchy mostly exists:** `register_self {parent}` already links a subagent to its session. What's missing is
+  status and progress.
+- **One primitive, a keyed status line:** `{agent, key, context?, state: running|done|failed|blocked, text, updated_at}`.
+  This covers every variant Robin raised:
+  - a *one-liner* is a single key (e.g. `main`);
+  - *update-in-place* means reusing a key ("tests: 312/1020");
+  - *tied to a context* groups lines under the thing being worked on (`context:"#62 grants"`);
+  - the *log* is the append-only history of every change.
+- **Keep gossip small:**
+  - Only the current keyed lines replicate, riding the roster gossip the way grants do (#62), capped per agent and per
+    host with the oldest dropped.
+  - The full log stays on the originating host (daily JSONL) and is fetched on demand when the dashboard expands an
+    agent, like the #66d `CONNECT` pattern.
+  - Replicating every log line would flood the mesh.
+- **Two ways to report:**
+  - *Explicit:* `tools/aimb-status.mjs --key tests --text "312/1020" --state running [--context …]`, which reuses the
+    doorbell's gateway connection, plus a `status` MCP tool for agents that have the bridge loaded.
+  - *Automatic:* client lifecycle hooks (e.g. Claude Code agent start/stop hooks, if available; verify first) report
+    start and stop without the agent's cooperation, so a dead agent never shows "running" forever.
+- **Staleness:** lines silent for N minutes render as stale. When a session leaves the mesh, its agents are marked
+  gone rather than left showing running.
+- **Visibility (decide):**
+  - Status text is plaintext realm-wide, like a subject. Agents must be told never to put secrets in it.
+  - Open question: should a viewer see only projects they have access to?
+- **Orchestrator query:** a tool returning agent status, so a session (e.g. Bridget on `@`) can answer "what's
+  everyone doing", not just the dashboard.
+
+**Suggested phasing:**
+1. **v1:** script + `status` tool, keyed lines with context, current-state gossip, and a dashboard "Activity" page
+   (project → session → agent).
+2. **v2:** hook-driven lifecycle, on-demand log history, persistence.
+3. **v3:** the orchestrator-facing query tool.
+
+Related: #58 (dashboard session dedupe), #62/#66 (what federates), #53 (doorbell-style scripts), #65 (a rollout would
+benefit from the same visibility).
 
 ## #69 — doorbell 6-hour inbox check-in keeps the bridge loaded  ·  **DONE (v1.54.0)**
 Robin's request (2026-09-30). An idle session whose only activity is the doorbell loop makes no bridge tool call for
