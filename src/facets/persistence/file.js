@@ -182,11 +182,13 @@ export function create(ctx) {
     },
     async remove(from, to) { try { await fsp.unlink(dir('grants', `${slug(from)}__${slug(to)}.grant`)) } catch {} },
     async gcAll({ now = Date.now() } = {}) {   // drop expired edges (exp in the past); forever (exp null) survives
+      // #62: a TOMBSTONE (revoked:true) carries a past exp too, but must outlive it so the revoke keeps beating an
+      // older grant — consent.gc() removes tombstones on its own (longer) TTL via remove().
       let dropped = 0, gdir = dir('grants')
       for (const f of await readDirSafe(gdir)) {
         if (!f.endsWith('.grant')) continue
         const file = path.join(gdir, f), j = await readJson(file)
-        if (j && j.exp && j.exp < now) { try { await fsp.unlink(file) } catch {} dropped++ }
+        if (j && j.exp && j.exp < now && !j.revoked) { try { await fsp.unlink(file) } catch {} dropped++ }
       }
       return dropped
     },
@@ -435,7 +437,7 @@ export function create(ctx) {
     const mboxes = {}
     for (const m of msgs) { const who = m.for ? `${m.for.project}/${m.for.user}/${m.for.name}` : '(unknown)'; const e = mboxes[who] || (mboxes[who] = { who, count: 0, bytes: 0, oldest: m.ts }); e.count++; e.bytes += m.bytes; if (m.ts < e.oldest) e.oldest = m.ts }
     const claims = await readAll('claims', '.claim', j => ({ project: j.project, topic: j.pattern, holder_name: j.holder_name, user: j.user, exclusive: !!j.exclusive, announce_offline: !!j.announce_offline, refreshed_at: j.refreshed_at }))
-    const grants = await readAll('grants', '.grant', j => ({ from: j.from, to: j.to, mode: j.mode, exp: j.exp || null, granted_at: j.granted_at }))
+    const grants = await readAll('grants', '.grant', j => ({ from: j.from, to: j.to, mode: j.mode, exp: j.exp || null, granted_at: j.granted_at, revoked: !!j.revoked, origin: j.origin || null }))
     const registrations = await readAll('registrations', '.reg', j => ({ name: j.name, project: j.project, user: j.user, client_kind: j.client_kind, last_seen: j.last_seen }))
     const subscriptions = await readAll('subscriptions', '.sub', j => ({ name: j.name, project: j.project, user: j.user, pattern: j.pattern }))
     const retained = await readAll('retained', '.val', j => ({ project: j.project, topic: j.topic, ts: j.ts }))
@@ -444,7 +446,7 @@ export function create(ctx) {
     const behaviors = await readAll('behaviors', '.beh', j => ({ name: j.name, project: j.project, user: j.user, operation: behOp(j.operation), scope: j.scope, match: j.match, behavior: j.behavior }))
     return {
       enabled: true, readable, dir: root,
-      counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.length, registrations: registrations.length, subscriptions: subscriptions.length, vault: vaults.length, retained: retained.length, kept: kept.length, behaviors: behaviors.length },
+      counts: { parked: msgs.length, mailboxes: Object.keys(mboxes).length, claims: claims.length, grants: grants.filter(g => !g.revoked).length, registrations: registrations.length, subscriptions: subscriptions.length, vault: vaults.length, retained: retained.length, kept: kept.length, behaviors: behaviors.length },
       vault: vaults, kept, behaviors,
       mailboxes: Object.values(mboxes).sort((a, b) => b.count - a.count), claims, grants, registrations, subscriptions, retained,
     }

@@ -75,7 +75,65 @@ check('TOOLS names are unique', new Set(TOOLS.map(t => t.name)).size === TOOLS.l
   const o = createConsent({ persistence: {}, persist: false }); o.setPolicy({ default: 'open' }, true)
   check('consent: open realm allows any cross-project + reachable=all', o.mayInitiate('a', 'b') && o.reachable('a') === 'all')
 }
-check('parseTtlMin durations', parseTtlMin('24h') === 1440 && parseTtlMin('7d') === 10080 && parseTtlMin('30m') === 30 && parseTtlMin(45) === 45)
+// ---- #62: replicated grant set, last-writer-wins merge ----
+{
+  const mk = (origin = 'h1') => { const c = createConsent({ persistence: {}, persist: false, origin }); c.setPolicy({ default: 'strict', allow: [] }, false); return c }
+  const G = (updated_at, extra = {}) => ({ from: 'aimb', to: 'marz', mode: 'send', exp: null, updated_at, revoked: false, origin: 'h1', ...extra })
+  const T = (updated_at, extra = {}) => G(updated_at, { revoked: true, exp: updated_at, ...extra })
+  const allowed = c => c.mayInitiate('AIMB', 'Marz')
+  const state = c => JSON.stringify(c.grantSet())
+  let c = mk()
+  check('#62 merge: a learned grant authorises + reports a change', c.merge([G(100)]) === 1 && allowed(c))
+  check('#62 merge: newer record wins (mode upgraded by a newer grant)', c.merge([G(200, { mode: 'bidirectional' })]) === 1 && c.mayInitiate('marz', 'aimb'))
+  check('#62 merge: an OLDER record is ignored', c.merge([G(150)]) === 0 && c.grantSet()[0].mode === 'bidirectional')
+  check('#62 merge: a newer tombstone beats an older grant', c.merge([T(300)]) === 1 && !allowed(c) && c.grantSet()[0].revoked === true)
+  check('#62 merge: an older grant cannot resurrect a tombstone', c.merge([G(250)]) === 0 && !allowed(c))
+  check('#62 merge: a newer grant beats an older tombstone (re-grant)', c.merge([G(400)]) === 1 && allowed(c))
+  // idempotent: merging the same set again changes nothing
+  const before = state(c)
+  check('#62 merge: idempotent (re-merging the same set changes nothing)', c.merge(c.grantSet()) === 0 && state(c) === before)
+  // commutative: every order of the same records converges to the same state
+  const recs = [G(10), T(20, { origin: 'h2' }), G(20, { origin: 'h3' }), G(15, { mode: 'bidirectional' }), { from: 'x', to: 'y', mode: 'send', updated_at: 5 }]
+  const perms = [[0, 1, 2, 3, 4], [4, 3, 2, 1, 0], [2, 0, 4, 1, 3], [1, 3, 0, 4, 2]]
+  const outs = perms.map(p => { const k = mk(); for (const i of p) k.merge([recs[i]]); return state(k) })
+  check('#62 merge: commutative (any order converges to one state)', outs.every(o => o === outs[0]), JSON.stringify(outs))
+  const batch = mk(); batch.merge(recs)
+  check('#62 merge: one batch == one-at-a-time', state(batch) === outs[0])
+  // tie rule: same updated_at -> the tombstone wins, whichever arrives first
+  const t1 = mk(); t1.merge([G(50, { origin: 'zz' })]); t1.merge([T(50, { origin: 'aa' })])
+  const t2 = mk(); t2.merge([T(50, { origin: 'aa' })]); t2.merge([G(50, { origin: 'zz' })])
+  check('#62 tie: on equal updated_at the tombstone wins (both orders)', !allowed(t1) && !allowed(t2) && state(t1) === state(t2))
+  const o1 = mk(); o1.merge([G(60, { origin: 'a', mode: 'send' })]); o1.merge([G(60, { origin: 'b', mode: 'bidirectional' })])
+  const o2 = mk(); o2.merge([G(60, { origin: 'b', mode: 'bidirectional' })]); o2.merge([G(60, { origin: 'a', mode: 'send' })])
+  check('#62 tie: then the greater origin wins, deterministically', state(o1) === state(o2) && o1.grantSet()[0].origin === 'b')
+  // expiry: a learned grant past its exp never authorises; gc turns it into a tombstone that still beats an older grant
+  const e = mk(); e.merge([G(70, { exp: Date.now() - 1000 })])
+  check('#62 expiry: a learned expired grant does not authorise', !allowed(e) && !e.reachable('aimb').includes('marz'))
+  e.gc()
+  check('#62 expiry: gc tombstones an expired grant, which still beats an older grant', e.grantSet()[0].revoked === true && e.merge([G(65)]) === 0 && !allowed(e))
+  const f = mk(); f.merge([G(80, { exp: Date.now() + 60000 })])
+  check('#62 expiry: an unexpired learned grant authorises', allowed(f))
+  // legacy record (<=1.44 durable form): no updated_at -> dates from granted_at, and any newer write beats it
+  const l = mk(); l.merge([{ from: 'AIMB', to: 'Marz', mode: 'send', exp: null, granted_at: '2026-01-01T00:00:00.000Z' }])
+  check('#62 legacy: a record without updated_at is accepted, dated from granted_at', allowed(l) && l.grantSet()[0].updated_at === Date.parse('2026-01-01T00:00:00.000Z'))
+  check('#62 legacy: a newer tombstone beats it', l.merge([T(Date.parse('2026-02-01'))]) === 1 && !allowed(l))
+  const l0 = mk(); l0.merge([{ from: 'aimb', to: 'marz', mode: 'send' }])
+  check('#62 legacy: no updated_at AND no granted_at -> 0 (any stamped write beats it)', l0.grantSet()[0].updated_at === 0 && l0.merge([T(1)]) === 1)
+  // local writes: revoke tombstones (and replicates), re-allow beats the tombstone even if the clock lags it
+  const w = mk('me'); w.allow('a', 'b', 'send', null)
+  check('#62 local: revoke writes a tombstone (not a delete) and returns had', w.revoke('a', 'b') === true && w.grantSet().length === 1 && w.grantSet()[0].revoked === true && !w.mayInitiate('a', 'b'))
+  w.merge([{ from: 'a', to: 'b', mode: 'send', revoked: true, exp: Date.now() + 1e9, updated_at: Date.now() + 1e9, origin: 'skewed' }])
+  const re = w.allow('a', 'b', 'send', null)
+  check('#62 local: a local allow beats a future-stamped tombstone (stamp = max(now, known+1))', w.mayInitiate('a', 'b') && re.origin === 'me')
+  check('#62 local: revoke of an unknown edge still tombstones it (returns false)', w.revoke('q', 'r') === false && w.grantSet().some(g => g.from === 'q' && g.revoked))
+  // tombstone GC honours the TTL
+  const gcC = createConsent({ persistence: {}, persist: false, tombstoneTtlMs: 1000 })
+  gcC.merge([T(Date.now() - 5000), { from: 'k', to: 'l', mode: 'send', revoked: true, exp: Date.now(), updated_at: Date.now() }])
+  gcC.gc()
+  check('#62 gc: tombstones older than the TTL are dropped, fresh ones kept', gcC.grantSet().length === 1 && gcC.grantSet()[0].from === 'k')
+  check('#62 merge: junk records are ignored', mk().merge([null, 5, {}, { from: 'a' }, 'x']) === 0 && mk().merge(undefined) === 0)
+}
+check('parseTtlMin durations',parseTtlMin('24h') === 1440 && parseTtlMin('7d') === 10080 && parseTtlMin('30m') === 30 && parseTtlMin(45) === 45)
 check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && parseTtlMin(0) === null && parseTtlMin('') === null && parseTtlMin('nope') === null)
 
 // ---- reminders module (encapsulated state) — #44 operation-aware ----

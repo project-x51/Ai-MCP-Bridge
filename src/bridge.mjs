@@ -105,7 +105,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.44.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.45.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -203,7 +203,11 @@ const topicMailIdent = (realm, project, topic) => ({ realm: realm || REALM, proj
 // consent: a project may reach another only if same-project, the realm is `open`, a static config edge
 // allows it, or a runtime grant does. The reply exception (firewall return-traffic) is gated by the signed
 // reply-cap below, NOT by policy. `projKey`/`lc` are in lib/keys.js; `parseTtlMin` in lib/consent.js.
-const consent = createConsent({ persistence, persist: PERSIST })
+// #62: runtime grants replicate mesh-wide as a last-writer-wins set (see lib/consent.js + announceGrants /
+// gossipFrame / the GRANTS frame below); `origin` tags the records this process writes, and a revoke's tombstone
+// is forgotten after AI_BRIDGE_GRANT_TOMBSTONE_TTL_MS (default 30 days).
+const consent = createConsent({ persistence, persist: PERSIST, origin: SESSION,
+  tombstoneTtlMs: Number(process.env.AI_BRIDGE_GRANT_TOMBSTONE_TTL_MS) || 30 * 86400000 })
 const computeOpen = pol => process.env.AI_BRIDGE_OPEN === '1' || String((pol && pol.default) || 'strict') === 'open'
 consent.setPolicy((CFG.projects && typeof CFG.projects === 'object') ? CFG.projects : { default: 'strict', allow: [] }, computeOpen(CFG.projects))
 // live-reload via the ConfigSource facet: a synced edit to the policy propagates without a restart (the
@@ -506,6 +510,12 @@ function topicList() { return [...myTopics.values()].map(t => ({ ...t, waiting: 
 function announceCaps() {
   if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.capabilities = { ...CAPS } }; broadcastRoster() }
   else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'CAPS', session: SESSION, capabilities: CAPS })
+}
+// #62: a grant/revoke must reach the whole mesh. A gateway re-broadcasts (ROSTER to followers + PEER_ROSTER gossip,
+// whose dedupe signature includes the grant set); a follower sends its set UP so its gateway merges + gossips it.
+function announceGrants() {
+  if (role === 'gateway') broadcastRoster()
+  else if (gwSock && !gwSock.destroyed) sendFrame(gwSock, { t: 'GRANTS', session: SESSION, grants: consent.grantSet() })
 }
 function announceTopics() {
   if (role === 'gateway') { const r = roster.get(SESSION); if (r) { r.topics = topicList() }; broadcastRoster() }
@@ -1096,8 +1106,8 @@ function rosterPayload() {
 }
 // VISIBILITY (§4): a page sees only the projects it may reach (same project / open / static edge),
 // so "can't see → can't address" matches the delivery gate. Enforced by default; a page opts out with
-// hello { seeAll:true }. Honors the shared-config policy; remote runtime grants don't widen a view
-// (delivery still enforces them). The raw list_sessions tool stays full (observability).
+// hello { seeAll:true }. Honors the shared-config policy + the runtime grants this bridge knows (since #62 that
+// includes grants learned from peers). The raw list_sessions tool stays full (observability).
 function rosterPayloadFor(viewerProject, viewerRealm) {
   const vp = viewerProject || 'unclassified'
   const reach = p => consent.mayInitiate(vp, p || 'unclassified')
@@ -1115,7 +1125,7 @@ function rosterFor(ws) {
     ? rosterPayload() : rosterPayloadFor(ws.project, ws.realm)
 }
 function broadcastRoster() {
-  const frame = { type: 'ROSTER', ...rosterPayload() }
+  const frame = { type: 'ROSTER', ...rosterPayload(), grants: consent.grantSet() }   // #62: followers merge the grant set (consent is checked in the process hosting the target)
   for (const sock of followers.values()) sendFrame(sock, frame)   // bridges get full; each filters its own leaves
   // listeners are deliberately EXCLUDED from the roster fan-out — a doorbell gets counts, not the mesh (see below)
   for (const ws of leaves) if (ws.readyState === 1 && ws.kind !== 'listener') { try { ws.send(JSON.stringify({ type: 'roster', ...rosterFor(ws) })) } catch {} }
@@ -1216,25 +1226,30 @@ const localRosterSlice = () => [...roster.values()].filter(s => !s.origin)   // 
 // pages live only on a gateway; gossip DISPLAY fields only (never capKey or other secrets) so remote dashboards can show web sessions
 const localPagesSlice = () => [...pages.values()].map(p => ({ instance: p.instance, page_kind: p.page_kind, title: p.title || '', subject: p.subject || null, icon: p.icon || null, project: p.project || null, user: p.user || null }))
 const refreshCap = () => TEST_GOSSIP === 'legacy' ? {} : { gossip_refresh: true, refresh_ms: GOSSIP_REFRESH_MS }   // #63 capability flag
-const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, ...refreshCap() })
+// #62: `grants` = the FULL replicated grant set this hub knows (local + learned), so a grant spreads transitively
+// even though the roster slice is one-hop. LWW makes re-gossip safe; a ≤1.44 receiver ignores the field.
+const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, ...refreshCap() })
 const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap() })
 function gossipToPeers(force) {
   if (role !== 'gateway' || !peerGw.size || TEST_GOSSIP === 'silent') return
-  const slice = localRosterSlice(), pg = localPagesSlice(), sig = JSON.stringify([slice, pg])
-  if (!force && sig === lastGossip) return                         // only send when MY locals changed (breaks the merge→broadcast→gossip loop)
+  const slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), sig = JSON.stringify([slice, pg, gr])
+  if (!force && sig === lastGossip) return                         // only send when MY locals (or the grant set) changed (breaks the merge→broadcast→gossip loop)
   lastGossip = sig
-  const frame = gossipFrame(slice, pg)
+  const frame = gossipFrame(slice, pg, gr)
   for (const p of peerGw.values()) if (p.sock && !p.sock.destroyed) sendFrame(p.sock, frame)
 }
-function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock) {
+function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants) {
   if (!fromGw || fromGw === SESSION) return
   // #63: only the CURRENT link for that gateway may write its slice — a late frame on a retired/replaced socket
   // would otherwise resurrect entries that no peerGw entry owns, and nothing would ever clean them up again.
   const peer = peerGw.get(fromGw)
   if (!peer || peer.sock !== sock) return
   peer.seen = Date.now()
+  // #62: fold the peer's grant set in BEFORE the slice dedupe — a grant-only change arrives with an unchanged slice.
+  // A change re-broadcasts (followers get it in ROSTER) and re-gossips it onward; an idempotent merge ends the loop.
+  const grantsChanged = consent.merge(grants) > 0
   const sig = JSON.stringify([host, port, sessions, pages])
-  if (sig === peer.sig) return                                     // a periodic refresh of an unchanged slice: stamp only, no broadcast
+  if (sig === peer.sig) { if (grantsChanged) broadcastRoster(); return }   // a periodic refresh of an unchanged slice: stamp only, no broadcast
   peer.sig = sig
   for (const [k, v] of [...roster]) if (v.origin === fromGw) roster.delete(k)   // replace this gateway's slice wholesale
   for (const s of (sessions || [])) {
@@ -1320,7 +1335,7 @@ function connectToPeer(host, port) {
         linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || p, f.name, f, true)
         sendFrame(sock, gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted
       }
-      else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock)
+      else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants)
       else if (f.t === 'PING') { if (!TEST_GOSSIP) sendFrame(sock, { t: 'PONG', seq: f.seq }) }   // #63: the accepting hub probes us too (<=1.43 dialers ignore PING — 'legacy' mimics that)
       else if (f.t === 'PONG') touchPeer(sock)
       else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
@@ -1444,6 +1459,9 @@ function onControlConn(sock) {
         const r = roster.get(f.session); if (r) { r.topics = f.topics || []; broadcastRoster() }
       } else if (f.t === 'SET_CLIENT') {
         const r = roster.get(f.session); if (r) { r.client = f.client || null; r.client_kind = clientKind(f.client); broadcastRoster() }
+      } else if (f.t === 'GRANTS') {                        // #62: a follower's grant set (its own allow/revoke) goes UP to be merged + gossiped
+        if (!who) return                                     // policy frame: only on an authenticated (HELLO'd) connection
+        if (consent.merge(f.grants) > 0) broadcastRoster()   // → ROSTER to every follower + gossip to every peer hub
       } else if (f.t === 'TRACE') {
         traces.collect(f.trace)
       } else if (f.t === 'PAGE_MSG') {                       // follower forwarding an envelope to a page leaf
@@ -1467,7 +1485,7 @@ function onControlConn(sock) {
         sendFrame(sock, gossipFrame())   // #63: full slice on every (re)link, independent of lastGossip
         sock.on('close', () => { if (peerGw.get(f.session)?.sock === sock) dropPeer(f.session) })
       } else if (f.t === 'PEER_ROSTER') {
-        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock)
+        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants)
       } else if (f.t === 'PONG') {
         touchPeer(sock)
       } else if (f.t === 'PING') { if (TEST_GOSSIP !== 'silent') sendFrame(sock, { t: 'PONG', seq: f.seq }) }
@@ -1609,6 +1627,7 @@ function becomeFollower(gwPort = PORT) {   // #57: connect to whichever port the
       topics: topicList(), bridge_version: BRIDGE_VERSION, capabilities: CAPS,
       realm: REALM, project: PROC_IDENT?.project || null, user: PROC_IDENT?.user || null,
       client: CLIENT ? CLIENT.name : null })
+    sendFrame(sock, { t: 'GRANTS', session: SESSION, grants: consent.grantSet() })   // #62: anything granted/learned while not following (a ≤1.44 gateway ignores it)
     log(`follower registered with gateway on :${gwPort}`)
   })
   onFrames(sock, f => {
@@ -1618,6 +1637,7 @@ function becomeFollower(gwPort = PORT) {   // #57: connect to whichever port the
       roster = new Map(f.sessions.map(s => [s.session, s]))
       pages = new Map((f.pages || []).map(p => [p.instance, p]))
       if (f.gateway) gatewayId = f.gateway
+      consent.merge(f.grants)   // #62: consent for MY sub-peers is checked here, so learn the realm's grants from the gateway
     }
   })
   const reelect = () => { if (role !== 'stopping') { gwSock = null; setTimeout(election, backoff + Math.random() * 100); backoff = Math.min(backoff * 2, 3000) } }
@@ -2018,7 +2038,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (opTtl != null && sawReq) effTtl = Math.min(opTtl, reqTtl)
       const exp = effTtl != null ? Date.now() + effTtl * 60000 : null
       consent.allow(from, to, mode, exp)         // §14: runtime grant + durable copy (survives a restart)
-      broadcastRoster()                          // visibility may widen
+      announceGrants()                           // #62: replicate mesh-wide (+ visibility may widen)
       emitTraceRaw({ dir: 'con', verb: 'allow', from: me0.project, from_name: me0.user || NAME, to: from, size: 0,
         note: `allow ${from} -> ${me0.project} (${mode}, ${exp ? effTtl + 'm' : 'forever'})`, envelope_id: null })
       // Bug 3: tell the original requester(s) their access landed, echoing request_id + the permitted TTL
@@ -2032,8 +2052,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       let myProj = PROC_IDENT?.project, holderId = SESSION
       if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); myProj = sp.identity?.project; holderId = sp.id }
       const from = projKey(a.project), to = projKey(myProj)
-      const had = consent.revoke(from, to)   // §14: drop the runtime grant + its durable edge
-      if (had) broadcastRoster()
+      const had = consent.revoke(from, to)   // §14/#62: tombstone the edge (durable) so the revoke replicates
+      announceGrants()
       return ok({ ok: true, revoked: had, from, to: myProj, reminders: opReminders(holderId, 'revoke_project', { project: a.project }) })
     }
     case 'request_project_access': {

@@ -65,8 +65,9 @@ export interface ClaimRecord {
 }
 /** A durable name->identity registration (offline-by-name delivery, §19). */
 export interface Registration { name: string; realm?: string; project?: string; user?: string; secret_hash?: string | null; client_kind?: string | null; last_seen?: string }
-/** A durable cross-project consent edge (§14). */
-export interface Grant { from: string; to: string; mode: 'send' | 'bidirectional'; exp?: number | null; granted_at?: string }
+/** A durable cross-project consent edge (§14). #62: also the replicated LWW record gossiped mesh-wide — a revoke is a
+ *  tombstone (revoked:true); updated_at (ms epoch) orders writes (a legacy record without it dates from granted_at). */
+export interface Grant { from: string; to: string; mode: 'send' | 'bidirectional'; exp?: number | null; granted_at?: string; updated_at?: number; revoked?: boolean; origin?: string }
 /** A kept-alive (ownerless) topic marker — sends park against it until reclaimed (#26). */
 export interface KeptTopic { realm?: string; project: string; topic: string; description?: string; icon?: string | null; exclusive?: boolean; announce_offline?: boolean; keep_alive?: boolean; behaviors?: string[]; ownerless_since?: string }
 /** A per-session behaviour reminder (#29). */

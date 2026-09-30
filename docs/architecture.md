@@ -628,6 +628,8 @@ may **only shorten** it; the grant response and the requester's notification bot
 TTL. Approving a request is no longer silent: the bridge sends the requester a **`project_access_granted`**
 echoing its `request_id` + the permitted TTL/expiry (it previously had to poll-by-retry). Edges are
 routing metadata (project names + mode + expiry, already cleartext in the roster) so stored as plain JSON.
+Since v1.45.0 (#62) runtime grants also **replicate mesh-wide** as a last-writer-wins set (revokes are
+tombstones), gossiped between hubs and pushed to/from followers — see §13 v1.45.0.
 
 ### Durable registrations — offline-by-name delivery (§19) — built v1.11
 
@@ -1112,6 +1114,55 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.45.0):** *cross-project consent grants federate mesh-wide as a last-writer-wins set (#62).* **What
+  broke:** consent is receiver-side — `deliveryAllowed` → `consent.mayInitiate(from, to)` runs in the bridge PROCESS
+  hosting the target — but an `allow_project` grant lived only in the one process that ran it (RAM + that host's
+  store). Live 2026-09-29: an AIMB broadcast reached Marz sessions on LITTLE (grant there) but was `project-denied`
+  for MapGuy2, a Marz sub-peer on a FOLLOWER on ROBIN, and for Ferret on the Mac. **Design:** `lib/consent.js` now
+  holds one record per edge `(from,to)`: `{ from, to, mode, exp, updated_at, revoked, origin }` (`updated_at` = ms
+  epoch; `origin` = the writing session). A revoke writes a TOMBSTONE (`revoked:true`, newer `updated_at`) instead of
+  deleting, so it propagates and beats the older grant. `merge()` keeps per edge the record that wins `beats()`:
+  greater `updated_at`; on a tie the tombstone, then the greater origin, then the greater canonical JSON — a total
+  order, so merge is idempotent + commutative. A local `allow`/`revoke` stamps `max(now, known+1)`, so it always
+  beats what the host already knows even under clock skew. `mayInitiate`/`reachable` read the merged set and skip
+  tombstones and expired grants. bridge.mjs only calls `grantSet()`/`merge()` and never touches the map.
+  **Replication:** every gateway re-gossips the FULL set it knows (local + learned) in a new `grants` field on
+  `PEER_ROSTER` — roster slices are one-hop, but LWW makes transitive re-gossip safe, so a grant crosses any number of
+  hubs. `gossipToPeers`'s dedupe signature now includes the set, so an `allow_project` sends at once (not on the 60s
+  #63 refresh); `mergeRemoteRoster` merges the set BEFORE the #63 unchanged-slice stamp-only return, so a grant-only
+  change is never swallowed, and a change re-broadcasts (→ onward gossip; an idempotent merge ends the loop). The
+  #63 refresh carries the set too (anti-entropy). **Followers:** the gateway's `ROSTER` to followers carries
+  `grants`, and a follower merges it into its own consent (consent for a follower's sub-peer is checked in the
+  follower). A follower's own `allow_project`/`revoke_project` goes UP in a new follower→gateway `GRANTS` frame
+  (`{t:'GRANTS', session, grants}`, full set, accepted only after `HELLO`), also sent on every (re)connect after
+  `REGISTER`; the gateway merges and re-broadcasts/gossips. So a grant made anywhere reaches every gateway AND every
+  follower on every host. **Persistence:** every process persists each record that CHANGED in a merge, so a learned
+  grant survives a restart and its granting host going offline. Legacy durable records (no `updated_at`) date from
+  `granted_at` (else 0), so any 1.45 write beats them. A tombstone is stored with `exp` = the revoke time, so a ≤1.44
+  bridge sharing the store (the Windows Dropbox pair) never rehydrates it as a grant; the file store's `gcAll` now
+  skips tombstones. The dashboard's Grants view shows tombstones as "revoked" and counts only live grants.
+  **Tombstone GC:** `consent.gc()` turns an EXPIRED grant into a tombstone (same `updated_at`, so it still beats an
+  older forever-grant a long-offline host re-gossips) and drops a tombstone once older than
+  `AI_BRIDGE_GRANT_TOMBSTONE_TTL_MS` (default 30 days) from `max(updated_at, exp)`. **Known limit:** a host offline
+  for longer than that TTL can come back and re-gossip a grant whose revoke everyone has already forgotten,
+  resurrecting it. (A ≤1.44 bridge sharing a store also gc's tombstones early, since their `exp` is past.)
+  **Mixed versions:** ≤1.44 bridges ignore the `grants` field and the `GRANTS` frame, so grants spread only among
+  1.45+ hosts; a ≤1.44 host (or a follower under a ≤1.44 gateway) still knows only its local grants. Nothing breaks
+  for older peers. **Out of scope:** static `config.projects.allow` edges stay per-config and are NOT gossiped.
+  **Security:** any realm member can gossip a grant (the realm token is the membership gate) — the same trust level
+  as the existing unsigned roster/claim gossip, and an accepted trade-off; the `GRANTS` frame needs a `HELLO`'d
+  connection and `PEER_ROSTER` grants are merged only from an adopted peer link. The `request_project_access` →
+  `allow_project` → `project_access_granted` flow is unchanged (pending requests stay local to the operator's
+  bridge). **Tests:** 22 new LWW unit checks in `test_lib_unit` (newer wins; tombstone beats older grant; newer
+  grant beats older tombstone; idempotent; commutative across orders + batch; tie rules; expiry incl. gc→tombstone;
+  legacy records; local stamp beats a future-stamped tombstone; revoke of an unknown edge; tombstone TTL; junk
+  input). New `test_grants_federate_live` (18 checks): gateways on 127.0.0.1/127.0.0.2 plus a FOLLOWER on A hosting
+  the Marz target (the MapGuy2 shape), a 60s refresh so every propagation must be prompt: denied before any grant; a
+  grant made on B (not where the target lives) → `ok:true` AND in the follower-hosted target's inbox, and the
+  follower's own `access` lists it; a revoke on B → denied again; a re-grant beats the tombstone; a grant made on A's
+  FOLLOWER reaches B (lands in the inbox); and, with file persistence in a temp dir, the grant A LEARNED survives A
+  (gateway + follower) restarting while B is down. Against the pre-fix bridge + consent (`AIMB_TEST_BRIDGE`) 9 of 18
+  FAIL — every propagation and durability check (`project-denied` where the grant should apply).
 - **Built (v1.44.0):** *cross-host federation self-heals after a peer restarts or moves port (#63).* **What broke:**
   after the Mac flipped 7000→12317 and restarted several times, LITTLE-001 kept the Mac's OLD roster slice behind a
   TCP link that still showed ESTABLISHED, so LITTLE's sessions dialed the dead old port for Mac peers while ROBIN's

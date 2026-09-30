@@ -6,9 +6,16 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.43.0) — read this first after a compact
-**Current version: v1.43.0.** All work committed to `main` (v1.42.0 + v1.43.0 committed locally, not yet pushed).
+## RESUME STATE (updated 2026-09-30, v1.45.0) — read this first after a compact
+**Current version: v1.45.0.** All work committed to `main` (v1.42.0 – v1.45.0 committed locally, not yet pushed).
 Everything below is durable; nothing important is only in chat.
+
+**2026-09-30 (v1.45.0):** Fixed **#62**. Runtime cross-project grants (`allow_project`/`revoke_project`) now
+replicate mesh-wide as a last-writer-wins set (revoke = tombstone): gossiped in `PEER_ROSTER.grants`, pushed to
+followers in `ROSTER.grants`, and sent up from a follower in a new `GRANTS` frame; every process persists what it
+learns. **Rollout: every host (gateways AND the bridges its followers run) needs 1.45.0 for grants to spread** — a
+≤1.44 host still only knows its local grants (and the #62 static-edge workaround on the Mac stays needed until the Mac
+runs 1.45.0). Static `config.projects` edges are still per-config (not gossiped).
 
 **2026-09-30 (v1.44.0):** Fixed **#63**. Cross-host federation now self-heals: a full slice is sent on every
 (re)link; a same-host peer with a new session retires the old one; and a 60s refresh+PING heartbeat expires
@@ -89,7 +96,7 @@ entry (on older bridges a `{doorbell_cmd}` would reach the agent unexpanded). Li
 NOT edited. Tests: `test_doorbell_live` (40), `test_connect_reminders_live` (17), both verified to fail on the
 pre-change code.
 
-## #66 — replication audit: what federates mesh-wide vs what's bridge-local  ·  **OPEN (audit — Robin, 2026-09-29)**
+## #66 — replication audit: what federates mesh-wide vs what's bridge-local  ·  **OPEN (audit — Robin, 2026-09-29; (a) grants DONE v1.45.0)**
 Triggered by #62 (a consent grant not rippling past one bridge). Audit of bridge state, classified by whether it
 replicates across the mesh. **The routing + observation plane FEDERATES; the policy + durability plane does NOT.**
 
@@ -106,7 +113,8 @@ things in the gossip are `sessions` and `pages`):
 
 **Does NOT replicate** — local to a bridge PROCESS (RAM) or to a persistence STORE (shared only where the store
 is, e.g. the Windows Dropbox pair; never across separate machines):
-1. **Consent grants** (`runtimeAllow` / `allow_project`) — per-process + durable per-store, NOT gossiped. → #62,
+1. **Consent grants** (`runtimeAllow` / `allow_project`) — per-process + durable per-store, NOT gossiped *(was — now
+   replicated since v1.45.0, #62; static `config.projects` edges are still per-config)*. → #62,
    the acute case. You can SEE and ADDRESS a peer mesh-wide, but whether a cross-project send is ALLOWED depends on
    the RECIPIENT's host having the grant. Proven live 2026-09-29: a doorbell broadcast reached Marz sessions on
    LITTLE (grant there) but was `project-denied` for MapGuy2 on ROBIN and Ferret:Mac.1 on the Mac (no grant there).
@@ -124,8 +132,8 @@ is, e.g. the Windows Dropbox pair; never across separate machines):
 
 **The bug class:** routing federates but policy doesn't, so a peer is reachable everywhere while the rule that
 governs the interaction (consent, behaviour) lives only where it was set. **Fix candidates, priority order:**
-(a) **grants** (#62) — gossip them in PEER_ROSTER, or carry a signed grant in the envelope (sender-side proof), or
-a shared consent store; (b) **default/connect reminders** — a realm-wide config or gossip, so a connect reminder
+(a) **grants** (#62) — **DONE (v1.45.0):** gossiped in PEER_ROSTER as a last-writer-wins set (tombstone revokes),
+pushed to/from followers, persisted where learned (static `config.projects` edges remain per-config — item 3); (b) **default/connect reminders** — a realm-wide config or gossip, so a connect reminder
 set once reaches all hosts; (c) **retained values** + (d) **remote page subscriptions** — include in gossip;
 (e) leave parked-mail/vault/registrations store-local by design. #61 (ok:true masks a denied/dropped send) makes
 every one of these fail SILENTLY, so #61 is a prerequisite for trusting any of it.
@@ -186,7 +194,13 @@ all peer hubs on any peer (re)connect; drop+refresh a peer's roster slice when i
 heartbeat-expire stale peer sessions. Relates to #57 (migration) and #61 (masking). Distinct from the v1.38.0 dial
 fix, which was about INITIAL cross-port dialing, not refreshing an already-linked peer after it moves.
 
-## #62 — cross-project consent grants don't federate (per-receiving-host)  ·  **OPEN (root cause of "Mac never receives")**
+## #62 — cross-project consent grants don't federate (per-receiving-host)  ·  **DONE (v1.45.0)**
+**Fixed:** (v1.45.0) option (a): runtime grants are a replicated last-writer-wins set — one record per `(from,to)`
+edge with `updated_at`; a revoke is a tombstone. Every gateway re-gossips the full set in `PEER_ROSTER.grants`
+(sent at once on change), followers get it in `ROSTER.grants` and send their own changes up in a `GRANTS` frame, and
+every process persists what it learns. Tombstones are GC'd after `AI_BRIDGE_GRANT_TOMBSTONE_TTL_MS` (30 days; a host
+offline longer can resurrect a revoked grant). Needs 1.45.0 on every host; ≤1.44 hosts ignore it. Static config
+edges stay per-config. Guard: `test_grants_federate_live` (9/18 FAIL pre-fix). See architecture §13.
 `deliveryAllowed` (bridge.mjs) is RECEIVER-side and directional: a PowerHub bridge accepts an AIMB message only
 if THAT bridge has an `AIMB→PowerHub` edge — a static `CFG.projects` edge or a durable runtime grant
 (`allow_project`, persisted in `lib/consent.js`'s `runtimeAllow`). **Grants are per-receiving-host and do NOT

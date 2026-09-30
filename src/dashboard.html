@@ -377,7 +377,7 @@
     {key:'claims',icon:'🏷',name:'Claims — durable responsibilities',badge:'b-resp',
       cols:[['topic',function(r){return topicMark(esc(tc(r.topic)),{exclusive:r.exclusive,persistent:true})}],['owner',function(r){return esc(nm(r.holder_name))}],['project · user',PROJU],['flags',function(r){var f=[];if(r.exclusive)f.push('exclusive');if(r.announce_offline)f.push('announce-offline');return f.join(' · ')||'—'}],['refreshed',function(r){return tsf(r.refreshed_at)}]]},
     {key:'grants',icon:'🔑',name:'Grants — cross-project consent',badge:'b-con',
-      cols:[['edge',function(r){return '<b>'+esc(tc(r.from))+'</b> → <b>'+esc(tc(r.to))+'</b>'}],['mode',function(r){return esc(r.mode)}],['expires',function(r){return r.exp?tsf(new Date(r.exp).toISOString()):'<span class="empty">forever</span>'}],['granted',function(r){return tsf(r.granted_at)}]]},
+      cols:[['edge',function(r){return '<b>'+esc(tc(r.from))+'</b> → <b>'+esc(tc(r.to))+'</b>'}],['mode',function(r){return r.revoked?'<span class="empty">revoked</span>':esc(r.mode)}],['expires',function(r){return r.revoked?'—':r.exp?tsf(new Date(r.exp).toISOString()):'<span class="empty">forever</span>'}],['granted',function(r){return tsf(r.granted_at)}]]},
     {key:'registrations',icon:'📇',name:'Registrations — name → identity',badge:'b-pu',
       cols:[['name',function(r){return '<b>'+esc(nm(r.name))+'</b>'}],['project · user',PROJU],['kind',function(r){return esc(r.client_kind||'?')}],['last seen',function(r){return tsf(r.last_seen)}]]},
     {key:'subscriptions',icon:'👂',name:'Subscriptions — interest',badge:'b-subp',
