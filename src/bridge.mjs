@@ -108,7 +108,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.55.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.56.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -973,9 +973,9 @@ async function routeEnvelope(env) {
   return dialAndSend(peer.port, peer.host || HOST, env.to, env)   // local pair-dial; cross-host: peer.host/port point at the owning gateway, which splices (§7)
 }
 
-// deliver a SYSTEM control message (bypasses project consent) to every participant in a project —
-// used by request_project_access to reach a project the requester cannot otherwise see.
-async function deliverSystemToProject(toProject, verb, body) {
+// every LIVE participant of a project, mesh-wide (the roster carries every host's sessions + sub-peers): the audience
+// of a system notice to a project (request_project_access; #72 project_access_granted / _revoked).
+function projectTargets(toProject) {
   const want = projKey(toProject)
   const targets = []
   for (const sp of subpeers.values()) if (projKey(sp.identity?.project) === want) targets.push(sp.id)   // sub-peer tier
@@ -984,8 +984,13 @@ async function deliverSystemToProject(toProject, verb, body) {
     for (const sp of (s.subpeers || [])) if (projKey(sp.project) === want) targets.push(sp.id)
   }
   for (const p of pages.values()) if (projKey(p.identity?.project) === want) targets.push('page:' + p.instance)
+  return [...new Set(targets)]
+}
+// deliver a SYSTEM control message (bypasses project consent) to every participant in a project —
+// used by request_project_access to reach a project the requester cannot otherwise see.
+async function deliverSystemToProject(toProject, verb, body) {
   let n = 0
-  for (const to of [...new Set(targets)]) {
+  for (const to of projectTargets(toProject)) {
     const env = makeEnvelope({ to, verb, body, subject: `project access request: ${verb}`, from: { session: SESSION, name: NAME, kind: 'session' } })
     env.system = true
     const r = await routeEnvelope(env)
@@ -993,12 +998,38 @@ async function deliverSystemToProject(toProject, verb, body) {
   }
   return n
 }
-// deliver a SYSTEM control message to a SINGLE target id (e.g. project_access_granted back to a requester —
-// Bug 3: the requester must be told its access request was approved instead of polling-by-retry).
-async function deliverSystemTo(toId, verb, body, subject) {
-  const env = makeEnvelope({ to: toId, verb, body, subject: subject || `system: ${verb}`, from: { session: SESSION, name: NAME, kind: 'session' } })
-  env.system = true
-  return routeEnvelope(env)
+
+// #72: tell the GRANTED project that its access to the granting project was granted / changed / revoked. Called ONLY
+// from the allow_project / revoke_project handlers, i.e. on the bridge where the grant was MADE — a grant learned via
+// GRANTS / PEER_ROSTER gossip goes through consent.merge(), which announces nothing — so the mesh sees ONE notice per
+// change. Audience: every live member of the project (projectTargets, mesh-wide) now, plus `extra` ids (a pending
+// requester, echoed its request_id — Bug 3 — and never sent twice); a DURABLE registration of that project that is
+// live nowhere on the roster gets it PARKED (drained on its next register_self, as §19 parking). Consent: the notice
+// runs granting -> granted, which a one-way grant leaves CLOSED, so it rides as `system` — the exemption
+// project_access_request and the Bug-3 ack already use. `system` is only ever set by the bridge's own code (never
+// from a tool/page argument) and only for these fixed verbs, so it opens no general path. Returns { live, parked, extra }.
+async function announceProjectAccess({ verb, subject, body, from, project, extra = new Map(), onlyExtra = false }) {
+  const mk = (to, add) => { const env = makeEnvelope({ to, verb, body: JSON.stringify({ ...body, ...(add || {}) }), subject, from }); env.system = true; return env }
+  const targets = onlyExtra ? [] : projectTargets(project).filter(t => !extra.has(t))   // onlyExtra: an unchanged re-grant acks requesters only
+  const res = await Promise.all([...targets.map(t => ({ t, add: null, x: false })), ...[...extra].map(([t, add]) => ({ t, add, x: true }))]
+    .map(async ({ t, add, x }) => { try { const r = await routeEnvelope(mk(t, add)); return { x, ok: !!(r && r.ok) } } catch { return { x, ok: false } } }))
+  let parked = 0
+  if (PERSIST && !onlyExtra) {   // offline durable members: park (only identities live NOWHERE on the roster — a live one already got it)
+    const want = projKey(project), key = (p, u, n) => `${projKey(p)}|${lc(u || '')}|${lc(n || '')}`, liveKeys = new Set()
+    for (const sp of subpeers.values()) liveKeys.add(key(sp.identity?.project, sp.identity?.user, sp.name))
+    for (const s of roster.values()) for (const sp of (s.subpeers || [])) liveKeys.add(key(sp.project, sp.user, sp.name))
+    let regs = []
+    try { regs = await persistence.registrations.all() } catch { }
+    for (const r of regs) {
+      if (!r || !r.name || projKey(r.project) !== want || (r.realm || REALM) !== REALM || liveKeys.has(key(r.project, r.user, r.name))) continue
+      liveKeys.add(key(r.project, r.user, r.name))   // one per identity
+      const env = mk(`name:${r.name}`)
+      try { await persistence.mailbox.put({ realm: r.realm || REALM, project: r.project, user: r.user, name: r.name }, env.id, env); parked++ } catch { continue }
+      emitTraceRaw({ dir: 'send', verb, from: from?.session || SESSION, from_name: from?.name || NAME, to: r.name, to_name: r.name, to_kind: 'subpeer',
+        subject, pattern: 'send', size: 0, note: `parked for offline peer ${r.name}`, envelope_id: env.id })
+    }
+  }
+  return { live: res.filter(r => !r.x && r.ok).length, extra: res.filter(r => r.x && r.ok).length, parked }
 }
 
 // the first bridge to become gateway can launch the Windows tray (in --ephemeral mode, so it exits
@@ -2227,7 +2258,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     }
     case 'allow_project': {
       let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }, holderId = SESSION
-      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user }; holderId = sp.id }
+      let by = { session: SESSION, name: NAME, kind: 'session' }   // #72: the granter — the notice's `from` (so from.project = the granting project)
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); me0 = { project: sp.identity?.project, user: sp.identity?.user }; holderId = sp.id; by = { session: sp.id, name: sp.name, kind: 'subpeer' } }
       if (!me0.project || me0.project === 'unclassified') return ok({ ok: false, code: 'caller-unclassified' })
       if (!a.project) return ok({ ok: false, code: 'project-required' })
       const from = projKey(a.project), to = projKey(me0.project)
@@ -2242,24 +2274,56 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       let effTtl = opTtl != null ? opTtl : (sawReq ? reqTtl : null)
       if (opTtl != null && sawReq) effTtl = Math.min(opTtl, reqTtl)
       const exp = effTtl != null ? Date.now() + effTtl * 60000 : null
+      // #72: does this call CHANGE anything? A re-grant of a live edge with the same mode and the same TTL (forever, or
+      // the same minutes — read back from the record as exp - updated_at) is not re-announced to the granted project.
+      const prev = consent.edge(from, to), prevTtl = prev && prev.exp ? (prev.exp - prev.updated_at) / 60000 : null
+      const unchanged = !!prev && prev.live && prev.mode === mode && (effTtl == null ? !prev.exp : prevTtl != null && Math.abs(prevTtl - effTtl) < 0.05)
       consent.allow(from, to, mode, exp)         // §14: runtime grant + durable copy (survives a restart)
       announceGrants()                           // #62: replicate mesh-wide (+ visibility may widen)
       emitTraceRaw({ dir: 'con', verb: 'allow', from: me0.project, from_name: me0.user || NAME, to: from, size: 0,
         note: `allow ${from} -> ${me0.project} (${mode}, ${exp ? effTtl + 'm' : 'forever'})`, envelope_id: null })
-      // Bug 3: tell the original requester(s) their access landed, echoing request_id + the permitted TTL
-      for (const p of pend) {
-        consent.deletePending(p.reqId)
-        deliverSystemTo(p.requester, 'project_access_granted', JSON.stringify({ to: me0.project, from, mode, request_id: p.reqId, ttl_minutes: effTtl, expires_at: exp ? new Date(exp).toISOString() : null }), `project access granted: ${from} -> ${me0.project}`).catch(() => {})
+      // Bug 3: the original requester(s) are told their access landed, echoing request_id + the permitted TTL — they ride
+      // the #72 announcement as `extra` targets (one notice each, never a second copy), and still get it on an unchanged re-grant.
+      const extra = new Map()
+      for (const p of pend) { consent.deletePending(p.reqId); extra.set(p.requester, { request_id: p.reqId }) }
+      const expiresAt = exp ? new Date(exp).toISOString() : null
+      let sent = { live: 0, extra: 0, parked: 0 }
+      if (from !== to && (!unchanged || extra.size)) {
+        const granted = String(a.project).trim(), oneWay = mode !== 'bidirectional'
+        const body = { action: 'granted', granting_project: me0.project, granted_project: granted, mode, one_way: oneWay,
+          direction: oneWay ? `${granted} -> ${me0.project}` : `${granted} <-> ${me0.project}`,
+          ttl_minutes: effTtl, expires_at: expiresAt, granted_by: { name: by.name, session: by.session, project: me0.project, user: me0.user || null },
+          note: `${granted} sessions may now initiate messages to ${me0.project}` + (oneWay ? ` (one-way: ${me0.project} may not initiate to ${granted} through this grant)` : ` and ${me0.project} sessions may initiate to ${granted} (bidirectional)`) + (expiresAt ? `, until ${expiresAt}` : ''),
+          to: me0.project, from }   // `to`/`from`: the Bug-3 ack's original fields, kept for older readers
+        sent = await announceProjectAccess({ verb: 'project_access_granted', from: by, project: granted, body,
+          subject: `${me0.project} granted ${granted} access (${oneWay ? 'one-way' : 'bidirectional'}${effTtl != null ? `, ${effTtl}m` : ''})`,
+          extra, onlyExtra: unchanged })
       }
-      return ok({ ok: true, allow: { from, to: me0.project, mode, ttl_minutes: effTtl, expires_at: exp ? new Date(exp).toISOString() : null }, notified: pend.length, reminders: opReminders(holderId, 'allow_project', { project: a.project }) })
+      return ok({ ok: true, allow: { from, to: me0.project, mode, ttl_minutes: effTtl, expires_at: expiresAt },
+        notified: sent.extra + sent.live + sent.parked, notified_pending: sent.extra, announced: sent.live, parked: sent.parked,   // #72: notified = every notice sent (was: pending requesters only)
+        ...(unchanged ? { announce: 'unchanged' } : {}), reminders: opReminders(holderId, 'allow_project', { project: a.project }) })
     }
     case 'revoke_project': {
-      let myProj = PROC_IDENT?.project, holderId = SESSION
-      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); myProj = sp.identity?.project; holderId = sp.id }
+      let myProj = PROC_IDENT?.project, myUser = PROC_IDENT?.user, holderId = SESSION, by = { session: SESSION, name: NAME, kind: 'session' }
+      if (a.as) { const { sp, err } = authSub(String(a.as), a.secret); if (err) return ok(err); myProj = sp.identity?.project; myUser = sp.identity?.user; holderId = sp.id; by = { session: sp.id, name: sp.name, kind: 'subpeer' } }
       const from = projKey(a.project), to = projKey(myProj)
+      const prev = consent.edge(from, to)
       const had = consent.revoke(from, to)   // §14/#62: tombstone the edge (durable) so the revoke replicates
       announceGrants()
-      return ok({ ok: true, revoked: had, from, to: myProj, reminders: opReminders(holderId, 'revoke_project', { project: a.project }) })
+      // #72: announce the revoke to the granted project — same path + rules as the grant notice; a revoke of an edge that
+      // wasn't live here (already revoked / expired / never seen) changes nothing and is not announced
+      let sent = { live: 0, extra: 0, parked: 0 }
+      if (had && from !== to) {
+        const granted = String(a.project).trim(), mode = (prev && prev.mode) || 'send'
+        sent = await announceProjectAccess({ verb: 'project_access_revoked', from: by, project: granted,
+          subject: `${myProj} revoked ${granted} access`,
+          body: { action: 'revoked', granting_project: myProj, granted_project: granted, mode, one_way: mode !== 'bidirectional',
+            revoked_by: { name: by.name, session: by.session, project: myProj, user: myUser || null },
+            note: `the runtime grant letting ${granted} initiate to ${myProj}` + (mode === 'bidirectional' ? ' (and the reverse direction)' : '') + ' was revoked; a static config edge or another grant may still allow it',
+            to: myProj, from } })
+      }
+      return ok({ ok: true, revoked: had, from, to: myProj, notified: sent.live + sent.parked, announced: sent.live, parked: sent.parked,
+        reminders: opReminders(holderId, 'revoke_project', { project: a.project }) })
     }
     case 'request_project_access': {
       let me0 = { project: PROC_IDENT?.project, user: PROC_IDENT?.user }, requester = SESSION

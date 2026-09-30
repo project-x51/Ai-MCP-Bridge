@@ -186,7 +186,17 @@ to `{realm, scheme, id, display, assurance}`. v1.5 ships the **`label`** model (
 **Cross-project isolation is enforced.** Default stance **strict** (`config.json` `projects.default`,
 or env `AI_BRIDGE_OPEN=1` for open); same project always talks. A project opens itself to another with
 `allow_project {project, mode}` (receiver-controlled; static edges in `projects.allow`, runtime grants
-in-memory) or via `request_project_access {to}` → an operator there approves. Enforced **receiver-side**
+in-memory) or via `request_project_access {to}` → an operator there approves. Every grant **change** is announced
+to the granted project (v1.56.0, #72): its live sessions / sub-peers mesh-wide get a **`project_access_granted`**
+notice (subject e.g. `Ferret granted AIMB access (bidirectional)`; body `{action, granting_project, granted_project,
+mode, one_way, direction, ttl_minutes, expires_at, granted_by, note}` — bidirectional means the granting project may
+initiate back too), offline durable registrations get it parked for their next `register_self`, and a pending
+requester's copy also echoes its `request_id` (one notice each). `revoke_project` sends **`project_access_revoked`**
+the same way. Only the bridge where the call was made announces (never one that learns the grant by gossip), and an
+identical re-grant (same mode + TTL) or a no-op revoke announces nothing (`announce:"unchanged"`). Returns: `notified`
+(all notices) = `notified_pending` + `announced` (live) + `parked`. These notices, like `project_access_request`, are
+bridge-generated **system** messages exempt from consent (the grant may be one-way), which no tool argument can set —
+so an ordinary send in the closed direction is still `project-denied`. Enforced **receiver-side**
 at delivery (cross-project sends are dropped `project-denied`). **Replies** to a thread you opened are
 allowed back without a reverse grant, gated by an unforgeable **reply capability** — an HMAC keyed by
 the session's secret-derived `capKey`, bound to `(senderProject|targetProject|envId|expiry)`, verified

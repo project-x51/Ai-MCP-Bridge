@@ -121,6 +121,13 @@ one-way edge. The reply exception is made unforgeable by the **reply capability*
    (carried in the cleartext metadata plane, so a splice-opaque gateway enforces without reading
    bodies) against the target project's inbound policy. Catches same-host direct-dial and cross-host.
 
+**Consent-control notices are exempt.** The bridge's own consent traffic — `project_access_request` (to a project
+the requester cannot yet reach), `project_access_granted` and `project_access_revoked` (#72: granting → granted, the
+direction a one-way grant leaves closed) — is marked `system` on the envelope, and `deliveryAllowed` passes `system`
+first. Only bridge code sets it, for those fixed verbs; no tool, page or `send_to_peer` argument can, so it is not a
+general bypass (a realm member forging raw frames is outside the model anyway — the realm is one trust domain). A
+system notice skips `all`-scope receive reminders; project/host-scoped ones (matching the sender) still ride it.
+
 ### Policy file discipline
 
 The realm's shared config is **read-only to the bridge** — static policy is hand-edited. This
@@ -630,6 +637,12 @@ echoing its `request_id` + the permitted TTL/expiry (it previously had to poll-b
 routing metadata (project names + mode + expiry, already cleartext in the roster) so stored as plain JSON.
 Since v1.45.0 (#62) runtime grants also **replicate mesh-wide** as a last-writer-wins set (revokes are
 tombstones), gossiped between hubs and pushed to/from followers — see §13 v1.45.0.
+Since v1.56.0 (#72) every grant **change** is also **announced** to the granted project, not only to a pending
+requester: a **`project_access_granted`** notice (mode, one-way vs bidirectional, TTL/expiry, granter) goes to its live
+sessions / sub-peers / pages mesh-wide and is **parked** for its offline durable registrations; `revoke_project` sends
+**`project_access_revoked`** the same way. Only the bridge where the call was made announces (a grant learned by gossip
+never does), an identical re-grant (same mode + TTL) is not re-announced, and the notice rides the `system` consent
+exemption (below) because it runs granting → granted, which a one-way grant leaves closed — see §13 v1.56.0.
 
 ### Durable registrations — offline-by-name delivery (§19) — built v1.11
 
@@ -1114,6 +1127,35 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.56.0):** *grants are announced to the granted project (#72).* Reported by Ferret : PC.1. **What was
+  wrong:** `allow_project` told only a PENDING `request_project_access` requester (`notified: 0` otherwise), and pending
+  requests live only in the bridge where the request was made — so when Ferret granted AIMB bidirectional access, no AIMB
+  session ever learned it could now reach Ferret. **Fix:** `allow_project` now sends a **`project_access_granted`** system
+  notice to the granted project's live members mesh-wide (`projectTargets`: local sub-peers + every roster session /
+  sub-peer / page in that project — the audience `request_project_access` already used) and **parks** it for each durable
+  registration of that project that is live nowhere on the roster (mailbox `name:<peer>`, drained on its next
+  `register_self`, as §19 parking; only registrations in the granting bridge's store — a shared Dropbox store covers
+  every host, a host-local one only that host). Subject (public) e.g. `Ferret granted AIMB access (bidirectional, 30m)`;
+  `from` = the granting sub-peer (so `from.project` is the granting project and a reply reaches the granter); body
+  `{action:"granted", granting_project, granted_project, mode, one_way, direction:"AIMB -> Ferret"|"AIMB <-> Ferret",
+  ttl_minutes, expires_at, granted_by:{name,session,project,user}, note, to, from}` (`to`/`from` = the Bug-3 ack's
+  original fields). `revoke_project` sends **`project_access_revoked`** the same way (`{action:"revoked", …, mode,
+  revoked_by}`, subject `Ferret revoked AIMB access`). **Consent:** the notice runs granting → granted, which a one-way
+  grant leaves closed, so it is `system` — the exemption `project_access_request` and the Bug-3 ack already use,
+  set only by bridge code for these verbs, so an ordinary send in that direction stays `project-denied` (tested); a
+  ≤1.55 receiver honours it too. **No duplicates:** only the `allow_project` / `revoke_project` handler announces;
+  `consent.merge()` (GRANTS / PEER_ROSTER gossip) has no hook, so one notice per change mesh-wide. A re-grant of a
+  live edge with the same mode and TTL (forever, or the same minutes — read back from the stored record as
+  `exp − updated_at` via the new `consent.edge()`) is not re-announced (`announce:"unchanged"`); a revoke of an edge
+  that wasn't live changes nothing and announces nothing. **Pending requesters** ride the same call as extra targets
+  (their copy adds `request_id`) and are skipped in the broadcast — one notice each, and still acked on an unchanged
+  re-grant. **Return:** `notified` now counts every notice (pending acks + live announcements + parked; was pending
+  only), split as `notified_pending`, `announced`, `parked`; `revoke_project` gains `notified` / `announced` / `parked`.
+  Not announced: a TTL grant expiring on its own. Tests: new `test_grant_notice_live` (28 checks) — same-bridge and
+  cross-bridge live delivery with verb/mode/granter/subject, one-way consent still denies ordinary Alpha → Beta traffic,
+  parked for an offline durable registration + delivered on re-register, no duplicate from the gossip-learning bridge,
+  identical re-grants (forever and 30m) silent, a changed grant re-announced, revoke notices, a pending requester acked
+  once with its `request_id`; against the pre-change bridge 20 of the 28 FAIL. Full suite 1063 passed (44 files).
 - **Built (v1.55.0):** *doorbell `peer-unknown` — no re-arm loop after a bridge restart (#73).* Reported by Ferret :
   PC.1. **What was wrong:** after a bridge restart a session's sub-peer name is unknown until it calls `register_self`
   again, but a doorbell armed on it got `{type:"gone"}` at once → `reason:"peer-gone"` + the silent-re-arm guidance →

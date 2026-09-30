@@ -6,8 +6,8 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.55.0) — read this first after a compact
-**Current version: v1.55.0** (#73; code done, NOT yet deployed — live hosts run v1.54.0). Work is committed AND pushed
+## RESUME STATE (updated 2026-09-30, v1.56.0) — read this first after a compact
+**Current version: v1.56.0** (#72; code done, NOT yet deployed — live hosts run v1.54.0). Work is committed AND pushed
 to `main` (see `git log`). Everything below is durable;
 nothing important is only in chat.
 
@@ -23,9 +23,15 @@ with `list_sessions`).
 Optional tidy: live configs still carry ignored `compatPorts` keys (harmless). Not done: the optional
 `from_topic`-aware receive line in `behaviors.realm` (#54).
 
-**Still open:** #72 grant notices, #71 project-name case, #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #71 project-name case, #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
+
+**2026-09-30 (v1.56.0):** Built **#72** — `allow_project` announces every grant change to the granted project
+(`project_access_granted`: live members mesh-wide, parked for offline durable registrations; a pending requester's copy
+echoes its `request_id`, one notice each) and `revoke_project` sends `project_access_revoked`. Only the granting bridge
+announces; identical re-grants are silent. `notified` now counts all notices (+ `notified_pending`/`announced`/`parked`).
+Deploy = restart each bridge on 1.56.0 (only the granting bridge needs it; receivers of any version accept the notice).
 
 **2026-09-30 (v1.55.0):** Fixed **#73** — the doorbell no longer loops on a name not re-registered since a bridge
 restart: the bridge sends `{type:"unknown"}` (script: `reason:"peer-unknown"`, exit 0, "call register_self … then
@@ -178,8 +184,22 @@ late gone, version gate); 9 of the new checks FAIL on the pre-change bridge + sc
   - Exit code stays 0, since it isn't a bridge fault.
   - Update the README exit-code table.
 
-## #72 — `allow_project` grants aren't announced to the granted project  ·  **OPEN**
+## #72 — `allow_project` grants aren't announced to the granted project  ·  **DONE (v1.56.0)**
 Reported by Ferret : PC.1 (2026-09-30).
+**Built:** `allow_project` sends a `project_access_granted` **system** notice to the granted project's live sessions /
+sub-peers / pages mesh-wide (the audience `request_project_access` uses) and parks it for each durable registration of
+that project live nowhere on the roster (drained on its next `register_self`; only registrations in the granting
+bridge's store). Subject e.g. `Ferret granted AIMB access (bidirectional, 30m)`, `from` = the granter; body `{action,
+granting_project, granted_project, mode, one_way, direction, ttl_minutes, expires_at, granted_by, note, to, from}`.
+`revoke_project` sends `project_access_revoked` the same way (only when a live grant was revoked). **Consent:** it runs
+granting → granted (closed under a one-way grant), so it uses the existing `system` exemption that
+`project_access_request` and the Bug-3 ack already ride — set only by bridge code for these verbs, so ordinary sends in
+that direction stay `project-denied`. **Duplicates:** only the handler where the call was made announces
+(`consent.merge()` gossip never does); an identical re-grant (same mode + TTL, read back via the new `consent.edge()`)
+returns `announce:"unchanged"` and announces nothing; a pending requester rides the same call (its copy adds
+`request_id`) and is skipped in the broadcast. Return: `notified` = `notified_pending` + `announced` + `parked` (was
+pending only). Not announced: a TTL grant expiring by itself. Tests: new `test_grant_notice_live` (28 checks); 20 FAIL on
+the pre-change bridge.
 - **What happens:** `allow_project` returned `notified: 0` because there was no pending `request_project_access`. The
   granted project's sessions (AIMB here) have no way to learn they can now reach Ferret.
 - **Wanted:**

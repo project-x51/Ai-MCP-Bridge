@@ -129,6 +129,12 @@ export function createConsent({ persistence, persist, origin = '', tombstoneTtlM
     }
     return changed
   }
+  /** #72: the record this host holds for one edge (a copy, plus `live` = authorises right now), or null — so
+   *  allow_project / revoke_project can tell whether a call CHANGES anything before announcing it. */
+  function edge(from, to) {
+    const g = runtimeAllow.get(edgeKey(projKey(from), projKey(to)))
+    return g ? { ...g, live: live(g) } : null
+  }
   /** The full replicated set (grants + tombstones), edge-sorted so equal state serialises identically (gossip dedupe). */
   function grantSet() {
     return [...runtimeAllow.keys()].sort().map(k => ({ ...runtimeAllow.get(k) }))
@@ -167,5 +173,5 @@ export function createConsent({ persistence, persist, origin = '', tombstoneTtlM
   const pendingFor = (from, to) => { const f = projKey(from), t = projKey(to); return [...pendingAccess.values()].filter(p => p.from === f && p.to === t) }
   const deletePending = reqId => pendingAccess.delete(reqId)
 
-  return { setPolicy, mayInitiate, reachable, allow, revoke, merge, grantSet, rehydrate, gc, addPending, pendingFor, deletePending, get isOpen() { return open } }
+  return { setPolicy, mayInitiate, reachable, allow, revoke, edge, merge, grantSet, rehydrate, gc, addPending, pendingFor, deletePending, get isOpen() { return open } }
 }
