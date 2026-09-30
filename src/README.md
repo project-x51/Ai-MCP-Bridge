@@ -333,8 +333,15 @@ An idle session that polls `inbox` every ~10s spends a **model turn per poll** (
 "nothing arrived". Instead, attach a **`listener`** leaf and block:
 
 ```bash
-node tools/aimb-doorbell.mjs --name Bridget --project AIMB --status /tmp/db.json
+node "<abs path>/src/tools/aimb-doorbell.mjs" --name Bridget --project AIMB --status "<your scratchpad>/doorbell-Bridget.json"
 ```
+
+- `--name` is the peer to watch; `--topic` watches a topic instead.
+- `--project` is optional: it only matters when two peers share a name.
+- `--status` is optional. Give it a per-session path such as your scratchpad or `%TEMP%`, never a fixed `/tmp/...`,
+  because on Windows node resolves `/tmp` to `C:	mp`, which usually doesn't exist, and status writes fail silently.
+- The realm token and port come from the bridge's own `src/config.json`, found relative to the **script**, not your
+  working directory, so the command runs from anywhere. Don't pass `--token` in a shared command line.
 
 **You don't need to know that path:** `set_wake` (for a code session) returns a ready-to-run `command`, and a
 `connect` reminder may say `{doorbell_cmd}`, which the bridge expands per session when it emits the reminder
@@ -363,17 +370,28 @@ With the period hook, the check-in lands on each boundary whose seconds since lo
 6 × period. Test/tuning knob: `AIMB_DOORBELL_CHECKIN_EVERY=<k>` (default 6) = every *k*-th boundary instead.
 
 Run it **backgrounded**; it costs no tokens and ~no CPU while waiting, and exits the moment there is
-something to collect — the caller wakes, polls `inbox` **once**, and re-arms. The **exit code is a plain
-success/failure signal** for the harness (which paints any non-zero background exit as "failed"): **0** = it did
-its job — re-arm, and if `reason=="mail"` poll the inbox first, if `"hourly"` show the user the time (and with
-`inbox_check:true` call the inbox tool first, #69) (#52; a
-benign timeout no longer reads as a failure) · **4** = it *couldn't* do its job (never armed / bridge error — investigate, don't hot-loop) · **64**
-bad usage. The **specific outcome is in `reason`** on stdout + `--status` (`mail` / `hourly` / `timeout` /
-`peer-gone` / `link-closed`), so a caller still branches on it. A routine **no-mail** wake also carries a terse
-`guidance:"silent re-arm…"` so a doorbell loop doesn't burn tokens narrating uneventful re-arms — the agent
-stays quiet unless it's stopping the loop. `--status` writes a heartbeat file so you can confirm it's alive
-without spending a turn. Every exit line is **self-timestamped** (#51): `exited_at` (local ISO-8601 with tz
-offset) + `exited_at_unix`, on stdout and in the `--status` exit write.
+something to collect. The caller wakes, acts on the result, and re-arms.
+
+**Exit codes (#52).** The exit code is a plain success/failure signal, because the harness shows any non-zero
+background exit as "failed". The specific outcome is always in **`reason`**, which appears in the single JSON line on
+stdout and in the `--status` exit write. Branch on `reason`:
+
+| Exit | `reason` | What the caller does |
+|---|---|---|
+| **0** | `mail` | Poll `inbox` once, handle the mail, re-arm. |
+| **0** | `hourly` | Show the user `time`, re-arm. If `inbox_check:true` (00/06/12/18:00, #69), call `inbox` first even if nothing is waiting. |
+| **0** | `timeout` | Only with an explicit `--timeout`. Silent re-arm. |
+| **0** | `peer-gone` | The watched name left the mesh. Silent re-arm; re-register first if it was you. |
+| **0** | `link-closed` / `link-error` | The bridge link dropped **after** arming, e.g. a bridge restart. Silent re-arm. |
+| **4** | `error` | The bridge sent an error frame (`code`, `what`). Investigate; don't hot-loop re-arming. |
+| **4** | `link-closed` / `link-error` | The link failed **before** it ever armed (bridge down, wrong port/token). Investigate. |
+| **64** | — | Bad usage, e.g. no `--name`/`--topic`, or no realm token found. Fix the command. |
+
+Routine no-mail wakes (exit 0 and anything but `mail`/`hourly`) also carry a terse `guidance:"silent re-arm…"`, so a
+doorbell loop doesn't burn tokens narrating uneventful re-arms. The agent stays quiet unless it's stopping the loop.
+`--status` writes a heartbeat file, so you can confirm the doorbell is alive without spending a turn. Every exit is
+**self-timestamped** (#51): `exited_at` (local ISO-8601 with tz offset) and `exited_at_unix`, on stdout and in the
+`--status` exit write.
 
 Protocol: `hello {kind:"listener", token, watch:{name?, project?, topic?}}` → `welcome`, then
 `{type:"mail", peer, unread_direct, topics{}, total}` when the v1.24.17 waiting counts rise above zero,
