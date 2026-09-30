@@ -22,7 +22,7 @@ with `list_sessions`).
 Optional tidy: live configs still carry ignored `compatPorts` keys (harmless). Not done: the optional
 `from_topic`-aware receive line in `behaviors.realm` (#54).
 
-**Still open:** #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #73 doorbell peer-unknown after restart, #72 grant notices, #71 project-name case, #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -145,6 +145,43 @@ the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) 
 whenever a send returns `unknown-subpeer`.
 
 ---
+
+## #73 — doorbell reports `peer-gone` for a name not re-registered since a bridge restart (re-arm loop)  ·  **OPEN (fixing first)**
+Reported by Ferret : PC.1 (Ferret project, 2026-09-30).
+- **What happens:** after a bridge restart (the queue epoch changes), a session's name is unknown until it calls
+  `register_self` again. A doorbell armed before that exits at once with `reason:"peer-gone"`, and its guidance says
+  "silent re-arm". Re-arming exits again, so the session loops without ever re-registering. The v1.54.0 rollout
+  restarted every bridge, so every code session is exposed.
+- **Wanted:**
+  - Tell "never known / not registered since the restart" apart from "was here and left". Proposed:
+    `reason:"peer-unknown"` with guidance to call `register_self` with your name and secret, then re-arm.
+  - Or let the listener arm on an unknown name and wait for it to register.
+  - A real departure stays `peer-gone`.
+  - Exit code stays 0, since it isn't a bridge fault.
+  - Update the README exit-code table.
+
+## #72 — `allow_project` grants aren't announced to the granted project  ·  **OPEN**
+Reported by Ferret : PC.1 (2026-09-30).
+- **What happens:** `allow_project` returned `notified: 0` because there was no pending `request_project_access`. The
+  granted project's sessions (AIMB here) have no way to learn they can now reach Ferret.
+- **Wanted:**
+  - A short `project_access_granted` notice to the granted project's live sessions, parked for durable ones.
+  - The notice carries the mode (one-way or bidirectional; bidirectional also opens the reverse direction) and any TTL.
+  - A revoke should probably announce too.
+  - Grants federate as a last-writer-wins set since #62, so decide which host sends the notice (the granting bridge)
+    to avoid duplicates.
+
+## #71 — project names show inconsistent case (`AIMB` vs `aimb`, `Marz` vs `marz`)  ·  **OPEN**
+Reported by Ferret : PC.1 (2026-09-30).
+- **What happens:**
+  - A Ferret session called `allow_project(project:"AIMB")` and got a grant shown as `{from:"aimb", to:"Ferret"}`;
+    `register_self` then listed `access:["aimb"]`.
+  - `list_sessions` shows both `Marz` (MapGuy2, Lighter) and `marz` (MapSeeder).
+  - Matching is already case-insensitive (`projKey`/`lc`), so this is presentation plus stored spelling, not a split,
+    but it reads as two projects.
+- **Wanted:** one canonical display spelling per project (realm), ideally the first-seen or registered spelling. Use
+  it in grants, `access`, the roster, `list_sessions` and the dashboard, while matching stays case-insensitive.
+  Verify that no path really treats different cases as different projects (topics, consent, parked mail).
 
 ## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (spec in progress — Robin + Bridget, 2026-09-30)**
 **Why:** sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows what those
