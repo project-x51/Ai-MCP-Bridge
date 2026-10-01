@@ -367,6 +367,33 @@ silent steps such as builds and downloads.
 - `details` and `data` stay in memory only for each context's CURRENT line.
 - Older entries' `details` and `data` are read back from the host's daily JSONL when expanded.
 
+### Decisions after step 1 (Robin, 2026-10-01)
+- **State and the current line change only on `@~`.** An `@` message's state is recorded in its log entry only.
+- **Progress and ETA:**
+  - They persist between messages; `none` clears them. The ETA is dropped when a context goes done or failed.
+  - **ANY message can update a context's progress and ETA**, `@` included, since a bar update can't change the
+    headline.
+- **Progress ticks:** a message with NO text but `progress` and/or `eta`:
+  - updates the bar and ETA and counts as activity (it keeps the agent and context fresh);
+  - is not appended to the log and is not written to the daily JSONL, so it is ephemeral (memory and gossip only);
+  - on restart, the bar falls back to the last LOGGED message that carried progress, until the next tick.
+- **Session identity:** realm + project + user + session name. The host is not part of it, so a session that moves
+  machines stays the same session.
+- **Restart replay, newest first:** the host's daily JSONL is read BACKWARDS from the newest record.
+  - A reverse fold fills each entity's current line, bar, state and finished status, and stops once they are found,
+    so the board is current almost immediately.
+  - The in-memory history (up to `log_entries_per_agent`) then fills in, in the background.
+  - It covers `finished_visible_hours` (24h).
+- **Each bridge owns only its own history:**
+  - A restarted bridge rebuilds only its own host's sessions.
+  - Other hosts' current lines arrive by gossip (step 4).
+  - Remote history, details and data are fetched on demand from the owning bridge (the #66d `CONNECT` pattern) and
+    never bulk-copied.
+  - If the owning host is down, its agents show as gone and their history is unavailable.
+- **One writer per host:** the host's GATEWAY owns the activity state and the files. Followers forward `log` calls
+  up. Files are per HOST (`activity/<host>/YYYY-MM-DD.jsonl` under the persist dir), so a newly elected gateway
+  continues the same history.
+
 ### Build plan
 Each step is its own version.
 1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible. **BUILT (2026-09-30)** — `src/lib/activity.js`
