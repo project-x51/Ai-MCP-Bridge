@@ -465,6 +465,21 @@ silent steps such as builds and downloads.
   - A large history never swamps a bridge's CPU or a link's budget.
   - Replay and history reads are incremental and yield to the event loop.
 
+### Decisions before step 4 (Robin, 2026-10-01)
+- **Identity includes the host.** Every entity is keyed by realm + project + user + session + **host** (+ agent path).
+  This supersedes "the host is not part of it".
+  - Each host only ever writes its own entities, matching per-origin gossip ownership, so the same session/agent name
+    reporting from two hosts is simply two entities and nothing has to choose between them.
+  - The board GROUPS entries with the same realm/project/user/session name under one session, tagging hosts when it
+    spans more than one.
+  - A session that moves machines leaves its old host's entries to go stale or gone.
+- **User-mismatch check:** the few-seconds gossip lag is acceptable. Bare (process-level) sessions get the same rule
+  as sub-peers: same user allowed, a different user refused.
+- **Gossip rate:** at most ONE activity update per second per link, carrying only what changed.
+- **"Going down" notice:** the prepare-shutdown request also tells peer hosts, so their boards show that host's
+  agents as gone at once.
+- **No realm flag on the script:** the gateway already refuses a realm other than its own.
+
 ### Build plan
 Each step is its own version.
 1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible. **BUILT (2026-09-30)** — `src/lib/activity.js`
