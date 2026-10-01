@@ -406,6 +406,16 @@ silent steps such as builds and downloads.
   `log:false` messages.
   - Checkpoints are not log entries: they are hidden from log views and entry lookup.
   - Replay uses them, so the bar survives a restart without log noise.
+- **Checkpoint notation in the daily JSONL** (keeps the file clean):
+  - A CHANGED context writes `{"kind":"cp","k":17,...current line/bar/state}`, where `k` is a short per-file key.
+  - Unchanged-but-alive contexts are run-length encoded in ONE trailing repeat line:
+    `{"rep":[17,18,23],"n":245,"since":t0,"last":t1}`.
+  - At each interval, if that line is still the file's last line it is rewritten IN PLACE (truncate + write;
+    single writer per host file): `n` is incremented and `last` updated. Any other write closes it, and the next
+    unchanged interval starts a new one.
+  - Replay takes `last` as the context's last-alive time, so stale is right after a restart.
+  - Log views ignore `cp` and `rep` lines.
+  - A garbled final line (a crash mid-rewrite) is skipped, losing at most one interval of liveness.
 - **History across the wire is CHUNKED (step 4):**
   - Remote log, details and data fetches are paged with a cursor, a bounded page size (entries and bytes) and a
     request rate limit per link.
