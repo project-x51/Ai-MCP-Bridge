@@ -48,7 +48,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #70 agent activity board (steps 1–4 built; next: step 5 the dashboard Activity tree, then the snippet), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #74 federation test flakes, #70 agent activity board (steps 1–4 built; next: step 5 the dashboard Activity tree, then the snippet), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -187,6 +187,16 @@ the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) 
 whenever a send returns `unknown-subpeer`.
 
 ---
+
+## #74 — federation live tests flake under full-suite load  ·  **OPEN**
+- `test_grants_federate_live` failed once in the #70 step 2 full run, with "MCP error -32000: Connection closed" at
+  its after-restart `send_to_peer`.
+- `test_federation_heal_live` lost a connection once in the step 4 full run.
+- Both pass reliably when run alone (7/7 each), and neither touches the code that changed.
+
+**Suspicion:** a timing race around bridge restart/re-link under CPU load, or a test-harness port/timeout
+assumption. **Wanted:** reproduce under load (e.g. run each in a loop alongside a CPU hog), then find whether a
+bridge actually crashes (capture stderr) or the harness times out, and fix it or harden the test.
 
 ## #73 — doorbell reports `peer-gone` for a name not re-registered since a bridge restart (re-arm loop)  ·  **DONE (v1.55.0)**
 Reported by Ferret : PC.1 (Ferret project, 2026-09-30).
@@ -488,6 +498,20 @@ silent steps such as builds and downloads.
 - **"Going down" notice:** the prepare-shutdown request also tells peer hosts, so their boards show that host's
   agents as gone at once.
 - **No realm flag on the script:** the gateway already refuses a realm other than its own.
+
+### Decisions before step 5 (Robin, 2026-10-02)
+1. **Dashboard updates:** dashboards get DELTAS, like the gossip, not the whole board every second.
+2. **Stale slider:** the dashboard computes stale client-side from the raw fields, so the slider responds instantly.
+3. **A session on several hosts:** one session row with a host tag for each host, and agents beneath tagged by host.
+   The session headline comes from the most recently active host.
+4. **"Host down" versus "session left":** distinct. "Host down" gets its own badge, since it affects every agent on
+   that host.
+5. **History paging** continues into the day files once the in-memory entries run out, covering the full retention
+   window.
+6. **Many remote fetches at once:** the requesting gateway QUEUES them (respecting the per-link rate) instead of
+   surfacing `rate-limited` to dashboards.
+7. **Who may read activity:** dashboards and registered sessions only, not page leaves.
+8. **Duplicate hostnames:** accepted. A warning is logged when one is detected.
 
 ### Build plan
 Each step is its own version.
