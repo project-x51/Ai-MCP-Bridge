@@ -29,10 +29,12 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `project-names.js` (#71 the replicated first-seen canonical spelling per project; `note`/`merge`/`display`),
   `traces.js` (the observation-plane ring buffer + dashboard fan-out; `collect`/`history`), and `egress-auth.js`
   (#36 server-side auth token sources — mint/cache/refresh a bearer token for an egress backend). `activity.js` is the
-  pure core of the #70 agent activity board (no I/O, no clock — `now` is a parameter; not wired in yet): report
-  parsing (`@ctx`/`@~ctx`, progress/eta/stale_after, the locked limits), `apply` over a plain state object, the
-  derived views (stale/gone, rollup, visibility), the per-origin gossip `snapshot`/`mergeSnapshot`, the memory
-  budget and `resolveConfig` (the `activity` block + `AI_BRIDGE_ACTIVITY_*`); unit-tested in `tests/test_activity_unit.mjs`. `win-env.js`
+  pure core of the #70 agent activity board (no I/O, no clock — `now` is a parameter; bridge.mjs does the I/O): report
+  parsing (`@ctx`/`@~ctx`, progress/eta/stale_after, the `log` flag, the locked limits), `apply` over a plain state
+  object, text placeholders (`renderText`), checkpoints (`planCheckpoints`), the newest-first replay (`createReplay`),
+  the read views (`boardView`/`logView`/`findEntry`), the derived views (stale/gone, rollup, visibility), the
+  per-origin gossip `snapshot`/`mergeSnapshot`, the memory budget and `resolveConfig` (the `activity` block +
+  `AI_BRIDGE_ACTIVITY_*`); unit-tested in `tests/test_activity_unit.mjs`. `win-env.js`
   rehydrates environment variables that an MCP host stripped at launch (Windows registry) so `${env:…}` secret
   refs resolve. The bridge core (handlers, routing, delivery, gateway) deliberately stays in `bridge.mjs`.
 - `types.d.ts` — shared shapes for JSDoc + `checkJs` (see Type-checking below).
@@ -169,6 +171,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 • `set_behavior {behavior, operation?, scope, match?, as?, secret?}` • `list_behaviors {as?, secret?}` • `clear_behavior {operation?, scope?, match?, as?, secret?}` (#29/#32/#44 per-operation behaviour reminders)
 • `allow_project {project, mode?, as?, secret?}` • `revoke_project {project, as?, secret?}` • `request_project_access {to, reason?, as?, secret?}`
 • `http_request {backend, method?, path?, query?, headers?, body?, json?, as?, secret?}` (#33/#36 egress — present only when a backend is configured)
+• `log {as, secret, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?}` • `activity {project?, session?, agent?, active_only?, log?, entry?}` (#70 the activity board — see "Log / activity")
 • `set_wake {…}` (reserved — unsupported).
 
 **Feature detection (#41):** `profile.names` says which facet the operator CONFIGURED; `capabilities` says
@@ -439,6 +442,74 @@ e.g. not re-registered after a bridge restart), `{type:"gone"}` if it was there 
 It is **counts-only** — no roster, traces, persistence or sender identities — so it needs **no per-peer secret**
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
+
+## Log / activity (#70) — what every agent is doing (v1.58.0, build-plan step 2)
+Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress. Step 2
+is this host only (the `log` + `activity` tools, the gateway-owned state, the daily log files); gossip (step 4), the
+dashboard tree (step 5), `tools/aimb-log.mjs` (step 3) and the agent snippet (step 6) follow.
+
+**Reporting — `log {as, secret, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?}`.**
+You report as a registered session (`as` + `secret`). Omit `agent` for the session itself; `agent:"spec-70/research"`
+(≤3 levels) reports for one of your agents — agents never register. The session's identity is **realm + project + user
++ session name** (not the host, so a session that moves machines stays the same session).
+- Every message belongs to a **context**: `"@build compiling"` appends to the build context's log; `"@~build
+  compiling"` also makes it that context's **current line**; `"@~root …"` sets your own headline; no prefix = `@root`,
+  log only. `context:"@~build"` does the same without a prefix (the text is then literal). Quote spaces: `@~"strip 17"`.
+- **State** (`running|blocked|failed|done|idle`) changes only with an `@~` line; `@~root` done/failed **finishes** the
+  agent. Stale is computed (quiet longer than `stale_after_min`, or the message's own `stale_after`, ≤24h); gone = the
+  session left this host's roster (deregister / TTL / its process exited), cleared when it comes back.
+- **Progress / ETA** (`"4812/12000 tiles"`, `"3/6"`, `"61%"` / `"15m"`, `"1h25m"`, `"19:27"`) move the bar from **any**
+  message, stick until changed (`"none"` clears) and the ETA is dropped while the context is done/failed.
+- **Text is a template**, rendered when read: `{progress}` → "4,812 of 12,000 tiles" ("61%" for a % bar, "3 of 6"
+  without a unit), `{pct}` → "40%" (floored), `{done}` `{total}` `{unit}`, `{eta}` → "~1h 25m" ("now" once due, "?"
+  with no ETA). `{{` / `}}` are literal braces; an unknown `{word}`, or a bar placeholder with no bar, stays as typed. A
+  current line renders against the context's **live** bar (`"@~Tharsis Seeding {progress}"` keeps moving); a log entry
+  against the progress recorded on it. The files and the gossip keep the raw template.
+- **Default text:** a message with progress/eta and no text gets `"{progress}"` (`"{eta}"` with only an ETA) — logged or not.
+- **`log:false`** updates the board (line, state, bar, activity) **without** appending to the log or the file. An
+  agent's own tool calls cost tokens, so agents log sparingly, at milestones; a **script** may report often with
+  `log:false` (e.g. every second) and occasionally `log:true`. The bridge checkpoints that progress every
+  `progress_checkpoint_sec` so the bar survives a restart.
+- Limits (locked; a change is a version bump): text 240 chars (longer is truncated + `warnings`), context name 60, 32
+  contexts per agent, 128 agents per session (the 129th evicts the oldest *finished* one), `details` 4 KB, `data` 16 KB
+  JSON — keep both small. **Status text is plaintext, realm-wide: never put secrets in it.**
+- Returns `{ ok, id, ts, session, agent, context, current, state, stale_at, logged }` (+ `warnings`, `evicted`; codes
+  like `context-too-long`, `too-many-agents`, `activity-disabled`, `activity-loading`, `no-gateway`).
+
+**Reading — `activity {project?, session?, agent?, active_only?, log?, entry?}`.** This host's board: sessions → agents →
+contexts with their current lines (`text` raw, `rendered` filled in), effective state (`stale` / `gone`; `was` = the
+reported one), rollup progress (summed per shared unit, else the mean %), ETA, visibility and log counts.
+`log:{session, project?, agent?, context?, limit?}` is one agent's (or the session's) in-memory log, newest first;
+`entry:{id}` is one entry in full with its `details`/`data` (memory for a current line, else the day file — via an id →
+offset index, else a scan of the day the id's timestamp names). Times are ms epochs.
+
+**One writer per host.** The host's **gateway** owns the board and its files; a follower authenticates its own sub-peer
+and forwards the call up its control link (`ACTIVITY` frame + request id → `ACTIVITY_R`, 5 s timeout; only a registered
+follower's frames are honoured, and only for a sub-peer on its roster). A follower promoted to gateway first **replays**
+the host's files (below); a `log` call waits for that (≤15 s, else `activity-loading`).
+
+**Files:** `<persist dir>/activity/<host>/YYYY-MM-DD.jsonl` (local date), only with persistence on. One JSON line per
+logged entry (with `details`/`data` and the identity), plus two compact kinds for `log:false` activity:
+- a **checkpoint** `{"kind":"cp","k":3,"ts":…,"session":…,"agent":…,"context":…,"current":{…},"state":…,"progress":…,"eta_at":…}`
+  — written at most once per context per interval when its line / bar / ETA changed; `k` is a small per-file key given
+  to the context the first time it is checkpointed that day;
+- a **repeat line** `{"rep":[3,7],"n":245,"since":…,"last":…}` — these keys were alive and *unchanged* for `n`
+  intervals from `since` to `last`. While the set stays exactly the same the bridge rewrites this last line in place;
+  any other write (an entry, a cp) or a different set starts a new one. Contexts with no activity aren't listed.
+
+Ids are `act_<boot nonce>_<ms base36>-<seq>` (the time names the day file). Retention deletes day files older than
+`log_retention_days` (at gateway start and daily). **Replay** reads the files newest-first, backwards in 64 KB chunks:
+phase 1 fills current lines, bars, states and finished status from the newest record carrying them (a cp counts), and
+publishes the board as soon as everything seen is resolved (or after 300 ms); phase 2 fills each agent's history. It
+covers `finished_visible_hours`; a context's `last_activity` also takes the `last` of any repeat line listing it, so it
+isn't stale after a restart. A garbled final line (a crash mid-write) is skipped. A clean shutdown flushes pending
+checkpoints.
+
+**Config** — an `activity` block in `config.json` (live-reloaded), each key with an `AI_BRIDGE_ACTIVITY_<KEY>` env override:
+`log_retention_days` 7 · `log_entries_per_agent` 200 (in memory) · `stale_after_min` 15 · `finished_visible_hours` 24 ·
+`memory_budget_mb` 64 (over it, the oldest finished agents, then the oldest log entries, are evicted) ·
+`progress_checkpoint_sec` 60 (10–3600, 0 = off) · `enabled` true. Test-only env: `AI_BRIDGE_ACTIVITY_CHECKPOINT_MS`,
+`_FWD_MS`, `_LOAD_WAIT_MS`, `_GC_MS`, `_RETENTION_MS`, `_INDEX_MAX`, `_PHASE1_MS`.
 
 ## Behaviour reminders (#29 / #32 / #44)
 A session registers "how to behave" reminders: `set_behavior {behavior, operation?, scope, match?}`

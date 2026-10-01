@@ -119,4 +119,36 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: {
       name: { type: 'string', description: 'the session name whose secret to recover' },
       project: { type: 'string', description: 'optional — disambiguate if the name exists in more than one project' } }, required: ['name'] } },
+  { name: 'log', description: 'Report status to the AGENT ACTIVITY BOARD (#70) as a registered session (as + secret; register_self first). Omit `agent` to report as the session itself; pass agent:"<label>" (a path of up to 3 levels, e.g. "spec-70/research") to report for one of your agents — agents never register. ' +
+      'Every message belongs to a CONTEXT: text "@build compiling" (or context:"@build") appends to the build context\'s log; "@~build compiling" also makes it that context\'s CURRENT line (its headline); "@~root …" sets your own headline; no prefix = @root, log only. Quote names with spaces: @~"strip 17". ' +
+      'state (running|blocked|failed|done|idle) changes only with an @~ line; "@~root" with state done|failed finishes the agent (stale is computed, never reported). progress ("4812/12000 tiles", "3/6", "61%") and eta ("15m", "1h25m", "19:27") move the bar from ANY message and stick until changed ("none" clears). ' +
+      'TEXT IS A TEMPLATE rendered when read: {progress} {pct} {done} {total} {unit} {eta} — e.g. "@~Tharsis Seeding {progress}" stays current as the bar moves ({{ and }} are literal braces). A message with progress/eta but no text gets the text "{progress}" ("{eta}" when only an ETA is given). ' +
+      'log:false updates the board WITHOUT appending to the log — use it for frequent progress updates (e.g. a script reporting every second; the bridge checkpoints the bar periodically so it survives a restart); keep log:true (the default) for meaningful milestones. Your own tool calls cost tokens: report at milestones, not every step. ' +
+      'stale_after ("60m", max 24h) lets a long silent step (a build, a download) stay non-stale until your next message. Limits: text 240 chars (longer is truncated), context name 60, 32 contexts per agent, 128 agents per session, details 4 KB, data 16 KB of JSON — keep details and data as small as possible. ' +
+      'Status text is PLAINTEXT and visible realm-wide: never put secrets in it. Returns { ok, id, ts, session, agent, context, current, state, stale_at, logged }.',
+    inputSchema: { type: 'object', properties: {
+      as: { type: 'string', description: 'your registered sub-peer handle (peer id or name)' },
+      secret: { type: 'string' },
+      agent: { type: 'string', description: 'agent label/path under your session (≤3 levels, e.g. "spec-70/research"); omit = the session itself' },
+      text: { type: 'string', description: 'one line ≤240 chars; may start with @ctx / @~ctx; a template ({progress} {pct} {done} {total} {unit} {eta}); optional when progress or eta is given' },
+      context: { type: 'string', description: '"@root" (default) | "@Ctx" | "@~Ctx" — overrides a prefix in text (the text is then taken literally)' },
+      state: { type: 'string', enum: ['running', 'blocked', 'failed', 'done', 'idle'], description: 'applies with an @~ line; default: the context\'s current state, else running' },
+      progress: { type: ['string', 'number'], description: '"4812/12000 tiles" | "4812/12000:tiles" | "3/6" | "61%" | "none"' },
+      eta: { type: ['string', 'number'], description: '"15m" | "1h25m" | "19:27" (local clock) | "none"' },
+      stale_after: { type: ['string', 'number'], description: 'how long this may stay quiet before it counts as stale, e.g. "60m" (max 24h); lasts until your next message' },
+      details: { type: 'string', description: 'optional text ≤4 KB, fetched on demand (activity entry:{id}) — keep it small' },
+      data: { type: ['object', 'array', 'string'], description: 'optional JSON ≤16 KB, fetched on demand — keep it small' },
+      log: { type: 'boolean', description: 'true (default) = append to the log + the host\'s daily file; false = update the board only (frequent progress updates)' } },
+      required: ['as', 'secret'] } },
+  { name: 'activity', description: 'Read this host\'s AGENT ACTIVITY BOARD (#70): sessions → agents → contexts with their current lines (`text` = the raw template, `rendered` = with {progress} / {eta} … filled from the live bar), the effective state (stale / gone computed; `was` = the reported state), rollup progress, ETA, visibility and log counts. ' +
+      'Filters: project, session, agent (that path and everything under it), active_only (hide finished/gone agents). ' +
+      'log:{ session, project?, agent?, context?, limit? } returns that agent\'s (omit agent = the session\'s own) in-memory log NEWEST FIRST, each entry rendered against the progress/ETA recorded on it. entry:{ id } returns one entry in full with its details/data (from memory, or this host\'s daily log file). ' +
+      'This host only for now (other hosts arrive with gossip). Times are ms epochs.',
+    inputSchema: { type: 'object', properties: {
+      project: { type: 'string' }, session: { type: 'string' }, agent: { type: 'string' },
+      active_only: { type: 'boolean' },
+      log: { type: 'object', description: '{ session, project?, agent?, context?, limit? } — one log, newest first', properties: {
+        session: { type: 'string' }, project: { type: 'string' }, agent: { type: 'string' }, context: { type: 'string' }, limit: { type: 'number' } } },
+      entry: { type: 'object', description: '{ id } — one entry with its details/data', properties: { id: { type: 'string' } } },
+      as: { type: 'string' }, secret: { type: 'string' } } } },
 ]

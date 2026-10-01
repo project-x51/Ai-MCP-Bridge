@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import readline from 'node:readline'
 
 export const meta = { facet: 'persistence', name: 'file' }
 
@@ -440,11 +441,145 @@ export function create(ctx) {
 
   // ---- #71 canonical project display names: the replicated first-seen map (projKey -> { name, first_seen }), ONE file
   // per writing host holding that host's whole map (small: one entry per project); the bridge folds all() at startup. ----
+  const pnQ = new Map()   // file -> write chain: back-to-back saves land in call order (the newest map wins on disk)
   const projectNames = {
-    async put(writer, list) { await writeAtomic(dir('project-names', `${lslug(writer || 'host', 80)}.pnames`), JSON.stringify(Array.isArray(list) ? list : [])) },
+    put(writer, list) {
+      const file = dir('project-names', `${lslug(writer || 'host', 80)}.pnames`), body = JSON.stringify(Array.isArray(list) ? list : [])
+      const job = () => writeAtomic(file, body)
+      const p = (pnQ.get(file) || Promise.resolve()).then(job, job)
+      pnQ.set(file, p.catch(() => {}))
+      return p
+    },
     async all() {   // every host's list: [[{ name, first_seen }, ...], ...]
       const pdir = dir('project-names'), out = []
       for (const f of await readDirSafe(pdir)) { if (!f.endsWith('.pnames')) continue; const j = await readJson(path.join(pdir, f)); if (Array.isArray(j)) out.push(j) }
+      return out
+    },
+  }
+
+  // ---- #70 activity log: the host's DAILY JSONL, activity/<host>/YYYY-MM-DD.jsonl (local date). ONE writer per host file
+  // (the host's gateway — bridge.mjs never calls a write from a follower), so appends need no locking and the trailing
+  // repeat line can be rewritten IN PLACE. Writes are serialised per file (offsets stay exact); a file whose last byte
+  // isn't "\n" (a crash mid-write) gets one before our first append, so a garbled line never swallows the next record.
+  // The reader goes BACKWARDS in chunks from the end (newest first) and yields a garbled line as rec:null. ----
+  const DAY_RE = /^\d{4}-\d{2}-\d{2}$/
+  const actDir = host => dir('activity', lslug(host || 'host', 80))
+  const actFile = (host, day) => { if (!DAY_RE.test(String(day))) throw new Error(`bad activity day "${day}"`); return path.join(actDir(host), `${day}.jsonl`) }
+  const actQ = new Map(), actSize = new Map(), actLast = new Map()   // file -> write chain / its size / { offset, length } of the last line written
+  const actQueue = (file, job) => { const p = (actQ.get(file) || Promise.resolve()).then(job, job); actQ.set(file, p.catch(() => {})); return p }
+  const lineBuf = line => Buffer.from(String(line).replace(/\n+$/, '') + '\n')
+  async function actOpenSize(file) {
+    if (actSize.has(file)) return actSize.get(file)
+    await ensure(path.dirname(file))
+    let size = 0
+    try { size = (await fsp.stat(file)).size } catch { }
+    if (size > 0) {
+      const fh = await fsp.open(file, 'r'), b = Buffer.alloc(1)
+      try { await fh.read(b, 0, 1, size - 1) } finally { await fh.close() }
+      if (b[0] !== 0x0a) { await fsp.appendFile(file, '\n'); size++ }
+    }
+    actSize.set(file, size)
+    return size
+  }
+  async function* backwardsFile(file, day, chunk) {
+    let fh
+    try { fh = await fsp.open(file, 'r') } catch { return }
+    try {
+      let pos = (await fh.stat()).size, tail = Buffer.alloc(0)
+      const emit = (buf, offset) => { let rec = null; try { rec = JSON.parse(buf.toString('utf8')) } catch { } return { rec, day, offset, length: buf.length } }
+      while (pos > 0) {
+        const n = Math.min(chunk, pos); pos -= n
+        const buf = Buffer.alloc(n)
+        await fh.read(buf, 0, n, pos)
+        const data = tail.length ? Buffer.concat([buf, tail]) : buf   // `data` starts at file offset `pos`
+        let end = data.length
+        for (let i = data.length - 1; i >= 0; i--) {
+          if (data[i] !== 0x0a) continue
+          if (end > i + 1) yield emit(data.subarray(i + 1, end), pos + i + 1)
+          end = i
+        }
+        tail = Buffer.from(data.subarray(0, end))   // the (partial) line that started before this chunk
+      }
+      if (tail.length) yield emit(tail, 0)
+    } finally { await fh.close() }
+  }
+  const activity = {
+    /** Append one record line. → { day, offset, length } (length excludes the newline) */
+    async append(host, day, line) {
+      const file = actFile(host, day), buf = lineBuf(line)
+      return actQueue(file, async () => {
+        const offset = await actOpenSize(file)
+        await fsp.appendFile(file, buf)
+        actSize.set(file, offset + buf.length); actLast.set(file, { offset, length: buf.length - 1 })
+        return { day, offset, length: buf.length - 1 }
+      })
+    },
+    /** Rewrite the file's LAST line (the open repeat line, starting at `offset`) in place; if it is no longer the last
+     *  line written, append instead. → { day, offset, length, rewritten } */
+    async replaceTail(host, day, offset, line) {
+      const file = actFile(host, day), buf = lineBuf(line)
+      return actQueue(file, async () => {
+        const size = await actOpenSize(file), last = actLast.get(file)
+        if (!last || last.offset !== offset || last.offset + last.length + 1 !== size) {
+          await fsp.appendFile(file, buf)
+          actSize.set(file, size + buf.length); actLast.set(file, { offset: size, length: buf.length - 1 })
+          return { day, offset: size, length: buf.length - 1, rewritten: false }
+        }
+        const fh = await fsp.open(file, 'r+')
+        try { await fh.write(buf, 0, buf.length, offset); await fh.truncate(offset + buf.length) } finally { await fh.close() }   // a crash mid-write leaves a garbled LAST line, which the reader skips
+        actSize.set(file, offset + buf.length); actLast.set(file, { offset, length: buf.length - 1 })
+        return { day, offset, length: buf.length - 1, rewritten: true }
+      })
+    },
+    /** Synchronous append (a clean shutdown's checkpoint flush, from process 'exit'). */
+    appendSync(host, day, line) {
+      const file = actFile(host, day), buf = lineBuf(line)
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      let size = actSize.get(file)
+      if (size == null) { try { size = fs.statSync(file).size } catch { size = 0 } }
+      fs.appendFileSync(file, buf)
+      actSize.set(file, size + buf.length); actLast.set(file, { offset: size, length: buf.length - 1 })
+      return { day, offset: size, length: buf.length - 1 }
+    },
+    /** The record at (day, offset, length), or null. */
+    async readAt(host, day, offset, length) {
+      let fh
+      try { fh = await fsp.open(actFile(host, day), 'r') } catch { return null }
+      try { const b = Buffer.alloc(length); const { bytesRead } = await fh.read(b, 0, length, offset); return JSON.parse(b.subarray(0, bytesRead).toString('utf8')) } catch { return null } finally { await fh.close() }
+    },
+    /** A LOGGED entry by id in one day's file (cp / rep lines never match), or null. Streams the file line by line. */
+    async find(host, day, id) {
+      let file
+      try { file = actFile(host, day); await fsp.access(file) } catch { return null }
+      const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity })
+      try {
+        for await (const line of rl) {
+          if (!line.includes(id)) continue
+          let j = null; try { j = JSON.parse(line) } catch { continue }
+          if (j && j.id === id && j.kind == null && !Array.isArray(j.rep)) return j
+        }
+      } finally { rl.close() }
+      return null
+    },
+    /** This host's day files, oldest first. */
+    async days(host) { return (await readDirSafe(actDir(host))).filter(f => f.endsWith('.jsonl') && DAY_RE.test(f.slice(0, -6))).map(f => f.slice(0, -6)).sort() },
+    /** Every record NEWEST FIRST: the newest day's file from its end, then earlier days down to `fromDay`. Yields
+     *  { rec (null = garbled), day, offset, length }. Reads `chunk` bytes at a time — never a whole large file. */
+    async *readBackwards(host, { fromDay = null, chunk = 65536 } = {}) {
+      for (const day of (await this.days(host)).reverse()) {
+        if (fromDay && day < fromDay) break
+        yield* backwardsFile(actFile(host, day), day, chunk)
+      }
+    },
+    /** Retention: delete this host's day files before `beforeDay`. Returns the days deleted. */
+    async prune(host, beforeDay) {
+      const out = []
+      for (const day of await this.days(host)) {
+        if (day >= beforeDay) break
+        const file = actFile(host, day)
+        try { await fsp.unlink(file); out.push(day) } catch { }
+        actSize.delete(file); actLast.delete(file); actQ.delete(file)
+      }
       return out
     },
   }
@@ -487,7 +622,7 @@ export function create(ctx) {
   }
 
   return {
-    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, behaviors, realmDefaults, projectNames, snapshot,
+    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, behaviors, realmDefaults, projectNames, activity, snapshot,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,

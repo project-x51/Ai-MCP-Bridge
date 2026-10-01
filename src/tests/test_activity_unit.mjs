@@ -1,8 +1,10 @@
-// Fast UNIT tests for lib/activity.js — the pure core of #70 (agent activity board), build-plan step 1. No bridge, no
-// sockets, no clock: every time is an explicit `now`. Covers parsing (prefixes, limits, progress/eta/stale_after),
+// Fast UNIT tests for lib/activity.js — the pure core of #70 (agent activity board), build-plan steps 1 + 2. No bridge,
+// no sockets, no clock: every time is an explicit `now`. Covers parsing (prefixes, limits, progress/eta/stale_after),
 // apply semantics (@ vs @~, stickiness, finish, details/data retention, log cap, context/agent limits + eviction),
 // the derived views (stale, gone, rollup, visibility), the gossip snapshot + per-origin merge, the memory budget and
-// resolveConfig's env/config precedence.
+// resolveConfig's env/config precedence. Step 2: the session identity, the log flag, default text + placeholders
+// (renderText), persistence markers, checkpoints (cp/rep), the read views, the newest-first replay (== a chronological
+// apply on seeded random sequences; phase 1; windows; instances) and the file facet's daily JSONL (temp dir).
 import * as A from '../lib/activity.js'
 let pass = 0, fail = 0
 const check = (n, c, x = '') => { c ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
@@ -27,9 +29,9 @@ check('limits: the locked #70 values', A.ACTIVITY_LIMITS.text === 240 && A.ACTIV
   && A.ACTIVITY_LIMITS.contextsPerAgent === 32 && A.ACTIVITY_LIMITS.agentsPerSession === 128 && A.ACTIVITY_LIMITS.detailsBytes === 4096
   && A.ACTIVITY_LIMITS.dataBytes === 16384 && A.ACTIVITY_LIMITS.staleAfterMaxMs === 24 * HOUR)
 check('limits + defaults are frozen', Object.isFrozen(A.ACTIVITY_LIMITS) && Object.isFrozen(A.ACTIVITY_DEFAULTS) && Object.isFrozen(A.ACTIVITY_STATES))
-check('defaults: the #70 per-host config', J(A.ACTIVITY_DEFAULTS) === J({ log_retention_days: 7, log_entries_per_agent: 200, stale_after_min: 15, finished_visible_hours: 24, memory_budget_mb: 64, enabled: true }))
+check('defaults: the #70 per-host config (+ step 2 progress_checkpoint_sec)', J(A.ACTIVITY_DEFAULTS) === J({ log_retention_days: 7, log_entries_per_agent: 200, stale_after_min: 15, finished_visible_hours: 24, memory_budget_mb: 64, progress_checkpoint_sec: 60, enabled: true }))
 check('states: running|blocked|failed|done|idle', J(A.ACTIVITY_STATES) === J(['running', 'blocked', 'failed', 'done', 'idle']))
-check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 'AI_BRIDGE_ACTIVITY_STALE_AFTER_MIN' && A.ACTIVITY_ENV.enabled === 'AI_BRIDGE_ACTIVITY_ENABLED' && Object.keys(A.ACTIVITY_ENV).length === 6)
+check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 'AI_BRIDGE_ACTIVITY_STALE_AFTER_MIN' && A.ACTIVITY_ENV.enabled === 'AI_BRIDGE_ACTIVITY_ENABLED' && A.ACTIVITY_ENV.progress_checkpoint_sec === 'AI_BRIDGE_ACTIVITY_PROGRESS_CHECKPOINT_SEC' && Object.keys(A.ACTIVITY_ENV).length === 7)
 
 // ================================================================= resolveConfig
 {
@@ -240,7 +242,9 @@ check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 
     && r.entry.host === 'ROBIN-Z790' && r.entry.user === 'robin' && r.entry.current === false && r.entry.details === null && r.entry.data === null)
   const r2 = say(st, S1, { text: 'second' }, T0 + 1)
   check('apply: entry ids unique + ordered', r2.id !== r.id && r2.id > r.id)
-  check('apply: session lookup is case-insensitive on session + project', A.getSession(st, { session: 'BRIDGET', project: 'aimb' }) === sess)
+  check('apply: session lookup is case-insensitive on session + project + user (+ realm, default "default")', A.getSession(st, { session: 'BRIDGET', project: 'aimb', user: 'ROBIN' }) === sess
+    && A.getSession(st, { session: 'Bridget', project: 'AIMB', user: 'robin', realm: 'DEFAULT' }) === sess)
+  check('apply: the session key needs the user (step 2: realm + project + user + session)', A.getSession(st, { session: 'Bridget', project: 'AIMB' }) === null)
   say(st, { session: 'Bridget', project: 'Other' }, { text: 'x' }, T0)
   check('apply: same session name in another project = another session', st.local.size === 2)
   check('apply: missing session name -> bad-session', A.apply(st, { session: '  ' }, M({ text: 'x' }), T0).code === 'bad-session' && A.apply(st, null, M({ text: 'x' }), T0).code === 'bad-session')
@@ -261,8 +265,8 @@ check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 
   const ctx = n => e().contexts.get(n)
   const r1 = say(st, I, { agent: A1, text: '@build compiling', progress: '1/4', eta: '10m', state: 'blocked' }, T0)
   check('@: creates the agent + context; does NOT set the current line', r1.ok && r1.agent === 'worker' && r1.context === 'build' && !r1.current && ctx('build').current === null)
-  check('@: progress/eta/state recorded in the log entry only', ctx('build').progress === null && ctx('build').eta_at === null && e().log[0].progress.done === 1 && e().log[0].eta_at === T0 + 10 * MIN && e().log[0].state === 'blocked'
-    && A.stateOf(ctx('build')) === 'running')
+  check('@: progress + eta move the bar (step 2: ANY message); state stays in the log entry only', J(ctx('build').progress) === J({ done: 1, total: 4, unit: '' }) && ctx('build').eta_at === T0 + 10 * MIN
+    && e().log[0].progress.done === 1 && e().log[0].eta_at === T0 + 10 * MIN && e().log[0].state === 'blocked' && A.stateOf(ctx('build')) === 'running')
   const r2 = say(st, I, { agent: A1, text: '@~build 2 of 4', progress: '2/4 files', eta: '8m' }, T0 + MIN)
   check('@~: sets the current line + progress + eta', r2.current && ctx('build').current.text === '2 of 4' && ctx('build').current.id === r2.id && J(ctx('build').progress) === J({ done: 2, total: 4, unit: 'files' }) && ctx('build').eta_at === T0 + MIN + 8 * MIN)
   check('@~: the default state is running when the context has no current line', r2.state === 'running')
@@ -489,7 +493,7 @@ check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 
   const rr = R('sum')
   check('rollup: a REPORTED @root progress wins (not a rollup)', rr.done === 7 && rr.total === 10 && rr.unit === 'strips' && rr.rollup === false && rr.pct === 70)
   say(st, I, { agent: 'logonly', text: '@a x', progress: '5/10' }, T0)
-  check('rollup: progress on @ (log-only) messages does not count', R('logonly') === null)
+  check('rollup: progress on an @ (log-only) message counts too (step 2)', (r => r && r.done === 5 && r.total === 10 && r.rollup)(R('logonly')))
   say(st, I, { agent: 'one', text: '@~a x', progress: '5/10 files' }, T0)
   check('rollup: a single context still rolls up (labelled)', (r => r.done === 5 && r.rollup && r.n === 1)(R('one')))
   say(st, I, { text: '@~phase1 x', progress: '1/2' }, T0)
@@ -578,7 +582,7 @@ check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 
   check('merge: two origins held side by side', here.remote.size === 2 && A.getSession(here, { session: 'Linux', project: 'X' }, 'HOST-C') !== null)
   // B's host drops a session: the new slice REPLACES the old one wholesale
   A.expire(hostB, T0)   // no-op, just exercising
-  hostB.local.delete(A.sessionKey('AIMB', 'Two'))
+  hostB.local.delete(A.sessionKey({ project: 'AIMB', session: 'Two' }))
   say(hostB, { session: 'Mac', project: 'AIMB' }, { agent: 'w', text: '@~root B moved on' }, T0 + MIN)
   const m3 = A.mergeSnapshot(here, 'HOST-B', A.snapshot(hostB))
   check('merge: a new slice REPLACES the origin\'s old one (dropped session gone)', m3.changed && A.getSession(here, { session: 'Two', project: 'AIMB' }, 'HOST-B') === null
@@ -681,6 +685,369 @@ check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 
   const r4 = A.enforceBudget(s4, 1)
   check('enforceBudget: remote slices are never evicted (their origin bounds them)', J(r4.evicted.map(e => e.agent)) === J(['la']) && A.getEntity(s4, { session: 'R', project: 'P' }, 'ra', 'HOST-B') !== null)
   check('estimateBytes: counts remote slices', A.estimateBytes(s4) > A.estimateBytes(mk()) + 500)
+}
+
+// ================================================================= step 2 (v1.58.0): config, ids, days
+{
+  const R = A.resolveConfig
+  const w = []
+  check('config: progress_checkpoint_sec 0 = off; 5 -> 10; 99999 -> 3600; -1 -> 0 (+ warning)', R({ progress_checkpoint_sec: 0 }).progress_checkpoint_sec === 0
+    && R({ progress_checkpoint_sec: 5 }).progress_checkpoint_sec === 10 && R({ progress_checkpoint_sec: 99999 }).progress_checkpoint_sec === 3600
+    && R({ progress_checkpoint_sec: -1 }, {}, w).progress_checkpoint_sec === 0 && w.length === 1 && R({}, { AI_BRIDGE_ACTIVITY_PROGRESS_CHECKPOINT_SEC: '30' }).progress_checkpoint_sec === 30)
+  const st = A.createActivity({ origin: 'H', idPrefix: 'act_ab12_' })
+  const r = say(st, S1, { text: 'x' }, T0)
+  check('ids: <prefix><ts36>-<seq36>; entryTime() reads the time back', r.id === `act_ab12_${T0.toString(36)}-1` && A.entryTime(r.id) === T0 && A.entryTime('nope') === null && A.entryTime(5) === null)
+  const d = new Date(T0)
+  check('localDay: the LOCAL calendar day, YYYY-MM-DD', A.localDay(T0) === `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` && A.localDay(NaN) === null)
+}
+
+// ================================================================= step 2: session identity = realm + project + user + session
+{
+  const st = mk()
+  say(st, { session: 'Alpha', project: 'AIMB', user: 'robin', host: 'ROBIN-Z790' }, { text: 'one' }, T0)
+  say(st, { session: 'Alpha', project: 'AIMB', user: 'kim', host: 'ROBIN-Z790' }, { text: 'two' }, T0)
+  say(st, { session: 'Alpha', project: 'AIMB', user: 'robin', realm: 'other' }, { text: 'three' }, T0)
+  check('identity: same name + project, another user (or realm) = another session', st.local.size === 3)
+  say(st, { session: 'ALPHA', project: 'aimb', user: 'Robin', host: 'LITTLE-001' }, { text: 'moved' }, T0 + MIN)
+  const s = A.getSession(st, { session: 'alpha', project: 'AIMB', user: 'robin' })
+  check('identity: another HOST is the same session (it moved machines); first-seen spellings kept, host updated', st.local.size === 3 && s.session === 'Alpha' && s.user === 'robin' && s.host === 'LITTLE-001' && s.self.log.length === 2)
+  check('identity: the session record + entry carry the realm', s.realm === 'default' && say(st, S1, { text: 'r' }, T0).entry.realm === 'default')
+  check('sessionKey: an object; realm defaults to "default"', A.sessionKey({ session: 'a', project: 'P', user: 'u' }) === A.sessionKey({ session: 'A', project: 'p', user: 'U', realm: 'Default' }))
+}
+
+// ================================================================= step 2: the log flag
+{
+  check('log flag: default true; false / "false" / 0 / "no" parse; junk -> bad-log', M({ text: 'x' }).log === true && M({ text: 'x', log: false }).log === false && M({ text: 'x', log: 'false' }).log === false
+    && M({ text: 'x', log: 0 }).log === false && M({ text: 'x', log: 'no' }).log === false && M({ text: 'x', log: true }).log === true && C({ text: 'x', log: 'maybe' }) === 'bad-log')
+  const st = mk(), I = S1
+  const e = () => A.getEntity(st, I, 'w')
+  say(st, I, { agent: 'w', text: '@~build compiling', progress: '1/4' }, T0)
+  const before = e().log.length
+  const r = say(st, I, { agent: 'w', text: '@~build linking', state: 'blocked', progress: '2/4', details: 'D', log: false }, T0 + MIN)
+  check('log:false: takes full effect (current line + state + bar)', r.ok && r.logged === false && e().contexts.get('build').current.text === 'linking' && A.stateOf(e().contexts.get('build')) === 'blocked'
+    && e().contexts.get('build').progress.done === 2 && e().contexts.get('build').current.details === 'D')
+  check('log:false: NOT appended to the log; entry:null, logged:false; still has an id (its line)', e().log.length === before && r.entry === null && typeof r.id === 'string' && e().contexts.get('build').current.id === r.id)
+  check('log:false: counts as activity (refreshes stale)', e().last_activity === T0 + MIN && r.stale_at === T0 + MIN + 15 * MIN)
+  A.markSessionGone(st, I, T0 + 2 * MIN)
+  say(st, I, { agent: 'w', text: '@build ping', log: false }, T0 + 3 * MIN)
+  check('log:false: clears gone like any message', A.getSession(st, I).gone_at === null && e().gone_at === null)
+  const r2 = say(st, I, { agent: 'w', text: 'logged' }, T0 + 4 * MIN)
+  check('log:true (default): logged:true + an entry', r2.logged === true && !!r2.entry && e().log.length === before + 1)
+  // a new agent at the 128 limit must be logged (its eviction has to reach the JSONL)
+  const s2 = mk()
+  for (let i = 1; i <= 128; i++) say(s2, I, { agent: `a${i}`, text: 'hi' }, T0)
+  say(s2, I, { agent: 'a1', text: '@~root done', state: 'done' }, T0 + 1)
+  check('log:false: may not create the 129th agent (an eviction must be logged)', say(s2, I, { agent: 'new', text: 'hi', log: false }, T0 + 2).code === 'too-many-agents' && A.getEntity(s2, I, 'a1') !== null)
+  check('... a logged one evicts as before', say(s2, I, { agent: 'new', text: 'hi' }, T0 + 3).evicted.join() === 'a1')
+}
+
+// ================================================================= step 2: default text + progress/eta on any message
+{
+  check('default text: progress without text -> "{progress}" (logged or not)', M({ progress: '3/6' }).text === '{progress}' && M({ progress: '3/6', log: false }).text === '{progress}' && M({ text: '', progress: '3/6' }).text === '{progress}')
+  check('default text: only an ETA -> "{eta}"', M({ eta: '15m' }).text === '{eta}' && M({ progress: '1/2', eta: '15m' }).text === '{progress}')
+  check('default text: no text and no progress/eta is still rejected', C({}) === 'bad-text' && C({ text: '' }) === 'text-empty' && C({ text: '@~build' }) === 'text-empty' && C({ state: 'done' }) === 'bad-text')
+  const m = M({ text: '@~build', progress: '5/10 tiles', state: 'blocked' })
+  check('default text: a prefix alone + progress = that context\'s line "{progress}" (state allowed)', m.context === 'build' && m.current && m.text === '{progress}' && m.state === 'blocked')
+  check('default text: "{progress}" also with the context param', M({ context: '@~tiles', progress: '1/2' }).text === '{progress}')
+  const st = mk(), I = S1, c = () => A.getEntity(st, I, 'w').contexts.get('t')
+  say(st, I, { agent: 'w', text: '@~t start', eta: '30m' }, T0)
+  say(st, I, { agent: 'w', text: '@t note', eta: '10m' }, T0 + MIN)
+  check('eta: an @ message moves the ETA too', c().eta_at === T0 + 11 * MIN)
+  say(st, I, { agent: 'w', text: '@~t finished', state: 'done' }, T0 + 2 * MIN)
+  say(st, I, { agent: 'w', text: '@t late eta', eta: '10m', progress: '9/10' }, T0 + 3 * MIN)
+  check('eta: ignored while the context is done (bar still moves)', c().eta_at === null && c().progress.done === 9)
+  say(st, I, { agent: 'w', text: '@~t again', state: 'running' }, T0 + 4 * MIN)
+  check('eta: stays dropped after a revive without one', c().eta_at === null)
+}
+
+// ================================================================= step 2: persistence markers on entries
+{
+  const st = mk(), I = S1
+  const a = say(st, I, { agent: 'w', text: '@~build go' }, T0).entry
+  check('markers: the first entry of a session/agent/context carries new_session/new_entity/new_context', a.new_session && a.new_entity && a.new_context && a.v === 1)
+  const b = say(st, I, { agent: 'w', text: '@build more' }, T0 + 1).entry
+  check('markers: later entries carry none', !b.new_session && !b.new_entity && !b.new_context)
+  const c2 = say(st, I, { agent: 'w', text: 'root note' }, T0 + 2).entry
+  check('markers: a new context (root\'s first entry) carries new_context only', c2.new_context && !c2.new_entity && !c2.new_session)
+  const d = say(st, I, { text: 'session self' }, T0 + 3).entry
+  check('markers: the session\'s own entity\'s first entry carries new_entity', d.new_entity && d.new_context && !d.new_session)
+  say(st, I, { agent: 'q', text: '@x hi', log: false }, T0 + 4)
+  const q = say(st, I, { agent: 'q', text: '@x logged now' }, T0 + 5).entry
+  check('markers: go on the first PERSISTED record (an unlogged creation does not count)', q.new_entity && q.new_context)
+  const f = say(st, I, { agent: 'w', text: '@~root done', state: 'done' }, T0 + 6).entry
+  const g = say(st, I, { agent: 'w', text: '@~root still done', state: 'done' }, T0 + 7).entry
+  const h = say(st, I, { agent: 'w', text: '@~root back', state: 'running' }, T0 + 8).entry
+  check('markers: an @~root entry carries the entity\'s resulting finished_at (null when live)', f.finished_at === T0 + 6 && g.finished_at === T0 + 6 && 'finished_at' in h && h.finished_at === null && !('finished_at' in b))
+  check('in-memory entries never hold the markers', !('new_session' in A.getEntity(st, I, 'w').log[0]) && !('finished_at' in A.getEntity(st, I, 'w').log.at(-1)))
+}
+
+// ================================================================= step 2: renderText (placeholders rendered at READ time)
+{
+  const R = A.renderText, P1 = { done: 4812, total: 12000, unit: 'tiles' }
+  check('render: {progress} with a unit', R('Seeding {progress}', P1, null, T0) === 'Seeding 4,812 of 12,000 tiles')
+  check('render: {progress} without a unit; for a % bar', R('{progress}', { done: 3, total: 6, unit: '' }, null, T0) === '3 of 6' && R('{progress}', { done: 61, total: 100, unit: '%' }, null, T0) === '61%')
+  check('render: {pct} floored (100% only when done)', R('{pct}', P1, null, T0) === '40%' && R('{pct}', { done: 999, total: 1000, unit: '' }, null, T0) === '99%' && R('{pct}', { done: 6, total: 6, unit: '' }, null, T0) === '100%')
+  check('render: {done} {total} {unit}', R('{done}/{total} {unit}', P1, null, T0) === '4,812/12,000 tiles')
+  check('render: {unit} with no unit is left untouched', R('{done} {unit}', { done: 3, total: 6, unit: '' }, null, T0) === '3 {unit}')
+  check('render: no bar -> bar placeholders left untouched', R('a {progress} {pct} {done} {total} {unit} b', null, null, T0) === 'a {progress} {pct} {done} {total} {unit} b')
+  check('render: {eta} short relative durations', R('{eta}', null, T0 + 85 * MIN, T0) === '~1h 25m' && R('{eta}', null, T0 + 45 * MIN, T0) === '~45m' && R('{eta}', null, T0 + 2 * HOUR, T0) === '~2h'
+    && R('{eta}', null, T0 + 51 * HOUR, T0) === '~2d 3h' && R('{eta}', null, T0 + 30000, T0) === '~30s' && R('{eta}', null, T0 + 48 * HOUR, T0) === '~2d')
+  check('render: {eta} due/past -> "now"; none -> "?"', R('{eta}', null, T0, T0) === 'now' && R('{eta}', null, T0 - MIN, T0) === 'now' && R('ETA {eta}', null, null, T0) === 'ETA ?')
+  check('render: {{ and }} are literal braces', R('{{progress}} {{x}} }}', P1, null, T0) === '{progress} {x} }' && R('{{{progress}}}', { done: 1, total: 2, unit: '' }, null, T0) === '{1 of 2}')
+  check('render: an unknown {word} (or {Progress}) is left untouched', R('{nope} {Progress} {progress', P1, null, T0) === '{nope} {Progress} {progress')
+  check('render: a plain text is returned as is; non-string -> ""', R('just text', P1, null, T0) === 'just text' && R(null, P1, null, T0) === '')
+  check('render: a rollup works as the bar', R('{progress}', { done: 40, total: 200, unit: 'tiles', pct: 20, rollup: true, n: 2 }, null, T0) === '40 of 200 tiles')
+  check('fmtNum: grouping, decimals, negatives, deterministic', A.fmtNum(1234567) === '1,234,567' && A.fmtNum(1.5) === '1.5' && A.fmtNum(1234.567) === '1,234.57' && A.fmtNum(0) === '0'
+    && A.fmtNum(999) === '999' && A.fmtNum(1000) === '1,000' && A.fmtNum(-2500) === '-2,500' && A.fmtNum(1e15) === '1,000,000,000,000,000' && A.fmtNum(2.0) === '2')
+  check('fmtEta: rounding edges', A.fmtEta(59000) === '~59s' && A.fmtEta(60000) === '~1m' && A.fmtEta(89 * MIN + 40000) === '~1h 30m' && A.fmtEta(NaN) === '?')
+}
+
+// ================================================================= step 2: read views (board / log / entry) + rendering
+{
+  const st = mk(), I = S1, now = T0 + 10 * MIN
+  say(st, I, { agent: 'w', text: '@~tiles Seeding {progress} ({pct}) eta {eta}', progress: '10/100 tiles', eta: '30m' }, T0)
+  say(st, I, { agent: 'w', text: '@tiles batch {progress}', progress: '20/100 tiles' }, T0 + MIN)
+  say(st, I, { agent: 'w', progress: '40/100 tiles', context: '@tiles', log: false }, T0 + 2 * MIN)
+  say(st, I, { agent: 'w', text: '@~root overall {progress}' }, T0 + 3 * MIN)
+  say(st, I, { text: '@~root orchestrating' }, T0 + 4 * MIN)
+  say(st, { session: 'Other', project: 'X', user: 'robin' }, { agent: 'z', text: '@~root fin', state: 'done' }, T0)
+  const b = A.boardView(st, now)
+  const bw = b.find(s => s.session === 'Bridget').agents[0], tiles = bw.contexts.find(c => c.name === 'tiles')
+  check('board: sessions sorted, agents + contexts (root first) with effective state', b.length === 2 && bw.agent === 'w' && bw.contexts[0].name === 'root' && tiles.state === 'running')
+  check('board: a current line renders against the CURRENT bar + ETA (moved by the log:false update)', tiles.current.text === 'Seeding {progress} ({pct}) eta {eta}' && tiles.current.rendered === 'Seeding 40 of 100 tiles (40%) eta ~20m')
+  check('board: a root line renders against the entity\'s bar (the rollup)', bw.current.rendered === 'overall 40 of 100 tiles' && bw.progress.rollup === true)
+  check('board: filters (project, session, agent, active_only)', A.boardView(st, now, { project: 'x' }).length === 1 && A.boardView(st, now, { session: 'bridget' }).length === 1
+    && A.boardView(st, now, { agent: 'nope' }).length === 0 && A.boardView(st, now, { active_only: true }).find(s => s.session === 'Other').agents.length === 0)
+  check('board: stale computed with stale_after_min (or a viewer threshold)', A.boardView(st, T0 + 30 * MIN)[0].agents[0].state === 'stale' && A.boardView(st, T0 + 30 * MIN, { staleMin: 60 })[0].agents[0].state === 'running')
+  const lv = A.logView(st, { session: 'Bridget', agent: 'w' }, now)
+  check('log view: newest first; rendered against the progress RECORDED on each entry', lv.ok && lv.entries.length === 3 && lv.entries[0].text === 'overall {progress}' && lv.entries[0].rendered === 'overall {progress}'
+    && lv.entries[1].rendered === 'batch 20 of 100 tiles' && lv.entries[2].rendered === 'Seeding 10 of 100 tiles (10%) eta ~20m')
+  check('log view: context filter + limit', A.logView(st, { session: 'Bridget', agent: 'w', context: '@tiles', limit: 1 }, now).entries.map(e => e.text).join() === 'batch {progress}'
+    && A.logView(st, { session: 'Bridget', agent: 'w', context: 'tiles' }, now).total === 2)
+  check('log view: the session itself (no agent); codes', A.logView(st, { session: 'bridget' }, now).entries[0].text === 'orchestrating' && A.logView(st, { session: 'nobody' }).code === 'unknown-session'
+    && A.logView(st, { session: 'Bridget', agent: 'ghost' }).code === 'unknown-agent' && A.logView(st, {}).code === 'bad-log-query')
+  say(st, { session: 'Bridget', project: 'Other', user: 'robin' }, { text: 'twin' }, T0)
+  check('log view: an ambiguous name asks for the project', A.logView(st, { session: 'Bridget' }).code === 'ambiguous-session' && A.logView(st, { session: 'Bridget', project: 'aimb', agent: 'w' }).ok)
+  const r = say(st, I, { agent: 'w', text: '@~d with details', details: 'DD', data: { a: 1 } }, T0 + 5 * MIN)
+  const r2 = say(st, I, { agent: 'w', text: '@d log only', details: 'LOGGED' }, T0 + 6 * MIN)
+  const f1 = A.findEntry(st, r.id, now), f2 = A.findEntry(st, r2.id, now)
+  check('findEntry: a current line comes with its details/data', f1.where === 'current' && f1.complete && f1.entry.details === 'DD' && f1.entry.data.a === 1 && f1.entry.agent === 'w' && f1.entry.session === 'Bridget')
+  check('findEntry: a log entry has flags only (complete:false -> read the JSONL); unknown -> null', f2.where === 'log' && f2.complete === false && f2.entry.has_details && f2.entry.details === null && A.findEntry(st, 'nope') === null)
+}
+
+// ================================================================= step 2: checkpoints (cp) + repeat lines (rep)
+{
+  const st = mk(), I = S1
+  const tick = t => A.planCheckpoints(st, t)
+  const file = []   // simulates the day's JSONL: rewrite:true replaces the LAST line
+  const write = ws => { for (const w of ws) { if (w.rewrite) { check('rep rewrite: the open repeat line IS the file\'s last line', file.length && file.at(-1).rep !== undefined); file[file.length - 1] = w.rec } else file.push(w.rec) } return ws }
+  say(st, I, { agent: 'w', context: '@~scan', progress: '1/100', log: false }, T0)
+  const w1 = write(tick(T0 + MIN))
+  check('cp: a context changed by log:false -> one full cp line with a per-file key', w1.length === 1 && w1[0].kind === 'cp' && w1[0].rec.kind === 'cp' && w1[0].rec.k === 1 && w1[0].rec.progress.done === 1
+    && w1[0].rec.current.text === '{progress}' && w1[0].rec.new_session && w1[0].rec.new_entity && w1[0].rec.new_context)
+  check('cp: nothing live -> nothing written', tick(T0 + 2 * MIN).length === 0)
+  for (let i = 0; i < 3; i++) {
+    say(st, I, { agent: 'w', context: '@~scan', progress: '1/100', log: false }, T0 + (2 + i) * MIN + 1000)   // alive, UNCHANGED
+    write(tick(T0 + (3 + i) * MIN))
+  }
+  check('rep: unchanged-but-alive intervals -> ONE repeat line whose n increments (rewritten in place)', file.length === 2 && J(file[1].rep) === '[1]' && file[1].n === 3 && file[1].since === T0 + 3 * MIN && file[1].last === T0 + 5 * MIN)
+  say(st, I, { agent: 'w', context: '@~scan', progress: '50/100', log: false }, T0 + 5 * MIN + 1000)    // a CHANGE
+  say(st, I, { agent: 'w', text: '@~other x', log: false }, T0 + 5 * MIN + 2000)
+  const w2 = write(tick(T0 + 6 * MIN))
+  check('cp: a change mid-stream -> a new cp (same key); a new context gets the next key', w2.length === 2 && w2.every(w => w.kind === 'cp') && w2.find(w => w.rec.context === 'scan').rec.k === 1 && w2.find(w => w.rec.context === 'other').rec.k === 2)
+  say(st, I, { agent: 'w', context: '@~scan', progress: '50/100', log: false }, T0 + 6 * MIN + 1000)
+  say(st, I, { agent: 'w', text: '@~other x', log: false }, T0 + 6 * MIN + 2000)
+  const w3 = write(tick(T0 + 7 * MIN))
+  check('rep: after a cp the next unchanged interval starts a FRESH repeat line', w3.length === 1 && w3[0].kind === 'rep' && !w3[0].rewrite && J(w3[0].rec.rep) === '[1,2]' && w3[0].rec.n === 1)
+  say(st, I, { agent: 'w', context: '@~scan', progress: '50/100', log: false }, T0 + 7 * MIN + 1000)
+  const w4 = write(tick(T0 + 8 * MIN))
+  check('rep: a different key set -> a new line (every key on a line was alive in all its n intervals)', w4.length === 1 && !w4[0].rewrite && J(w4[0].rec.rep) === '[1]')
+  say(st, I, { agent: 'w', context: '@~scan', progress: '50/100', log: false }, T0 + 8 * MIN + 1000)
+  const ent = say(st, I, { agent: 'w', text: '@other a logged line' }, T0 + 8 * MIN + 2000); file.push(ent.entry)
+  const w5 = write(tick(T0 + 9 * MIN))
+  check('rep: any other write (a log entry) closes the open line -> the next is appended', w5.length === 1 && w5[0].kind === 'rep' && !w5[0].rewrite)
+  check('cp: at most one cp per context per interval (a burst)', (() => { for (let i = 0; i < 20; i++) say(st, I, { agent: 'w', context: '@~scan', progress: `${51 + i}/100`, log: false }, T0 + 9 * MIN + i * 100); const w = write(tick(T0 + 10 * MIN)); return w.length === 1 && w[0].rec.progress.done === 70 })())
+  // the replay: last_activity from the rep lines; the bar from the newest cp
+  const now = T0 + 11 * MIN
+  const b = A.createActivity({ origin: 'HOST-A' })
+  A.replayNewestFirst(b, ['{"truncated', ...file.slice().reverse()], now)
+  const sc = A.getEntity(b, I, 'w').contexts.get('scan')
+  check('replay: the bar + current line come back from the newest cp', sc.progress.done === 70 && sc.current.text === '{progress}')
+  check('replay: last_activity = the newest record or rep `last` listing the key', sc.last_activity === T0 + 10 * MIN && A.getEntity(b, I, 'w').contexts.get('other').last_activity === T0 + 8 * MIN + 2000)
+  check('replay: checkpoints never enter the log history', A.getEntity(b, I, 'w').log.map(e => e.text).join() === 'a logged line')
+  check('replay: a garbled record (a crash mid-rewrite) is skipped', A.recordKind('{"truncated') === null && A.recordKind({ rep: [1], n: 1 }) === null && A.recordKind({ kind: 'cp', session: 's', context: 'c', ts: 1 }) === null)
+  check('replay: today\'s cp keys are re-derived (new cps continue the numbering)', b.cp && b.cp.next === 3 && b.cp.keys.size === 2)
+  // a context alive all day on ONE old cp + ONE rep line: the cp is older than the window but the rep is inside it
+  const TB = T0 - 2 * HOUR   // 04:00 UTC: TB .. TB+3h is one local day in every real timezone
+  const s3 = A.createActivity({ origin: 'H', config: { finished_visible_hours: 1 } })
+  const oldCp = { v: 1, kind: 'cp', k: 4, ts: TB, session: 'S', project: 'P', user: 'u', agent: null, context: 'scan', current: { id: 'i', ts: TB, text: 'scanning', state: 'running' }, state: 'running', progress: { done: 5, total: 9, unit: '' }, eta_at: null, new_session: true, new_entity: true, new_context: true }
+  const repLine = { rep: [4], n: 200, since: TB + MIN, last: TB + 3 * HOUR }
+  A.replayNewestFirst(s3, [repLine, { v: 1, id: 'z', ts: TB + 1000, session: 'S', project: 'P', user: 'u', agent: null, context: 'other', text: 'old', state: 'running' }, oldCp], TB + 3 * HOUR + MIN)
+  const sc3 = A.getEntity(s3, { session: 'S', project: 'P', user: 'u' }, null).contexts.get('scan')
+  check('replay: an old cp still needed by an in-window rep line is used (and old entries are not)', !!sc3 && sc3.current.text === 'scanning' && sc3.last_activity === TB + 3 * HOUR
+    && !A.getEntity(s3, { session: 'S', project: 'P', user: 'u' }, null).contexts.has('other'))
+  // a new local day: keys restart and every live context gets a full cp there
+  const tomorrow = T0 + 30 * HOUR
+  say(st, I, { agent: 'w', context: '@~scan', progress: '70/100', log: false }, tomorrow - 1000)
+  const w6 = tick(tomorrow)
+  check('cp: a new day\'s file -> keys restart at 1, an unchanged context gets a full cp', w6.length === 1 && w6[0].kind === 'cp' && w6[0].rec.k === 1)
+  // flushCheckpoints: every dirty context now (a clean shutdown)
+  say(st, I, { agent: 'w', context: '@~scan', progress: '71/100', log: false }, tomorrow + 1000)
+  say(st, I, { agent: 'w', text: '@~other y', log: false }, tomorrow + 2000)
+  const fl = A.flushCheckpoints(st, tomorrow + 3000)
+  check('flushCheckpoints: a cp per dirty context, regardless of the interval', fl.length === 2 && fl.every(w => w.kind === 'cp'))
+}
+
+// ================================================================= step 2: replay == chronological apply (seeded random)
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296 } }
+const byKey = (a, b) => (String(a.key) < String(b.key) ? -1 : String(a.key) > String(b.key) ? 1 : 0)
+function dump(st, full = true) {
+  const ent = e => ({ path: e.path, finished_at: e.finished_at, ...(full ? { started_at: e.started_at, last_activity: e.last_activity, gone_at: e.gone_at, stale_after_ms: e.stale_after_ms, log: e.log, log_dropped: e.log_dropped } : {}),
+    contexts: [...e.contexts.values()].sort(byKey).map(c => ({ name: c.name, current: c.current && (full ? c.current : { id: c.current.id, text: c.current.text, state: c.current.state, details: c.current.details, data: c.current.data }),
+      progress: c.progress, eta_at: c.eta_at, ...(full ? { created_at: c.created_at, last_activity: c.last_activity, stale_after_ms: c.stale_after_ms } : {}) })) })
+  return J([...st.local.values()].sort(byKey).map(s => ({ key: s.key, realm: s.realm, session: s.session, project: s.project, user: s.user, ...(full ? { host: s.host, created_at: s.created_at, last_activity: s.last_activity, gone_at: s.gone_at } : {}),
+    self: ent(s.self), agents: [...s.agents.values()].sort(byKey).map(ent) })))
+}
+function genMessages(seed, n, { unlogged = 0 } = {}) {
+  const r = rng(seed), pick = a => a[Math.floor(r() * a.length)]
+  const idents = [{ session: 'Alpha', project: 'AIMB', user: 'robin', host: 'H1' }, { session: 'beta', project: 'Marz', user: 'robin', host: 'H1' }, { session: 'ALPHA', project: 'aimb', user: 'kim', host: 'H1' }]
+  const agents = [null, null, 'w1', 'W1', 'w2/sub', 'w3', 'deep/a/b']
+  const ctxs = ['', '@build ', '@~build ', '@~Build ', '@tiles ', '@~tiles ', '@~"strip 17" ', '@root ', '@~root ', '@~root ']
+  const out = []
+  let t = T0
+  for (let i = 0; i < n; i++) {
+    t += 1000 + Math.floor(r() * 90000)
+    const input = { agent: pick(agents), text: pick(ctxs) + `m${i} {progress}` }
+    if (r() < 0.3) input.state = pick(A.ACTIVITY_STATES)
+    if (r() < 0.25) input.progress = r() < 0.15 ? 'none' : `${Math.floor(r() * 50)}/${50 + Math.floor(r() * 50)} ${pick(['tiles', 'Tiles', '', 'files'])}`
+    if (r() < 0.2) input.eta = r() < 0.2 ? 'none' : `${1 + Math.floor(r() * 90)}m`
+    if (r() < 0.1) input.stale_after = `${5 + Math.floor(r() * 120)}m`
+    if (r() < 0.1) input.details = `details ${i}`
+    if (r() < 0.1) input.data = { i, v: [i, 'x'] }
+    if (unlogged && r() < unlogged) { input.log = false; if (!input.text.startsWith('@~') && r() < 0.6) input.progress = `${i % 50}/50` }
+    if (r() < 0.03) { delete input.text; if (!input.progress && !input.eta) input.progress = `${i % 7}/7` }   // default text
+    out.push({ ident: pick(idents), input, t })
+  }
+  return out
+}
+{
+  for (const seed of [7, 70, 1958]) {
+    const msgs = genMessages(seed, 1500)
+    const A1 = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 10 } }), entries = []
+    let applied = 0
+    for (const m of msgs) { const r = say(A1, m.ident, m.input, m.t); if (r.ok) { applied++; if (r.entry) entries.push(JSON.parse(J(r.entry))) } }
+    const now = msgs.at(-1).t + MIN
+    A.expire(A1, now)
+    const B = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 10 } })
+    const st = A.replayNewestFirst(B, entries.slice().reverse(), now)
+    check(`replay == chronological apply: seed ${seed} (${applied} msgs, ${st.entries} entries; current state AND log contents)`, dump(A1) === dump(B), firstDiff(dump(A1), dump(B)))
+  }
+  // with log:false messages + periodic checkpoints + a final flush: current lines, bars, ETAs, states, finished agree
+  for (const seed of [11, 2026]) {
+    const msgs = genMessages(seed, 1200, { unlogged: 0.45 })
+    const A2 = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 10 } }), recs = []
+    const writeW = ws => { for (const w of ws) { if (w.rewrite) recs[recs.length - 1] = JSON.parse(J(w.rec)); else recs.push(JSON.parse(J(w.rec))) } }
+    let nextTick = T0 + 5 * MIN
+    for (const m of msgs) {
+      while (m.t >= nextTick) { writeW(A.planCheckpoints(A2, nextTick)); nextTick += 5 * MIN }
+      const r = say(A2, m.ident, m.input, m.t)
+      if (r.ok && r.entry) recs.push(JSON.parse(J(r.entry)))
+    }
+    const now = msgs.at(-1).t + MIN
+    writeW(A.flushCheckpoints(A2, now))
+    A.expire(A2, now)
+    const B2 = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 10 } })
+    const st2 = A.replayNewestFirst(B2, recs.slice().reverse(), now)
+    check(`replay with cp/rep (log:false 45%): seed ${seed} (${st2.entries} entries, ${st2.cps} cps, ${st2.reps} reps) — current lines/bars/ETAs/states/finished agree`, dump(A2, false) === dump(B2, false), firstDiff(dump(A2, false), dump(B2, false)))
+  }
+}
+function firstDiff(a, b) { if (a === b) return ''; let i = 0; while (i < a.length && a[i] === b[i]) i++; return `@${i}: …${a.slice(Math.max(0, i - 120), i + 80)}\n  vs …${b.slice(Math.max(0, i - 120), i + 80)}` }
+
+// ================================================================= step 2: replay — instances, eviction, window, phase 1
+{
+  // an agent evicted at the 128 limit and later re-created: the replay must not merge the two instances
+  const st = mk({ log_entries_per_agent: 10 }), I = S1, entries = []
+  const sayE = (input, t) => { const r = say(st, I, input, t); if (r.entry) entries.push(JSON.parse(J(r.entry))); return r }
+  for (let i = 1; i <= 128; i++) sayE({ agent: `a${i}`, text: `@~work a${i} start`, progress: `${i}/200` }, T0 + i * 1000)
+  sayE({ agent: 'a5', text: '@~root done', state: 'done' }, T0 + 200000)
+  sayE({ agent: 'a9', text: '@~root done', state: 'done' }, T0 + 201000)
+  check('harness: the 129th agent evicts a5', sayE({ agent: 'new1', text: 'hi' }, T0 + 202000).evicted.join() === 'a5')
+  sayE({ agent: 'new1', text: '@~root done', state: 'done' }, T0 + 203000)
+  check('harness: a5 comes back as a NEW instance (evicts a9)', sayE({ agent: 'a5', text: '@~fresh back again' }, T0 + 204000).evicted.join() === 'a9')
+  const now = T0 + 300000
+  A.expire(st, now)
+  const B = mk({ log_entries_per_agent: 10 })
+  A.replayNewestFirst(B, entries.slice().reverse(), now)
+  check('replay: evicted agents stay evicted; a re-created agent is a NEW instance (no old contexts / log)', dump(st) === dump(B) && !A.getEntity(B, I, 'a9') && !A.getEntity(B, I, 'a5').contexts.has('work'), firstDiff(dump(st), dump(B)))
+  // the window: records older than finished_visible_hours are not replayed
+  const W = mk({ finished_visible_hours: 2 }), ents = []
+  const sw = (input, t) => { const r = say(W, I, input, t); if (r.entry) ents.push(JSON.parse(J(r.entry))) }
+  sw({ agent: 'old', text: '@~root long gone', state: 'done' }, T0)
+  sw({ agent: 'live', text: '@~root recent' }, T0 + 5 * HOUR)
+  const W2 = mk({ finished_visible_hours: 2 })
+  const sts = A.replayNewestFirst(W2, ents.slice().reverse(), T0 + 5 * HOUR + MIN)
+  check('replay: only records within finished_visible_hours (an agent finished before the window is not resurrected)', !A.getEntity(W2, I, 'old') && !!A.getEntity(W2, I, 'live') && sts.entries === 1)
+  check('replay: feed() reports "old" for a record before the window', A.createReplay(mk({ finished_visible_hours: 1 }), { now: T0 + 2 * HOUR }).feed(ents[0]) === 'old')
+}
+{
+  // phase 1: the caller can tell when every entity/context seen so far is resolved, and publish early
+  const st = mk(), I = S1, entries = []
+  const sayE = (input, t) => { const r = say(st, I, input, t); if (r.entry) entries.push(JSON.parse(J(r.entry))) }
+  sayE({ text: '@~root orchestrating' }, T0)                                     // the session's own entity (oldest)
+  sayE({ agent: 'w', text: '@~build compiling', progress: '1/4', eta: '10m' }, T0 + MIN)
+  sayE({ agent: 'w', text: '@~root working' }, T0 + 2 * MIN)
+  for (let i = 0; i < 30; i++) sayE({ agent: 'w', text: `@build noise ${i}` }, T0 + 3 * MIN + i * 1000)
+  const B = mk(), rp = A.createReplay(B, { now: T0 + HOUR })
+  const recs = entries.slice().reverse()
+  let i = 0
+  for (; i < 30; i++) rp.feed(recs[i])
+  check('phase 1: not complete while a context\'s current line / bar is unresolved', !rp.phase1Complete() && rp.pending() === 1)
+  rp.feed(recs[i++])   // w @~root (root's first record → sealed)
+  check('phase 1: still pending: build has no @~ yet', !rp.phase1Complete())
+  rp.feed(recs[i++])   // w @~build — resolves build (current, bar, ETA)
+  check('phase 1: complete once everything SEEN is resolved (one older record still unread)', rp.phase1Complete() && i === recs.length - 1)
+  rp.publish()
+  const wb = A.getEntity(B, I, 'w')
+  check('phase 1: publish() installs current lines + bars without history', wb.contexts.get('build').current.text === 'compiling' && wb.contexts.get('build').progress.done === 1 && wb.contexts.get('root').current.text === 'working' && wb.log.length === 0)
+  rp.feed(recs[i++])
+  const fin = rp.finish()
+  check('phase 2: finish() adds the history (chronological, capped) and the rest', fin.entries === 33 && A.getEntity(B, I, 'w').log.length === 32 && A.getEntity(B, I, 'w').log[0].text === 'compiling'
+    && A.getSession(B, I).self.contexts.get('root').current.text === 'orchestrating' && dump(st) === dump(B))
+}
+
+// ================================================================= step 2: the file facet's daily JSONL (+ the replay reading it backwards)
+{
+  const os = await import('node:os'), fs = await import('node:fs'), path = await import('node:path')
+  const { create } = await import('../facets/persistence/file.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aimb-actunit-'))
+  const store = create({ CFG: {}, HERE: dir, env: { AI_BRIDGE_PERSIST_DIR: dir } }), F = store.activity
+  const st = mk({ log_entries_per_agent: 10 }), I = S1, D = A.localDay(T0)
+  for (let i = 0; i < 40; i++) { const r = say(st, I, { agent: 'w', text: `@~c${i % 3} ünïcødé ✓ line ${i} {progress}`, progress: `${i}/40 tiles`, details: 'é'.repeat(i * 7) }, T0 + i * 1000); await F.append('HOST', D, J(r.entry)) }
+  const back = []
+  for await (const r of F.readBackwards('HOST', { chunk: 61 })) back.push(r)   // a tiny chunk: lines and multi-byte chars straddle chunk edges
+  check('facet: readBackwards (chunked) yields every line newest first, intact across chunk edges', back.length === 40 && back.every(r => r.rec) && back[0].rec.text.includes('line 39') && back[39].rec.text.includes('line 0'))
+  check('facet: offsets + lengths address each line (readAt)', J(await F.readAt('HOST', D, back[5].offset, back[5].length)) === J(back[5].rec))
+  const B = mk({ log_entries_per_agent: 10 }), rp = A.createReplay(B, { now: T0 + HOUR })
+  for (const r of back) rp.feed(r.rec, r.day)
+  rp.finish()
+  check('facet → replay: the state rebuilt from the file equals the live one', dump(st) === dump(B), firstDiff(dump(st), dump(B)))
+  const a = await F.append('HOST', D, J({ rep: [1], n: 1, since: 1, last: 2 }))
+  const r1 = await F.replaceTail('HOST', D, a.offset, J({ rep: [1], n: 2, since: 1, last: 3 }))
+  await F.append('HOST', D, J({ v: 1, id: 'act_x_zz-1', ts: T0, session: 'S', context: 'root', text: 'later', state: 'running' }))
+  const r2 = await F.replaceTail('HOST', D, a.offset, J({ rep: [1], n: 3, since: 1, last: 4 }))
+  const reps = []; for await (const r of F.readBackwards('HOST')) if (r.rec && r.rec.rep) reps.push(r.rec)
+  check('facet: replaceTail rewrites the LAST line in place; once something follows it, it appends instead', r1.rewritten === true && r2.rewritten === false && J(reps.map(x => x.n)) === '[3,2]')
+  const file = path.join(dir, 'activity', 'host', `${D}.jsonl`)
+  fs.appendFileSync(file, '{"crash-mid-wri')   // a crash left a partial last line
+  const s2 = create({ CFG: {}, HERE: dir, env: { AI_BRIDGE_PERSIST_DIR: dir } })   // a new process (the next gateway)
+  await s2.activity.append('HOST', D, J({ rep: [9], n: 1, since: 5, last: 6 }))
+  const tail = []; for await (const r of s2.activity.readBackwards('HOST')) { tail.push(r); if (tail.length === 2) break }
+  check('facet: a partial last line (a crash) is skipped as garbled, and the next append starts on a fresh line', tail[0].rec && J(tail[0].rec.rep) === '[9]' && tail[1].rec === null)
+  check('facet: find() returns a logged entry by id, never a cp/rep line', (await F.find('HOST', D, 'act_x_zz-1'))?.text === 'later' && (await F.find('HOST', D, 'nope')) === null)
+  await F.append('HOST', '2020-01-02', J({ old: true }))
+  check('facet: days() + prune() (retention)', J(await F.days('HOST')) === J(['2020-01-02', D]) && J(await F.prune('HOST', '2021-01-01')) === J(['2020-01-02']) && J(await F.days('HOST')) === J([D]))
+  check('facet: a bad day name is refused (no path tricks)', await F.append('HOST', '../../x', '{}').then(() => false, () => true))
+  try { fs.rmSync(dir, { recursive: true, force: true }) } catch { }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

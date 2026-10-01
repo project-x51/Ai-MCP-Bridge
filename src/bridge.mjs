@@ -33,6 +33,7 @@ import { createRealmDefaults, realmFromConfig } from './lib/realm-defaults.js'
 import { createProjectNames } from './lib/project-names.js'
 import { createRetainedSet, envBytes, RETAIN_REPLICATE_MAX_BYTES, RETAIN_GOSSIP_MAX_BYTES } from './lib/retained.js'
 import { createTraces } from './lib/traces.js'
+import * as Act from './lib/activity.js'
 import { create as createEgress } from './services/egress.js'
 
 // ---------------------------------------------------------------- config / identity
@@ -109,7 +110,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.57.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.58.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -852,6 +853,222 @@ setInterval(() => {
   if (changed) announceSubpeers()
 }, SWEEP_MS).unref()
 
+// ---------------------------------------------------------------- #70 activity board (step 2: the `log` + `activity` tools)
+// ONE WRITER PER HOST: this host's GATEWAY owns the activity state and its daily JSONL (activity/<host>/YYYY-MM-DD.jsonl
+// under the persist dir, via the persistence facet). A follower authenticates its own sub-peer, then forwards the call UP
+// its control link (ACTIVITY frame with a request id → ACTIVITY_R; a timeout and a clear code when there's no gateway).
+// A newly elected gateway REPLAYS the host's files (newest first: lib/activity.js createReplay) before it serves a `log`
+// call, so it continues the same history. The pure model is lib/activity.js; this section is the I/O around it: config,
+// replay, appends + checkpoints (cp/rep), retention, expiry, the memory budget, the gone sweep, the id → offset index.
+const ACT_FWD_MS = Number(process.env.AI_BRIDGE_ACTIVITY_FWD_MS) || 5000                // follower → gateway request timeout
+const ACT_LOAD_WAIT_MS = Number(process.env.AI_BRIDGE_ACTIVITY_LOAD_WAIT_MS) || 15000   // a `log` call waits this long for a restart replay
+const ACT_GC_MS = Number(process.env.AI_BRIDGE_ACTIVITY_GC_MS) || 60000                 // expire() + enforceBudget() cadence
+const ACT_RETENTION_MS = Number(process.env.AI_BRIDGE_ACTIVITY_RETENTION_MS) || 86400000   // retention sweep cadence (also at gateway start)
+const ACT_INDEX_MAX = Number(process.env.AI_BRIDGE_ACTIVITY_INDEX_MAX) || 100000          // id → (day, offset) entries kept; beyond, a lookup scans the day file
+const ACT_PHASE1_MS = Number(process.env.AI_BRIDGE_ACTIVITY_PHASE1_MS) || 300            // a long replay publishes a provisional board after this
+const LOG_FIELDS = ['agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log']
+const BOARD_FIELDS = ['project', 'session', 'agent', 'active_only', 'log', 'entry']
+function activityConfig(cfg) { const w = []; const c = Act.resolveConfig(cfg && cfg.activity, process.env, w); for (const x of w) log(`activity config: ${x}`); return c }
+let ACT_CFG = activityConfig(CFG)
+let activity = null        // the host's activity state — on the GATEWAY only (a follower forwards)
+let actReplay = null       // { phase: 'replaying' | 'published' | 'done', promise, stats }
+const actIndex = new Map() // entry id -> { day, offset, length } in this host's JSONL (details/data lookups)
+const actPresent = new Set()   // session keys seen live on this host's roster (a present → absent transition marks them gone)
+let actApplies = 0, actCpTimer = null, actCpEvery = 0, actCpBusy = false
+const actCheckpointMs = () => Number(process.env.AI_BRIDGE_ACTIVITY_CHECKPOINT_MS) || ACT_CFG.progress_checkpoint_sec * 1000   // env: tests use a short interval
+const tzOff = t => -new Date(t).getTimezoneOffset()
+const actDisabled = () => ({ ok: false, code: 'activity-disabled', what: 'the activity board is disabled on this host (config activity.enabled / AI_BRIDGE_ACTIVITY_ENABLED)' })
+profile.config.watch(c => {   // live-reload: the knobs apply to the next call / sweep (enabled, stale window, caps, cadence)
+  const n = activityConfig(c)
+  if (JSON.stringify(n) === JSON.stringify(ACT_CFG)) return
+  ACT_CFG = n; if (activity) activity.config = n
+  scheduleActivityCheckpoints(); log('activity config reloaded')
+})
+function indexEntry(id, day, offset, length) {
+  actIndex.set(id, { day, offset, length })
+  if (actIndex.size > ACT_INDEX_MAX) actIndex.delete(actIndex.keys().next().value)
+}
+// gateway promotion (becomeGateway): create the host's state and replay its files in the background (startup is never
+// blocked on it); `log` calls wait for it, reads see the phase-1 board as soon as it's published
+function startActivity() {
+  if (activity) return
+  activity = Act.createActivity({ config: ACT_CFG, origin: HOSTNAME, idPrefix: `act_${crypto.randomBytes(2).toString('hex')}_` })
+  activity.config = ACT_CFG
+  actReplay = { phase: 'replaying', stats: null, promise: null }
+  actReplay.promise = replayActivity().catch(e => log(`activity replay failed: ${(e && e.message) || e}`))
+    .finally(() => { actReplay.phase = 'done'; syncActivityGone() })
+  scheduleActivityCheckpoints()
+}
+async function replayActivity() {
+  if (!PERSIST) return
+  const t0 = Date.now()
+  await pruneActivity(t0)   // retention first (startup), so the replay never reads a file it is about to delete
+  const rp = Act.createReplay(activity, { now: t0 })
+  const fromDay = Act.localDay(t0 - ACT_CFG.finished_visible_hours * 3600000)
+  let n = 0
+  for await (const r of persistence.activity.readBackwards(HOSTNAME, { fromDay })) {
+    if (r.rec && typeof r.rec.id === 'string' && r.rec.kind == null) indexEntry(r.rec.id, r.day, r.offset, r.length)
+    if (rp.feed(r.rec, r.day) === 'old' && !rp.wantsOlder(r.day)) break   // past the window (an older cp a rep line needs is still read)
+    if (++n % 256 === 0 && actReplay.phase === 'replaying' && (rp.phase1Complete() || Date.now() - t0 > ACT_PHASE1_MS)) {
+      rp.publish(); actReplay.phase = 'published'   // phase 1: current lines / bars / states visible now; history follows
+      log(`activity: board published after ${n} records (${rp.phase1Complete() ? 'phase 1 complete' : 'provisional'}); replay continues`)
+    }
+  }
+  const st = rp.finish()
+  actReplay.stats = { ...st, ms: Date.now() - t0 }
+  if (st.fed) log(`activity: replayed ${st.entries} entries, ${st.cps} checkpoints, ${st.reps} repeat lines → ${st.sessions} session(s) in ${Date.now() - t0}ms`)
+}
+async function pruneActivity(now) {   // retention: delete day files older than log_retention_days (gateway only — the host's one writer)
+  if (!PERSIST || !activity || role !== 'gateway') return
+  try {
+    const gone = await persistence.activity.prune(HOSTNAME, Act.localDay(now - ACT_CFG.log_retention_days * 86400000))
+    if (gone.length) log(`activity: retention removed ${gone.length} day file(s): ${gone.join(', ')}`)
+  } catch (e) { log(`activity: retention failed: ${e.message}`) }
+}
+setInterval(() => { pruneActivity(Date.now()) }, ACT_RETENTION_MS).unref()
+async function persistActivity(rec) {   // one JSONL line (a logged entry or a cp); never from a non-gateway process
+  if (!PERSIST || !activity || role !== 'gateway') return null
+  try {
+    const loc = await persistence.activity.append(HOSTNAME, Act.localDay(rec.ts), JSON.stringify(rec))
+    if (loc && typeof rec.id === 'string') indexEntry(rec.id, loc.day, loc.offset, loc.length)
+    return loc
+  } catch (e) { log(`activity: JSONL append failed: ${e.message}`); return null }
+}
+// checkpoints: every progress_checkpoint_sec, a cp line per context whose bar / line / ETA changed via log:false, and
+// ONE trailing repeat line for the alive-but-unchanged ones (rewritten in place while the key set stays the same)
+function scheduleActivityCheckpoints() {
+  const ms = PERSIST && activity ? actCheckpointMs() : 0
+  if (ms === actCpEvery) return
+  if (actCpTimer) clearInterval(actCpTimer)
+  actCpTimer = null; actCpEvery = ms
+  if (ms > 0) { actCpTimer = setInterval(() => { checkpointActivity().catch(e => log(`activity: checkpoint failed: ${e.message}`)) }, ms); actCpTimer.unref() }
+}
+async function checkpointActivity() {
+  if (!activity || role !== 'gateway' || !PERSIST || actCpBusy || (actReplay && actReplay.phase !== 'done')) return
+  actCpBusy = true
+  try {
+    const writes = Act.planCheckpoints(activity, Date.now()), day = activity.cp.day
+    for (const w of writes) {
+      if (w.kind === 'cp') { await persistActivity(w.rec); continue }
+      const rep = activity.cp.rep, line = JSON.stringify(w.rec)   // a log entry may have closed it meanwhile (rep null): then just append
+      const loc = w.rewrite && rep && rep.offset != null ? await persistence.activity.replaceTail(HOSTNAME, day, rep.offset, line) : await persistence.activity.append(HOSTNAME, day, line)
+      if (rep && loc && activity.cp.rep === rep) rep.offset = loc.offset
+    }
+  } finally { actCpBusy = false }
+}
+process.on('exit', () => {   // a clean shutdown flushes the pending checkpoints (sync appends; a kill skips this — one interval lost)
+  if (!activity || !PERSIST || !actCheckpointMs() || (actReplay && actReplay.phase !== 'done')) return
+  try { for (const w of Act.flushCheckpoints(activity, Date.now())) persistence.activity.appendSync(HOSTNAME, activity.cp.day, JSON.stringify(w.rec)) } catch { }
+})
+function actBudget() {
+  const r = Act.enforceBudget(activity, ACT_CFG.memory_budget_mb * 1048576)
+  if (r.evicted.length || r.entries_dropped) log(`activity: over the ${ACT_CFG.memory_budget_mb} MB budget — evicted ${r.evicted.length} finished agent(s), dropped ${r.entries_dropped} log entries`)
+}
+setInterval(() => {   // expiry (finished/gone agents past finished_visible_hours leave the board) + the memory budget
+  if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
+  Act.expire(activity, Date.now())
+  for (const k of [...actPresent]) if (!activity.local.has(k)) actPresent.delete(k)
+  actBudget()
+}, ACT_GC_MS).unref()
+// GONE: a session whose sub-peer was live on this host's roster and then left (deregister, TTL expiry, its follower
+// process exited) is marked gone; it is cleared when the session comes back (re-registers or reports again). A session
+// never seen live here (e.g. one only replayed from the files) is not marked — it simply goes stale.
+function syncActivityGone() {
+  if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
+  const live = new Set()
+  for (const s of roster.values()) { if (s.origin) continue; for (const sp of (s.subpeers || [])) live.add(Act.sessionKey({ realm: sp.realm || REALM, project: sp.project, user: sp.user, session: sp.name })) }
+  const now = Date.now()
+  for (const [k, sess] of activity.local) {
+    if (live.has(k)) { if (!actPresent.has(k)) { actPresent.add(k); if (sess.gone_at) Act.markSessionGone(activity, sess, null) } }
+    else if (actPresent.has(k)) { actPresent.delete(k); Act.markSessionGone(activity, sess, now) }
+  }
+}
+// ---- the gateway's handlers (a follower reaches them through activityCall → ACTIVITY frame)
+async function activityLog(ident, input) {
+  if (!ACT_CFG.enabled) return actDisabled()
+  if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  if (actReplay && actReplay.phase !== 'done') {   // a new gateway finishes the replay before it applies anything
+    const ready = await Promise.race([actReplay.promise.then(() => true), new Promise(res => { setTimeout(() => res(false), ACT_LOAD_WAIT_MS).unref() })])
+    if (!ready) return { ok: false, code: 'activity-loading', what: 'the activity board is still loading this host\'s log after a restart — retry in a moment' }
+  }
+  const now = Date.now()
+  const p = Act.parseMessage(input, { now, tzOffsetMin: tzOff(now) })
+  if (!p.ok) return p
+  const r = Act.apply(activity, ident, p.msg, now)
+  if (!r.ok) return r
+  actPresent.add(Act.sessionKey(ident))
+  const persisted = r.entry && PERSIST ? !!(await persistActivity(r.entry)) : null
+  if (++actApplies % 50 === 0) actBudget()
+  return { ok: true, id: r.id, ts: r.ts, session: ident.session, agent: r.agent, context: r.context, current: r.current, state: r.state, stale_at: r.stale_at, logged: r.logged,
+    ...(persisted === false ? { persisted: false } : {}), ...(r.evicted.length ? { evicted: r.evicted } : {}), ...(r.warnings.length ? { warnings: r.warnings } : {}) }
+}
+const actShow = o => (o && typeof o === 'object' && o.project != null ? { ...o, project: projName(o.project) } : o)   // #71: canonical project spelling
+async function activityRead(q) {
+  if (!ACT_CFG.enabled) return actDisabled()
+  if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  q = q && typeof q === 'object' ? q : {}
+  const now = Date.now()
+  const head = { ok: true, host: HOSTNAME, now, stale_after_min: ACT_CFG.stale_after_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}) }
+  if (q.entry != null) {
+    const r = await lookupActivityEntry(String((q.entry && typeof q.entry === 'object' ? q.entry.id : q.entry) || ''), now)
+    return r.ok === false ? r : { ...head, ...r }
+  }
+  if (q.log != null) {
+    const lv = Act.logView(activity, typeof q.log === 'object' ? q.log : { session: q.log }, now)
+    if (!lv.ok) return lv
+    const { ok: _ok, ...rest } = lv
+    return { ...head, log: actShow(rest) }
+  }
+  return { ...head, sessions: Act.boardView(activity, now, { project: q.project, session: q.session, agent: q.agent, active_only: !!q.active_only }).map(actShow) }
+}
+// one entry in full: memory first (a current line holds its details/data), else this host's JSONL — by the id index,
+// else a scan of the day file the id's timestamp names (± a day). Checkpoint / repeat lines never match.
+async function lookupActivityEntry(id, now) {
+  if (!id) return { ok: false, code: 'id-required', what: 'entry needs { id }' }
+  const mem = Act.findEntry(activity, id, now)
+  if (mem && mem.complete) return { source: 'memory', entry: actShow(mem.entry) }
+  if (PERSIST) {
+    let rec = null, via = null
+    const ix = actIndex.get(id)
+    if (ix) { const r = await persistence.activity.readAt(HOSTNAME, ix.day, ix.offset, ix.length); if (r && r.id === id && r.kind == null) { rec = r; via = 'index' } }
+    const t = rec ? null : Act.entryTime(id)
+    if (t) for (const d of new Set([Act.localDay(t), Act.localDay(t - 86400000), Act.localDay(t + 86400000)])) { rec = await persistence.activity.find(HOSTNAME, d, id); if (rec) { via = 'scan'; break } }
+    if (rec) {
+      const { v: _v, new_session: _s, new_entity: _e, new_context: _c, ...e } = rec
+      return { source: 'file', via, entry: actShow({ ...e, rendered: Act.renderText(e.text, e.progress, e.eta_at, now) }) }
+    }
+  }
+  if (mem) return { source: 'memory', entry: actShow(mem.entry), note: 'details/data are not available: this entry is not in this host\'s log files' }
+  return { ok: false, code: 'unknown-entry', what: `no entry ${id} on this host (in memory or in its daily log files)` }
+}
+// ---- the follower side: forward to this host's gateway over the control link, wait for its answer
+const actPending = new Map()   // rid -> { resolve, timer }
+let actRid = 0, gwRegistered = false
+function failActivityPending(code, what) { for (const p of actPending.values()) { clearTimeout(p.timer); p.resolve({ ok: false, code, what }) } actPending.clear() }
+function activityForward(op, payload) {
+  return new Promise(resolve => {
+    const rid = String(++actRid)
+    const timer = setTimeout(() => { actPending.delete(rid); resolve({ ok: false, code: 'gateway-timeout', what: `this host's gateway did not answer within ${ACT_FWD_MS}ms — retry` }) }, ACT_FWD_MS)
+    timer.unref()
+    actPending.set(rid, { resolve, timer })
+    sendFrame(gwSock, { t: 'ACTIVITY', session: SESSION, rid, op, ...payload })
+  })
+}
+const verLt = (a, b) => { const x = String(a || '0').split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); return false }
+async function activityCall(op, payload) {   // op 'log' { ident, input } | 'read' { query }
+  const t0 = Date.now()
+  for (;;) {
+    if (role === 'gateway') return op === 'log' ? activityLog(payload.ident, payload.input) : activityRead(payload.query)
+    if (role === 'follower' && gwSock && !gwSock.destroyed && gwRegistered) {
+      const gv = roster.get(gatewayId)?.bridge_version   // a ≤1.57 gateway ignores ACTIVITY frames: say so now, not after a timeout
+      if (gv && verLt(gv, '1.58.0')) return { ok: false, code: 'gateway-unsupported', what: `this host's gateway runs bridge ${gv}; the activity board needs 1.58.0+ on the gateway (restart it on the new version)` }
+      return activityForward(op, payload)
+    }
+    if (Date.now() - t0 >= ACT_FWD_MS) return { ok: false, code: 'no-gateway', what: 'no gateway on this host right now (re-election in progress?) — retry in a moment' }
+    await new Promise(r => setTimeout(r, 100))
+  }
+}
+
 // ---------------------------------------------------------------- delivery (inbound to THIS process)
 async function deliver(env) {
   if (seen.has(env.id)) return { ok: true, dedup: true }
@@ -1328,6 +1545,7 @@ function rosterFor(ws) {
     ? rosterPayload() : rosterPayloadFor(ws.project, ws.realm))
 }
 function broadcastRoster() {
+  syncActivityGone()     // #70: a session that left this host's roster shows as gone (cleared when it returns)
   noteRosterProjects()   // #71: give every roster project a canonical spelling before it goes out
   const frame = { type: 'ROSTER', ...rosterPayload(), grants: consent.grantSet(), realm_defaults: realmDefaults.current(), project_names: projectNames.list() }   // #62: followers merge the grant set (consent is checked in the process hosting the target); #66b: and the realm defaults
   // #66c: the retained set rides a follower's ROSTER only when that follower hasn't had the current version (a new
@@ -1647,6 +1865,8 @@ function becomeGateway(server) {
     client: CLIENT ? CLIENT.name : null, client_kind: CLIENT ? clientKind(CLIENT.name) : null }]])
   flushPendingTraces()
   server.on('connection', onControlConn)
+  failActivityPending('gateway-lost', 'this bridge became the gateway mid-call — retry'); gwRegistered = false
+  startActivity()    // #70: this host's activity board + its daily JSONL are owned here now (replayed in the background)
   startWsIngress(WS_PORT)
   broadcastRoster()
   maybeLaunchTray()
@@ -1698,6 +1918,16 @@ function onControlConn(sock) {
       } else if (f.t === 'RETAINED') {                      // #66c: a follower's retained publish(es) go UP to be merged + spread
         if (!who) return                                     // policy frame: only on an authenticated (HELLO'd) connection
         if (retainedSet.merge(f.retained) > 0) broadcastRoster()   // LWW: an older value changes nothing
+      } else if (f.t === 'ACTIVITY') {                      // #70: a follower's log / activity call (it authenticated its own sub-peer)
+        const reply = result => { try { sendFrame(sock, { t: 'ACTIVITY_R', rid: f.rid, result }) } catch { } }
+        if (!who || !f.session || followers.get(f.session) !== sock) { reply({ ok: false, code: 'unauthorized', what: 'activity frames are accepted only from a registered follower' }); return }
+        if (f.op === 'log') {
+          const id = f.ident || {}, fr = roster.get(f.session)
+          const known = !!fr && (fr.subpeers || []).some(sp => ciEq(sp.name, id.session) && projKey(sp.project) === projKey(id.project) && lc(sp.user) === lc(id.user) && (sp.realm || REALM) === (id.realm || REALM))
+          if (!known) { reply({ ok: false, code: 'unknown-subpeer', what: 'that session is not registered on the forwarding bridge' }); return }
+          activityLog({ realm: id.realm || REALM, project: id.project, user: id.user, session: id.session, host: HOSTNAME }, f.input || {}).then(reply, e => reply({ ok: false, code: 'gateway-error', what: String((e && e.message) || e) }))
+        } else if (f.op === 'read') activityRead(f.query || {}).then(reply, e => reply({ ok: false, code: 'gateway-error', what: String((e && e.message) || e) }))
+        else reply({ ok: false, code: 'bad-op', what: `unknown activity op ${f.op}` })
       } else if (f.t === 'TRACE') {
         traces.collect(f.trace)
       } else if (f.t === 'PAGE_MSG') {                       // follower forwarding an envelope to a page leaf
@@ -1893,7 +2123,8 @@ function becomeFollower() {
   })
   onFrames(sock, f => {
     if (f.t === 'RENAME') { NAME = f.name }
-    else if (f.t === 'REGISTERED') { flushPendingTraces() }
+    else if (f.t === 'REGISTERED') { gwRegistered = true; flushPendingTraces() }
+    else if (f.t === 'ACTIVITY_R') { const p = actPending.get(f.rid); if (p) { clearTimeout(p.timer); actPending.delete(f.rid); p.resolve(f.result) } }   // #70
     else if (f.type === 'ROSTER') {
       roster = new Map(f.sessions.map(s => [s.session, s]))
       pages = new Map((f.pages || []).filter(p => p && p.instance).map(p => [p.instance, publicPage(p)]))   // #68: a ≤1.48 gateway still sends page capKeys — never keep (or re-emit) one here; a follower never uses a page's key
@@ -1904,7 +2135,10 @@ function becomeFollower() {
       projectNames.merge(f.project_names)   // #71: and the realm's canonical project spellings (for what MY tools show)
     }
   })
-  const reelect = () => { if (role !== 'stopping') { gwSock = null; setTimeout(election, backoff + Math.random() * 100); backoff = Math.min(backoff * 2, 3000) } }
+  const reelect = () => {
+    gwRegistered = false; failActivityPending('gateway-lost', 'this host\'s gateway went away mid-call (re-election) — retry')   // #70
+    if (role !== 'stopping') { gwSock = null; setTimeout(election, backoff + Math.random() * 100); backoff = Math.min(backoff * 2, 3000) }
+  }
   sock.on('close', reelect)
   sock.on('error', () => {})
 }
@@ -2473,6 +2707,23 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       const cur = Number(a.cursor || 0)
       return ok({ messages: inbox.slice(cur).map(decryptedView), next_cursor: inbox.length })
+    }
+    case 'log': {   // #70: report status to this host's activity board (the gateway applies it; a follower forwards it up)
+      if (!a.as) return ok({ ok: false, code: 'as-required', what: 'log reports as a registered session: pass as + secret (register_self first)' })
+      const { sp, err } = authSub(String(a.as), a.secret)
+      if (err) return ok(err)
+      if (!ACT_CFG.enabled) return ok(actDisabled())
+      const input = {}
+      for (const k of LOG_FIELDS) if (a[k] !== undefined) input[k] = a[k]
+      const pre = Act.parseMessage(input, { now: Date.now(), tzOffsetMin: tzOff(Date.now()) })   // validate here: a bad call costs no round trip
+      if (!pre.ok) return ok(pre)
+      const ident = { realm: sp.identity?.realm || REALM, project: sp.identity?.project || 'unclassified', user: sp.identity?.user || null, session: sp.name, host: HOSTNAME }
+      return ok(await activityCall('log', { ident, input }))
+    }
+    case 'activity': {   // #70: read this host's activity board (+ one agent's log, or one entry in full)
+      const query = {}
+      for (const k of BOARD_FIELDS) if (a[k] !== undefined) query[k] = a[k]
+      return ok(await activityCall('read', { query }))
     }
     case 'set_behavior': {   // #29: register a 'how to behave when a message arrives' reminder for a scope
       let holder = SESSION, holderIdentity = pIdent(PROC_IDENT, HOSTNAME)

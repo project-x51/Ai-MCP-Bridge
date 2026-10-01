@@ -66,6 +66,16 @@ export function create(ctx) {
       async put(writer, list) {},                  // #71: this host's canonical project-name map [{ name, first_seen }], one per writing host
       async all() { return [] },                   // every host's list; the bridge folds them (earliest first_seen wins) at startup
     },
+    activity: {                                    // #70: the host's daily JSONL (activity/<host>/YYYY-MM-DD.jsonl); ONE writer per host (its gateway)
+      async append(host, day, line) { return null },              // append one record line -> { day, offset, length }
+      async replaceTail(host, day, offset, line) { return null }, // rewrite the LAST line (the open repeat line) in place, else append -> { ..., rewritten }
+      appendSync(host, day, line) { return null },                // synchronous append (shutdown flush)
+      async readAt(host, day, offset, length) { return null },    // the record at an offset (the id -> offset index)
+      async find(host, day, id) { return null },                  // a LOGGED entry by id in one day's file (never a cp/rep line)
+      async days(host) { return [] },                             // the host's day files, oldest first
+      async *readBackwards(host, opts) {},                        // every record NEWEST FIRST ({ rec|null, day, offset, length }), chunked from the end
+      async prune(host, beforeDay) { return [] },                 // retention: delete days before beforeDay
+    },
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
   }
 }

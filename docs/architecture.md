@@ -1154,6 +1154,51 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.58.0):** *the agent activity board, build-plan step 2 — the `log` + `activity` tools, gateway-owned state,
+  the host's daily JSONL (#70).* **Model changes in `lib/activity.js`** (the step-1 pure core; decisions of 2026-10-01):
+  the session key is realm + project + user + session name (the host is not part of it); state and the current line
+  change only on `@~`, while progress / ETA move on ANY message (sticky, `none` clears, the ETA is null while the
+  context is done/failed); the **`log` flag** (default true) — `log:false` takes full effect (line, state, bar, activity)
+  but is not appended to the in-memory log or the file (`entry:null, logged:false`); a message with progress/eta and no
+  text defaults to `"{progress}"` (`"{eta}"`); **text is a template** rendered at READ time (`renderText`: `{progress}`
+  `{pct}` `{done}` `{total}` `{unit}` `{eta}`, `{{`/`}}` literal, unknown or unfillable placeholders left as typed,
+  locale-neutral `fmtNum`) — current lines against the live bar, log entries against what they recorded; the files and
+  the snapshot keep the raw template. **Persisted records** carry `new_session` / `new_entity` / `new_context` on the
+  first record of each, `evicted` on an evicting entry and `finished_at` on an `@~root` entry, so the **replay**
+  (`createReplay` / `replayNewestFirst`, records fed NEWEST FIRST) stops exactly where an instance began and provably
+  equals a chronological `apply` of the same entries (seeded random tests, current state AND log contents). Phase 1
+  (current line, bar, ETA, state, finished — the newest record carrying each; `phase1Complete()` when everything seen
+  is resolved, `publish()` installs it) then phase 2 (each entity's history, chronological, capped); only
+  `finished_visible_hours`. **Checkpoints** (`planCheckpoints`, every `progress_checkpoint_sec`, default 60, 0 = off): a
+  context whose line / bar / ETA changed via `log:false` gets ONE `{"kind":"cp","k":…}` snapshot line per interval
+  (`k` = a per-file key); alive-but-unchanged contexts are run-length encoded in ONE trailing `{"rep":[k…],"n","since",
+  "last"}` line, rewritten in place while the key set stays exactly the same (any other write, or another set, starts a
+  new one); replay takes `last_activity` from the newest record or rep `last`, and a garbled final line is skipped. New
+  read views `boardView` / `logView` / `findEntry`. **Bridge:** ONE WRITER PER HOST — the gateway creates the state on
+  promotion (`startActivity` in `becomeGateway`) and replays the host's files in the background (startup never blocks;
+  a `log` call waits ≤15 s for it, reads see the phase-1 board early with `loading`); a follower authenticates its own
+  sub-peer (`authSub`), validates the input locally, then forwards `{ident, input}` up its control link in an
+  `ACTIVITY` frame with a request id (`ACTIVITY_R` back; 5 s timeout → `gateway-timeout`; no gateway during a
+  re-election → `no-gateway`; a ≤1.57 gateway → `gateway-unsupported`; a dying link → `gateway-lost`). The gateway
+  honours `ACTIVITY` only on a HELLO'd connection that REGISTERED as that follower, and a `log` only for a sub-peer on
+  that follower's roster entry. `activity` reads go the same way. Files via a new persistence facet store
+  `activity` (`append` / `replaceTail` / `appendSync` / `readAt` / `find` / `days` / `readBackwards` / `prune`; file +
+  none + _template): `activity/<host>/YYYY-MM-DD.jsonl` (local date of the record), per-file serialised appends, a
+  crash's partial last line repaired before the next append, reads backwards in 64 KB chunks. Ids
+  `act_<nonce>_<ts36>-<seq36>`; details/data lookups go memory → id index → a scan of the day the id names. Retention
+  (`log_retention_days`) at gateway start + daily; `expire` + `enforceBudget` every minute (and every 50 applies);
+  gone = a present→absent transition of the session on this host's roster (swept in `broadcastRoster`), cleared when
+  it returns; a clean shutdown flushes pending checkpoints (sync appends on `exit`). Config: the `activity` block via
+  `resolveConfig` (live-reloaded), `AI_BRIDGE_ACTIVITY_*` env. **Not yet:** gossip / remote reads (step 4), the
+  dashboard (5), `aimb-log.mjs` (3), the agent snippet (6). Also fixed: `test_lib_unit`'s "#71 durable: rehydrate"
+  waited a fixed 150 ms for fire-and-forget writes — it now awaits them, and `persistence.projectNames.put` is
+  serialised per file so back-to-back saves land in order. Tests: `test_activity_unit` 287 → 384 checks; new
+  `test_log_live` (52 checks — gateway + follower on one host: forwarding, one file per host, `@`/`@~`, templates,
+  `log:false`, one cp + ONE rep line whose `n` grows and a fresh one after a change, memory / index / scan lookups,
+  limits + codes, `enabled:false`, stale, forged frames, gone on deregister, retention, startup replay of a seeded
+  file, restart replay twice incl. the `log:false` bar); against the pre-change bridge 46 of the 52 FAIL. `test_lib_unit`
+  +1. Full suite 1541 passed, 0 failed (47 files; `test_grants_federate_live` lost a bridge process once in the full run
+  and passed 7/7 alone).
 - **Built (v1.57.0):** *one canonical project spelling mesh-wide — the first-seen one (#71).* Reported by Ferret :
   PC.1. **What was wrong:** matching was case-insensitive, but surfaces showed whatever spelling they held:
   `allow_project(project:"AIMB")` returned `{from:"aimb"}` (consent stores projKey'd edges and the handler echoed the

@@ -6,9 +6,10 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-09-30, v1.57.0) — read this first after a compact
-**Current version: v1.57.0** (#71; code done, NOT yet deployed — live hosts run v1.54.0). Work is committed AND pushed
-to `main` (see `git log`). Everything below is durable;
+## RESUME STATE (updated 2026-10-01, v1.58.0) — read this first after a compact
+**Current version: v1.58.0** (#70 step 2: the `log` + `activity` tools, gateway-owned activity state, the daily JSONL;
+code done, NOT yet deployed — live hosts run v1.54.0). Work up to v1.57.0 is committed AND pushed to `main` (see
+`git log`); v1.58.0 is in the working tree for review. Everything below is durable;
 nothing important is only in chat.
 
 **DEPLOYED (2026-09-30):** every live host runs **v1.54.0**: ROBIN-Z790, LITTLE-001, Robins-Mac, phub-lnx-01 (checked
@@ -23,7 +24,14 @@ with `list_sessions`).
 Optional tidy: live configs still carry ignored `compatPorts` keys (harmless). Not done: the optional
 `from_topic`-aware receive line in `behaviors.realm` (#54).
 
-**Still open:** #70 agent activity board (spec in progress: model + `log` call agreed, layout WIP), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**2026-10-01 (v1.58.0):** Built **#70 step 2** — `log` (as a registered session; `@`/`@~` contexts, progress/ETA on any
+message, `log:false` board-only updates, `{progress}`/`{eta}` text templates rendered at read time) and `activity` (this
+host's board, one agent's log, one entry's details/data). The host's gateway owns the state and
+`activity/<host>/YYYY-MM-DD.jsonl` (entries + `cp` checkpoints + run-length `rep` lines); followers forward over the
+control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
+1.58 gateway; it says `gateway-unsupported` otherwise).
+
+**Still open:** #70 agent activity board (steps 1–2 built; next: step 3 `tools/aimb-log.mjs`, then gossip, dashboard, snippet), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -264,7 +272,8 @@ a bridge tool). The bridge gossips the current state, and each host keeps the fu
 - A message with no prefix is logged to `@root` without changing the headline, so setting a current line is always a
   deliberate `@~`.
 - A context is created by its first message. Quote names with spaces: `@~"CTX strip 17"`.
-- Progress and ETA take effect on `@~` messages (an `@` message only records them in its log entry).
+- ~~Progress and ETA take effect on `@~` messages (an `@` message only records them in its log entry).~~ Superseded
+  (2026-10-01): ANY message moves the bar — see "Decisions after step 1".
 - Optional `details` (≤ 4 KB text) and `data` (≤ 16 KB JSON) are **not gossiped**; the dashboard fetches them on demand.
 - Keyed update-in-place lines (an earlier idea) are dropped; `@~` replaces them.
 
@@ -313,13 +322,16 @@ to put secrets in it.
 ```
 log({ as, secret,                 // the reporting session (registered sub-peer)
       agent?,                     // agent label/path under it; omit = the session itself
-      text,                       // one-liner ≤ 240 chars (longer is truncated); may start with @ctx / @~ctx
+      text?,                      // one-liner ≤ 240 chars (longer is truncated); may start with @ctx / @~ctx; a template
+                                  //   ({progress} {pct} {done} {total} {unit} {eta}); default "{progress}" / "{eta}"
       context?,                   // "@root" (default) | "@Ctx" | "@~Ctx"; overrides a prefix in text
       state?,                     // running|blocked|failed|done|idle; default: the context's current, else running
-      progress?,                  // "4812/12000 tiles" | "3/6" | "61%"
-      eta?,                       // "15m" | "1h25m" | "19:27"
-      details?, data? })          // ≤ 4 KB text / ≤ 16 KB JSON, fetched on demand
-  → { ok, id, ts, agent, context, current, stale_at }
+      progress?,                  // "4812/12000 tiles" | "3/6" | "61%" | "none"
+      eta?,                       // "15m" | "1h25m" | "19:27" | "none"
+      stale_after?,               // "60m" (max 24h): this may stay quiet that long before it counts as stale
+      details?, data?,            // ≤ 4 KB text / ≤ 16 KB JSON, fetched on demand
+      log? })                     // true (default) = append to the log + file; false = board only
+  → { ok, id, ts, session, agent, context, current, state, stale_at, logged }   (BUILT v1.58.0)
 ```
 
 **Script:** `tools/aimb-log.mjs`, token-gated like the doorbell, no registration needed.
@@ -393,6 +405,18 @@ silent steps such as builds and downloads.
 - **One writer per host:** the host's GATEWAY owns the activity state and the files. Followers forward `log` calls
   up. Files are per HOST (`activity/<host>/YYYY-MM-DD.jsonl` under the persist dir), so a newly elected gateway
   continues the same history.
+- **During step 2 (Robin, 2026-10-01):**
+  - **The `log` flag** (default true): `log:false` takes full effect on the board (line, state, bar, activity) but is
+    not appended to the log or the file — for frequent updates (a script every second); `log:true` for milestones.
+    (Replaced the earlier implicit "no text = progress tick".)
+  - **Text is a template** rendered at READ time: `{progress}` `{pct}` `{done}` `{total}` `{unit}` `{eta}`; `{{`/`}}`
+    literal; unknown or unfillable placeholders left as typed. A current line renders against the context's LIVE bar,
+    a log entry against what it recorded. A message with progress/eta and no text defaults to `"{progress}"`
+    (`"{eta}"` with only an ETA), logged or not.
+  - **Checkpoints** (`progress_checkpoint_sec`, default 60, 10–3600, 0 = off): a context changed via `log:false` gets ONE
+    `{"kind":"cp","k":n,…}` line per interval (`k` = a per-file key); alive-but-unchanged contexts go in ONE trailing
+    `{"rep":[k…],"n","since","last"}` line, rewritten in place while the key set is exactly the same. Replay: the newest
+    of cp / entry wins for line, bar and state; `last_activity` takes rep `last`; garbled final lines are skipped.
 
 ### Logging flag, checkpoints and chunked history (Robin, 2026-10-01; supersedes the implicit "tick" rule above)
 - **An explicit `log` flag (default true) decides whether a message is logged.**
@@ -438,7 +462,11 @@ Each step is its own version.
    bump** (still v1.57.0). Decisions: text over 240 is truncated with a warning (everything else over a limit is
    rejected); done > total clamps; a clock ETA resolves at parse time (`now` + tz offset); the 129th agent evicts
    the session's oldest finished agent and is rejected only when none has finished.
-2. The `log` tool, local state and the daily JSONL.
+2. The `log` tool, local state and the daily JSONL. **BUILT (v1.58.0, 2026-10-01)** — `log` + `activity` tools, the
+   gateway-owned state (followers forward over the control link), `activity/<host>/YYYY-MM-DD.jsonl` (entries, `cp`,
+   `rep`), newest-first replay with an early phase-1 publish, retention, expiry, budget, gone on leave; `log:false`,
+   text templates and checkpoints (decided during the step). `test_activity_unit` 384 checks, new `test_log_live` (52).
+   See architecture.md §13 "Built (v1.58.0)".
 3. `tools/aimb-log.mjs`.
 4. Gossip, plus on-demand fetch of logs, details and data.
 5. The dashboard Activity tree.

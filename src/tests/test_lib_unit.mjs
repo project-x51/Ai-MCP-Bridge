@@ -517,11 +517,15 @@ check('#43 page cap input is token-gated too',
 // #71: the durable copy round-trips through the file store (one file per writing host; rehydrate folds them all)
 {
   const dir = fs.mkdtempSync(path.join(nodeOs.tmpdir(), 'aimb-pnames-'))
-  const store = createFilePersistence({ CFG: {}, HERE: dir, env: { AI_BRIDGE_PERSIST_DIR: dir } })
+  const store0 = createFilePersistence({ CFG: {}, HERE: dir, env: { AI_BRIDGE_PERSIST_DIR: dir } })
+  const writes = []   // the module's put() is fire-and-forget: track the promises and AWAIT them (was a fixed 150 ms sleep — flaky)
+  const store = { ...store0, projectNames: { ...store0.projectNames, put: (...a) => { const p = store0.projectNames.put(...a); writes.push(p); return p } } }
   const h1 = createProjectNames({ persistence: store, persist: true, writer: 'HOST-1' })
   const h2 = createProjectNames({ persistence: store, persist: true, writer: 'HOST-2' })
   h1.note('Marz', 100); h2.note('marz', 50); h2.note('AIMB', 70)
-  await new Promise(r => setTimeout(r, 150))   // put() is fire-and-forget
+  await Promise.all(writes)
+  check('#71 durable: every save landed, and back-to-back saves of one host land in order (its newest map on disk)', writes.length === 3
+    && JSON.stringify(JSON.parse(fs.readFileSync(path.join(dir, 'project-names', 'host-2.pnames'), 'utf8'))) === JSON.stringify(h2.list()))
   const back = createProjectNames({ persistence: store, persist: true, writer: 'HOST-3' })
   await back.rehydrate()
   check('#71 durable: rehydrate folds every host\'s file (earliest first_seen wins)', back.display('MARZ') === 'marz' && back.display('aimb') === 'AIMB' && back.size() === 2, JSON.stringify(back.list()))
