@@ -12,7 +12,7 @@
 // on A and B = two entities in one group; a dashboard WS request + push; a 20/s log:false burst for 4 s → ≤1 frame/s
 // per link; the bare-session user rule; a link restart (B's gateway killed, F takes over) → full slices, C's TRUNCATED newest-first and completed by later
 // deltas; a forged slice (another origin; host fields) ignored; remote log paging over ≥3 pages; remote entry
-// details/data; the fetch rate limit; prepare-shutdown on A → gone at once, cleared when A returns; C killed →
+// details/data; the fetch rate limit (queued by the requester since v1.61.0); prepare-shutdown on A → gone at once, cleared when A returns; C killed →
 // owner-unreachable + gone; the legacy hub breaks nothing. Ports 14100–14199. AIMB_TEST_BRIDGE=<file> runs it against
 // another bridge copy (the pre-change proof).
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -161,11 +161,14 @@ dash.ws.send(J({ type: 'activity', ref: 'q1', query: { session: 'Orch' } }))
 await until(async () => dash.msgs.some(m => m.type === 'activity' && m.ref === 'q1'), x => x, 3000)
 const dq = dash.msgs.find(m => m.type === 'activity' && m.ref === 'q1')
 check('dashboard: {type:"activity", query} → the mesh board (A\'s agent, tagged)', dq?.result?.ok === true && agentsOf(dq.result.sessions || [], 'Orch', 'research')[0]?.host === HA, J(dq))
-const nPush = dash.msgs.filter(m => m.type === 'activity_board').length
+// v1.61.0 (#70 step 5): pushes go only to a SUBSCRIBED dashboard — a full board, then deltas (test_activity_dashboard_live)
+dash.ws.send(J({ type: 'activity_sub' }))
+await until(async () => dash.msgs.some(m => m.type === 'activity_board'), x => x, 3000)
 await call(A, 'log', { as: 'Orch', secret: 'or', agent: 'dash-probe', text: '@~root seen on a dashboard' })
-await until(async () => dash.msgs.some(m => m.type === 'activity_board' && agentsOf(m.board?.sessions || [], 'Orch', 'dash-probe').length), x => x, 4000)
-check('dashboard: an activity_board push follows a remote change', dash.msgs.filter(m => m.type === 'activity_board').length > nPush
-  && dash.msgs.some(m => m.type === 'activity_board' && agentsOf(m.board?.sessions || [], 'Orch', 'dash-probe')[0]?.host === HA), J(dash.msgs.filter(m => m.type === 'activity_board').length))
+const probeUnit = m => (m.upsert || []).find(u => u.kind === 'agent' && u.agent === 'dash-probe')
+await until(async () => dash.msgs.some(m => m.type === 'activity_delta' && probeUnit(m)), x => x, 4000)
+check('dashboard: a subscribed dashboard gets a delta after a remote change (the agent, tagged with its host)', dash.msgs.some(m => m.type === 'activity_board' && m.full)
+  && dash.msgs.some(m => m.type === 'activity_delta' && probeUnit(m)?.host === HA), J(dash.msgs.filter(m => m.type.startsWith('activity_')).map(m => m.type)))
 dash.ws.close()
 
 // ---- 3. bare-session rule: a script may not report for a BARE session live under another user (same user: fine)
@@ -255,10 +258,10 @@ await sleep(600)
 const e2 = await call(F, 'activity', { entry: { id: cl.id } })
 check('remote entry: a remote CURRENT line is found by id alone (it is in the gossiped slice)', e2.ok && e2.from_host === HA && e2.entry?.details === 'CURRENT-DETAILS' && e2.entry?.data?.cur === true, J(e2))
 await sleep(1100)
-// ---- 9. the fetch rate limit (A serves 2/s per link)
+// ---- 9. the fetch rate limit (A serves 2/s per link). v1.61.0 (#70 step 5): the requesting gateway QUEUES the burst at
+// the owner's rate instead of answering rate-limited (the bounds + `busy` are in test_activity_dashboard_live)
 const burst = await Promise.all(Array.from({ length: 8 }, () => call(F, 'activity', { log: { session: 'Orch', agent: 'pager', limit: 1 } })))
-const limited = burst.filter(r => r.code === 'rate-limited')
-check('rate limit: a burst of 8 remote fetches → some answered, the rest rate-limited (retry_after_ms)', burst.some(r => r.ok) && limited.length >= 4 && limited.every(r => r.retry_after_ms > 0 && r.host === HA), J(burst.map(r => r.code || 'ok')))
+check('rate limit: a burst of 8 remote fetches → all answered (queued at the owner\'s 2/s, none rate-limited)', burst.every(r => r.ok) && burst.some(r => r.queued_ms > 0), J(burst.map(r => r.code || `ok${r.queued_ms ? '+' + r.queued_ms : ''}`)))
 const amb = await call(F, 'activity', { log: { session: 'Twin' } })
 check('remote log: a name on several hosts → ambiguous-session with each candidate\'s host', amb.ok === false && amb.code === 'ambiguous-session' && J((amb.candidates || []).map(c => c.host).sort()) === J([HA, HB]), J(amb))
 

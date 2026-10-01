@@ -6,11 +6,22 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-01, v1.60.0) — read this first after a compact
-**Current version: v1.60.0** (#70 step 4: mesh-wide gossip of the activity board + on-demand remote history; code done,
-NOT yet deployed — live hosts run v1.54.0). v1.59.0 (#70 step 3) is committed (`0bbcb5e`); v1.60.0 is in the working
-tree for review. The rebuilt tray (`PrepareShutdown()` before the kill) is NOT installed: only a scratch build proved it
-compiles; Robin runs `tray/windows/build.cmd`. Everything below is durable; nothing important is only in chat.
+## RESUME STATE (updated 2026-10-02, v1.61.0) — read this first after a compact
+**Current version: v1.61.0** (#70 step 5: the dashboard's Activity tree + deltas to dashboards, paging into the day
+files, queued remote fetches, read access, bell / host down, the duplicate-hostname warning; code done, NOT yet deployed
+— live hosts run v1.54.0). v1.60.0 (#70 step 4) is committed (`6ed091f`); v1.61.0 is in the working tree for review. The
+rebuilt tray (`PrepareShutdown()` before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs
+`tray/windows/build.cmd`. Everything below is durable; nothing important is only in chat.
+
+**2026-10-02 (v1.61.0):** Built **#70 step 5** — the dashboard's **Activity** section (collapsed by default; a tree:
+project → session → agent → context → log entry; status glyph with a stale ring, hover times, pills incl. a distinct
+host-down badge, 🔔, ⌛, the stale slider computed in the page, active only, project cycle + depth control, light/dark
+tokens). Dashboards now SUBSCRIBE (`activity_sub`) and get a full board then per-dashboard DELTAS ≤1/s (seq gap →
+resync); `activity {log}` pages continue into the day files (local and remote); remote fetches are QUEUED on the
+requesting gateway at the owner's rate (`busy` beyond 64 per link / 16 per dashboard); page leaves get no activity;
+`host_down` / `hosts_down` and `bell` on the board; a duplicate host name is logged. Deploy = restart each host's
+gateway on 1.61.0 (a 1.60 peer ignores `bell` and still answers fetches; a 1.60 owner's `rate-limited` is queued
+around). See architecture.md §13 "Built (v1.61.0)". **Open before step 6:** see "Questions before step 6" in #70.
 
 **2026-10-01 (v1.60.0):** Built **#70 step 4** — the activity identity now includes the HOST (each host writes only its
 own entities; the board groups a session's entities across hosts, every entity tagged with its host); each gateway
@@ -48,7 +59,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #74 federation test flakes, #70 agent activity board (steps 1–4 built; next: step 5 the dashboard Activity tree, then the snippet), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #74 federation test flakes, #70 agent activity board (steps 1–5 built; next: step 6 `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -277,7 +288,7 @@ accepted); `allow_project` let a caller declared `UNCLASSIFIED` grant (compared 
   it in grants, `access`, the roster, `list_sessions` and the dashboard, while matching stays case-insensitive.
   Verify that no path really treats different cases as different projects (topics, consent, parked mail).
 
-## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–4 built, v1.60.0; next: step 5 the dashboard tree — Robin + Bridget)**
+## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–5 built, v1.61.0; next: step 6 `{log_snippet}` + the connect reminder — Robin + Bridget)**
 **Why:** sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows what those
 agents are doing right now. **What:** a new dashboard page showing, across the whole mesh, sessions grouped by project,
 each session's agents under it, and each agent's progress. Agents report it themselves with a doorbell-style script (or
@@ -558,10 +569,40 @@ Each step is its own version.
    (≤1/s) + `{type:"activity"}` requests; bare sessions count for `session-user-mismatch`. `test_activity_unit` 427, new
    `test_activity_gossip_live` (44; 38 FAIL pre-change). See architecture.md §13 "Built (v1.60.0)". **Open before step
    5:** see "Questions before step 5" below.
-5. The dashboard Activity tree.
+5. The dashboard Activity tree. **BUILT (v1.61.0, 2026-10-02)** — the layout Robin approved in the mockups (tree only;
+   project cycle + Projects / Sessions / Agents; one row per multi-host session with host tags; the status glyph whose
+   ring empties toward stale; hover-only times; pills for blocked / failed / stale / gone + a distinct host-down badge;
+   🔔 / ⌛; the stale slider client-side; active only; Expand / Collapse all; a legend; light + dark tokens) in a new
+   collapsible **Activity** section of `dashboard.html`, plus the server side of "Decisions before step 5": deltas to
+   SUBSCRIBED dashboards (full on `activity_sub`, then per-dashboard `activity_delta` ≤1/s, seq gap → resync; lib
+   `boardView({raw})` / `dashUnits` / `planDashDelta`), paging into the day files (`logView({files})` + `actLogPage` +
+   the facet's `readBackwards({before})`, file cursors `f1.<day>.<offset>`, ≤8 MB scanned per page), queued remote
+   fetches (a per-link queue paced by a mirror of the owner's bucket; `busy` beyond 64 per link / 16 per dashboard /
+   a caller's max wait; `activity_queued` + `queued_ms`), read access (WS activity for dashboards only; one hello per
+   connection), `host_down` / `hosts_down`, the `bell` (doorbell listeners → `setBells`, gossiped in the header) and the
+   duplicate-hostname WARN. `test_activity_unit` 448, new `test_dashboard_activity` (62, jsdom) and
+   `test_activity_dashboard_live` (36; 28 FAIL pre-change). See architecture.md §13 "Built (v1.61.0)".
 6. `{log_snippet}` plus a connect reminder.
 
-### Questions before step 5 (raised by the step-4 build, 2026-10-01 — not decided)
+### Questions before step 6 (raised by the step-5 build, 2026-10-02 — not decided)
+- **Who sees the board.** The WS rule is "dashboards only", but a dashboard is just a token holder that says
+  `kind:"dashboard"` in its hello (a page holds the same token and could connect as one). Fine for a one-realm trust
+  domain — or should dashboards get their own credential?
+- **The snippet's stale_after.** Agents running long silent steps (builds, test suites) go stale at 15 min. Should
+  `{log_snippet}` teach `--stale-after` for those steps, and/or should a session be able to set a default stale_after for
+  its agents?
+- **The Activity section is collapsed by default** (so a dashboard that never opens it costs nothing). Open it by
+  default instead (Robin opens it once and the choice persists either way)?
+- **Remote log counts.** A remote entity's Log row says "all contexts · HOST" (the gossip carries no entry count).
+  Carry `log.entries` in the gossiped entity (a few bytes) so remote rows show "N entries" too?
+- **Older instances in the files.** Paging into the day files follows the identity, so an agent name that finished and
+  later reappeared shows its older instance's entries further down. Stop at the instance start (the `new_entity` marker)
+  instead?
+- **The connect reminder's audience** (step 6 as proposed): `client:code` only, or Cowork too (it can't run the script
+  but has the `log` tool)?
+
+
+### Questions before step 5 (raised by the step-4 build, 2026-10-01 — ANSWERED in "Decisions before step 5"; built in v1.61.0)
 - **Dashboard data path.** v1.60.0 pushes the WHOLE merged board to dashboards (`activity_board`, ≤1/s, only while one
   is connected) and answers `{type:"activity", query}`. Fine for a few hosts; at a large mesh the dashboard may want the
   same deltas the hubs exchange. Keep full pushes, or send deltas?

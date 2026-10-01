@@ -326,9 +326,17 @@ ignored, which is how mixed versions coexist):
     `base === seq` (`beat:true`) is the minute heartbeat's sync check.
   - `ACTIVITY_DOWN {origin, reason}` — going down (prepare-shutdown / clean exit): the receiver shows that host gone.
   - `ACTIVITY_REQ {rid, op:"log"|"entry", q}` → `ACTIVITY_RES {rid, result}` — on-demand history from the owning hub
-    (paged, rate-limited by the owner); `ACTIVITY_REQ {op:"resync"}` (no rid, no reply) asks for a full slice.
+    (paged, rate-limited by the owner; v1.61.0: pages continue into the owner's day files, a rate-limited answer names
+    the owner's `rate`, and the requester queues its fetches at that rate); `ACTIVITY_REQ {op:"resync"}` (no rid, no
+    reply) asks for a full slice. v1.61.0: a session record's header may carry `bell:true` (a doorbell armed for it).
   - `origin` is informational: ownership is ALWAYS the link's host (the hostname of the peer's `PEER_HELLO` session);
     a frame whose `origin` names another host is dropped.
+
+**Dashboard activity messages** (v1.61.0, #70 step 5; WS `dashboard` leaves only — a page leaf is answered
+`dashboard-only`): `{type:"activity_sub", resync?}` → `{type:"activity_board", full:true, epoch, seq:1, head, upsert}`,
+then ≤1/s `{type:"activity_delta", epoch, seq, base, head, upsert, remove}` (units: one per session group, one per agent,
+in the raw board form); `{type:"activity_unsub"}`; `{type:"activity", ref, query}` → (`{type:"activity_queued", ref,
+host, wait_ms, position}` while a remote fetch waits) → `{type:"activity", ref, result}`.
 
 **Deliberately out of scope here.** Cross-*realm* bridging stays in §8 (a translator, because keys
 differ). And cross-machine hub **high-availability**: if a machine's hub dies its local mesh re-elects
@@ -1175,6 +1183,80 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.61.0):** *the agent activity board, build-plan step 5 — the dashboard's Activity tree, plus deltas to
+  dashboards, history paging into the day files, queued remote fetches, read access, the doorbell flag, host down vs gone
+  and the duplicate-hostname warning (#70).* Decisions of 2026-10-02 ("Decisions before step 5"; the layout Robin approved
+  via interactive mockups). **The page** (`dashboard.html`, a new collapsible **Activity** section, collapsed by default;
+  `#activity` opens it): a TREE only — project → session → agent → context → log entry. Project headings show their
+  counts (sessions · active agents) and cycle all → sessions only → collapsed on click; a Projects / Sessions / Agents
+  control sets every project. Default view: every session with its agents' `@root` rows, contexts + logs closed. A session
+  on several hosts is ONE row (a host tag each; the headline = the most recently active host's `self`; agents tagged by
+  host; expanding it shows a Log + contexts per host). Rows: a 16 px SVG status glyph (centre = state: dot running /
+  blocked / idle, tick done, cross failed; a live item's ring EMPTIES as the time left before stale runs out — ticked in
+  place each second via `data-sa`/`data-win`), the name (agents monospace; `a/b` nests under `a`, prefix dimmed), the
+  `@root` line rendered, a progress bar (striped = rollup), ⌛ only with an ETA, 🔔 with an armed doorbell, pills ONLY for
+  blocked / failed / stale / gone plus a distinct violet **host down** badge; a stale row greys out. NO inline time text:
+  hover tooltips (computed on mouseover from the live data) give started / running for / last activity / stale at, or
+  done|failed at + took; the bar gives exact counts + reported vs "rollup of its N contexts"; ⌛ "ETA ~15m (estimated),
+  about 19:27"; 🔔 "Doorbell armed". Expanding an entity: a **Log** row ("N entries, all contexts"; remote: "all contexts
+  · HOST") → entries newest first (time, state dot, `@ctx` / `@~ctx`, rendered text; an entry with details/data expands
+  into the text + pretty JSON; "load older…" pages on; a queued fetch shows a spinner + its wait; `busy` offers a retry),
+  then each context (◎, glyph, line, bar, ⌛) expanding into its own log. Controls: active only (finished + gone agents and
+  sessions with nothing active hidden; localStorage), a stale-after slider 5–60 min (default = the head's
+  `stale_after_min`; an item's `stale_after_ms` wins), Expand all (sessions + agents, never fetches) / Collapse all, a
+  legend. Rows are diffed by key (`actReconcile`), so the 1 s re-render only replaces changed rows and hover tooltips
+  survive. The pure client logic is `window.AimbAct` (effState / ringFrac / glyphSvg / statusTip / etaTip / barTip /
+  renderText — a port of lib's / applyMsg / nextLevel / buildTree) for the jsdom test. **Colour tokens:** the page now
+  defines `:root` tokens (bg, fg, muted, lines, heads, surfaces, state colours) with a dark set under `prefers-color-scheme:
+  dark` (or `?theme=dark|light` → `data-theme`); the structural colours of every section use them, the pastel badges keep
+  theirs. **Deltas to dashboards:** the old whole-board-per-second push is gone. A dashboard subscribes (`activity_sub`)
+  only while the section is open and the tab visible, unsubscribes on leave; subscribe → `activity_board {full, epoch,
+  seq:1, head, upsert}`, then ≤1 per `ACT_GOSSIP_MS` (one global timer, kicked by `actDashKick` on any local / remote
+  change) `activity_delta {epoch, seq, base, head, upsert, remove}` diffed per dashboard (`ws.actSub.pub`) — lib
+  `dashUnits(boardView(…, {raw:true}))` (one unit per session group, one per agent; stable ids) + `planDashDelta` (the same
+  published-view diff as `planSlice`); a delta is sent only if a unit or the head (minus `now`) changed. RAW board form:
+  reported states (`gone` kept — data, not time), raw templates and times, no `rendered`/`stale_at`, so time passing never
+  makes a delta and the page's slider is instant. A `base` that isn't the page's seq → `{activity_sub, resync:true}` → a
+  fresh full board. **Paging into the day files:** `logView(…, {files:true})` returns, once memory runs out with room
+  left, a `files` descriptor (target identity, `before` = the oldest in-memory entry's ts + the in-memory ids — or the
+  dropped cursor's time —, the room left); a page that fills exactly at the end of memory hands out its last id, and a
+  file cursor `f1.<day>.<offset>` skips memory. The bridge's `actLogPage` continues with the persistence facet's
+  `readBackwards(host, {fromDay: retention, before:{day, offset}})` (new `before` option: start below that offset of that
+  day, newer days skipped; chunked async reads), matching `fileEntryMatches` (logged entries of that realm / project /
+  user / session / agent [/ context], case-insensitive; cp/rep never) → `fileEntryView` (the in-memory shape + rendered),
+  bounded by the page's entries, 32 KB (`ACT_PAGE_BYTES`) and at most `AI_BRIDGE_ACTIVITY_SCAN_BYTES` (8 MB) of file per
+  page (then a cursor at the last record scanned); `from_files` counts them. Local reads and the owner side of remote
+  `log` fetches both use it (the owner's 50 / 32 KB). **Queued remote fetches:** `activityRemote(host, op, q, ctx)` puts
+  every fetch in the link's queue (`p.act.out`), paced by a mirror token bucket (`ACT_FETCH_RATE`, or the `rate` an
+  owner's `rate-limited` answer now names; such an answer puts the fetch back at the head for its `retry_after_ms`, ≤4
+  times); bounds `AI_BRIDGE_ACTIVITY_QUEUE_LINK` (64 waiting per link) and `_QUEUE_DASH` (16 queued + in flight per
+  dashboard, `ws.actFetches`), and `ctx.maxWaitMs` (a follower's forwarded read ≈ `ACT_FWD_MS − ACT_REMOTE_MS − 300`, the
+  gateway's own tool `_TOOL_WAIT_MS` 10 s) → `busy` + `retry_after_ms`; `ctx.onQueued` → `{type:"activity_queued", ref,
+  host, wait_ms, position}`; a waited result carries `queued_ms`; a dropped link fails its queue (`owner-unreachable`).
+  **Read access:** on the WS, `activity` / `activity_sub` / `activity_unsub` from anything but a dashboard → `dashboard-only`
+  (pushes only ever go to subscribed dashboards); a second `hello` on a connection is refused (`already-hello`) so a page
+  can't re-hello into a dashboard. The `activity` tool is unchanged. **Host down vs gone:** `boardView` marks every entity
+  of a remote slice whose origin is down (`markOriginDown`: ACTIVITY_DOWN, link lost / retired / expired) with
+  `host_down` (the down time), the group with `hosts_down` (tool + raw); a session that left is `gone` without it.
+  **The bell:** `setBells(state, watches)` sets `session.bell` for each local session a doorbell listener on this gateway
+  watches (name, + project when given); synced on listener connect / close (+ `AI_BRIDGE_ACTIVITY_BELL_GRACE_MS`, 5 s,
+  after a close — the doorbell re-arms after each wake), after each `log` and after the replay; `bell` rides the gossip
+  header (`sessHeader` / `wHeader` / `applySlice`; a ≤1.60 receiver ignores it) and groups OR it. **Duplicate host names:**
+  `adoptPeer` → `warnDupHost` (once per name per `AI_BRIDGE_DUP_HOST_WARN_MS`, 10 min): a peer with OUR name, another live
+  peer link with the same name at a different advertise host, or (after the #63 PING probe) one at the same host on
+  another port that stayed alive. No other behaviour change. The `activity` tool description now says the paging,
+  `host_down` / `bell` and `busy`. Tests: `test_activity_unit` 427 → 448 (raw board, host_down, dash units + deltas,
+  bells through a full + a header-only delta, file cursors, the files descriptor, fileEntryMatches / View, the facet's
+  `before`); `test_activity_gossip_live` (44) — its dashboard check now subscribes, its rate-limit check now expects the
+  burst queued (all ok); new `test_dashboard_activity` (62, jsdom; against the pre-change page: nothing to test, 2/2 FAIL);
+  new `test_activity_dashboard_live` (36 — three loopback hosts + a fourth with A's name: full board on subscribe, deltas
+  only, ≤1/s under a 180-update burst, chained bases, the folded view = a fresh full board; an unsubscribed dashboard gets
+  nothing; a dropped delta → resync → whole again; a page leaf refused (reads, subscribe, a re-hello) and pushed nothing;
+  local paging over 5 pages through the files into a 3-day-old file; remote paging over 4 pages into A's files; a 10-fetch
+  burst all ok with `activity_queued` + `queued_ms`; 30 at once → `busy` beyond 12; gone vs host down; the bell (remote,
+  cleared after the grace, local by name); unsubscribe; the duplicate-hostname WARN once) — against the pre-change bridge
+  28 of the 36 FAIL. Full suite 1787 passed, 0 failed (51 files; in the first full run `test_federation` lost a bridge
+  connection once mid-test, then passed 6/6 solo and in the complete rerun).
 - **Built (v1.60.0):** *the agent activity board, build-plan step 4 — mesh-wide gossip of the board + on-demand remote
   history (#70).* Decisions of 2026-10-01 ("Decisions before step 4"). **Host in the identity:** every entity is keyed by
   realm + project + user + session + HOST (+ agent path) — `sessionKey` gains the host, and inside `lib/activity.js` the

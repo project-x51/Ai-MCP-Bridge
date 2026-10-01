@@ -64,7 +64,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
   sessions/pages as nodes, control/page edges, amber pulse on message activity, gateway↔gateway edge
-  appears when cross-host gossip lands), plus roster tables + trace feed. **The gateway serves it over
+  appears when cross-host gossip lands), plus roster tables + trace feed, and the **Activity** tree of what every
+  agent is doing (#70 step 5 — see "The Activity page"; light / dark follow the OS). **The gateway serves it over
   HTTP on the ws port** — open `http://127.0.0.1:<wsPort>/?token=<token>` (same origin as the WS, so it
   isn't blocked the way a `file://` page is). Opening the file directly still works if you add `?ws=`.
   Click a node to set an **alias**: sessions/pages rename live (a session's own `set_name` wins later);
@@ -128,9 +129,14 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   containment, header filter + server-side inject (#33, 9); and `test_lib_unit.mjs` — the fast pure-`lib/` +
   services units (topics/envelope/refs/consent/reminders/traces, egress incl. server-side auth mint/refresh/
   inject and the secret-resolver, `win-env` reg-parsing, tailscale `hostOf`) (#31/#35/#36, 88); and
-  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 427); `test_activity_gossip_live.mjs`
-  — four loopback "hosts" + a follower: the mesh board, deltas ≤1/s per link, truncation, remote paging / entries / rate
-  limit, going-down, owner down, forged slices, a legacy hub, dashboards (#70 step 4, 44). Tests run in
+  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 448); `test_activity_gossip_live.mjs`
+  — four loopback "hosts" + a follower: the mesh board, deltas ≤1/s per link, truncation, remote paging / entries /
+  queued fetches, going-down, owner down, forged slices, a legacy hub, dashboards (#70 step 4, 44);
+  `test_dashboard_activity.mjs` — the dashboard's Activity view in jsdom: client-side stale, the status glyph + ring,
+  hover times, placeholders, the delta store, the tree, pills / host down / bell, the project cycle, active only, logs
+  (#70 step 5, 62); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
+  board → deltas ≤1/s, seq-gap resync, page leaves refused, paging into the day files (local + remote), queued fetches
+  + `busy`, gone vs host down, the doorbell flag, the duplicate-hostname warning (#70 step 5, 36). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -449,11 +455,12 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
-remote history (step 4, "Mesh-wide" below). The dashboard tree (step 5) and the agent snippet (step 6) follow.
+remote history (step 4, "Mesh-wide" below), and the dashboard's **Activity** tree (step 5, "The Activity page" below). The
+agent snippet (step 6) follows.
 
 **Reporting — `log {as, secret, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?}`.**
 You report as a registered session (`as` + `secret`). Omit `agent` for the session itself; `agent:"spec-70/research"`
@@ -554,13 +561,85 @@ follower's `activity` shows the mesh too):
   ones, if it is still alive).
 - **Remote history, on demand:** `activity {log}` / `{entry}` for another host's entity is a request over the same link
   to the **owning** gateway: a log comes in **pages** (at most 50 entries / 32 KB, set by the owner; `cursor` →
-  `next_cursor`); details and data only on an explicit `entry` fetch. The owner serves at most 4 fetches per second
-  per link (`rate-limited` + `retry_after_ms` beyond that). Owner down or not answering in 4 s → `owner-unreachable`
-  (its agents stay on the board, gone); a pre-1.60 owner → `owner-unsupported`.
-- **Dashboards** (WS `dashboard` leaves) get `{type:"activity_board", board}` at most once per second when the board
-  changes, and may ask `{type:"activity", ref, query}` (the `activity` tool's query) → `{type:"activity", ref, result}`.
+  `next_cursor`; since v1.61.0 the pages continue into the owner's **day files**, below); details and data only on an
+  explicit `entry` fetch. The owner serves at most 4 fetches per second per link; since v1.61.0 the **requesting**
+  gateway queues its fetches at that rate (below) instead of passing `rate-limited` on. Owner down or not answering in
+  4 s → `owner-unreachable` (its agents stay on the board, gone); a pre-1.60 owner → `owner-unsupported`.
+- **Dashboards** subscribe and get deltas (v1.61.0 — "The Activity page" below).
 - **Mixed versions:** a ≤1.59 hub doesn't declare `activity_gossip`, so it gets no activity frames (and would ignore
   them); its agents simply don't appear on 1.60 boards. Deploy = restart each host's gateway on 1.60.0.
+
+### The Activity page (v1.61.0, step 5)
+The dashboard's **Activity** section is the mesh board as a tree: **project → session → agent → context → log entry**.
+- **Projects** show their counts (sessions · active agents). Clicking a project heading cycles **all → sessions only →
+  collapsed**; the **Projects / Sessions / Agents** control sets every project at once. The default view shows every
+  session with its agents' `@root` rows; contexts and logs start closed.
+- **A session row:** its name, a **host tag** per host (a session on several hosts is ONE row; its headline is the most
+  recently active host's; its agents are tagged by host), the `@root` line with its placeholders filled, the status
+  glyph, the progress bar, ⌛ when there is an ETA, 🔔 when a doorbell is armed for it, and pills.
+- **An agent row:** the glyph, its path (monospace; `a/b` nests under `a`), its `@root` line, the bar (striped = a rollup
+  of its contexts), ⌛, pills. **Expanding** a session or agent shows its **Log** ("N entries, all contexts" — newest
+  first, each entry with its time, a state dot, `@ctx` / `@~ctx` and the text; "load older…" at the end pages on) and
+  then its **contexts** (◎, the line, the bar, ⌛), each expanding into its own log. An entry with details / data expands
+  into the text and the pretty-printed JSON.
+- **The status glyph** (16 px): the centre is the state (a dot for running / blocked / idle, a tick for done, a cross for
+  failed); a live item's **ring empties** as the time left before it goes stale runs out. **No time text is inline** —
+  hover the glyph for the actual times (started, running for, last activity, stale at — or done / failed at and how long
+  it took), the bar for the exact counts (reported or a rollup), ⌛ for "ETA ~15m (estimated), about 19:27".
+- **Pills** only for **blocked, failed, stale, gone**, plus a distinct **host down** badge (violet; its host sent a
+  going-down notice or its link dropped — every agent of that host) as opposed to **gone** (the session left). A stale
+  row's text greys out.
+- **Controls:** **active only** (hides finished and gone agents and sessions with nothing active; remembered per
+  browser); **stale after** 5–60 min (starts at the bridge's `stale_after_min`; an item's own `stale_after` still wins) —
+  stale is computed **in the page** from the raw times, so the slider is instant; **Expand all / Collapse all**. A legend
+  explains the glyphs. The colours are the page's tokens: light by default, dark with the OS setting (or `?theme=dark`
+  / `?theme=light`); `dashboard.html#activity` opens the section directly.
+
+**Data path — deltas, not boards.** The section is collapsed by default, and a dashboard subscribes only while it is
+open and the browser tab is visible — one that never opens it costs the bridge nothing:
+- `{type:"activity_sub"}` → `{type:"activity_board", full:true, epoch, seq:1, head, upsert:[…]}`: every **unit** — one
+  per session group (header, `self` / `selves`, `bell`, `hosts_down`) and one per agent — in the **raw** form: the
+  reported state (`gone` included), the raw line template, the raw times; no `rendered` or `stale_at` (the page computes
+  those), so time passing is never a change.
+- Then at most once a second, when anything changed: `{type:"activity_delta", epoch, seq, base, head, upsert:[changed
+  units], remove:[unit ids]}`, diffed against what THAT dashboard was last sent. A delta whose `base` isn't the page's
+  `seq` means one was lost: the page sends `{type:"activity_sub", resync:true}` and starts again from a full board.
+  `head` = `{host, now, stale_after_min, remote_hosts, loading?}` (the page corrects for clock skew with `now`).
+- `{type:"activity_unsub"}` when the section closes (or the tab is hidden).
+- Reads stay `{type:"activity", ref, query}` → `{type:"activity", ref, result}`; a remote fetch that has to wait first
+  sends `{type:"activity_queued", ref, host, wait_ms, position}` (the page shows a spinner).
+
+**Paging into the day files.** Once an entity's in-memory entries (`log_entries_per_agent`) run out, `activity {log}`
+pages on into the host's daily JSONL — read backwards in chunks with the same reader as the restart replay (async per
+chunk, so it yields to the event loop), back through `log_retention_days` (older instances of the same agent name
+included). A file page's cursor is `f1.<day>.<offset>` (continue before that byte of that day's file). Pages stay
+bounded (a page never exceeds `log_entries_per_agent` entries, a remote owner's 50 entries / 32 KB; 32 KB locally),
+and a page reads at most 8 MB of file (`AI_BRIDGE_ACTIVITY_SCAN_BYTES`) — a rarely-reporting agent in a busy file may
+get a short or empty page with a cursor to go on (the page follows it automatically). Remote pages do the same on the
+owner. `from_files` counts a page's entries that came from the files.
+
+**Queued remote fetches.** The requesting gateway queues its remote `log` / `entry` fetches per link and paces them with
+a mirror of the owner's token bucket (4/s, or the `rate` an owner's `rate-limited` answer names — such a fetch goes back
+to the head of the queue for its `retry_after_ms`, at most 4 times). Bounds: 64 waiting per link
+(`AI_BRIDGE_ACTIVITY_QUEUE_LINK`) and 16 queued + in flight per dashboard (`AI_BRIDGE_ACTIVITY_QUEUE_DASH`); beyond
+either → `{ok:false, code:"busy", retry_after_ms}`. A follower's forwarded read may wait ≈0.7 s at most (it must answer
+inside the follower's 5 s timeout), the `activity` tool on the gateway 10 s (`AI_BRIDGE_ACTIVITY_TOOL_WAIT_MS`); longer
+→ `busy`. A result that waited carries `queued_ms`.
+
+**Read access.** The activity board's pushes and the WS `activity` reads are for **dashboards** (and registered sessions,
+through the `activity` tool) — **never page leaves**: a page's `activity` / `activity_sub` is answered
+`dashboard-only`, and a connection gets one `hello` (a page can't re-hello into a dashboard: `already-hello`).
+
+**Host down vs gone, and the bell.** Every entity of a host that went down carries `host_down` (when), and its session
+group lists `hosts_down` — a session that LEFT is `gone` without it (both in the `activity` tool too). A session's `bell`
+is true while a doorbell `listener` on its host's gateway watches its name (+ project); it rides the gossip header, so
+every board shows it, and stays ~5 s after the listener closes (`AI_BRIDGE_ACTIVITY_BELL_GRACE_MS`; the doorbell
+re-arms after each wake).
+
+**Duplicate host names** are accepted (#70 decision) but logged: a gateway that links two peer hubs with the same host
+name at different addresses (or one with its own name; or, after a liveness probe, at the same address on another port)
+logs `WARN duplicate host name "<name>": …` once per name per 10 min (`AI_BRIDGE_DUP_HOST_WARN_MS`) — their activity
+slices overwrite each other.
 
 ### The script — `tools/aimb-log.mjs` (v1.59.0, step 3)
 For agents (which never register) and long-running scripts. The orchestrator puts one line in each agent's prompt and the

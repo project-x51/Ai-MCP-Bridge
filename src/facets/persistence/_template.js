@@ -74,7 +74,7 @@ export function create(ctx) {
       async readAt(host, day, offset, length) { return null },    // the record at an offset (the id -> offset index)
       async find(host, day, id) { return null },                  // a LOGGED entry by id in one day's file (never a cp/rep line)
       async days(host) { return [] },                             // the host's day files, oldest first
-      async *readBackwards(host, opts) {},                        // every record NEWEST FIRST ({ rec|null, day, offset, length }), chunked from the end
+      async *readBackwards(host, opts) {},                        // every record NEWEST FIRST ({ rec|null, day, offset, length }), chunked from the end; opts { fromDay, chunk, before:{day, offset} }
       async prune(host, beforeDay) { return [] },                 // retention: delete days before beforeDay
     },
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },

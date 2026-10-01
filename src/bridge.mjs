@@ -110,7 +110,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.60.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.61.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -899,7 +899,7 @@ function startActivity() {
   activity.config = ACT_CFG
   actReplay = { phase: 'replaying', stats: null, promise: null }
   actReplay.promise = replayActivity().catch(e => log(`activity replay failed: ${(e && e.message) || e}`))
-    .finally(() => { actReplay.phase = 'done'; syncActivityGone(); actChanged() })   // #70 step 4: the replayed board goes out to the peer hubs
+    .finally(() => { actReplay.phase = 'done'; syncActivityGone(); syncActivityBells(); actChanged() })   // #70 step 4: the replayed board goes out to the peer hubs (step 5: with its bells)
   scheduleActivityCheckpoints()
 }
 async function replayActivity() {
@@ -1028,6 +1028,7 @@ async function activityLog(ident, input, opts = {}) {   // opts.script: an aimb-
   const r = Act.apply(activity, ident, p.msg, now)
   if (!r.ok) return r
   actChanged()   // #70 step 4: coalesced into ≤1 gossip frame per second per peer link
+  syncActivityBells()   // #70 step 5: a new session may be one an armed doorbell watches
   if (!opts.script) actPresent.add(Act.sessionKey({ ...ident, host: HOSTNAME }))   // a script-only session is never marked gone (it can still go stale)
   const persisted = r.entry && PERSIST ? !!(await persistActivity(r.entry)) : null
   if (++actApplies % 50 === 0) actBudget()
@@ -1035,7 +1036,10 @@ async function activityLog(ident, input, opts = {}) {   // opts.script: an aimb-
     ...(persisted === false ? { persisted: false } : {}), ...(r.evicted.length ? { evicted: r.evicted } : {}), ...(r.warnings.length ? { warnings: r.warnings } : {}) }
 }
 const actShow = o => (o && typeof o === 'object' && o.project != null ? { ...o, project: projName(o.project) } : o)   // #71: canonical project spelling
-async function activityRead(q) {
+// ctx (v1.61.0, #70 step 5): who is asking — { ws } a dashboard (its queued remote fetches are bounded per dashboard),
+// onQueued(info) to hear a queued fetch's expected wait (the page shows a spinner), maxWaitMs (a follower's forwarded
+// read must answer inside its own timeout, so it gets `busy` rather than a long queue)
+async function activityRead(q, ctx = {}) {
   if (!ACT_CFG.enabled) return actDisabled()
   if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   q = q && typeof q === 'object' ? q : {}
@@ -1049,7 +1053,7 @@ async function activityRead(q) {
     let remote = null
     if (want && lc(want) !== lc(HOSTNAME)) { remote = actKnownHost(want); if (!remote) return { ok: false, code: 'unknown-host', what: `no activity from a host "${want}" is held here` } }
     else if (!want && !Act.findEntry(activity, id, now)) { const loc = Act.locateEntry(activity, id); if (loc && !loc.local) remote = loc.host }
-    if (remote) { const r = await activityRemote(remote, 'entry', { id }); return r.ok === false ? r : { ...head, from_host: remote, source: r.source, ...(r.via ? { via: r.via } : {}), ...(r.note ? { note: r.note } : {}), entry: actShow(r.entry) } }
+    if (remote) { const r = await activityRemote(remote, 'entry', { id }, ctx); return r.ok === false ? r : { ...head, from_host: remote, source: r.source, ...(r.via ? { via: r.via } : {}), ...(r.note ? { note: r.note } : {}), ...(r.queued_ms ? { queued_ms: r.queued_ms } : {}), entry: actShow(r.entry) } }
     const r = await lookupActivityEntry(id, now)
     if (r.ok === false && !want && activity.remote.size) r.what += ' — for another host\'s older log entry pass entry:{ id, host }'
     return r.ok === false ? r : { ...head, ...r }
@@ -1063,13 +1067,44 @@ async function activityRead(q) {
     const c = cands[0]
     const sub = { ...lq, ...(c ? { session: c.session.session, project: c.session.project, user: c.session.user } : {}) }
     delete sub.host
-    if (c && !c.local) { const r = await activityRemote(c.host, 'log', sub); return r.ok === false ? r : { ...head, from_host: c.host, log: actShow(r.log) } }
-    const lv = Act.logView(activity, sub, now)
+    if (c && !c.local) { const r = await activityRemote(c.host, 'log', sub, ctx); return r.ok === false ? r : { ...head, from_host: c.host, ...(r.queued_ms ? { queued_ms: r.queued_ms } : {}), log: actShow(r.log) } }
+    const lv = await actLogPage(sub, now)   // v1.61.0: continues into this host's day files once memory runs out
     if (!lv.ok) return lv
     const { ok: _ok, ...rest } = lv
     return { ...head, log: actShow({ ...rest, host: HOSTNAME }) }
   }
   return { ...head, sessions: Act.boardView(activity, now, { project: q.project, session: q.session, agent: q.agent, host: q.host, active_only: !!q.active_only }).map(actShow) }
+}
+// #70 step 5 (v1.61.0): HISTORY PAGING INTO THE DAY FILES. logView pages the in-memory log; once it runs out (or the
+// cursor is a file cursor `f1.<day>.<offset>`) the page continues in this host's daily JSONL, read BACKWARDS in chunks
+// (step 2's reader — async I/O per chunk, so it yields to the event loop) through log_retention_days: the entity's
+// logged entries older than its oldest in-memory one, up to the page's room (entries + bytes; ACT_PAGE_* for a remote
+// owner's page, the 32 KB cap for a local one). A page reads at most ACT_SCAN_BYTES of file — a sparse agent in a
+// busy file gets a short (maybe empty) page with a cursor to go on. next_cursor = the file position before the last
+// record taken (or scanned); null once the window is exhausted.
+const ACT_SCAN_BYTES = Number(process.env.AI_BRIDGE_ACTIVITY_SCAN_BYTES) || 8 * 1048576
+async function actLogPage(q, now, opts = {}) {
+  const lv = Act.logView(activity, q, now, { ...opts, files: !!PERSIST })
+  if (!lv.ok || !lv.files) return lv
+  const f = lv.files; delete lv.files
+  const maxB = Math.min(f.maxBytes, ACT_PAGE_BYTES), out = lv.entries
+  const fromDay = Act.localDay(now - ACT_CFG.log_retention_days * 86400000)
+  let bytes = f.bytes, scanned = 0, last = null, lastHit = null, stop = null, n = 0
+  for await (const r of persistence.activity.readBackwards(HOSTNAME, { fromDay, before: f.from })) {
+    scanned += r.length + 1; last = r
+    const rec = r.rec
+    if (rec && Act.fileEntryMatches(rec, f.target) && !(f.before && (rec.ts > f.before.ts || f.before.ids.has(rec.id)))) {
+      const x = Act.fileEntryView(rec, now), b = Buffer.byteLength(JSON.stringify(x)) + 1
+      if (n >= f.need || (out.length && bytes + b > maxB)) { stop = 'full'; break }
+      out.push(x); bytes += b; n++; lastHit = r
+    }
+    if (scanned >= ACT_SCAN_BYTES) { stop = 'scan'; break }
+  }
+  lv.from_files = n
+  if (stop === 'full') lv.next_cursor = lastHit ? Act.fileCursor(lastHit.day, lastHit.offset) : (out.length ? out[out.length - 1].id : null)
+  else if (stop === 'scan') lv.next_cursor = Act.fileCursor(last.day, last.offset)
+  else lv.next_cursor = null
+  return lv
 }
 // one entry in full: memory first (a current line holds its details/data), else this host's JSONL — by the id index,
 // else a scan of the day file the id's timestamp names (± a day). Checkpoint / repeat lines never match.
@@ -1108,7 +1143,7 @@ const verLt = (a, b) => { const x = String(a || '0').split('.').map(Number), y =
 async function activityCall(op, payload) {   // op 'log' { ident, input } | 'read' { query }
   const t0 = Date.now()
   for (;;) {
-    if (role === 'gateway') return op === 'log' ? activityLog(payload.ident, payload.input) : activityRead(payload.query)
+    if (role === 'gateway') return op === 'log' ? activityLog(payload.ident, payload.input) : activityRead(payload.query, { maxWaitMs: ACT_TOOL_WAIT_MS })
     if (role === 'follower' && gwSock && !gwSock.destroyed && gwRegistered) {
       const gv = roster.get(gatewayId)?.bridge_version   // a ≤1.57 gateway ignores ACTIVITY frames: say so now, not after a timeout
       if (gv && verLt(gv, '1.58.0')) return { ok: false, code: 'gateway-unsupported', what: `this host's gateway runs bridge ${gv}; the activity board needs 1.58.0+ on the gateway (restart it on the new version)` }
@@ -1274,14 +1309,16 @@ function actServe(sock, p, host, f) {
   if (!ACT_CFG.enabled) return reply({ ...actDisabled(), host: HOSTNAME })
   const a = p.act, now = Date.now()
   a.bucket = Math.min(ACT_FETCH_RATE, a.bucket + ((now - a.bucketAt) * ACT_FETCH_RATE) / 1000); a.bucketAt = now
-  if (a.bucket < 1) return reply({ ok: false, code: 'rate-limited', host: HOSTNAME, retry_after_ms: Math.ceil(((1 - a.bucket) * 1000) / ACT_FETCH_RATE), what: `host ${HOSTNAME} serves at most ${ACT_FETCH_RATE} history fetches per second per link — retry shortly` })
+  if (a.bucket < 1) return reply({ ok: false, code: 'rate-limited', host: HOSTNAME, rate: ACT_FETCH_RATE, retry_after_ms: Math.ceil(((1 - a.bucket) * 1000) / ACT_FETCH_RATE), what: `host ${HOSTNAME} serves at most ${ACT_FETCH_RATE} history fetches per second per link — retry shortly` })   // v1.61.0: + rate (a requester paces its queue to it)
   a.bucket -= 1
   const q = f.q && typeof f.q === 'object' ? f.q : {}
-  if (f.op === 'log') {
-    const lv = Act.logView(activity, q, now, { maxEntries: ACT_PAGE_ENTRIES, maxBytes: ACT_PAGE_BYTES })
-    if (!lv.ok) return reply({ ...lv, host: HOSTNAME })
-    const { ok: _ok, ...rest } = lv
-    return reply({ ok: true, host: HOSTNAME, log: { ...rest, host: HOSTNAME } })
+  if (f.op === 'log') {   // v1.61.0: a page continues into this host's day files once memory runs out (actLogPage)
+    actLogPage(q, now, { maxEntries: ACT_PAGE_ENTRIES, maxBytes: ACT_PAGE_BYTES }).then(lv => {
+      if (!lv.ok) return reply({ ...lv, host: HOSTNAME })
+      const { ok: _ok, ...rest } = lv
+      reply({ ok: true, host: HOSTNAME, log: { ...rest, host: HOSTNAME } })
+    }, e => reply({ ok: false, code: 'owner-error', host: HOSTNAME, what: String((e && e.message) || e) }))
+    return
   }
   if (f.op === 'entry') {
     lookupActivityEntry(String(q.id || ''), now).then(r => reply(r.ok === false ? { ...r, host: HOSTNAME } : { ok: true, host: HOSTNAME, ...r }),
@@ -1290,19 +1327,77 @@ function actServe(sock, p, host, f) {
   }
   reply({ ok: false, code: 'bad-op', what: `unknown activity request ${String(f.op).slice(0, 40)}` })
 }
-/** The requester side: one remote fetch over the owning host's link → its result, or owner-unreachable / owner-unsupported. */
-function activityRemote(host, op, q) {
+/**
+ * The requester side: one remote fetch over the owning host's link → its result, or owner-unreachable /
+ * owner-unsupported / busy. v1.61.0 (#70 step 5, "Decisions before step 5" 6): fetches are QUEUED per link and paced by
+ * a mirror of the owner's token bucket (ACT_FETCH_RATE, or the `rate` an owner's rate-limited answer names), so a
+ * dashboard expanding many remote logs waits instead of seeing `rate-limited`; an owner that still says rate-limited
+ * puts the fetch back at the head of the queue for its retry_after_ms (≤ 4 times). Bounded: ACT_QUEUE_LINK waiting per
+ * link and ACT_QUEUE_DASH queued + in flight per dashboard; beyond either (or a wait over ctx.maxWaitMs) → `busy` with
+ * retry_after_ms. ctx.onQueued({ wait_ms, position }) hears a fetch that has to wait; a queued result carries queued_ms.
+ */
+const ACT_QUEUE_LINK = Number(process.env.AI_BRIDGE_ACTIVITY_QUEUE_LINK) || 64
+const ACT_QUEUE_DASH = Number(process.env.AI_BRIDGE_ACTIVITY_QUEUE_DASH) || 16
+const ACT_TOOL_WAIT_MS = Number(process.env.AI_BRIDGE_ACTIVITY_TOOL_WAIT_MS) || 10000   // the `activity` tool on the gateway waits at most this long in the queue
+function actOut(a) {   // the link's outbound fetch queue + its token-bucket mirror (refilled on read)
+  const o = a.out || (a.out = { rate: ACT_FETCH_RATE, bucket: ACT_FETCH_RATE, at: Date.now(), hold: 0, q: [], timer: null })
+  const now = Date.now()
+  o.bucket = Math.min(o.rate, o.bucket + ((now - o.at) * o.rate) / 1000); o.at = now
+  return o
+}
+const actWaitMs = (o, pos) => Math.max(0, o.hold - Date.now(), Math.ceil(((pos - o.bucket) * 1000) / o.rate))   // the pos-th fetch in line (1 = next)
+function activityRemote(host, op, q, ctx = {}) {
   const gw = actOwner.get(host), p = gw ? peerGw.get(gw) : null
   if (!p || !p.sock || p.sock.destroyed) return Promise.resolve({ ok: false, code: 'owner-unreachable', host, what: `host ${host} is down or unreachable right now — its history can't be fetched (its last-known lines show as gone)` })
   if (!p.act || !p.act.cap) return Promise.resolve({ ok: false, code: 'owner-unsupported', host, what: `host ${host} runs a bridge without remote activity fetch (needs 1.60.0+)` })
+  const o = actOut(p.act), ws = ctx && ctx.ws, wait = actWaitMs(o, o.q.length + 1)
+  const busy = (why, after) => Promise.resolve({ ok: false, code: 'busy', host, retry_after_ms: Math.max(100, after), what: `too many history fetches are waiting (${why}) — retry in a moment` })
+  if (ws && (ws.actFetches || 0) >= ACT_QUEUE_DASH) return busy(`${ACT_QUEUE_DASH} for this dashboard`, actWaitMs(o, o.q.length))
+  if (o.q.length >= ACT_QUEUE_LINK) return busy(`${ACT_QUEUE_LINK} for host ${host}`, wait)
+  if (ctx && Number.isFinite(ctx.maxWaitMs) && wait > ctx.maxWaitMs) return busy(`a ${wait}ms wait for host ${host}`, wait)
+  if (ws) ws.actFetches = (ws.actFetches || 0) + 1
   return new Promise(resolve => {
-    const rid = `${ACT_EPOCH}-${++actRemoteRid}`
-    const timer = setTimeout(() => { actRemotePending.delete(rid); resolve({ ok: false, code: 'owner-unreachable', host, what: `host ${host} did not answer within ${ACT_REMOTE_MS}ms — retry` }) }, ACT_REMOTE_MS)
-    timer.unref()
-    actRemotePending.set(rid, { resolve, timer, sock: p.sock })
-    sendFrame(p.sock, { t: 'ACTIVITY_REQ', rid, op, q })
-    tapRec('sent', { peer: host, kind: 'req', op })
-  })
+    o.q.push({ host, op, q, resolve, t0: Date.now(), tries: 0 })
+    if (wait > 0 && ctx && typeof ctx.onQueued === 'function') { try { ctx.onQueued({ host, wait_ms: wait, position: o.q.length }) } catch { } }
+    actPump(p)
+  }).finally(() => { if (ws) ws.actFetches = Math.max(0, (ws.actFetches || 1) - 1) })
+}
+function actPump(p) {
+  const a = p.act, o = a && a.out
+  if (!o || o.timer) return
+  while (o.q.length) {
+    if (peerGw.get(a.gw) !== p || !p.sock || p.sock.destroyed) { actFailQueue(a, 'the link to the owning host dropped while the fetch was queued'); return }
+    actOut(a)
+    const w = Math.max(o.hold - Date.now(), o.bucket < 1 ? Math.ceil(((1 - o.bucket) * 1000) / o.rate) : 0)
+    if (w > 0) { o.timer = setTimeout(() => { o.timer = null; actPump(p) }, w); o.timer.unref(); return }
+    o.bucket -= 1
+    actDispatch(p, o.q.shift())
+  }
+}
+function actFailQueue(a, what) {
+  const o = a && a.out
+  if (!o) return
+  if (o.timer) { clearTimeout(o.timer); o.timer = null }
+  for (const j of o.q.splice(0)) j.resolve({ ok: false, code: 'owner-unreachable', host: j.host, what })
+}
+function actDispatch(p, job) {
+  const rid = `${ACT_EPOCH}-${++actRemoteRid}`, host = job.host, o = p.act.out
+  job.sent = Date.now()
+  const done = r => {
+    if (r && r.code === 'rate-limited' && job.tries < 4 && peerGw.get(p.act.gw) === p) {   // the owner's bucket disagrees: wait its retry_after, then go first
+      job.tries++
+      if (Number(r.rate) > 0) o.rate = Number(r.rate)
+      o.bucket = Math.min(o.bucket, 0); o.hold = Date.now() + Math.max(50, Number(r.retry_after_ms) || 250)
+      o.q.unshift(job); actPump(p); return
+    }
+    const qd = job.sent - job.t0   // time spent waiting in the queue (not the round trip)
+    job.resolve(r && typeof r === 'object' && r.ok !== false && qd > 0 ? { ...r, queued_ms: qd } : r)
+  }
+  const timer = setTimeout(() => { actRemotePending.delete(rid); done({ ok: false, code: 'owner-unreachable', host, what: `host ${host} did not answer within ${ACT_REMOTE_MS}ms — retry` }) }, ACT_REMOTE_MS)
+  timer.unref()
+  actRemotePending.set(rid, { resolve: done, timer, sock: p.sock })
+  sendFrame(p.sock, { t: 'ACTIVITY_REQ', rid, op: job.op, q: job.q })
+  tapRec('sent', { peer: host, kind: 'req', op: job.op })
 }
 /** A host name as held (case-insensitive), or null. */
 function actKnownHost(h) {
@@ -1318,6 +1413,7 @@ function actRemoteInfo() {
 // that slice's agents show as GONE until the host returns
 function actLinkLost(gw, p, why) {
   if (p && p.act && p.act.timer) { clearTimeout(p.act.timer); p.act.timer = null }
+  if (p && p.act) actFailQueue(p.act, 'the link to the owning host dropped while the fetch was queued')   // v1.61.0: its queued fetches too
   for (const [rid, q] of [...actRemotePending]) if (p && q.sock === p.sock) { clearTimeout(q.timer); actRemotePending.delete(rid); q.resolve({ ok: false, code: 'owner-unreachable', host: hostOfGw(gw), what: 'the link to the owning host dropped mid-request' }) }
   const host = hostOfGw(gw)
   if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, Date.now())) { log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`); actDashKick() }
@@ -1339,18 +1435,62 @@ function actAnnounceDown(reason) {
     tick()
   })
 }
-// dashboards (WS kind 'dashboard'): the merged board pushed as {type:"activity_board", board} at most once per ACT_GOSSIP_MS
-// when it changed (local or remote), plus request/response {type:"activity", ref, query} → {type:"activity", ref, result}
+// #70 step 5 (v1.61.0): DASHBOARDS get the merged board as DELTAS, like the gossip — only a dashboard that SUBSCRIBED
+// (its Activity view is open: {type:"activity_sub"}; {type:"activity_unsub"} on leave), so one that never opens it pays
+// nothing. On subscribe (or {type:"activity_sub", resync:true}): {type:"activity_board", full:true, epoch, seq, head,
+// upsert:[every unit]}; then at most once per ACT_GOSSIP_MS, when anything changed (local or remote):
+// {type:"activity_delta", epoch, seq, base, head, upsert:[changed units], remove:[unit ids]} — each dashboard diffed against
+// its OWN published view (lib/activity.js dashUnits / planDashDelta over boardView raw: reported states + raw times, so
+// time passing is never a change; the page computes stale with its own slider). A delta whose `base` isn't the page's
+// seq means one was lost → the page asks for a resync. head = { host, now, stale_after_min, remote_hosts, loading? }.
+// Requests {type:"activity", ref, query} → {type:"activity", ref, result} (a queued remote fetch first sends
+// {type:"activity_queued", ref, wait_ms, position}). Pushes and reads are for DASHBOARDS only, never page leaves (#70
+// "Decisions before step 5" 7: registered sessions read with the `activity` tool).
+const actDashSubs = () => [...leaves].filter(ws => ws.kind === 'dashboard' && ws.actSub && ws.readyState === 1)
+function actDashHead() {
+  return { host: HOSTNAME, now: Date.now(), stale_after_min: ACT_CFG.stale_after_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
+    remote_hosts: activity && activity.remote.size ? actRemoteInfo() : [] }
+}
+const actDashUnits = () => Act.dashUnits(Act.boardView(activity, Date.now(), { raw: true }).map(actShow))
+function actDashSubscribe(ws) {   // a full board now (not throttled): the page's view starts from it
+  ws.actSub = { pub: new Map(), seq: 1, head: '' }
+  const plan = Act.planDashDelta(ws.actSub.pub, actDashUnits(), { full: true }), head = actDashHead()
+  ws.actSub.head = JSON.stringify({ ...head, now: 0 })
+  try { ws.send(JSON.stringify({ type: 'activity_board', full: true, epoch: ACT_EPOCH, seq: 1, head, upsert: plan.upsert })) } catch { }
+}
 function actDashKick() {
-  if (actDashTimer || role !== 'gateway' || !activity) return
-  let any = false
-  for (const ws of leaves) if (ws.kind === 'dashboard' && ws.readyState === 1) { any = true; break }
-  if (!any) return
+  if (actDashTimer || role !== 'gateway' || !activity || !actDashSubs().length) return
   actDashTimer = setTimeout(() => {
     actDashTimer = null; actDashLast = Date.now()
-    activityRead({}).then(board => dashSend(JSON.stringify({ type: 'activity_board', board })), () => { })
+    const subs = actDashSubs()
+    if (!subs.length || !activity) return
+    const units = actDashUnits(), head = actDashHead(), hj = JSON.stringify({ ...head, now: 0 })
+    for (const ws of subs) {
+      const plan = Act.planDashDelta(ws.actSub.pub, units)
+      if (plan.empty && hj === ws.actSub.head) continue
+      const base = ws.actSub.seq++
+      ws.actSub.head = hj
+      try { ws.send(JSON.stringify({ type: 'activity_delta', epoch: ACT_EPOCH, seq: ws.actSub.seq, base, head, upsert: plan.upsert, remove: plan.remove })) } catch { }
+    }
   }, Math.max(0, actDashLast + ACT_GOSSIP_MS - Date.now()))
   actDashTimer.unref()
+}
+// #70 step 5 (v1.61.0): the DOORBELL flag. A session is "armed" while a `listener` leaf on this gateway watches its name
+// (+ project); a listener that just closed counts for ACT_BELL_GRACE_MS more (the doorbell script exits on mail and
+// re-arms — the bell shouldn't flicker). lib/activity.js setBells marks the local sessions; it rides the gossip header.
+const ACT_BELL_GRACE_MS = Number(process.env.AI_BRIDGE_ACTIVITY_BELL_GRACE_MS) || 5000
+const actBellClosed = new Map()   // JSON watch -> closed-at
+function syncActivityBells() {
+  if (!activity || role !== 'gateway') return
+  const now = Date.now(), watches = []
+  for (const ws of leaves) if (ws.kind === 'listener' && ws.readyState === 1 && ws.watch) watches.push(ws.watch)
+  for (const [k, t] of [...actBellClosed]) { if (now - t > ACT_BELL_GRACE_MS) actBellClosed.delete(k); else watches.push(JSON.parse(k)) }
+  if (Act.setBells(activity, watches)) actChanged()
+}
+function actBellClose(ws) {
+  if (!ws.watch || !ws.watch.name) return
+  actBellClosed.set(JSON.stringify({ name: ws.watch.name, project: ws.watch.project || null }), Date.now())
+  setTimeout(syncActivityBells, ACT_BELL_GRACE_MS + 50).unref()
 }
 
 // ---------------------------------------------------------------- delivery (inbound to THIS process)
@@ -2021,15 +2161,31 @@ function adoptPeer(peerSession, sock, host, port, name, hello, outbound) {
   // restart (two live gateways can't both hold one host:port). Other port ⇒ it may be a live rival (split-brain /
   // two loopback test "hosts"), so PING it and retire only if a provable peer stays silent. Different machines never match.
   const hn = s => String(s).split('/')[0]
+  if (lc(hn(peerSession)) === lc(HOSTNAME)) warnDupHost(hn(peerSession), `this hub (${SESSION} at ${ADVERTISE}:${PORT})`, `peer hub ${peerSession} at ${host}:${port}`)   // #70 step 5
   for (const [id, p] of [...peerGw]) {
-    if (id === peerSession || hn(id) !== hn(peerSession) || p.host !== host) continue
+    if (id === peerSession || hn(id) !== hn(peerSession)) continue
+    if (p.host !== host) { warnDupHost(hn(id), `peer hub ${id} at ${p.host}:${p.port}`, `peer hub ${peerSession} at ${host}:${port}`); continue }   // #70 step 5: two machines, one name
     if (Number(p.port) === Number(port)) { retirePeer(id, `replaced by restarted ${peerSession}`); continue }
     if (!provable(p) || !p.sock || p.sock.destroyed) continue
     const t0 = Date.now()
     sendFrame(p.sock, { t: 'PING', seq: 0 })
-    const tm = setTimeout(() => { if (peerGw.get(id) === p && p.seen < t0) retirePeer(id, `silent after same-host peer ${peerSession} linked`) }, PEER_PROBE_MS)
+    const tm = setTimeout(() => {
+      if (peerGw.get(id) === p && p.seen < t0) retirePeer(id, `silent after same-host peer ${peerSession} linked`)
+      else if (peerGw.get(id) === p && peerGw.has(peerSession)) warnDupHost(hn(id), `peer hub ${id} at ${p.host}:${p.port}`, `peer hub ${peerSession} at ${host}:${port}`)   // #70 step 5: both alive — a live duplicate, not a restart
+    }, PEER_PROBE_MS)
     if (tm.unref) tm.unref()
   }
+}
+// #70 step 5 (v1.61.0, "Decisions before step 5" 8): DUPLICATE HOST NAMES are accepted, but logged. The host name (the
+// prefix of a gateway's session id) is the activity origin and #63's same-machine test, so two live hubs with the same
+// name and different addresses / sessions fight over one activity slice. One WARN per name per DUP_HOST_WARN_MS.
+const DUP_HOST_WARN_MS = Number(process.env.AI_BRIDGE_DUP_HOST_WARN_MS) || 600000
+const dupHostWarned = new Map()   // lc(host name) -> last warned at
+function warnDupHost(name, a, b) {
+  const k = lc(name), now = Date.now()
+  if (now - (dupHostWarned.get(k) || 0) < DUP_HOST_WARN_MS) return
+  dupHostWarned.set(k, now)
+  log(`WARN duplicate host name "${name}": ${a} and ${b} both claim it — the activity board keys a host by its name, so their activity slices will overwrite each other (#70)`)
 }
 function dropPeer(peerSession, why) {
   if (!peerGw.has(peerSession)) return
@@ -2218,7 +2374,7 @@ function onControlConn(sock) {
           const known = !!fr && (fr.subpeers || []).some(sp => ciEq(sp.name, id.session) && projKey(sp.project) === projKey(id.project) && lc(sp.user) === lc(id.user) && (sp.realm || REALM) === (id.realm || REALM))
           if (!known) { reply({ ok: false, code: 'unknown-subpeer', what: 'that session is not registered on the forwarding bridge' }); return }
           activityLog({ realm: id.realm || REALM, project: id.project, user: id.user, session: id.session, host: HOSTNAME }, f.input || {}).then(reply, e => reply({ ok: false, code: 'gateway-error', what: String((e && e.message) || e) }))
-        } else if (f.op === 'read') activityRead(f.query || {}).then(reply, e => reply({ ok: false, code: 'gateway-error', what: String((e && e.message) || e) }))
+        } else if (f.op === 'read') activityRead(f.query || {}, { maxWaitMs: Math.max(0, ACT_FWD_MS - ACT_REMOTE_MS - 300) }).then(reply, e => reply({ ok: false, code: 'gateway-error', what: String((e && e.message) || e) }))   // v1.61.0: a queued remote fetch must answer inside the follower's timeout
         else reply({ ok: false, code: 'bad-op', what: `unknown activity op ${f.op}` })
       } else if (f.t === 'TRACE') {
         traces.collect(f.trace)
@@ -2321,6 +2477,7 @@ function onWsConnection(ws) {
       ws.on('message', async raw => {
         let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
         if (m.type === 'hello') {
+          if (ws.kind && ws.kind !== 'logger') { try { ws.send(JSON.stringify({ type: 'error', code: 'already-hello', what: 'one hello per connection' })) } catch {} ; return }   // v1.61.0 (#70 step 5): a page can't re-hello into a dashboard
           if (!profile.auth.verify(m.token)) {
             if (m.kind === 'logger') { try { ws.send(JSON.stringify({ type: 'error', code: 'unauthorized', what: 'bad realm token' })) } catch {} }   // #70 step 3: the script says why
             ws.close(); return
@@ -2335,6 +2492,7 @@ function onWsConnection(ws) {
               ws.close(); return
             }
             leaves.add(ws)
+            syncActivityBells()   // #70 step 5: the watched session's 🔔 on the activity board
             log(`listener connected: watch=${JSON.stringify(ws.watch)} (${ws.instance})`)
             try { ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, capabilities: CAPS, realm: REALM, watch: ws.watch })) } catch {}
             notifyOne(ws)   // fire IMMEDIATELY if mail is already waiting — arming must not miss what's already there
@@ -2377,12 +2535,22 @@ function onWsConnection(ws) {
           try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result })) } catch {}
         } else if (ws.kind === 'logger') {
           try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'bad-op', what: `a logger sends only {type:"log"} (got ${JSON.stringify(String(m.type)).slice(0, 40)})` } })) } catch {}
-        } else if (m.type === 'activity' && ws.kind === 'dashboard') {   // #70 step 4: the mesh board / a log page / an entry (the `activity` tool's query)
-          const q = {}
+        } else if ((m.type === 'activity' || m.type === 'activity_sub' || m.type === 'activity_unsub') && ws.kind !== 'dashboard') {   // #70 step 5: dashboards only — never a page leaf
+          const deny = { ok: false, code: 'dashboard-only', what: 'the activity board is for dashboards and registered sessions (the activity tool), not page leaves' }
+          try { ws.send(JSON.stringify(m.type === 'activity' ? { type: 'activity', ref: m.ref != null ? m.ref : null, result: deny } : { type: 'activity_board', ...deny })) } catch {}
+        } else if (m.type === 'activity_sub') {   // #70 step 5: the Activity view opened (or a resync after a seq gap) → a full board, then deltas
+          if (role !== 'gateway' || !activity) { try { ws.send(JSON.stringify({ type: 'activity_board', ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })) } catch {} ; return }
+          if (!ACT_CFG.enabled) { try { ws.send(JSON.stringify({ type: 'activity_board', ...actDisabled() })) } catch {} ; return }
+          actDashSubscribe(ws)
+        } else if (m.type === 'activity_unsub') {
+          ws.actSub = null
+        } else if (m.type === 'activity') {   // #70 step 4: the mesh board / a log page / an entry (the `activity` tool's query)
+          const q = {}, ref = m.ref != null ? m.ref : null
           for (const k of BOARD_FIELDS) if (m.query && typeof m.query === 'object' && m.query[k] !== undefined) q[k] = m.query[k]
           let result
-          try { result = await activityRead(q) } catch (e) { result = { ok: false, code: 'gateway-error', what: String((e && e.message) || e) } }
-          try { ws.send(JSON.stringify({ type: 'activity', ref: m.ref != null ? m.ref : null, result })) } catch {}
+          const onQueued = info => { try { ws.send(JSON.stringify({ type: 'activity_queued', ref, ...info })) } catch {} }   // v1.61.0: the page shows a spinner
+          try { result = await activityRead(q, { ws, onQueued }) } catch (e) { result = { ok: false, code: 'gateway-error', what: String((e && e.message) || e) } }
+          try { ws.send(JSON.stringify({ type: 'activity', ref, result })) } catch {}
         } else if (m.type === 'set_alias' && ws.kind === 'dashboard') {
           if (m.scope === 'host') { ALIASES[m.target] = m.alias; persistAliases() }
           else if (m.scope === 'session') {
@@ -2434,6 +2602,8 @@ function onWsConnection(ws) {
       ws.on('close', () => {
         if (ws.kind === 'logger') return   // #70 step 3: never on the roster — nothing to announce (and a 1/s script would flood the log)
         if (ws.kind) log(`${ws.kind} disconnected (${ws.instance})`)
+        if (ws.kind === 'listener') actBellClose(ws)   // #70 step 5: the bell stays for a short grace (the doorbell re-arms)
+        ws.actSub = null
         if (ws.kind === 'page') {
           const p = pages.get(ws.instance)
           emitTraceRaw({ dir: 'con', verb: 'offline', from: `page:${ws.instance}`, from_name: p ? (p.title || p.page_kind) : 'page', to: SESSION, size: 0, note: 'page offline', envelope_id: null })

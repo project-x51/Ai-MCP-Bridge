@@ -481,11 +481,12 @@ export function create(ctx) {
     actSize.set(file, size)
     return size
   }
-  async function* backwardsFile(file, day, chunk) {
+  async function* backwardsFile(file, day, chunk, end = null) {   // end: start below this byte offset (a record's start) — v1.61.0 paging
     let fh
     try { fh = await fsp.open(file, 'r') } catch { return }
     try {
-      let pos = (await fh.stat()).size, tail = Buffer.alloc(0)
+      const size = (await fh.stat()).size
+      let pos = end != null && end >= 0 ? Math.min(end, size) : size, tail = Buffer.alloc(0)
       const emit = (buf, offset) => { let rec = null; try { rec = JSON.parse(buf.toString('utf8')) } catch { } return { rec, day, offset, length: buf.length } }
       while (pos > 0) {
         const n = Math.min(chunk, pos); pos -= n
@@ -566,11 +567,14 @@ export function create(ctx) {
     /** This host's day files, oldest first. */
     async days(host) { return (await readDirSafe(actDir(host))).filter(f => f.endsWith('.jsonl') && DAY_RE.test(f.slice(0, -6))).map(f => f.slice(0, -6)).sort() },
     /** Every record NEWEST FIRST: the newest day's file from its end, then earlier days down to `fromDay`. Yields
-     *  { rec (null = garbled), day, offset, length }. Reads `chunk` bytes at a time — never a whole large file. */
-    async *readBackwards(host, { fromDay = null, chunk = 65536 } = {}) {
+     *  { rec (null = garbled), day, offset, length }. Reads `chunk` bytes at a time — never a whole large file.
+     *  v1.61.0 (#70 step 5, history paging): `before: { day, offset }` starts with the records BEFORE that offset of that
+     *  day's file (newer days skipped) — a page cursor. */
+    async *readBackwards(host, { fromDay = null, chunk = 65536, before = null } = {}) {
       for (const day of (await this.days(host)).reverse()) {
         if (fromDay && day < fromDay) break
-        yield* backwardsFile(actFile(host, day), day, chunk)
+        if (before && day > before.day) continue
+        yield* backwardsFile(actFile(host, day), day, chunk, before && day === before.day ? before.offset : null)
       }
     },
     /** Retention: delete this host's day files before `beforeDay`. Returns the days deleted. */

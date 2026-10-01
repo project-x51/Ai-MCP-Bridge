@@ -77,6 +77,14 @@
 // unfinished entities as GONE (its host went down / unreachable) until a fresh full slice replaces it; dropOrigin() /
 // expireRemote() forget it.
 //
+// DASHBOARDS (build-plan step 5, v1.61.0): boardView({ raw:true }) is the page's form — reported states and raw times /
+// templates, so the page computes stale with its own slider and renders the placeholders, and time passing is never a
+// change; dashUnits() splits it into one unit per session group + one per agent, and planDashDelta() diffs a dashboard's
+// published view the way planSlice diffs a link's. `host_down` marks entities of a slice whose host went down (gone
+// because the HOST went away, not the session); `bell` (setBells) marks a session a doorbell listener watches and rides
+// the gossip header. logView({ files:true }) hands the caller a descriptor to page on into the host's day files once memory
+// runs out (fileCursor / parseFileCursor, fileEntryMatches, fileEntryView).
+//
 // LIMITS are locked in code (they change what crosses the mesh, so every bridge must agree — a change is a version
 // bump); the per-host knobs come from the `activity` config block + AI_BRIDGE_ACTIVITY_* env (resolveConfig).
 import { lc, projKey } from './keys.js'
@@ -487,7 +495,7 @@ export function parseMessage(input, opts = {}) {
  *   log_dropped:number, persisted?:boolean }} ActivityEntity
  * @typedef {{ key:string, origin:string, realm?:string, session:string, project:string, user:string|null,
  *   host:string|null, created_at:number, last_activity:number, gone_at:number|null, self:ActivityEntity,
- *   agents:Map<string, ActivityEntity>, persisted?:boolean }} ActivitySession
+ *   agents:Map<string, ActivityEntity>, persisted?:boolean, bell?:boolean }} ActivitySession
  * @typedef {{ day:string, keys:Map<string, number>, next:number,
  *   rep:{ keys:number[], since:number, last:number, n:number, offset?:number }|null }} ActivityCpFile
  * @typedef {{ v:1, config:any, origin:string, idPrefix:string, seq:number, local:Map<string, ActivitySession>,
@@ -1096,42 +1104,54 @@ const lineView = (l, p, eta, now) => (l ? compact({ id: l.id, ts: l.ts, text: l.
  * (default this host's config.stale_after_min) — stale, and gone (a session that left its host's roster, or a remote slice
  * whose origin went down: markOriginDown). Rollup progress, visibility. Groups sorted by key; agents by path then host.
  * @param {ActivityState} state @param {number} now
- * @param {{ project?:string, session?:string, agent?:string, host?:string, active_only?:boolean, staleMin?:number }} [opts]
+ * @param {{ project?:string, session?:string, agent?:string, host?:string, active_only?:boolean, staleMin?:number, raw?:boolean }} [opts]
  *   agent matches that path or anything under it (`a` → `a`, `a/b`); host keeps only that host's entities;
- *   active_only drops finished/gone agents
+ *   active_only drops finished/gone agents; raw (v1.61.0) = the dashboard form (reported states, raw templates + times)
  */
 export function boardView(state, now, opts = {}) {
   const sm = Number(opts.staleMin) > 0 ? Number(opts.staleMin) : state.config.stale_after_min
   const hours = state.config.finished_visible_hours
   const pk = str(opts.project) ? projKey(opts.project) : null, sk = str(opts.session) ? lc(opts.session) : null, ak = str(opts.agent) ? lc(opts.agent).replace(/^\/+|\/+$/g, '') : null
   const hk = str(opts.host) ? lc(opts.host) : null
+  // v1.61.0 (#70 step 5): RAW = the dashboard's form — the REPORTED state (gone kept: it is data, not time), the raw line
+  // template and the raw times, no `rendered` / `stale_at` / `was`-for-stale: the page computes stale + renders the
+  // placeholders itself (its own slider, its own clock), so a delta never carries a change that is only time passing
+  const raw = !!opts.raw
+  const rawLine = l => (l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null)
   const ctxView = (c, e) => {
     const eff = effectiveState(c, now, sm, e)
+    if (raw) return compact({ name: c.name, state: eff.gone ? 'gone' : eff.was, was: eff.gone ? eff.was : null, current: rawLine(c.current),
+      progress: c.progress ? { ...c.progress } : null, eta_at: c.eta_at, created_at: c.created_at, last_activity: c.last_activity, stale_after_ms: c.stale_after_ms })
     return compact({ name: c.name, state: eff.state, was: eff.state !== eff.was ? eff.was : null, stale_at: eff.stale_at,
       current: lineView(c.current, c.key === 'root' ? rollup(e) : c.progress, c.eta_at, now),
       progress: c.progress ? { ...c.progress, pct: Math.round(progressPct(c.progress) * 10) / 10 } : null, eta_at: c.eta_at, created_at: c.created_at,
       last_activity: c.last_activity, stale_after_ms: c.stale_after_ms })
   }
-  // a remote entity's log lives on its owner (fetched on demand): its view says so instead of counting a log it lacks
-  const entView = (e, host, local) => {
+  // a remote entity's log lives on its owner (fetched on demand): its view says so instead of counting a log it lacks.
+  // v1.61.0: `host_down` = its host went down / unreachable (ACTIVITY_DOWN or the link dropped) — distinct from a session
+  // that LEFT (gone_at without host_down)
+  const entView = (e, host, local, down) => {
     const eff = effectiveState(e, now, sm), root = e.contexts.get('root'), bar = rollup(e)
+    const ctxs = [...e.contexts.values()].sort((a, b) => (a.key === 'root' ? -1 : b.key === 'root' ? 1 : cmp(a.key, b.key))).map(c => ctxView(c, e))
+    const lg = local ? { entries: e.log.length, dropped: e.log_dropped } : { remote: true }
+    if (raw) return compact({ agent: e.path, host, state: eff.gone ? 'gone' : eff.was, was: eff.gone ? eff.was : null, active: isActive(e), host_down: down || null,
+      current: rawLine(root && root.current), progress: bar, eta_at: root ? root.eta_at : null, started_at: e.started_at, last_activity: e.last_activity,
+      finished_at: e.finished_at, gone_at: e.gone_at, stale_after_ms: e.stale_after_ms, contexts: ctxs, log: lg })
     return compact({ agent: e.path, host, state: eff.state, was: eff.state !== eff.was ? eff.was : null, stale_at: eff.stale_at, active: isActive(e), visible: visible(e, now, hours),
-      current: lineView(root && root.current, bar, root ? root.eta_at : null, now), progress: bar, eta_at: root ? root.eta_at : null, started_at: e.started_at, last_activity: e.last_activity,
-      finished_at: e.finished_at, gone_at: e.gone_at, stale_after_ms: e.stale_after_ms,
-      contexts: [...e.contexts.values()].sort((a, b) => (a.key === 'root' ? -1 : b.key === 'root' ? 1 : cmp(a.key, b.key))).map(c => ctxView(c, e)),
-      log: local ? { entries: e.log.length, dropped: e.log_dropped } : { remote: true } })
+      host_down: down || null, current: lineView(root && root.current, bar, root ? root.eta_at : null, now), progress: bar, eta_at: root ? root.eta_at : null, started_at: e.started_at, last_activity: e.last_activity,
+      finished_at: e.finished_at, gone_at: e.gone_at, stale_after_ms: e.stale_after_ms, contexts: ctxs, log: lg })
   }
-  const groups = new Map()   // groupKey -> [{ s, host, local }]
-  const add = (s, host, local) => {
+  const groups = new Map()   // groupKey -> [{ s, host, local, down }]
+  const add = (s, host, local, down) => {
     if (pk && projKey(s.project) !== pk) return
     if (sk && lc(s.session) !== sk) return
     if (hk && lc(host) !== hk) return
     const g = groupKey(s)
     if (!groups.has(g)) groups.set(g, [])
-    groups.get(g).push({ s, host, local })
+    groups.get(g).push({ s, host, local, down: down || null })
   }
-  for (const s of state.local.values()) add(s, state.origin, true)
-  for (const [o, sl] of state.remote) for (const s of sl.sessions.values()) add(s, o, false)
+  for (const s of state.local.values()) add(s, state.origin, true, null)
+  for (const [o, sl] of state.remote) for (const s of sl.sessions.values()) add(s, o, false, sl.down_at || null)
   const out = []
   for (const g of [...groups.keys()].sort(cmp)) {
     const parts = groups.get(g).sort((a, b) => (a.local !== b.local ? (a.local ? -1 : 1) : cmp(lc(a.host), lc(b.host))))
@@ -1145,13 +1165,64 @@ export function boardView(state, now, opts = {}) {
     const lead = parts[0].s, multi = hosts.length > 1
     const newest = parts.reduce((b, p) => (p.s.last_activity > b.s.last_activity ? p : b), parts[0])
     const goneAll = parts.every(p => p.s.gone_at)
+    const down = parts.filter(p => p.down).map(p => p.host)
     out.push(compact({ session: lead.session, project: lead.project, user: lead.user, realm: lead.realm, host: multi ? null : hosts[0], hosts: multi ? hosts : null, multi_host: multi,
       created_at: Math.min(...parts.map(p => p.s.created_at)), last_activity: Math.max(...parts.map(p => p.s.last_activity)),
       gone_at: goneAll ? Math.max(...parts.map(p => p.s.gone_at)) : null,
-      self: entView(newest.s.self, newest.host, newest.local), selves: multi ? parts.map(p => entView(p.s.self, p.host, p.local)) : null,
-      agents: agents.map(x => entView(x.a, x.p.host, x.p.local)) }))
+      bell: parts.some(p => p.s.bell), hosts_down: down.length ? down : null,   // v1.61.0: a doorbell armed for the session (on any of its hosts); hosts down
+      self: entView(newest.s.self, newest.host, newest.local, newest.down), selves: multi ? parts.map(p => entView(p.s.self, p.host, p.local, p.down)) : null,
+      agents: agents.map(x => entView(x.a, x.p.host, x.p.local, x.p.down)) }))
   }
   return out
+}
+/**
+ * The DOORBELL flag (v1.61.0, #70 step 5): mark each LOCAL session whose name (+ project, when the watch names one) a
+ * doorbell `listener` on this host's gateway is watching — `bell` rides the session header (gossip + dashboards).
+ * @param {ActivityState} state @param {{ name?: string|null, project?: string|null }[]} watches
+ * @returns {boolean} whether any session's flag changed
+ */
+export function setBells(state, watches) {
+  const ws = (Array.isArray(watches) ? watches : []).filter(w => w && str(w.name)).map(w => ({ n: lc(w.name.trim()), p: str(w.project) ? projKey(w.project) : null }))
+  let changed = false
+  for (const s of state.local.values()) {
+    const b = ws.some(w => w.n === lc(s.session) && (!w.p || w.p === projKey(s.project)))
+    if (!!s.bell !== b) { s.bell = b; changed = true }
+  }
+  return changed
+}
+/**
+ * DASHBOARD DELTAS (v1.61.0, #70 step 5) — the same shape of diff as the gossip (a per-subscriber published view; only
+ * what changed + removals), over the MERGED raw board: one unit per session GROUP (its header, self/selves — not its
+ * agents) and one per AGENT entity (group + host + path). Each unit carries a stable `id`, its kind and its group key.
+ * @param {any[]} board  boardView(state, now, { raw:true }) (canonical project spellings applied by the caller)
+ * @returns {Map<string, { json:string, obj:any }>}
+ */
+export function dashUnits(board) {
+  const units = new Map()
+  for (const g of Array.isArray(board) ? board : []) {
+    const gk = groupKey(g), { agents, ...hdr } = g
+    const gid = JSON.stringify(['s', gk]), go = { id: gid, kind: 'session', key: gk, ...hdr }
+    units.set(gid, { json: JSON.stringify(go), obj: go })
+    for (const a of agents || []) {
+      const id = JSON.stringify(['a', gk, lc(a.host), lc(a.agent)]), ao = { id, kind: 'agent', group: gk, ...a }
+      units.set(id, { json: JSON.stringify(ao), obj: ao })
+    }
+  }
+  return units
+}
+/**
+ * One dashboard's next delta against its published view `pub` (id -> json): the changed / new units (`upsert`, sessions
+ * before agents) and the ids that left (`remove`). `full` resets the view and sends everything. `pub` is updated.
+ * @param {Map<string, string>} pub @param {Map<string, { json:string, obj:any }>} units @param {{ full?: boolean }} [opts]
+ * @returns {{ upsert:any[], remove:string[], empty:boolean }}
+ */
+export function planDashDelta(pub, units, opts = {}) {
+  if (opts && opts.full) pub.clear()
+  const upsert = [], remove = []
+  for (const [id, u] of units) if (pub.get(id) !== u.json) { upsert.push(u.obj); pub.set(id, u.json) }
+  for (const id of [...pub.keys()]) if (!units.has(id)) { remove.push(id); pub.delete(id) }
+  upsert.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'session' ? -1 : 1))
+  return { upsert, remove, empty: !upsert.length && !remove.length }
 }
 /**
  * The sessions matching a log query on EVERY host held (v1.60.0): [{ host, local, session }] — by name (+ project / user
@@ -1187,7 +1258,9 @@ export function locateEntry(state, id) {
  * @param {ActivityState} state
  * @param {{ session:string, project?:string, user?:string, agent?:string|null, context?:string, limit?:number, cursor?:string }} q
  * @param {number} [now]
- * @param {{ maxEntries?: number, maxBytes?: number }} [opts]
+ * @param {{ maxEntries?: number, maxBytes?: number, files?: boolean }} [opts]  files (v1.61.0): the caller pages on into the
+ *   day files — a file cursor is accepted, and a page that exhausts memory with room left carries a `files` descriptor
+ *   { target, from, before, need, bytes, maxBytes } for it (the caller strips it)
  * @returns {ActivityResult}
  */
 export function logView(state, q, now = Date.now(), opts = {}) {
@@ -1204,7 +1277,16 @@ export function logView(state, q, now = Date.now(), opts = {}) {
   const maxE = Number(opts && opts.maxEntries) > 0 ? Math.floor(Number(opts.maxEntries)) : Infinity, maxB = Number(opts && opts.maxBytes) > 0 ? Number(opts.maxBytes) : Infinity
   const lim = Math.max(1, Math.min(Number(q.limit) > 0 ? Math.floor(Number(q.limit)) : 50, state.config.log_entries_per_agent, maxE))
   const list = ck ? ent.log.filter(x => lc(x.context) === ck) : ent.log
-  let end = list.length   // entries [0, end) are older than the cursor
+  const head = { ok: true, session: s.session, project: s.project, user: s.user, agent: ent.path, context: ck ? (ent.contexts.get(ck) || { name: ck }).name : null }
+  // v1.61.0 (#70 step 5): opts.files = the caller can continue into the host's DAY FILES once memory runs out — a `files`
+  // descriptor (what to match, where to start, how much room is left) is returned for it; the caller strips it
+  const target = { realm: s.realm, project: s.project, user: s.user, session: s.session, agent: ent.path, context: ck }
+  const fc = parseFileCursor(q.cursor)
+  if (fc) {
+    if (!(opts && opts.files)) return bad('bad-cursor', 'that cursor pages the day files, which this reader does not serve')
+    return { ...head, entries: [], total: list.length, dropped: ent.log_dropped, next_cursor: null, files: { target, from: fc, before: null, need: lim, bytes: 0, maxBytes: maxB } }
+  }
+  let end = list.length, cursorT = null   // entries [0, end) are older than the cursor
   if (str(q.cursor)) {
     let i = -1
     for (let j = list.length - 1; j >= 0; j--) if (list[j].id === q.cursor) { i = j; break }
@@ -1213,6 +1295,7 @@ export function logView(state, q, now = Date.now(), opts = {}) {
       const t = entryTime(q.cursor)
       if (t === null) return bad('bad-cursor', 'cursor must be the next_cursor of a previous page')
       end = 0; while (end < list.length && list[end].ts < t) end++   // its entry was dropped meanwhile: continue by time
+      cursorT = t
     }
   }
   const entries = []
@@ -1223,9 +1306,39 @@ export function logView(state, q, now = Date.now(), opts = {}) {
     if (entries.length && bytes + b > maxB) break
     entries.push(x); bytes += b
   }
-  return { ok: true, session: s.session, project: s.project, user: s.user, agent: ent.path, context: ck ? (ent.contexts.get(ck) || { name: ck }).name : null,
-    entries, total: list.length, dropped: ent.log_dropped, next_cursor: i >= 0 && entries.length ? entries[entries.length - 1].id : null }
+  const out = /** @type {any} */ ({ ...head, entries, total: list.length, dropped: ent.log_dropped, next_cursor: i >= 0 && entries.length ? entries[entries.length - 1].id : null })
+  if (opts && opts.files && i < 0) {   // memory ran out: older entries are only in the day files
+    if (entries.length >= lim || bytes >= maxB) out.next_cursor = entries.length ? entries[entries.length - 1].id : null   // full: the next page starts there
+    else {
+      const oldest = ent.log.length ? ent.log[0] : null   // the memory log is a contiguous tail: the files continue from before it
+      const ids = new Set(ent.log.map(x => x.id))
+      if (cursorT !== null) ids.add(q.cursor)   // a cursor whose entry was dropped: the files continue from before IT (shown already)
+      const bts = cursorT !== null ? (oldest ? Math.min(oldest.ts, cursorT) : cursorT) : oldest ? oldest.ts : null
+      out.files = { target, from: null, before: bts !== null ? { ts: bts, ids } : null, need: lim - entries.length, bytes, maxBytes: maxB }
+    }
+  }
+  return out
 }
+/** A day-file paging cursor (v1.61.0): `f1.<day>.<offset>` = continue with the records BEFORE that byte offset of that day's file. */
+export const fileCursor = (day, offset) => `f1.${day}.${Math.max(0, Math.floor(Number(offset) || 0))}`
+/** @returns {{ day:string, offset:number } | null} */
+export function parseFileCursor(c) {
+  const m = typeof c === 'string' && c.match(/^f1\.(\d{4}-\d{2}-\d{2})\.(\d{1,15})$/)
+  return m ? { day: m[1], offset: Number(m[2]) } : null
+}
+/**
+ * Is this day-file record a LOGGED entry of `target` (logView's files.target: realm + project + user + session + agent
+ * path or null for the session itself + an optional lc'd context)? cp / rep lines never match.
+ */
+export function fileEntryMatches(rec, target) {
+  if (recordKind(rec) !== 'entry' || !target) return false
+  if (lc(rec.session) !== lc(target.session) || projKey(rec.project) !== projKey(target.project) || lc(rec.user) !== lc(target.user)) return false
+  if ((lc(rec.realm) || 'default') !== (lc(target.realm) || 'default')) return false
+  if (target.agent == null ? rec.agent != null : rec.agent == null || lc(rec.agent) !== lc(target.agent)) return false
+  return !target.context || lc(rec.context) === target.context
+}
+/** A day-file entry in logView's entry shape (the small in-memory form + `rendered` as recorded). */
+export const fileEntryView = (rec, now) => ({ ...smallOf(rec), rendered: renderText(rec.text, rec.progress, rec.eta_at, now) })
 /**
  * An entry by id from MEMORY: a current line (with its details/data; `rendered` against the live bar) or a log entry
  * (flags only — the caller reads details/data back from the JSONL; `rendered` as recorded). null when not held.
@@ -1263,7 +1376,7 @@ function snapEntity(e) {
 }
 function snapSession(s) {
   return compact({ session: s.session, project: s.project, user: s.user, realm: s.realm, host: s.host, created_at: s.created_at, last_activity: s.last_activity,
-    gone_at: s.gone_at, self: snapEntity(s.self), agents: [...s.agents.values()].sort((a, b) => cmp(a.key, b.key)).map(snapEntity) })
+    gone_at: s.gone_at, bell: !!s.bell, self: snapEntity(s.self), agents: [...s.agents.values()].sort((a, b) => cmp(a.key, b.key)).map(snapEntity) })
 }
 /**
  * The compact replicated form of one origin's slice (default: ours): current lines only (with has_details/has_data
@@ -1328,7 +1441,7 @@ function wHeader(r, origin) {
   const project = str(r.project) || 'unclassified'
   const realm = str(r.realm) || 'default', user = str(r.user)
   return { key: sessionKey({ realm, project, user, session, host: origin }), origin, realm, session, project, user, host: origin, created_at: wTime(r.created_at) || 0,
-    last_activity: wTime(r.last_activity) || 0, gone_at: wPos(r.gone_at) }
+    last_activity: wTime(r.last_activity) || 0, gone_at: wPos(r.gone_at), bell: r.bell === true }
 }
 function wSession(r, origin) {
   const h = wHeader(r, origin)
@@ -1377,7 +1490,8 @@ export const dropOrigin = (state, origin) => state.remote.delete(origin)
 
 // ---- v1.60.0 (#70 step 4): the wire — per-link deltas under a byte cap, newest-active first
 
-const sessHeader = s => compact({ session: s.session, project: s.project, user: s.user, realm: s.realm, host: s.host, created_at: s.created_at, last_activity: s.last_activity, gone_at: s.gone_at })
+const sessHeader = s => compact({ session: s.session, project: s.project, user: s.user, realm: s.realm, host: s.host, created_at: s.created_at, last_activity: s.last_activity, gone_at: s.gone_at,
+  bell: !!s.bell })   // v1.61.0 (#70 step 5): the doorbell flag rides the header (a ≤1.60 receiver ignores it)
 /**
  * This host's gossip UNITS: one per entity (a session's own entity or an agent), keyed `[sessionKey, agentKey]`, with
  * its canonical JSON (snapshot form) and last_activity, plus each session's header. Compute once per change and reuse
@@ -1486,7 +1600,7 @@ export function applySlice(state, fromOrigin, body) {
       if (held.sessions.size >= MAX_SESSIONS_PER_ORIGIN) continue
       held.sessions.set(h.key, wSession(r, origin)); changed = true; continue
     }
-    s.created_at = h.created_at; s.last_activity = h.last_activity; s.gone_at = h.gone_at
+    s.created_at = h.created_at; s.last_activity = h.last_activity; s.gone_at = h.gone_at; s.bell = h.bell
     if (r.self && typeof r.self === 'object') s.self = wEntity(r.self, null)
     for (const a of Array.isArray(r.agents) ? r.agents : []) {
       if (!a || typeof a !== 'object') continue

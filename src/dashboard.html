@@ -4,15 +4,28 @@
 <meta charset="utf-8">
 <title>Ai MCP Bridge — Dashboard</title>
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1240px; margin: 10px auto; padding: 0 10px; color: #222; }
+  /* #70 step 5 (v1.61.0): colour TOKENS — light by default, dark under prefers-color-scheme (or ?theme=dark|light). The
+     structural colours (page, text, lines, table heads, row hover) and the whole Activity view use them; the pastel
+     badges keep their own colours (legible on both). */
+  :root { --bg:#FFFFFF; --fg:#222222; --fg-strong:#0F172A; --muted:#6B7280; --faint:#9CA3AF; --line:#E5E7EB; --line-soft:#F3F4F6;
+    --head:#F9FAFB; --head-fg:#374151; --surface:#F8FAFC; --surface-2:#F1F5F9; --hover:#F8FAFC; --det:#FAFAFA; --first:#FEFCE8;
+    --ok:#16A34A; --warn:#D97706; --bad:#DC2626; --info:#2563EB; --idle:#64748B; --down:#7C3AED; --down-fg:#FFFFFF; --track:#E5E7EB; --bar:#3B82F6; --bar-roll:#93C5FD;
+    color-scheme: light; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#111418; --fg:#E2E8F0; --fg-strong:#F8FAFC; --muted:#9CA3AF; --faint:#6B7280;
+    --line:#2B323B; --line-soft:#1E242B; --head:#1A2028; --head-fg:#CBD5E1; --surface:#161B22; --surface-2:#1C232C; --hover:#1A2129; --det:#151A20; --first:#2A2714;
+    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C; color-scheme: dark; } }
+  :root[data-theme="dark"] { --bg:#111418; --fg:#E2E8F0; --fg-strong:#F8FAFC; --muted:#9CA3AF; --faint:#6B7280;
+    --line:#2B323B; --line-soft:#1E242B; --head:#1A2028; --head-fg:#CBD5E1; --surface:#161B22; --surface-2:#1C232C; --hover:#1A2129; --det:#151A20; --first:#2A2714;
+    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C; color-scheme: dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1240px; margin: 10px auto; padding: 0 10px; color: var(--fg); background: var(--bg); }
   h1 { font-size: 20px; margin: 8px 0; }
   .pip { display:inline-block; width:10px; height:10px; border-radius:50%; background:#DC2626; margin-right:6px; }
   .pip.on { background:#16A34A; }
-  .sub { color:#6B7280; font-size:13px; margin-bottom:10px; }
-  h2 { font-size: 15px; border-bottom: 1px solid #E5E7EB; padding-bottom: 5px; margin: 18px 0 8px 0; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:10px; }
+  h2 { font-size: 15px; border-bottom: 1px solid var(--line); padding-bottom: 5px; margin: 18px 0 8px 0; }
   table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
-  th, td { text-align: left; padding: 5px 9px; border-bottom: 1px solid #F3F4F6; vertical-align: top; }
-  th { background: #F9FAFB; font-weight: 600; color: #374151; }
+  th, td { text-align: left; padding: 5px 9px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  th { background: var(--head); font-weight: 600; color: var(--head-fg); }
   .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; }
   .bub { display:inline-block; border-radius:10px; padding:1px 9px; font-size:11px; font-weight:600; }
   .b-send { background:#DBEAFE; color:#1E40AF; } .b-recv { background:#DCFCE7; color:#14532D; }
@@ -22,17 +35,17 @@
   .mono.latest { color:#16A34A; font-weight:600; }            /* newest bridge version on the mesh */
   .mono.incompat { color:#DC2626; font-weight:700; }          /* too old to interoperate (below the compat floor) */
   .mono.ok { color:#334155; }                                 /* compatible, just behind the latest */
-  #traces tr:first-child td { background:#FEFCE8; }
-  #map { width: 100%; background: #F8FAFC; border: 1px solid #E5E7EB; border-radius: 10px; }
-  .hint { color:#9CA3AF; font-size:11.5px; margin: 4px 0 0 2px; }
+  #traces tr:first-child td { background:var(--first); }
+  #map { width: 100%; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+  .hint { color:var(--faint); font-size:11.5px; margin: 4px 0 0 2px; }
   /* SVG node styling */
-  .n-host { fill: #FFFFFF; stroke: #CBD5E1; rx: 12; }
-  .n-host-label { font-size: 12px; font-weight: 700; fill: #334155; cursor: pointer; }
+  .n-host { fill: var(--bg); stroke: var(--line); rx: 12; }
+  .n-host-label { font-size: 12px; font-weight: 700; fill: var(--head-fg); cursor: pointer; }
   .n-sess circle { fill: #E0F2FE; stroke: #38BDF8; stroke-width: 1.5; cursor: pointer; }
   .n-sess.gw circle { fill: #DCFCE7; stroke: #16A34A; stroke-width: 2.5; }
   .n-page rect { fill: #FCE7F3; stroke: #F472B6; stroke-width: 1.5; rx: 8; cursor: pointer; }
-  .n-label { font-size: 11px; font-weight: 600; fill: #1F2937; text-anchor: middle; pointer-events: none; }
-  .n-sub { font-size: 9.5px; fill: #6B7280; text-anchor: middle; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .n-label { font-size: 11px; font-weight: 600; fill: var(--fg); text-anchor: middle; pointer-events: none; }
+  .n-sub { font-size: 9.5px; fill: var(--muted); text-anchor: middle; pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace; }
   .n-tag { font-size: 9px; font-weight: 700; fill: #16A34A; text-anchor: middle; pointer-events: none; }
   .edge { stroke: #94A3B8; stroke-width: 1.2; }
   .edge.page { stroke-dasharray: 4 3; stroke: #F9A8D4; }
@@ -45,20 +58,20 @@
   .b-pub { background:#FEF3C7; color:#92400E; }
   .b-code { background:#FFEDD5; color:#9A3412; }      /* code session/sub-peer = orange */
   .b-subp { background:#FEF9C3; color:#854D0E; }      /* non-code sub-peer = yellow */
-  tr.mach-row td { background:#F1F5F9; border-top:2px solid #E2E8F0; padding-top:7px; padding-bottom:7px; }
-  .b-mach { font-weight:700; font-size:12.5px; color:#0F172A; }
+  tr.mach-row td { background:var(--surface-2); border-top:2px solid var(--line); padding-top:7px; padding-bottom:7px; }
+  .b-mach { font-weight:700; font-size:12.5px; color:var(--fg-strong); }
   tr.x-row { cursor: pointer; }
-  tr.x-row:hover td { background:#F8FAFC; }
-  tr.x-det td { background:#FAFAFA; font-size:11.5px; padding:7px 12px 9px 28px; }
-  .x-chev { display:inline-block; width:12px; color:#9CA3AF; font-size:10px; }
+  tr.x-row:hover td { background:var(--hover); }
+  tr.x-det td { background:var(--det); font-size:11.5px; padding:7px 12px 9px 28px; }
+  .x-chev { display:inline-block; width:12px; color:var(--faint); font-size:10px; }
   /* Shrink the leading chevron/spacer column to its content in every main table so the
      second column (Name / Computer / Time) starts at the same x across the independent
      tables — this is what lines the Computers list up with the Sessions Name column. */
   table:not(.pers) th:first-child, table:not(.pers) td:first-child { width:1%; white-space:nowrap; }
   .kv { display:inline-block; margin-right:16px; white-space:nowrap; }
-  .kv b { color:#6B7280; font-weight:600; font-size:10.5px; margin-right:4px; }
-  .subj { color:#1F2937; }
-  .subj.none { color:#9CA3AF; font-style:italic; }
+  .kv b { color:var(--muted); font-weight:600; font-size:10.5px; margin-right:4px; }
+  .subj { color:var(--fg); }
+  .subj.none { color:var(--faint); font-style:italic; }
   .n-subp circle { fill: #FEF9C3; stroke: #EAB308; stroke-width: 1.5; }
   .n-sess.code circle { fill: #FFEDD5; stroke: #F97316; }   /* code sessions = orange */
   .n-subp.code circle { fill: #FFEDD5; stroke: #F97316; }
@@ -76,18 +89,77 @@
   .edge.subp { stroke-dasharray: 3 3; stroke: #EAB308; }
   .pulse circle, .pulse rect { stroke: #F59E0B !important; stroke-width: 3.5 !important; }
   .edge.pulse-e { stroke: #F59E0B; stroke-width: 3; }
-  #prof { font-size:11.5px; color:#6B7280; margin:-6px 0 10px 2px; }
-  #prof b { color:#334155; } #prof .fk { color:#94A3B8; }
-  .chip { display:inline-block; background:#F8FAFC; border:1px solid #E5E7EB; border-radius:8px; padding:2px 10px; margin:0 7px 4px 0; font-size:12px; }
-  .chip b { font-weight:700; color:#0F172A; } .chip span { color:#64748B; }
+  #prof { font-size:11.5px; color:var(--muted); margin:-6px 0 10px 2px; }
+  #prof b { color:var(--head-fg); } #prof .fk { color:var(--faint); }
+  .chip { display:inline-block; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:2px 10px; margin:0 7px 4px 0; font-size:12px; }
+  .chip b { font-weight:700; color:var(--fg-strong); } .chip span { color:var(--muted); }
   table.pers { width:auto; margin:3px 0 2px; font-size:11.5px; }
-  table.pers th { background:transparent; color:#9CA3AF; font-weight:600; font-size:10px; text-transform:uppercase; letter-spacing:.03em; padding:1px 14px 3px 0; border:none; }
+  table.pers th { background:transparent; color:var(--faint); font-weight:600; font-size:10px; text-transform:uppercase; letter-spacing:.03em; padding:1px 14px 3px 0; border:none; }
   table.pers td { padding:2px 14px 2px 0; border:none; }
-  .empty { color:#9CA3AF; font-style:italic; }
+  .empty { color:var(--faint); font-style:italic; }
   .sech { cursor:pointer; user-select:none; }
-  .sech:hover { color:#0F172A; }
-  .chev { display:inline-block; width:15px; color:#9CA3AF; font-size:11px; vertical-align:1px; }
+  .sech:hover { color:var(--fg-strong); }
+  .chev { display:inline-block; width:15px; color:var(--faint); font-size:11px; vertical-align:1px; }
   .sec.collapsed .secb { display:none; }
+  /* ---- #70 step 5 (v1.61.0): the Activity tree (project → session → agent → context → log entry) */
+  #acttag:empty { display:none; }
+  .act-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; font-size:12px; color:var(--muted); margin:2px 0 8px; }
+  .act-bar label { cursor:pointer; user-select:none; white-space:nowrap; }
+  .act-bar input[type=range] { width:120px; vertical-align:middle; accent-color:var(--info); }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; vertical-align:middle; }
+  .seg button, .act-btn { font:inherit; font-size:11.5px; cursor:pointer; color:var(--muted); background:var(--bg); }
+  .seg button { border:0; border-left:1px solid var(--line); padding:2px 10px; }
+  .seg button:first-child { border-left:0; }
+  .seg button.on { background:var(--head); color:var(--fg-strong); font-weight:600; }
+  .act-btn { border:1px solid var(--line); border-radius:7px; padding:2px 10px; }
+  .act-btn:hover, .seg button:hover { color:var(--fg-strong); }
+  .act-tree { font-size:12.5px; border-top:1px solid var(--line-soft); }
+  .act-msg { color:var(--faint); font-size:12px; font-style:italic; padding:8px 4px; }
+  .ar { display:flex; align-items:center; gap:7px; min-height:26px; padding:2px 8px 2px calc(6px + var(--d, 0) * 20px); border-bottom:1px solid var(--line-soft); color:var(--fg); }
+  .ar.click { cursor:pointer; } .ar.click:hover { background:var(--hover); }
+  .ar .chv { flex:none; width:12px; text-align:center; color:var(--faint); font-size:10px; }
+  .ar .gl { flex:none; width:16px; height:16px; display:block; }
+  .ar .nm { flex:none; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; color:var(--fg-strong); }
+  .ar .nm.path { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:11.5px; }
+  .ar .nm .pre { color:var(--faint); font-weight:400; }
+  .ar .ln { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ar .ln.none { color:var(--faint); font-style:italic; }
+  .ar .pb { flex:none; width:120px; height:6px; border-radius:3px; background:var(--track); overflow:hidden; }
+  .ar .pb > i { display:block; height:100%; background:var(--bar); border-radius:3px; }
+  .ar .pb.roll > i { background:repeating-linear-gradient(135deg, var(--bar) 0 5px, var(--bar-roll) 5px 8px); }
+  .ar .pb.nil { visibility:hidden; }
+  .ar .ic { flex:none; width:16px; text-align:center; font-size:12px; line-height:16px; }
+  .ar .ic.nil { visibility:hidden; }
+  .ar .pills { flex:none; display:flex; gap:4px; }
+  .htag { flex:none; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:10px; color:var(--muted); border:1px solid var(--line); border-radius:5px; padding:0 5px; line-height:15px; white-space:nowrap; }
+  .htag.down { color:var(--down); border-color:var(--down); }
+  .pill { font-size:10.5px; font-weight:700; line-height:15px; border-radius:9px; padding:0 7px; border:1px solid; white-space:nowrap; }
+  .pill.blocked { color:var(--warn); border-color:var(--warn); }
+  .pill.failed { color:var(--bad); border-color:var(--bad); }
+  .pill.stale { color:var(--faint); border-color:var(--faint); }
+  .pill.gone { color:var(--faint); border-color:var(--faint); border-style:dashed; }
+  .pill.hostdown { color:var(--down-fg); background:var(--down); border-color:var(--down); }
+  .ar.stale, .ar.stale .nm, .ar.stale .ln, .ar.stale .tm, .ar.gone .nm, .ar.gone .ln { color:var(--faint); }
+  .ar.stale .pb, .ar.gone .pb { opacity:.45; }
+  .ar.proj { background:var(--surface-2); border-top:2px solid var(--line); }
+  .ar.proj .cnt { color:var(--muted); font-weight:400; font-size:11.5px; }
+  .ar.lg .nm, .ar.more .nm { font-weight:600; color:var(--muted); font-size:11.5px; }
+  .ar.le { min-height:22px; font-size:12px; }
+  .ar .tm { flex:none; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:11px; color:var(--muted); }
+  .ar .dot { flex:none; width:8px; height:8px; border-radius:50%; background:var(--faint); }
+  .ar .ctag { flex:none; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:10.5px; color:var(--info); }
+  .ar .ctag.cur { font-weight:700; }
+  .ar .tgt { flex:none; width:16px; text-align:center; color:var(--muted); }
+  .ad { padding:4px 10px 8px calc(30px + var(--d, 0) * 20px); border-bottom:1px solid var(--line-soft); font-size:11.5px; }
+  .ad pre { margin:4px 0 0; background:var(--surface); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:280px; overflow:auto; color:var(--fg); }
+  .ad .k { color:var(--muted); font-weight:600; font-size:10.5px; }
+  .spin { display:inline-block; width:9px; height:9px; border:2px solid var(--line); border-top-color:var(--info); border-radius:50%; animation:aspin .8s linear infinite; vertical-align:-1px; margin-right:5px; }
+  @keyframes aspin { to { transform:rotate(360deg); } }
+  .act-legend { display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px; font-size:11.5px; color:var(--faint); margin:8px 0 0 2px; }
+  .act-legend span { display:inline-flex; align-items:center; gap:5px; }
+  .act-legend svg { flex:none; width:14px; height:14px; }
+  .s-running { color:var(--ok); } .s-blocked { color:var(--warn); } .s-idle { color:var(--idle); } .s-done { color:var(--ok); } .s-failed { color:var(--bad); } .s-stale, .s-gone { color:var(--faint); }
+  .bg-running, .bg-done { background:var(--ok) !important; } .bg-blocked { background:var(--warn) !important; } .bg-idle { background:var(--idle) !important; } .bg-failed { background:var(--bad) !important; }
 </style>
 </head>
 <body>
@@ -105,6 +177,19 @@
   <h2 class="sech"><span class="chev">▾</span>Sessions <span id="realmtag" class="bub b-info" style="font-weight:600"></span><span style="float:right;font-weight:400;font-size:12px;color:#6B7280"><select id="groupBy" title="Group sessions by" style="font-size:11px;vertical-align:middle;margin-right:10px;padding:1px 3px"><option value="pc">group: PC</option><option value="project" selected>group: project</option><option value="user">group: user</option><option value="none">group: none</option></select><label id="showBridgesLbl" style="cursor:pointer;user-select:none"><input type="checkbox" id="showBridges" style="vertical-align:middle;margin-right:4px"> show bridges</label></span></h2>
   <div class="secb">
     <table><thead><tr><th></th><th>Name</th><th>Session id</th><th>Client</th><th>Project · User</th><th>Topics</th></tr></thead><tbody id="sessions"></tbody></table>
+  </div>
+</section>
+<section class="sec" data-sec="activity" id="activity">
+  <h2 class="sech"><span class="chev">▾</span>Activity <span id="acttag" class="bub b-info" style="font-weight:600"></span></h2>
+  <div class="secb">
+    <div class="act-bar">
+      <span class="seg" id="actDepth" title="Show every project down to this level"><button data-l="collapsed">Projects</button><button data-l="sessions">Sessions</button><button data-l="all">Agents</button></span>
+      <label title="Hide finished and gone agents, and sessions with nothing active"><input type="checkbox" id="actActive" style="vertical-align:middle;margin-right:4px">active only</label>
+      <label title="A running or blocked item with no message for this long counts as stale (an item's own stale_after wins)">stale after <input type="range" id="actStale" min="5" max="60" step="1" value="15"> <b id="actStaleV" style="color:var(--fg-strong)">15m</b></label>
+      <span><button class="act-btn" id="actExpand">Expand all</button> <button class="act-btn" id="actCollapse">Collapse all</button></span>
+    </div>
+    <div id="acttree" class="act-tree"></div>
+    <div class="act-legend" id="actlegend"></div>
   </div>
 </section>
 <section class="sec" data-sec="map">
@@ -135,6 +220,7 @@
 (function(){
   var qs = new URLSearchParams(location.search);
   var token = qs.get('token') || '';
+  var theme = qs.get('theme'); if(theme==='dark'||theme==='light') document.documentElement.setAttribute('data-theme',theme);   // #70 step 5: else the OS preference
   // when served over http://host:port (recommended) derive the ws from the page origin; file:// falls back
   var wsUrl = qs.get('ws') || ((location.host && location.protocol.indexOf('http') === 0) ? ('ws://' + location.host) : 'ws://127.0.0.1:12318');
   var pip=document.getElementById('pip'), gw=document.getElementById('gw');
@@ -662,6 +748,328 @@
     pulse(t.from); pulse(t.to);
   }
 
+  // ------------------------------------------------ activity (#70 step 5, v1.61.0)
+  // The PURE part — window.AimbAct, unit-tested by tests/test_dashboard_activity.mjs. The bridge sends REPORTED states and
+  // raw times (boardView raw), so stale is computed HERE from last_activity + the item's own stale_after (else the slider):
+  // the slider is instant and a delta never carries "time passed". Also: the status glyph (centre = state, ring = time
+  // left before stale), the text placeholders (a port of lib/activity.js renderText), progress / ETA tooltips, the
+  // project-level cycle, active-only filtering, the delta store (a seq gap → resync) and the tree.
+  var AimbAct=(function(){
+    var MIN=60000, LIVE={running:1,blocked:1}, C=2*Math.PI*6.5;
+    var MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    function p2(n){ return (n<10?'0':'')+n; }
+    function fmtNum(n){ if(!isFinite(n)) return String(n); var r=(Math.round(Math.abs(n)*100)/100).toFixed(2).split('.'), i=r[0], f=r[1].replace(/0+$/,'');
+      return (n<0&&(Number(i)||Number(f))?'-':'')+i.replace(/\B(?=(\d{3})+(?!\d))/g,',')+(f?'.'+f:''); }
+    function fmtEta(ms){ if(!isFinite(ms)) return '?'; if(ms<=0) return 'now'; if(ms<59500) return '~'+Math.max(1,Math.round(ms/1000))+'s';
+      var m=Math.round(ms/MIN), d=Math.floor(m/1440), h=Math.floor((m%1440)/60), mm=m%60;
+      if(d) return '~'+d+'d'+(h?' '+h+'h':''); if(h) return '~'+h+'h'+(mm?' '+mm+'m':''); return '~'+mm+'m'; }
+    function pct(p){ return p&&p.total>0?Math.min(100,(p.done/p.total)*100):0; }
+    // {progress} {pct} {done} {total} {unit} {eta}; {{ }} literal; unknown / unfillable left as typed (lib/activity.js renderText)
+    function renderText(t,progress,eta,now){
+      if(typeof t!=='string') return ''; if(t.indexOf('{')<0&&t.indexOf('}')<0) return t;
+      var p=progress&&isFinite(progress.done)&&isFinite(progress.total)&&progress.total>0?progress:null, unit=p&&typeof p.unit==='string'?p.unit:'';
+      return t.replace(/\{\{|\}\}|\{([a-z_]+)\}/g,function(m,k){
+        if(m==='{{') return '{'; if(m==='}}') return '}';
+        switch(k){
+          case 'progress': return !p?m:unit==='%'?fmtNum(p.done)+'%':fmtNum(p.done)+' of '+fmtNum(p.total)+(unit?' '+unit:'');
+          case 'pct': return p?Math.floor(pct(p)+1e-9)+'%':m;
+          case 'done': return p?fmtNum(p.done):m;
+          case 'total': return p?fmtNum(p.total):m;
+          case 'unit': return unit||m;
+          case 'eta': return isFinite(eta)&&eta>0?fmtEta(eta-now):'?';
+          default: return m;
+        } });
+    }
+    // the state to SHOW: gone comes from the bridge (data); stale = running/blocked, not finished, quiet > its window
+    function effState(item,parent,now,staleMin){
+      item=item||{}; var st=item.state||'running';
+      var hostDown=!!(item.host_down||(parent&&parent.host_down));
+      if(st==='gone') return { state:'gone', was:item.was||'running', gone:true, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null };
+      var finished=!!(item.finished_at||(parent&&parent.finished_at));
+      var win=item.stale_after_ms>0?item.stale_after_ms:((staleMin>0?staleMin:15)*MIN);
+      var at=!finished&&LIVE[st]?(item.last_activity||0)+win:null, stale=at!==null&&now>at;
+      return { state:stale?'stale':st, was:st, gone:false, hostDown:hostDown, stale:stale, live:at!==null&&!stale, staleAt:at, win:win };
+    }
+    function ringFrac(e,now){ return e&&e.live?Math.max(0,Math.min(1,(e.staleAt-now)/e.win)):0; }
+    function fmtDur(ms){ ms=Math.max(0,ms||0); var s=Math.round(ms/1000); if(s<60) return s+'s'; var m=Math.round(s/60); if(m<60) return m+'m';
+      var h=Math.floor(m/60), mm=m%60; if(h<24) return h+'h'+(mm?' '+mm+'m':''); var d=Math.floor(h/24), hh=h%24; return d+'d'+(hh?' '+hh+'h':''); }
+    function fmtClock(t,now){ var d=new Date(t), n=new Date(now==null?t:now), hm=p2(d.getHours())+':'+p2(d.getMinutes())+':'+p2(d.getSeconds());
+      return d.toDateString()===n.toDateString()?hm:(MON[d.getMonth()]+' '+d.getDate()+' '+hm); }
+    function fmtHM(t){ var d=new Date(t); return p2(d.getHours())+':'+p2(d.getMinutes()); }
+    function ago(ms){ return ms>=0?fmtDur(ms)+' ago':'in '+fmtDur(-ms); }
+    var CAP={running:'Running',blocked:'Blocked',idle:'Idle',done:'Done',failed:'Failed',stale:'Stale',gone:'Gone'};
+    // the glyph's hover text: ACTUAL times (never inline) — started, running for, last activity, stale-at; or done/failed at + took
+    function statusTip(item,parent,now,staleMin,host){
+      item=item||{}; var e=effState(item,parent,now,staleMin), L=[];
+      var start=item.started_at!=null?item.started_at:item.created_at;
+      var fin=item.finished_at||(item.current&&(item.state==='done'||item.state==='failed')?item.current.ts:null);
+      if(e.gone){
+        L.push(e.hostDown?('Host '+(host||'?')+' is down or unreachable — its agents show as gone'):'Gone — the session left the mesh');
+        L.push('was '+e.was+(item.gone_at?(e.hostDown?' · down since ':' · left at ')+fmtClock(item.gone_at,now):''));
+      } else if(e.state==='done'||e.state==='failed'){
+        L.push(CAP[e.state]+(fin?' at '+fmtClock(fin,now):'')+(fin&&start?' · took '+fmtDur(fin-start):''));
+      } else L.push(e.stale?('Stale — was '+e.was):CAP[e.state]);
+      if(start) L.push('started '+fmtClock(start,now)+(!e.gone&&e.state!=='done'&&e.state!=='failed'?' · running for '+fmtDur(now-start):''));
+      if(item.last_activity) L.push('last activity '+fmtClock(item.last_activity,now)+' ('+ago(now-item.last_activity)+')');
+      if(e.staleAt!=null) L.push((e.stale?'stale since ':'stale at ')+fmtClock(e.staleAt,now)+' ('+ago(now-e.staleAt)+')'+(item.stale_after_ms>0?' · its own stale_after '+fmtDur(item.stale_after_ms):''));
+      return L.join('\n');
+    }
+    function etaTip(eta,now){ return !(eta>0)?'':(eta>now?'ETA '+fmtEta(eta-now)+' (estimated), about '+fmtHM(eta):'ETA due now (estimated) — was about '+fmtHM(eta)); }
+    function barText(p){ return p.unit==='%'?fmtNum(p.done)+'%':fmtNum(p.done)+' of '+fmtNum(p.total)+(p.unit?' '+p.unit:''); }
+    function barTip(p){ if(!p) return ''; return barText(p)+' ('+Math.floor(pct(p)+1e-9)+'%) — '+(p.rollup?'rollup of its '+p.n+' context'+(p.n===1?'':'s'):'reported'); }
+    // 16px status glyph: centre = state (dot running/blocked/idle, tick done, cross failed); a LIVE item's ring empties as
+    // the time left before stale runs out (data-sa / data-win let the page tick it without a re-render)
+    function glyphSvg(e,now,kind){
+      var st=kind==='none'?'none':e.state, h='<svg class="gl s-'+st+'" viewBox="0 0 16 16" aria-hidden="true">';
+      var track='<circle cx="8" cy="8" r="6.5" fill="none" stroke="var(--track)" stroke-width="2"/>';
+      if(st==='none') return h+'<circle cx="8" cy="8" r="3" fill="none" stroke="var(--faint)" stroke-width="1.5"/></svg>';
+      if(st==='done') return h+'<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-opacity=".35" stroke-width="2"/><path d="M4.9 8.2 L7.1 10.4 L11.2 5.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      if(st==='failed') return h+'<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-opacity=".35" stroke-width="2"/><path d="M5.6 5.6 L10.4 10.4 M10.4 5.6 L5.6 10.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+      if(st==='gone') return h+'<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.2 2.2"/><circle cx="8" cy="8" r="2.6" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
+      if(st==='stale') return h+track+'<circle cx="8" cy="8" r="3" fill="currentColor"/></svg>';
+      if(st==='idle'||!e.live) return h+track+'<circle cx="8" cy="8" r="3" fill="currentColor"/></svg>';
+      var f=ringFrac(e,now);
+      return h+track+'<circle class="ring" cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="2" transform="rotate(-90 8 8)" stroke-dasharray="'+(C*f).toFixed(2)+' '+C.toFixed(2)+'" data-sa="'+e.staleAt+'" data-win="'+e.win+'"/><circle cx="8" cy="8" r="3" fill="currentColor"/></svg>';
+    }
+    // the delta store: a full board replaces it; a delta applies only on top of exactly the held (epoch, seq) → else resync
+    function applyMsg(st,m){
+      if(!m) return null;
+      if(m.type==='activity_board'){
+        if(m.ok===false){ st.error=m; return 'error'; }
+        st.units={}; st.epoch=m.epoch; st.seq=m.seq; st.error=null;
+        (m.upsert||[]).forEach(function(u){ if(u&&u.id) st.units[u.id]=u; });
+        if(m.head) st.head=m.head;
+        return 'full';
+      }
+      if(m.type==='activity_delta'){
+        if(!st.units||m.epoch!==st.epoch||m.base!==st.seq) return 'resync';
+        (m.remove||[]).forEach(function(id){ delete st.units[id]; });
+        (m.upsert||[]).forEach(function(u){ if(u&&u.id) st.units[u.id]=u; });
+        st.seq=m.seq; if(m.head) st.head=m.head;
+        return 'delta';
+      }
+      return null;
+    }
+    var LEVELS=['all','sessions','collapsed'];
+    function nextLevel(l){ var i=LEVELS.indexOf(l); return LEVELS[(i<0?0:i+1)%LEVELS.length]; }
+    function isActiveAgent(a){ return !!a&&!a.finished_at&&a.state!=='gone'; }
+    function selfActive(s){ return !!(s&&s.current&&!s.finished_at&&s.state!=='gone'); }
+    function pathKey(p){ return String(p==null?'':p).toLowerCase().replace(/\//g,'\u0001'); }
+    // projects (A→Z) → sessions (A→Z: a live tree must not reshuffle under the pointer) → agents (path order; a/b nests under a)
+    function buildTree(units,opts){
+      opts=opts||{}; var byKey={}, groups=[], projs={}, order=[];
+      Object.keys(units||{}).forEach(function(id){ var u=units[id]; if(u&&u.kind==='session'){ var g={s:u,agents:[]}; byKey[u.key]=g; groups.push(g); } });
+      Object.keys(units||{}).forEach(function(id){ var u=units[id]; if(u&&u.kind==='agent'&&byKey[u.group]) byKey[u.group].agents.push(u); });
+      groups.forEach(function(g){
+        g.agents.sort(function(a,b){ var x=pathKey(a.agent), y=pathKey(b.agent); if(x!==y) return x<y?-1:1; var hx=String(a.host).toLowerCase(), hy=String(b.host).toLowerCase(); return hx<hy?-1:hx>hy?1:0; });
+        var have={}; g.agents.forEach(function(a){ have[String(a.agent).toLowerCase()]=1; });
+        var list=g.agents.map(function(a){ var segs=String(a.agent).split('/'), d=0, pre=''; for(var i=1;i<segs.length;i++) if(have[segs.slice(0,i).join('/').toLowerCase()]){ d++; pre=segs.slice(0,i).join('/')+'/'; } return {a:a,depth:d,pre:pre}; });
+        var nActive=g.agents.filter(isActiveAgent).length;
+        if(opts.activeOnly){ list=list.filter(function(x){ return isActiveAgent(x.a); }); if(!list.length&&!(g.s.selves||[g.s.self]).some(selfActive)) return; }
+        var pk=String(g.s.project||'').toLowerCase();
+        if(!projs[pk]){ projs[pk]={key:pk,name:g.s.project,sessions:[],nSessions:0,nActive:0}; order.push(pk); }
+        projs[pk].sessions.push({s:g.s,agents:list,nActive:nActive}); projs[pk].nSessions++; projs[pk].nActive+=nActive;
+      });
+      order.sort(function(a,b){ return a<b?-1:a>b?1:0; });
+      return order.map(function(k){ var p=projs[k]; p.sessions.sort(function(x,y){ var a=String(x.s.session).toLowerCase(), b=String(y.s.session).toLowerCase(); return a<b?-1:a>b?1:0; }); return p; });
+    }
+    return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg,
+      applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, fmtDur:fmtDur, fmtClock:fmtClock, pct:pct };
+  })();
+  window.AimbAct=AimbAct;
+
+  // The VIEW. Subscribes ({type:"activity_sub"}) only while the Activity section is open and the tab visible, and
+  // unsubscribes on leave — a dashboard that never opens it costs the bridge nothing. Rows are diffed by key, so a
+  // re-render (every second: rings, stale) only replaces rows whose content changed and hover tooltips survive.
+  var ACT={ st:{units:null,seq:0,epoch:null,head:null,error:null}, on:false, skew:0, staleMin:null, activeOnly:false, defLevel:'all', levels:{}, open:{},
+    logs:{}, ents:{}, ref:0, pending:{}, tips:{}, acts:{}, kmap:{}, kn:0, timer:null };
+  window.AimbActView=ACT;   // tests + debugging
+  function anow(){ return Date.now()+ACT.skew; }
+  function actStaleMin(){ return ACT.staleMin!=null?ACT.staleMin:((ACT.st.head&&ACT.st.head.stale_after_min)||15); }
+  function actSend(o){ if(sock&&sock.readyState===1){ try{ sock.send(JSON.stringify(o)); return true; }catch(e){} } return false; }
+  function actWanted(){ var sec=document.querySelector('section[data-sec="activity"]'); return !!sec&&!sec.classList.contains('collapsed')&&!document.hidden&&!!sock&&sock.readyState===1; }
+  function actSync(){
+    var w=actWanted();
+    if(w&&!ACT.on){ ACT.on=actSend({type:'activity_sub'}); if(ACT.on&&!ACT.timer) ACT.timer=setInterval(function(){ if(ACT.on) actRender(); },1000); }
+    else if(!w&&ACT.on){ actSend({type:'activity_unsub'}); ACT.on=false; }
+    if(!ACT.on&&ACT.timer){ clearInterval(ACT.timer); ACT.timer=null; }
+    actRender();
+  }
+  function actOnMsg(m){
+    if(m.type==='activity_board'||m.type==='activity_delta'){
+      var r=AimbAct.applyMsg(ACT.st,m);
+      if(r==='resync'){ actSend({type:'activity_sub',resync:true}); return; }   // a lost delta: start again from a full board
+      if(ACT.st.head&&ACT.st.head.now) ACT.skew=ACT.st.head.now-Date.now();
+      if(r==='full'){ var sl=document.getElementById('actStale'); if(sl&&ACT.staleMin==null){ sl.value=String(Math.max(5,Math.min(60,actStaleMin()))); actStaleLabel(); } }
+      actRender();
+    } else if(m.type==='activity'){ var p=ACT.pending[m.ref]; if(p){ delete ACT.pending[m.ref]; p.cb(m.result); } }
+    else if(m.type==='activity_queued'){ var q=ACT.pending[m.ref]; if(q&&q.onq) q.onq(m); }
+  }
+  function actReq(query,cb,onq){ var ref='a'+(++ACT.ref); ACT.pending[ref]={cb:cb,onq:onq}; if(!actSend({type:'activity',ref:ref,query:query})){ delete ACT.pending[ref]; cb({ok:false,code:'disconnected',what:'not connected to the bridge'}); } }
+  function kOf(id){ return ACT.kmap[id]||(ACT.kmap[id]='k'+(++ACT.kn)); }   // a short DOM key per stable id (ids hold quotes)
+  function actLoadLog(key,q,more){
+    var L=ACT.logs[key]||(ACT.logs[key]={entries:[],next:null,loading:false,loaded:false,err:null,queued:null,auto:0});
+    if(L.loading) return;
+    L.loading=true; L.err=null; L.queued=null;
+    var lq={}; for(var k in q) if(q[k]!=null) lq[k]=q[k]; lq.limit=50; if(more&&L.next) lq.cursor=L.next;
+    actReq({log:lq},function(r){
+      L.loading=false; L.queued=null;
+      if(!r||r.ok===false){ L.err=r||{code:'no-answer'}; }
+      else { var lg=r.log||{}; L.entries=L.entries.concat(lg.entries||[]); L.next=lg.next_cursor||null; L.loaded=true; L.total=lg.total; L.host=lg.host||r.from_host||null;
+        if(!(lg.entries||[]).length&&L.next&&L.auto<5){ L.auto++; actRender(); actLoadLog(key,q,true); return; }   // a scan-bounded empty page: go on
+        L.auto=0; }
+      actRender();
+    },function(info){ L.queued=info; actRender(); });
+    actRender();
+  }
+  function actLoadEntry(id,host){
+    var E=ACT.ents[id]||(ACT.ents[id]={loading:false,entry:null,err:null,queued:null});
+    if(E.loading||E.entry) return;
+    E.loading=true;
+    actReq({entry:{id:id,host:host}},function(r){ E.loading=false; E.queued=null; if(!r||r.ok===false) E.err=r||{code:'no-answer'}; else E.entry=r.entry; actRender(); },function(info){ E.queued=info; actRender(); });
+  }
+  function hostTags(hosts,down){ return (hosts||[]).map(function(h){ var d=(down||[]).indexOf(h)>=0; return '<span class="htag'+(d?' down':'')+'">'+esc(h)+'</span>'; }).join(''); }
+  function barHtml(p,tipKey){ if(!p) return '<span class="pb nil"></span>'; return '<span class="pb'+(p.rollup?' roll':'')+'" data-tip="'+tipKey+'"><i style="width:'+AimbAct.pct(p).toFixed(1)+'%"></i></span>'; }
+  function pillsHtml(e,noLine,hostDown){
+    var h='';
+    if(!noLine){ if(e.state==='blocked') h+='<span class="pill blocked">blocked</span>'; if(e.state==='failed') h+='<span class="pill failed">failed</span>'; if(e.stale) h+='<span class="pill stale">stale</span>'; }
+    if(e.gone&&!e.hostDown&&!hostDown) h+='<span class="pill gone">gone</span>';
+    if(e.hostDown||hostDown) h+='<span class="pill hostdown" data-tip="hd">host down</span>';
+    return '<span class="pills">'+h+'</span>';
+  }
+  function actRender(){
+    var tree=document.getElementById('acttree'); if(!tree) return;
+    var tag=document.getElementById('acttag'), now=anow(), sm=actStaleMin(), rows=[];
+    ACT.tips={ hd:'Host down: its gateway sent a going-down notice or its link dropped — every agent on that host shows as gone until it returns (unlike gone: a session that left)' }; ACT.acts={};
+    function row(id,cls,d,html,act,tip){ var k=kOf(id); rows.push({k:k,cls:cls,d:d,html:html}); if(act) ACT.acts[k]=act; }
+    function tipK(id,f){ var k='t'+kOf(id); ACT.tips[k]=f; return k; }
+    var head=ACT.st.head||{};
+    if(!ACT.on&&!ACT.st.units){ tree.innerHTML='<div class="act-msg">'+(sock&&sock.readyState===1?'Open this section to watch the activity board.':'Not connected to the bridge.')+'</div>'; if(tag) tag.textContent=''; return; }
+    if(ACT.st.error){ tree.innerHTML='<div class="act-msg">'+esc(ACT.st.error.what||ACT.st.error.code)+'</div>'; if(tag) tag.textContent='off'; return; }
+    if(!ACT.st.units){ tree.innerHTML='<div class="act-msg"><span class="spin"></span>loading the activity board…</div>'; return; }
+    var projs=AimbAct.buildTree(ACT.st.units,{activeOnly:ACT.activeOnly}), nAct=0;
+    projs.forEach(function(p){ nAct+=p.nActive; });
+    if(tag) tag.textContent=projs.length+(projs.length===1?' project':' projects')+' · '+nAct+' active agent'+(nAct===1?'':'s')+(head.loading?' · loading':'');
+    // ---- an entity's expansion: its Log row (all contexts), then each context (expands into its own log)
+    function logRows(key,q,d,label,lbTip){
+      var open=!!ACT.open[key], L=ACT.logs[key];
+      row(key,'ar click lg',d,'<span class="chv">'+(open?'▾':'▸')+'</span><span class="tgt">≡</span><span class="nm">Log</span><span class="ln" data-tip="'+tipK(key,lbTip)+'">'+esc(label)+'</span>',
+        function(){ ACT.open[key]=!open; if(!open){ delete ACT.logs[key]; actLoadLog(key,q,false); } actRender(); });   // each open fetches a fresh first page
+      if(!open) return;
+      if(L) L.entries.forEach(function(x){
+        var ek=key+'|e|'+x.id, can=!!(x.has_details||x.has_data), eo=can&&!!ACT.open[ek], cx=String(x.context||'root');
+        row(ek,'ar le'+(can?' click':''),d+1,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span><span class="dot bg-'+esc(x.state||'running')+'" data-tip="'+tipK(ek+'s',(x.state||'running')+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"></span>'+
+          '<span class="ctag'+(x.current?' cur':'')+'">@'+(x.current?'~':'')+esc(cx)+'</span><span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(can?'<span class="ic" data-tip="'+tipK(ek+'i','has '+(x.has_details?'details':'')+(x.has_details&&x.has_data?' + ':'')+(x.has_data?'data':''))+'">⋯</span>':''),
+          can?function(){ ACT.open[ek]=!eo; if(!eo) actLoadEntry(x.id,q.host); actRender(); }:null);
+        if(eo){ var E=ACT.ents[x.id]||{}, inner='';
+          if(E.entry){ if(E.entry.details) inner+='<div class="k">details</div><pre>'+esc(E.entry.details)+'</pre>'; if(E.entry.data!=null) inner+='<div class="k">data</div><pre>'+esc(JSON.stringify(E.entry.data,null,2))+'</pre>'; if(!inner) inner='<span class="empty">no details or data</span>'; if(E.entry.note) inner+='<div class="k">'+esc(E.entry.note)+'</div>'; }
+          else if(E.err) inner='<span class="empty">'+esc(E.err.what||E.err.code)+'</span>';
+          else inner='<span class="spin"></span>'+(E.queued?'queued — about '+AimbAct.fmtDur(E.queued.wait_ms):'loading…');
+          rows.push({k:kOf(ek+'|d'),cls:'ad',d:d+1,html:inner}); }
+      });
+      var mk=key+'|more';
+      if(L&&L.loading) row(mk,'ar more',d+1,'<span class="chv"></span><span class="nm"><span class="spin"></span>'+(L.queued?'queued — about '+esc(AimbAct.fmtDur(L.queued.wait_ms))+(L.queued.host?' (host '+esc(L.queued.host)+' serves a few fetches a second)':''):'loading…')+'</span>');
+      else if(L&&L.err) row(mk,'ar more click',d+1,'<span class="chv"></span><span class="nm">'+esc((L.err.code==='busy'?'busy: ':'')+(L.err.what||L.err.code))+' — click to retry</span>',function(){ actLoadLog(key,q,L.loaded); });
+      else if(L&&L.next) row(mk,'ar more click',d+1,'<span class="chv"></span><span class="nm">load older…</span>',function(){ actLoadLog(key,q,true); });
+      else if(L&&L.loaded&&!L.entries.length) row(mk,'ar more',d+1,'<span class="chv"></span><span class="nm">no entries</span>');
+    }
+    function entityBody(ent,s,ek,d,hostLbl){
+      var q={session:s.session,project:s.project,user:s.user||null,host:ent.host,agent:ent.agent||null};
+      var n=ent.log&&ent.log.entries!=null?ent.log.entries:null;
+      logRows('log|'+ek,q,d,(n!=null?n+' entr'+(n===1?'y':'ies')+', all contexts':'all contexts')+(hostLbl?' · '+ent.host:''),
+        n!=null?('in memory on '+ent.host+(ent.log.dropped?' (+'+ent.log.dropped+' older, paged from the day files)':'; older entries page in from the day files')):('history lives on '+ent.host+' — fetched on demand'));
+      (ent.contexts||[]).forEach(function(c){
+        if(c.name==='root') return;
+        var ck='ctx|'+ek+'|'+c.name, co=!!ACT.open[ck], ce=AimbAct.effState(c,ent,now,sm);
+        row(ck,'ar click'+(ce.stale?' stale':'')+(ce.gone?' gone':''),d,'<span class="chv">'+(co?'▾':'▸')+'</span><span class="tgt" title="context">◎</span>'+
+          '<span data-tip="'+tipK(ck+'g',function(){ return AimbAct.statusTip(c,ent,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.glyphSvg(ce,now)+'</span><span class="nm">@'+esc(c.name)+'</span>'+
+          (c.current?'<span class="ln">'+esc(AimbAct.renderText(c.current.text,c.progress,c.eta_at,now))+'</span>':'<span class="ln none">no current line</span>')+
+          barHtml(c.progress,tipK(ck+'b',AimbAct.barTip(c.progress)))+(c.eta_at?'<span class="ic" data-tip="'+tipK(ck+'e',function(){ return AimbAct.etaTip(c.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+'<span class="ic nil"></span>'+pillsHtml(ce,false,false),
+          function(){ ACT.open[ck]=!co; actRender(); });
+        if(co) logRows('clog|'+ek+'|'+c.name,{session:q.session,project:q.project,user:q.user,host:q.host,agent:q.agent,context:'@"'+c.name+'"'},d+1,'@'+c.name+' only',
+          'this context\'s entries, newest first');
+      });
+    }
+    function entityRow(id,cls,d,ent,nameHtml,tagsHtml,parentDown,bell,isSelf){
+      var e=AimbAct.effState(ent,null,now,sm), noLine=isSelf&&!ent.current;
+      var line=ent.current?'<span class="ln">'+esc(AimbAct.renderText(ent.current.text,ent.progress,ent.eta_at,now))+'</span>':'<span class="ln none">'+(isSelf?'no status line of its own':'no current line')+'</span>';
+      var open=!!ACT.open[id];
+      row(id,cls+(e.stale&&!noLine?' stale':'')+(e.gone?' gone':''),d,'<span class="chv">'+(open?'▾':'▸')+'</span>'+
+        '<span data-tip="'+tipK(id+'g',function(){ return noLine&&!e.gone?'No status line of its own (report @~root to set one)':AimbAct.statusTip(ent,null,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':null)+'</span>'+
+        nameHtml+tagsHtml+line+barHtml(ent.progress,tipK(id+'b',AimbAct.barTip(ent.progress)))+
+        (ent.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(ent.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+
+        (bell?'<span class="ic" data-tip="'+tipK(id+'d','Doorbell armed')+'">🔔</span>':'<span class="ic nil"></span>')+pillsHtml(e,noLine,parentDown),
+        function(){ ACT.open[id]=!open; actRender(); });
+      return open;
+    }
+    if(!projs.length) rows.push({k:'empty',cls:'act-msg',d:0,html:ACT.activeOnly?'Nothing active right now (untick “active only” to see finished agents).':'No agent activity on the mesh yet — sessions report with the log tool or tools/aimb-log.mjs.'});
+    projs.forEach(function(p){
+      var pk='proj|'+p.key, lvl=ACT.levels[p.key]||ACT.defLevel;
+      row(pk,'ar click proj',0,'<span class="chv">'+(lvl==='all'?'▾':lvl==='sessions'?'▿':'▸')+'</span><span class="nm" data-tip="'+tipK(pk,'Click: all → sessions only → collapsed (now: '+(lvl==='all'?'all':lvl==='sessions'?'sessions only':'collapsed')+')')+'">📁 '+esc(pj(p.name)||'(no project)')+'</span>'+
+        '<span class="cnt">'+p.nSessions+' session'+(p.nSessions===1?'':'s')+' · '+p.nActive+' active agent'+(p.nActive===1?'':'s')+'</span>',
+        function(){ ACT.levels[p.key]=AimbAct.nextLevel(lvl); actRender(); });
+      if(lvl==='collapsed') return;
+      p.sessions.forEach(function(x){
+        var s=x.s, sid='sess|'+s.key, hosts=s.hosts||(s.host?[s.host]:[]);
+        var self=s.self||{}, sOpen=entityRow(sid,'ar click',1,self,'<span class="nm">'+esc(nm(s.session))+'</span>',hostTags(hosts,s.hosts_down),!!(s.hosts_down&&s.hosts_down.length),!!s.bell,true);
+        if(sOpen) (s.selves||[self]).forEach(function(se){ entityBody(se,s,'self|'+s.key+'|'+se.host,2,!!s.multi_host); });
+        if(lvl!=='all') return;
+        x.agents.forEach(function(y){
+          var a=y.a, d=2+y.depth, path=String(a.agent), rest=y.pre?path.slice(y.pre.length):path;
+          var aOpen=entityRow(a.id,'ar click',d,a,'<span class="nm path" title="'+esc(path).replace(/"/g,'&quot;')+'">'+(y.pre?'<span class="pre">'+esc(y.pre)+'</span>':'')+esc(rest)+'</span>',s.multi_host?hostTags([a.host],a.host_down?[a.host]:[]):'',false,false,false);
+          if(aOpen) entityBody(a,s,a.id,d+1,false);
+        });
+      });
+    });
+    actReconcile(tree,rows);
+    actRings(tree,now);
+    var segs=document.querySelectorAll('#actDepth button'), keys=projs.map(function(p){ return ACT.levels[p.key]||ACT.defLevel; });
+    for(var i=0;i<segs.length;i++){ var l=segs[i].getAttribute('data-l'); segs[i].className=(keys.length?keys.every(function(v){ return v===l; }):ACT.defLevel===l)?'on':''; }
+  }
+  function actReconcile(tree,rows){
+    var have={}, kids=tree.children;
+    for(var i=0;i<kids.length;i++){ var kk=kids[i].getAttribute('data-k'); if(kk) have[kk]=kids[i]; }
+    var want={};
+    rows.forEach(function(r,i){
+      want[r.k]=1;
+      var el=have[r.k];
+      if(!el){ el=document.createElement('div'); el.setAttribute('data-k',r.k); }
+      if(el._h!==r.html){ el.innerHTML=r.html; el._h=r.html; }
+      if(el.className!==r.cls) el.className=r.cls;
+      var dv=String(r.d||0); if(el.style.getPropertyValue('--d')!==dv) el.style.setProperty('--d',dv);
+      if(tree.children[i]!==el) tree.insertBefore(el,tree.children[i]||null);
+    });
+    for(var j=tree.children.length-1;j>=0;j--){ var c=tree.children[j], ck=c.getAttribute('data-k'); if(!ck||!want[ck]) tree.removeChild(c); }
+  }
+  function actRings(tree,now){   // the ring ticks without a re-render
+    var C=2*Math.PI*6.5, rs=tree.querySelectorAll('circle.ring');
+    for(var i=0;i<rs.length;i++){ var sa=Number(rs[i].getAttribute('data-sa')), win=Number(rs[i].getAttribute('data-win')), f=win>0?Math.max(0,Math.min(1,(sa-now)/win)):0;
+      rs[i].setAttribute('stroke-dasharray',(C*f).toFixed(2)+' '+C.toFixed(2)); }
+  }
+  function actStaleLabel(){ var v=document.getElementById('actStaleV'); if(v) v.textContent=actStaleMin()+'m'+(ACT.staleMin==null?' (bridge default)':''); }
+  function wireActivity(){
+    var tree=document.getElementById('acttree'); if(!tree) return;
+    tree.addEventListener('click',function(ev){ var el=ev.target&&ev.target.closest?ev.target.closest('[data-k]'):null; var f=el&&ACT.acts[el.getAttribute('data-k')]; if(f){ ev.preventDefault(); f(); } });
+    tree.addEventListener('mouseover',function(ev){ var el=ev.target&&ev.target.closest?ev.target.closest('[data-tip]'):null; if(!el) return; var t=ACT.tips[el.getAttribute('data-tip')]; if(t!=null){ var s=typeof t==='function'?t():t; if(s&&el.getAttribute('title')!==s) el.setAttribute('title',s); } });
+    var ao=document.getElementById('actActive');
+    try{ ACT.activeOnly=localStorage.getItem('aimb.act.active')==='1'; }catch(e){}
+    if(ao){ ao.checked=ACT.activeOnly; ao.addEventListener('change',function(){ ACT.activeOnly=ao.checked; try{ localStorage.setItem('aimb.act.active',ao.checked?'1':'0'); }catch(e){} actRender(); }); }
+    var sl=document.getElementById('actStale');
+    if(sl) sl.addEventListener('input',function(){ ACT.staleMin=Number(sl.value)||15; actStaleLabel(); actRender(); });
+    actStaleLabel();
+    var segs=document.querySelectorAll('#actDepth button');
+    for(var i=0;i<segs.length;i++) segs[i].addEventListener('click',function(ev){ var l=ev.currentTarget.getAttribute('data-l'); ACT.defLevel=l; Object.keys(ACT.levels).forEach(function(k){ ACT.levels[k]=l; });
+      AimbAct.buildTree(ACT.st.units||{},{}).forEach(function(p){ ACT.levels[p.key]=l; }); actRender(); });
+    var ex=document.getElementById('actExpand'), co=document.getElementById('actCollapse');
+    if(ex) ex.addEventListener('click',function(){ AimbAct.buildTree(ACT.st.units||{},{activeOnly:ACT.activeOnly}).forEach(function(p){ ACT.levels[p.key]='all'; p.sessions.forEach(function(x){ ACT.open['sess|'+x.s.key]=true; x.agents.forEach(function(y){ ACT.open[y.a.id]=true; }); }); }); ACT.defLevel='all'; actRender(); });
+    if(co) co.addEventListener('click',function(){ ACT.open={}; actRender(); });
+    var lg=document.getElementById('actlegend');
+    if(lg){ var t=Date.now(), mk=function(st,label){ var e=st==='running'||st==='blocked'?{state:st,live:true,staleAt:t+6*60000,win:10*60000}:{state:st,live:false,gone:st==='gone'}; return '<span>'+AimbAct.glyphSvg(e,t)+label+'</span>'; };
+      lg.innerHTML=mk('running','running')+mk('blocked','blocked')+mk('idle','idle')+mk('done','done')+mk('failed','failed')+mk('stale','stale')+mk('gone','gone')+
+        '<span>· the ring is the time left before an item goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of its contexts · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'; }
+    document.addEventListener('visibilitychange',actSync);
+  }
+
   // ------------------------------------------------ ws
   function connect(){
     var ws; try { ws=new WebSocket(wsUrl); } catch(e){ retry(); return; }
@@ -669,27 +1077,30 @@
     ws.onopen=function(){ ws.send(JSON.stringify({type:'hello',kind:'dashboard',instance:'dash-'+Math.random().toString(16).slice(2,8),token:token})); };
     ws.onmessage=function(ev){ var m; try{ m=JSON.parse(ev.data);}catch(e){return;}
       if(m.project_names) PN=m.project_names;   // #71: the canonical project spellings ride welcome + every roster push
-      if(m.type==='welcome'){ pip.classList.add('on'); backoff=1000; gw.textContent='gateway: '+m.gateway; renderProf(m); last=m; setComputers(m); setTables(m); drawMap(m); }
+      if(m.type==='welcome'){ pip.classList.add('on'); backoff=1000; gw.textContent='gateway: '+m.gateway; renderProf(m); last=m; setComputers(m); setTables(m); drawMap(m); ACT.on=false; actSync(); }   // #70 step 5: re-subscribe on a new socket
+      else if(m.type==='activity_board'||m.type==='activity_delta'||m.type==='activity'||m.type==='activity_queued'){ actOnMsg(m); }
       else if(m.type==='roster'){ last.sessions=m.sessions; last.pages=m.pages; last.hosts=m.hosts||last.hosts; last.gateway=m.gateway||last.gateway; setComputers(last); setTables(last); drawMap(last); }
       else if(m.type==='persistence'){ setPersistence(m.snapshot); }
       else if(m.type==='trace'){ addTrace(m.trace); }
       else if(m.type==='trace_history'){ (m.traces||[]).forEach(addTrace); } };
-    ws.onclose=function(){ pip.classList.remove('on'); gw.textContent='disconnected — retrying…'; retry(); };
+    ws.onclose=function(){ pip.classList.remove('on'); gw.textContent='disconnected — retrying…'; ACT.on=false; actRender(); retry(); };
     ws.onerror=function(){ try{ws.close();}catch(e){} };
     function retry(){ setTimeout(connect, backoff); backoff=Math.min(backoff*2,15000); }
   }
   // collapsible top-level sections — click a header to show/hide; the choice persists per section.
-  var DEFAULT_COLLAPSED={ map:1 };   // sections collapsed by default (until the user sets a preference)
+  var DEFAULT_COLLAPSED={ map:1, activity:1 };   // sections collapsed by default (until the user sets a preference); #70: a closed Activity costs nothing
   function wireSections(){
     var secs=document.querySelectorAll('section.sec');
     for(var i=0;i<secs.length;i++){ (function(sec){
       var h=sec.querySelector('.sech'), chev=h.querySelector('.chev'), ds=sec.getAttribute('data-sec'), key='aimb.sec.'+ds;
       var stored=null; try{ stored=localStorage.getItem(key); }catch(e){}
       if(stored===null ? !!DEFAULT_COLLAPSED[ds] : stored==='1') sec.classList.add('collapsed');
+      if(location.hash==='#'+ds) sec.classList.remove('collapsed');   // e.g. dashboard.html#activity opens it
       chev.textContent=sec.classList.contains('collapsed')?'▸':'▾';
       h.addEventListener('click',function(){
         var c=sec.classList.toggle('collapsed'); chev.textContent=c?'▸':'▾';
         try{ localStorage.setItem(key,c?'1':'0'); }catch(e){}
+        if(ds==='activity') actSync();   // #70 step 5: subscribe on open, unsubscribe on leave
       });
     })(secs[i]); }
   }
@@ -708,6 +1119,7 @@
     if(gb){ gb.addEventListener('click',function(e){ e.stopPropagation(); }); gb.addEventListener('mousedown',function(e){ e.stopPropagation(); }); }
   }
   wireShowBridges();
+  wireActivity();
   connect();
 })();
 </script>

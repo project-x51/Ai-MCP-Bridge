@@ -1195,5 +1195,90 @@ function firstDiff(a, b) { if (a === b) return ''; let i = 0; while (i < a.lengt
   check('paging: without a cursor or caps the view is unchanged (all, newest first)', A.logView(st, { session: 'Bridget', agent: 'p' }, T0 + MIN).entries.length === 2)
 }
 
+// ================================================================= step 5 (v1.61.0): the dashboard's raw board, deltas, bells, host down, paging into files
+{
+  const here = mk({}, 'HOST-A'), there = mk({}, 'HOST-B')
+  say(here, S1, { agent: 'w1', text: '@~root seeding {progress}', progress: '2/8 tiles', eta: '20m' }, T0)
+  say(there, { ...S1, session: 'Remote' }, { agent: 'r1', text: '@~root over there' }, T0)
+  A.applySlice(here, 'HOST-B', { full: true, epoch: 'e', seq: 1, sessions: A.snapshot(there).sessions })
+  const raw = A.boardView(here, T0 + 40 * MIN, { raw: true }), w1 = raw.find(g => g.session === 'Bridget').agents[0]
+  check('raw board: the REPORTED state even past the stale window (the page computes stale), no rendered / stale_at / visible', w1.state === 'running' && !('stale_at' in w1) && !('visible' in w1) && w1.current.text === 'seeding {progress}' && !('rendered' in w1.current)
+    && w1.last_activity === T0 && w1.progress.done === 2 && w1.eta_at === T0 + 20 * MIN, J(w1))
+  check('raw board: the non-raw (tool) view is unchanged — stale + rendered', A.boardView(here, T0 + 40 * MIN).find(g => g.session === 'Bridget').agents[0].state === 'stale' && A.boardView(here, T0).find(g => g.session === 'Bridget').agents[0].current.rendered === 'seeding 2 of 8 tiles')
+  // units + deltas
+  const pub = new Map(), u1 = A.dashUnits(raw)
+  const f = A.planDashDelta(pub, u1, { full: true })
+  check('dash units: one per session group + one per agent, stable ids, kinds, group keys', u1.size === 4 && f.upsert.filter(u => u.kind === 'session').length === 2 && f.upsert.filter(u => u.kind === 'agent').every(u => u.group && JSON.parse(u.id)[0] === 'a')
+    && f.upsert.findIndex(u => u.kind === 'agent') > f.upsert.map(u => u.kind).lastIndexOf('session'), J(f.upsert.map(u => [u.kind, u.id])))
+  check('dash delta: nothing changed → empty (time passing is not a change in the raw form)', A.planDashDelta(pub, A.dashUnits(A.boardView(here, T0 + 50 * MIN, { raw: true }))).empty)
+  say(here, S1, { agent: 'w1', context: '@~root', text: 'seeding {progress}', progress: '3/8 tiles', log: false }, T0 + MIN)
+  const d1 = A.planDashDelta(pub, A.dashUnits(A.boardView(here, T0 + MIN, { raw: true })))
+  check('dash delta: a bar update → only that agent (and its session header, whose last_activity moved)', d1.upsert.length === 2 && d1.upsert.some(u => u.kind === 'agent' && u.agent === 'w1' && u.progress.done === 3) && !d1.remove.length, J(d1.upsert.map(u => u.agent || u.session)))
+  A.dropOrigin(here, 'HOST-B')
+  const d2 = A.planDashDelta(pub, A.dashUnits(A.boardView(here, T0 + MIN, { raw: true })))
+  check('dash delta: a group that left → its session + agent ids removed', d2.remove.length === 2 && !d2.upsert.length, J(d2))
+  // host down vs gone
+  A.applySlice(here, 'HOST-B', { full: true, epoch: 'e2', seq: 1, sessions: A.snapshot(there).sessions })
+  A.markSessionGone(here, S1, T0 + 2 * MIN)
+  A.markOriginDown(here, 'HOST-B', T0 + 3 * MIN)
+  const bd = A.boardView(here, T0 + 3 * MIN, { raw: true }), gL = bd.find(g => g.session === 'Bridget'), gR = bd.find(g => g.session === 'Remote')
+  check('gone vs host down: a session that left → gone, no host_down; a host down → gone + host_down + the group\'s hosts_down', gL.agents[0].state === 'gone' && gL.agents[0].was === 'running' && !gL.agents[0].host_down && !gL.hosts_down
+    && gR.agents[0].state === 'gone' && gR.agents[0].host_down === T0 + 3 * MIN && J(gR.hosts_down) === J(['HOST-B']) && gR.self.host_down === T0 + 3 * MIN, J([gL.agents[0], gR]))
+  check('host down: the tool view carries host_down too', A.boardView(here, T0 + 3 * MIN).find(g => g.session === 'Remote').agents[0].host_down === T0 + 3 * MIN)
+  // bells
+  const b = mk({}, 'HOST-A')
+  say(b, S1, { text: '@~root hi' }, T0); say(b, { ...S1, session: 'Other', project: 'X' }, { text: '@~root yo' }, T0)
+  check('bells: a watch by name (+ project) marks the matching local session only; a change is reported once', A.setBells(b, [{ name: 'BRIDGET', project: 'aimb' }]) === true && A.setBells(b, [{ name: 'bridget', project: 'AIMB' }]) === false
+    && A.getSession(b, S1).bell === true && !A.getSession(b, { ...S1, session: 'Other', project: 'X' }).bell)
+  check('bells: a watch naming another project does not match; none → cleared', A.setBells(b, [{ name: 'Bridget', project: 'Other' }]) === true && !A.getSession(b, S1).bell && A.setBells(b, []) === false)
+  A.setBells(b, [{ name: 'other' }])
+  const snapB = A.snapshot(b)
+  check('bells: the flag rides the gossip (snapshot / header) and survives a full + a delta on the receiver', snapB.sessions.find(s => s.session === 'Other').bell === true && !('bell' in snapB.sessions.find(s => s.session === 'Bridget')))
+  const rcv = mk({}, 'HOST-Z'), bp = A.createPub()
+  A.applySlice(rcv, 'HOST-A', { full: true, epoch: 'q', seq: 1, ...A.planSlice(b, bp, { full: true }).body })
+  const bell1 = A.boardView(rcv, T0).find(g => g.session === 'Other').bell
+  A.setBells(b, [{ name: 'bridget' }])
+  A.applySlice(rcv, 'HOST-A', { epoch: 'q', seq: 2, base: 1, ...A.planSlice(b, bp).body })
+  const bv2 = A.boardView(rcv, T0)
+  check('bells: ... the receiver\'s board shows them, and a header-only delta moves them', bell1 === true && bv2.find(g => g.session === 'Bridget').bell === true && !bv2.find(g => g.session === 'Other').bell, J(bv2.map(g => [g.session, g.bell])))
+  // paging into the files: cursors, matching, the continuation descriptor
+  check('file cursor: format + parse (and garbage → null)', A.fileCursor('2026-10-02', 1234) === 'f1.2026-10-02.1234' && J(A.parseFileCursor('f1.2026-10-02.1234')) === J({ day: '2026-10-02', offset: 1234 })
+    && A.parseFileCursor('act_x_1-2') === null && A.parseFileCursor('f1.2026-1-2.5') === null)
+  const pst = mk({ log_entries_per_agent: 10 }), pid = []
+  for (let i = 0; i < 14; i++) pid.push(say(pst, S1, { agent: 'deep', text: `@step e${i}` }, T0 + i * 1000).id)
+  const m1 = A.logView(pst, { session: 'Bridget', agent: 'deep', limit: 6 }, T0 + MIN, { files: true })
+  const m2 = A.logView(pst, { session: 'Bridget', agent: 'deep', limit: 6, cursor: m1.next_cursor }, T0 + MIN, { files: true })
+  check('files: memory first; a page that exhausts memory with room left carries a files descriptor (target, before = the oldest kept, room)', !m1.files && m1.entries.length === 6 && m2.entries.length === 4 && m2.files?.need === 2
+    && m2.files.before.ts === T0 + 4000 && m2.files.before.ids.has(pid[4]) && m2.files.target.agent === 'deep' && m2.files.target.session === 'Bridget' && m2.files.from === null, J(m2.files))
+  const m3 = A.logView(pst, { session: 'Bridget', agent: 'deep', limit: 4, cursor: m1.next_cursor }, T0 + MIN, { files: true })
+  check('files: a page filled exactly at the end of memory → its last id as the cursor (the next page starts in the files)', !m3.files && m3.entries.length === 4 && m3.next_cursor === pid[4])
+  check('files: without opts.files the old view is unchanged (no descriptor, null cursor at the end)', !A.logView(pst, { session: 'Bridget', agent: 'deep', limit: 4, cursor: m1.next_cursor }, T0 + MIN).files
+    && A.logView(pst, { session: 'Bridget', agent: 'deep', limit: 4, cursor: m1.next_cursor }, T0 + MIN).next_cursor === null)
+  const fc = A.logView(pst, { session: 'Bridget', agent: 'deep', cursor: 'f1.2026-10-01.99' }, T0 + MIN, { files: true })
+  check('files: a file cursor → no memory entries, a descriptor starting there; refused without opts.files', fc.ok && fc.entries.length === 0 && J(fc.files.from) === J({ day: '2026-10-01', offset: 99 })
+    && A.logView(pst, { session: 'Bridget', agent: 'deep', cursor: 'f1.2026-10-01.99' }, T0 + MIN).code === 'bad-cursor')
+  const ent = say(mk(), S1, { agent: 'deep', text: '@~step x {progress}', progress: '1/2', details: 'D' }, T0).entry
+  const tgt = m2.files.target
+  check('files: fileEntryMatches — same entity (case-insensitive) yes; another agent / the session itself / a cp / a context filter no', A.fileEntryMatches(ent, tgt) && A.fileEntryMatches({ ...ent, session: 'BRIDGET', agent: 'DEEP' }, tgt)
+    && !A.fileEntryMatches({ ...ent, agent: 'other' }, tgt) && !A.fileEntryMatches({ ...ent, agent: null }, tgt) && !A.fileEntryMatches({ ...ent, kind: 'cp', k: 1 }, tgt)
+    && A.fileEntryMatches(ent, { ...tgt, context: 'step' }) && !A.fileEntryMatches(ent, { ...tgt, context: 'root' }) && A.fileEntryMatches({ ...ent, agent: null }, { ...tgt, agent: null }))
+  const fv = A.fileEntryView(ent, T0)
+  check('files: fileEntryView = the in-memory entry shape + rendered as recorded (no details/data, has_details flag)', fv.rendered === 'x 1 of 2' && fv.has_details === true && !('details' in fv) && fv.current === true && fv.context === 'step', J(fv))
+}
+{
+  const os = await import('node:os'), fs = await import('node:fs'), path = await import('node:path')
+  const { create } = await import('../facets/persistence/file.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aimb-actunit5-'))
+  const F = create({ CFG: {}, HERE: dir, env: { AI_BRIDGE_PERSIST_DIR: dir } }).activity
+  const locs = []
+  for (const d of ['2026-09-29', '2026-09-30']) for (let i = 0; i < 5; i++) locs.push({ d, i, ...(await F.append('H', d, J({ n: `${d}#${i}` }))) })
+  const from = locs.find(l => l.d === '2026-09-30' && l.i === 2), got = []
+  for await (const r of F.readBackwards('H', { before: { day: from.day, offset: from.offset }, chunk: 7 })) got.push(r.rec.n)
+  check('facet: readBackwards({ before }) starts below that offset of that day, then earlier days (newer skipped)', J(got) === J(['2026-09-30#1', '2026-09-30#0', '2026-09-29#4', '2026-09-29#3', '2026-09-29#2', '2026-09-29#1', '2026-09-29#0']), J(got))
+  const got2 = []; for await (const r of F.readBackwards('H', { before: { day: '2026-09-29', offset: 0 } })) got2.push(r)
+  check('facet: before the first byte of the oldest day → nothing', got2.length === 0)
+  fs.rmSync(dir, { recursive: true, force: true })
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
