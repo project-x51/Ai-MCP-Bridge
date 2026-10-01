@@ -140,15 +140,16 @@ export const TOOLS = [
       data: { type: ['object', 'array', 'string'], description: 'optional JSON ≤16 KB, fetched on demand — keep it small' },
       log: { type: 'boolean', description: 'true (default) = append to the log + the host\'s daily file; false = update the board only (frequent progress updates)' } },
       required: ['as', 'secret'] } },
-  { name: 'activity', description: 'Read this host\'s AGENT ACTIVITY BOARD (#70): sessions → agents → contexts with their current lines (`text` = the raw template, `rendered` = with {progress} / {eta} … filled from the live bar), the effective state (stale / gone computed; `was` = the reported state), rollup progress, ETA, visibility and log counts. ' +
-      'Filters: project, session, agent (that path and everything under it), active_only (hide finished/gone agents). ' +
-      'log:{ session, project?, agent?, context?, limit? } returns that agent\'s (omit agent = the session\'s own) in-memory log NEWEST FIRST, each entry rendered against the progress/ETA recorded on it. entry:{ id } returns one entry in full with its details/data (from memory, or this host\'s daily log file). ' +
-      'This host only for now (other hosts arrive with gossip). Times are ms epochs.',
+  { name: 'activity', description: 'Read the mesh-wide AGENT ACTIVITY BOARD (#70): sessions → agents → contexts with their current lines (`text` = the raw template, `rendered` = with {progress} / {eta} … filled from the live bar), the effective state (stale / gone computed here; `was` = the reported state), rollup progress, ETA, visibility and log counts. ' +
+      'Every host\'s agents are on it (gossiped): a session is grouped across hosts by realm + project + user + name, every agent carries its `host`, and a session on several hosts lists `hosts`. A host that went down shows its agents as gone. ' +
+      'Filters: project, session, agent (that path and everything under it), host, active_only (hide finished/gone agents). ' +
+      'log:{ session, project?, user?, host?, agent?, context?, limit?, cursor? } returns that agent\'s (omit agent = the session\'s own) log NEWEST FIRST, each entry rendered against the progress/ETA recorded on it — from another host it is fetched from that host in pages: pass the returned next_cursor as cursor for the next page. ' +
+      'entry:{ id, host? } returns one entry in full with its details/data (pass host for another host\'s older log entry). Codes: owner-unreachable (that host is down), rate-limited (retry_after_ms), ambiguous-session (pass project/user/host). Times are ms epochs.',
     inputSchema: { type: 'object', properties: {
-      project: { type: 'string' }, session: { type: 'string' }, agent: { type: 'string' },
+      project: { type: 'string' }, session: { type: 'string' }, agent: { type: 'string' }, host: { type: 'string' },
       active_only: { type: 'boolean' },
-      log: { type: 'object', description: '{ session, project?, agent?, context?, limit? } — one log, newest first', properties: {
-        session: { type: 'string' }, project: { type: 'string' }, agent: { type: 'string' }, context: { type: 'string' }, limit: { type: 'number' } } },
-      entry: { type: 'object', description: '{ id } — one entry with its details/data', properties: { id: { type: 'string' } } },
+      log: { type: 'object', description: '{ session, project?, user?, host?, agent?, context?, limit?, cursor? } — one log, newest first, paged', properties: {
+        session: { type: 'string' }, project: { type: 'string' }, user: { type: 'string' }, host: { type: 'string' }, agent: { type: 'string' }, context: { type: 'string' }, limit: { type: 'number' }, cursor: { type: 'string' } } },
+      entry: { type: 'object', description: '{ id, host? } — one entry with its details/data', properties: { id: { type: 'string' }, host: { type: 'string' } } },
       as: { type: 'string' }, secret: { type: 'string' } } } },
 ]

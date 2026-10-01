@@ -124,7 +124,7 @@ const B = await spawnBridge('ScriptHostB', '127.0.0.2', B_PORT, { AI_BRIDGE_USER
 let G = await spawnG(); all.push(G)
 await sleep(900)
 const gid = await call(G, 'my_identity')
-check('harness: G is a gateway on 1.59.0', gid.role === 'gateway' && gid.bridge_version === '1.59.0', J([gid.role, gid.bridge_version]))
+check('harness: G is a gateway on ≥ 1.59.0', gid.role === 'gateway' && (v => v[0] > 1 || (v[0] === 1 && v[1] >= 59))(String(gid.bridge_version).split('.').map(Number)), J([gid.role, gid.bridge_version]))   // v1.60.0: ≥, so a later bump doesn't break it
 
 // ---- one-shot
 const o1 = await runLog([...ID, '--agent', 'build', '@~compile compiling 3 crates'])

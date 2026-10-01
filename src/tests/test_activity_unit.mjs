@@ -234,12 +234,12 @@ check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 
   check('apply: ok + the #70 return shape', r.ok && typeof r.id === 'string' && r.ts === T0 && r.current === false && r.agent === null && r.context === 'root' && r.state === 'running'
     && r.stale_at === T0 + 15 * MIN && Array.isArray(r.evicted) && r.evicted.length === 0 && Array.isArray(r.warnings), J(r))
   const sess = A.getSession(st, S1)
-  check('apply: auto-creates the session (+ its own entity with @root)', !!sess && sess.session === 'Bridget' && sess.project === 'AIMB' && sess.user === 'robin' && sess.host === 'ROBIN-Z790'
+  check('apply: auto-creates the session (+ its own entity with @root); v1.60.0: its host is the origin (ident.host ignored)', !!sess && sess.session === 'Bridget' && sess.project === 'AIMB' && sess.user === 'robin' && sess.host === 'HOST-A'
     && sess.self.contexts.has('root') && sess.agents.size === 0 && sess.origin === 'HOST-A')
   check('apply: a plain message logs to @root without setting the current line', sess.self.log.length === 1 && sess.self.contexts.get('root').current === null)
   check('apply: in-memory entry is small (no details/data keys; current:false omitted)', J(Object.keys(sess.self.log[0])) === J(['id', 'ts', 'context', 'text', 'state']))
   check('apply: the returned entry carries identity for the JSONL', r.entry.session === 'Bridget' && r.entry.project === 'AIMB' && r.entry.agent === null && r.entry.origin === 'HOST-A'
-    && r.entry.host === 'ROBIN-Z790' && r.entry.user === 'robin' && r.entry.current === false && r.entry.details === null && r.entry.data === null)
+    && r.entry.host === 'HOST-A' && r.entry.user === 'robin' && r.entry.current === false && r.entry.details === null && r.entry.data === null)
   const r2 = say(st, S1, { text: 'second' }, T0 + 1)
   check('apply: entry ids unique + ordered', r2.id !== r.id && r2.id > r.id)
   check('apply: session lookup is case-insensitive on session + project + user (+ realm, default "default")', A.getSession(st, { session: 'BRIDGET', project: 'aimb', user: 'ROBIN' }) === sess
@@ -582,7 +582,7 @@ check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 
   check('merge: two origins held side by side', here.remote.size === 2 && A.getSession(here, { session: 'Linux', project: 'X' }, 'HOST-C') !== null)
   // B's host drops a session: the new slice REPLACES the old one wholesale
   A.expire(hostB, T0)   // no-op, just exercising
-  hostB.local.delete(A.sessionKey({ project: 'AIMB', session: 'Two' }))
+  hostB.local.delete(A.sessionKey({ project: 'AIMB', session: 'Two', host: 'HOST-B' }))   // v1.60.0: the key includes the host
   say(hostB, { session: 'Mac', project: 'AIMB' }, { agent: 'w', text: '@~root B moved on' }, T0 + MIN)
   const m3 = A.mergeSnapshot(here, 'HOST-B', A.snapshot(hostB))
   check('merge: a new slice REPLACES the origin\'s old one (dropped session gone)', m3.changed && A.getSession(here, { session: 'Two', project: 'AIMB' }, 'HOST-B') === null
@@ -710,7 +710,11 @@ check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 
   check('identity: same name + project, another user (or realm) = another session', st.local.size === 3)
   say(st, { session: 'ALPHA', project: 'aimb', user: 'Robin', host: 'LITTLE-001' }, { text: 'moved' }, T0 + MIN)
   const s = A.getSession(st, { session: 'alpha', project: 'AIMB', user: 'robin' })
-  check('identity: another HOST is the same session (it moved machines); first-seen spellings kept, host updated', st.local.size === 3 && s.session === 'Alpha' && s.user === 'robin' && s.host === 'LITTLE-001' && s.self.log.length === 2)
+  check('identity (v1.60.0): a LOCAL report ignores ident.host — the host is the origin, so it is the same local session; first-seen spellings kept', st.local.size === 3 && s.session === 'Alpha' && s.user === 'robin' && s.host === 'HOST-A' && s.self.log.length === 2)
+  check('sessionKey (v1.60.0): the host is part of it (case-insensitive); groupKey leaves it out', A.sessionKey({ session: 'a', project: 'P', user: 'u', host: 'H1' }) !== A.sessionKey({ session: 'a', project: 'P', user: 'u', host: 'H2' })
+    && A.sessionKey({ session: 'a', project: 'P', user: 'u', host: 'h1' }) === A.sessionKey({ session: 'A', project: 'p', user: 'U', host: 'H1' })
+    && A.groupKey({ session: 'a', project: 'P', user: 'u', host: 'H1' }) === A.groupKey({ session: 'A', project: 'p', user: 'U', host: 'H2' }))
+  check('identity (v1.60.0): the session key carries this origin', s.key === A.sessionKey({ session: 'alpha', project: 'AIMB', user: 'robin', host: 'HOST-A' }))
   check('identity: the session record + entry carry the realm', s.realm === 'default' && say(st, S1, { text: 'r' }, T0).entry.realm === 'default')
   check('sessionKey: an object; realm defaults to "default"', A.sessionKey({ session: 'a', project: 'P', user: 'u' }) === A.sessionKey({ session: 'A', project: 'p', user: 'U', realm: 'Default' }))
 }
@@ -1056,6 +1060,139 @@ function firstDiff(a, b) { if (a === b) return ''; let i = 0; while (i < a.lengt
   check('facet: days() + prune() (retention)', J(await F.days('HOST')) === J(['2020-01-02', D]) && J(await F.prune('HOST', '2021-01-01')) === J(['2020-01-02']) && J(await F.days('HOST')) === J([D]))
   check('facet: a bad day name is refused (no path tricks)', await F.append('HOST', '../../x', '{}').then(() => false, () => true))
   try { fs.rmSync(dir, { recursive: true, force: true }) } catch { }
+}
+
+// ================================================================= step 4 (v1.60.0): host in the identity + pre-1.60 replay
+{
+  const H = mk({ log_entries_per_agent: 10 }, 'HOST-A')
+  const recs = [   // step-2/3 records: one with no host at all, one with another spelling — both are THIS host's (per-host files)
+    { v: 1, id: 'act_a_1-1', ts: T0, session: 'Old', project: 'AIMB', user: 'robin', context: 'root', current: true, text: 'no host field', state: 'running', new_session: true, new_entity: true, new_context: true },
+    { v: 1, id: 'act_a_2-2', ts: T0 + 1000, session: 'Old', project: 'AIMB', user: 'robin', host: 'some-OLD-name', agent: 'w', context: 'root', current: true, text: 'odd host field', state: 'running', new_entity: true, new_context: true },
+  ]
+  const st = A.replayNewestFirst(H, recs.slice().reverse(), T0 + MIN)
+  const s = A.getSession(H, { session: 'old', project: 'aimb', user: 'robin' })
+  check('replay (pre-1.60 files): records without a host (or another spelling) rebuild ONE session of THIS host', st.sessions === 1 && !!s && s.host === 'HOST-A'
+    && s.key === A.sessionKey({ session: 'Old', project: 'AIMB', user: 'robin', host: 'HOST-A' }) && s.self.contexts.get('root').current.text === 'no host field' && A.getEntity(H, { session: 'Old', project: 'AIMB', user: 'robin' }, 'w') !== null)
+  const r = say(H, { session: 'Old', project: 'AIMB', user: 'robin' }, { text: '@~root continues' }, T0 + 2 * MIN)
+  check('replay (pre-1.60 files): a new report continues the replayed session', r.ok && H.local.size === 1 && s.self.contexts.get('root').current.text === 'continues')
+}
+
+// ================================================================= step 4: the mesh board — grouped by session across hosts
+{
+  const a = mk({}, 'HOST-A'), b = mk({}, 'HOST-B'), here = mk({}, 'HOST-A')
+  const ID = { session: 'Twin', project: 'AIMB', user: 'robin' }
+  say(a, ID, { agent: 'worker', text: '@~root on A' }, T0)
+  say(b, { ...ID, session: 'TWIN' }, { agent: 'worker', text: '@~root on B' }, T0 + MIN)
+  say(b, { session: 'Solo', project: 'AIMB', user: 'robin' }, { text: '@~root only B' }, T0)
+  say(here, ID, { agent: 'worker', text: '@~root on A' }, T0)
+  A.mergeSnapshot(here, 'HOST-B', A.snapshot(b))
+  const bv = A.boardView(here, T0 + 2 * MIN)
+  const twin = bv.find(g => g.session.toLowerCase() === 'twin'), solo = bv.find(g => g.session === 'Solo')
+  check('board: the same session name on two hosts = ONE group spanning both (hosts + multi_host)', bv.length === 2 && !!twin && J(twin.hosts) === J(['HOST-A', 'HOST-B']) && twin.multi_host === true && !('host' in twin))
+  check('board: ... with TWO entities for the same agent path, each tagged with its host', twin.agents.length === 2 && J(twin.agents.map(x => [x.agent, x.host, x.current.text])) === J([['worker', 'HOST-A', 'on A'], ['worker', 'HOST-B', 'on B']]))
+  check('board: ... selves (one per host) + self = the most recently active host\'s', twin.selves.length === 2 && twin.self.host === 'HOST-B' && J(twin.selves.map(x => x.host)) === J(['HOST-A', 'HOST-B']))
+  check('board: a one-host group keeps `host` (no hosts/multi_host); a remote entity\'s log lives on its owner', solo.host === 'HOST-B' && !('hosts' in solo) && !('multi_host' in solo) && solo.self.host === 'HOST-B' && solo.self.log.remote === true
+    && twin.agents[0].log.entries === 1)
+  check('board: filter by host', A.boardView(here, T0 + 2 * MIN, { host: 'host-b' }).length === 2 && A.boardView(here, T0 + 2 * MIN, { host: 'HOST-A' }).length === 1 && A.boardView(here, T0 + 2 * MIN, { host: 'HOST-A' })[0].host === 'HOST-A')
+  check('board: stale is computed on the READER\'s side with its own window', A.boardView(here, T0 + 40 * MIN, { session: 'solo' })[0].self.state === 'stale' && A.boardView(here, T0 + 40 * MIN, { session: 'solo', staleMin: 60 })[0].self.state === 'running')
+  const loc = A.locateSessions(here, { session: 'twin' })
+  check('locateSessions: every host holding the name (local first), filterable by host/project/user', J(loc.map(x => [x.host, x.local])) === J([['HOST-A', true], ['HOST-B', false]])
+    && A.locateSessions(here, { session: 'twin', host: 'host-b' }).length === 1 && A.locateSessions(here, { session: 'twin', user: 'kim' }).length === 0 && A.locateSessions(here, {}).length === 0)
+  const bLine = A.getEntity(here, ID, 'worker', 'HOST-B').contexts.get('root').current.id, aLine = A.getEntity(here, ID, 'worker').contexts.get('root').current.id
+  check('locateEntry: a remote CURRENT line names its host; a local one is local; unknown -> null', J(A.locateEntry(here, bLine)) === J({ host: 'HOST-B', local: false }) && A.locateEntry(here, aLine).local === true && A.locateEntry(here, 'nope') === null)
+  // gone: the origin went down
+  check('markOriginDown: unknown origin -> false', A.markOriginDown(here, 'NOPE', T0) === false)
+  check('markOriginDown: the slice\'s unfinished entities show GONE (last-known lines kept)', A.markOriginDown(here, 'HOST-B', T0 + 3 * MIN) === true
+    && A.boardView(here, T0 + 3 * MIN, { session: 'solo' })[0].self.state === 'gone' && A.boardView(here, T0 + 3 * MIN, { session: 'solo' })[0].self.current.text === 'only B'
+    && A.boardView(here, T0 + 3 * MIN, { session: 'twin' })[0].agents.find(x => x.host === 'HOST-B').state === 'gone' && A.boardView(here, T0 + 3 * MIN, { session: 'twin' })[0].agents.find(x => x.host === 'HOST-A').state === 'running')
+  check('remoteInfo: down_at shown', A.remoteInfo(here)[0].host === 'HOST-B' && A.remoteInfo(here)[0].down_at === T0 + 3 * MIN)
+  const back = A.mergeSnapshot(here, 'HOST-B', A.snapshot(b))
+  check('a fresh full slice from the returning host clears gone (even when identical)', back.changed === true && A.boardView(here, T0 + 4 * MIN, { session: 'solo' })[0].self.state === 'running' && !A.remoteInfo(here)[0].down_at)
+  A.markOriginDown(here, 'HOST-B', T0 + 5 * MIN)
+  check('expireRemote: a slice down longer than finished_visible_hours is dropped', A.expireRemote(here, T0 + 5 * MIN + 23 * HOUR).length === 0 && J(A.expireRemote(here, T0 + 5 * MIN + 24 * HOUR)) === J(['HOST-B']) && !here.remote.has('HOST-B'))
+  check('merge: own origin refused case-insensitively', A.mergeSnapshot(here, 'host-a', A.snapshot(b)).code === 'own-origin')
+}
+
+// ================================================================= step 4: the wire — planSlice (full / delta / cap) + applySlice (seq)
+{
+  const src = mk({}, 'HOST-B'), dst = mk({}, 'HOST-A'), pub = A.createPub()
+  const ID = { session: 'S', project: 'P', user: 'u' }
+  for (let i = 1; i <= 5; i++) say(src, ID, { agent: `a${i}`, text: `@~root agent ${i}` }, T0 + i * 1000)
+  const send = (opts, seq, base) => { const p = A.planSlice(src, pub, opts); return p.body ? { p, frame: { epoch: 'E1', seq, ...(base != null ? { base } : {}), ...JSON.parse(J(p.body)) } } : { p, frame: null } }
+  let { p, frame } = send({ full: true }, 1)
+  check('planSlice full: every entity, no remove, not truncated', frame.full === true && frame.sessions.length === 1 && frame.sessions[0].agents.length === 5 && !!frame.sessions[0].self && !frame.remove && !frame.truncated && p.entities === 6)
+  check('planSlice full: NO details/data/log on the wire', !J(frame).includes('"details"') && !J(frame).includes('"log"'))
+  const m1 = A.applySlice(dst, 'HOST-B', frame)
+  check('applySlice full: replaces the origin\'s slice, records epoch/seq', m1.ok && m1.full && dst.remote.get('HOST-B').seq === 1 && dst.remote.get('HOST-B').epoch === 'E1' && A.getSession(dst, ID, 'HOST-B').agents.size === 5)
+  check('planSlice delta: nothing changed -> no frame', send({}, 2, 1).frame === null)
+  say(src, ID, { agent: 'a2', text: '@~root agent 2 moved on' }, T0 + 10000)
+  ;({ frame } = send({}, 2, 1))
+  check('planSlice delta: carries ONLY the changed entity (+ its session header)', frame && !frame.full && frame.sessions.length === 1 && J(frame.sessions[0].agents.map(x => x.path)) === J(['a2']) && !frame.sessions[0].self && frame.sessions[0].session === 'S')
+  const m2 = A.applySlice(dst, 'HOST-B', frame)
+  check('applySlice delta: patches that entity only; seq advances', m2.ok && m2.changed && dst.remote.get('HOST-B').seq === 2 && A.getEntity(dst, ID, 'a2', 'HOST-B').contexts.get('root').current.text === 'agent 2 moved on'
+    && A.getEntity(dst, ID, 'a1', 'HOST-B').contexts.get('root').current.text === 'agent 1')
+  check('applySlice delta: a replayed / skipped delta is refused out-of-sync (base must equal the held seq)', A.applySlice(dst, 'HOST-B', frame).code === 'out-of-sync' && A.applySlice(dst, 'HOST-B', { ...frame, base: 7, seq: 8 }).code === 'out-of-sync'
+    && A.applySlice(dst, 'HOST-B', { ...frame, epoch: 'OTHER', base: 2, seq: 3 }).code === 'out-of-sync' && A.applySlice(dst, 'HOST-C', { epoch: 'E1', base: 0, seq: 1, sessions: [] }).code === 'out-of-sync')
+  check('applySlice: a sync beat (empty delta, base === seq) is accepted, unchanged', (r => r.ok && r.changed === false)(A.applySlice(dst, 'HOST-B', { epoch: 'E1', base: 2, seq: 2, sessions: [] })))
+  // removals: an agent expired + a whole session gone
+  say(src, { session: 'T', project: 'P', user: 'u' }, { text: '@~root second session' }, T0 + 11000)
+  ;({ frame } = send({}, 3, 2)); A.applySlice(dst, 'HOST-B', frame)
+  A.getSession(src, ID).agents.delete('a5')
+  src.local.delete(A.sessionKey({ session: 'T', project: 'P', user: 'u', host: 'HOST-B' }))
+  ;({ frame } = send({}, 4, 3))
+  check('planSlice delta: removals — the agent and the whole session, by identity', frame && J(frame.remove.map(x => [x.session, x.agent || null]).sort()) === J([['S', 'a5'], ['T', null]]) && frame.sessions.length === 0)
+  A.applySlice(dst, 'HOST-B', frame)
+  check('applySlice delta: removals applied', A.getEntity(dst, ID, 'a5', 'HOST-B') === null && A.getSession(dst, { session: 'T', project: 'P', user: 'u' }, 'HOST-B') === null && A.getSession(dst, ID, 'HOST-B').agents.size === 4)
+  // the result equals the source's snapshot (deltas converge)
+  check('deltas converge: the held slice re-snapshots exactly as the source', J(A.snapshot(dst, undefined, 'HOST-B')) === J(A.snapshot(src)), J(A.snapshot(dst, undefined, 'HOST-B')).slice(0, 300))
+  // ownership: a full slice never touches another origin; host fields in the frame are ignored
+  const forged = JSON.parse(J(A.planSlice(src, A.createPub(), { full: true }).body)); forged.sessions[0].host = 'HOST-C'; forged.origin = 'HOST-C'
+  A.applySlice(dst, 'HOST-D', { ...forged, epoch: 'X', seq: 1 })
+  check('applySlice: ownership is the link\'s origin — the frame\'s origin/host fields never decide it', dst.remote.has('HOST-D') && !dst.remote.has('HOST-C') && A.getSession(dst, ID, 'HOST-D').host === 'HOST-D'
+    && A.applySlice(dst, 'host-a', { full: true, sessions: [] }).code === 'own-origin' && A.applySlice(dst, 'HOST-E', { sessions: 'x' }).code === 'bad-slice')
+  // a down slice refuses deltas (the owner sends a full one when it returns)
+  A.markOriginDown(dst, 'HOST-B', T0 + 20000)
+  check('applySlice: a delta for a slice marked down is refused out-of-sync', A.applySlice(dst, 'HOST-B', { epoch: 'E1', base: 4, seq: 4, sessions: [] }).code === 'out-of-sync')
+}
+{
+  // the byte cap: NEWEST-ACTIVE first, the rest follows in the next frame(s); the first entity always goes
+  const src = mk({}, 'HOST-B'), dst = mk({}, 'HOST-A'), pub = A.createPub()
+  const ID = { session: 'Big', project: 'P', user: 'u' }
+  for (let i = 1; i <= 10; i++) say(src, ID, { agent: `ag${String(i).padStart(2, '0')}`, text: `@~root line ${i} ${'x'.repeat(150)}` }, T0 + i * 1000)
+  const p1 = A.planSlice(src, pub, { full: true, maxBytes: 1500 })
+  const got1 = (p1.body.sessions[0].agents || []).map(x => x.path)
+  check('cap: an oversized full slice is TRUNCATED (flagged) and stays under the cap', p1.body.truncated === true && p1.pending === true && got1.length >= 2 && got1.length < 10 && J(p1.body).length <= 1500 + 400)
+  check('cap: newest-active first (ag10, ag09, …)', J(got1) === J(Array.from({ length: got1.length }, (_, i) => `ag${String(10 - i).padStart(2, '0')}`)), J(got1))
+  A.applySlice(dst, 'HOST-B', { epoch: 'E', seq: 1, ...p1.body })
+  check('cap: the receiver holds the partial slice, flagged truncated', A.getSession(dst, ID, 'HOST-B').agents.size === got1.length && A.remoteInfo(dst)[0].truncated === true)
+  let seq = 1, frames = 0, p
+  while ((p = A.planSlice(src, pub, { maxBytes: 1500 })).body && frames < 20) { A.applySlice(dst, 'HOST-B', { epoch: 'E', base: seq, seq: seq + 1, ...p.body }); seq++; frames++ }
+  check('cap: the rest follows in later deltas (oldest last) until the slice is complete', frames >= 1 && A.getSession(dst, ID, 'HOST-B').agents.size === 10 && !A.remoteInfo(dst)[0].truncated
+    && J(A.snapshot(dst, undefined, 'HOST-B')) === J(A.snapshot(src)))
+  const tiny = A.planSlice(src, A.createPub(), { full: true, maxBytes: 10 })
+  check('cap: a cap smaller than one entity still sends one (and flags the rest)', tiny.entities === 1 && tiny.body.truncated === true)
+}
+
+// ================================================================= step 4: paged log (the remote-history chunk)
+{
+  const st = mk({ log_entries_per_agent: 50 }), I = S1
+  const ids = []
+  for (let i = 0; i < 7; i++) ids.push(say(st, I, { agent: 'p', text: `entry ${i} ${'y'.repeat(100)}` }, T0 + i * 1000).id)
+  const p1 = A.logView(st, { session: 'Bridget', agent: 'p', limit: 3 }, T0 + MIN)
+  const p2 = A.logView(st, { session: 'Bridget', agent: 'p', limit: 3, cursor: p1.next_cursor }, T0 + MIN)
+  const p3 = A.logView(st, { session: 'Bridget', agent: 'p', limit: 3, cursor: p2.next_cursor }, T0 + MIN)
+  check('paging: three pages newest first, a cursor chaining them, null at the end', J(p1.entries.map(e => e.id)) === J([ids[6], ids[5], ids[4]]) && J(p2.entries.map(e => e.id)) === J([ids[3], ids[2], ids[1]])
+    && J(p3.entries.map(e => e.id)) === J([ids[0]]) && p1.next_cursor === ids[4] && p3.next_cursor === null && p1.total === 7)
+  const pe = A.logView(st, { session: 'Bridget', agent: 'p', limit: 50 }, T0 + MIN, { maxEntries: 2 })
+  check('paging: opts.maxEntries caps the page (the owner\'s page size)', pe.entries.length === 2 && pe.next_cursor === ids[5])
+  const pb = A.logView(st, { session: 'Bridget', agent: 'p' }, T0 + MIN, { maxBytes: 400 })
+  check('paging: opts.maxBytes caps the page (at least one entry)', pb.entries.length >= 1 && pb.entries.length < 7 && J(pb.entries).length <= 400 + 50 && !!pb.next_cursor
+    && A.logView(st, { session: 'Bridget', agent: 'p' }, T0 + MIN, { maxBytes: 1 }).entries.length === 1)
+  st.local.values().next().value.agents.get('p').log.splice(0, 5)   // entries dropped (cap / budget) under a cursor: continue by time
+  const pt = A.logView(st, { session: 'Bridget', agent: 'p', cursor: ids[3] }, T0 + MIN)
+  check('paging: a cursor whose entry was dropped continues from its time; garbage -> bad-cursor', pt.ok && pt.entries.length === 0 && pt.next_cursor === null
+    && A.logView(st, { session: 'Bridget', agent: 'p', cursor: 'garbage' }, T0 + MIN).code === 'bad-cursor')
+  check('paging: without a cursor or caps the view is unchanged (all, newest first)', A.logView(st, { session: 'Bridget', agent: 'p' }, T0 + MIN).entries.length === 2)
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

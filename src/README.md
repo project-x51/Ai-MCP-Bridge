@@ -33,7 +33,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   parsing (`@ctx`/`@~ctx`, progress/eta/stale_after, the `log` flag, the locked limits), `apply` over a plain state
   object, text placeholders (`renderText`), checkpoints (`planCheckpoints`), the newest-first replay (`createReplay`),
   the read views (`boardView`/`logView`/`findEntry`), the derived views (stale/gone, rollup, visibility), the
-  per-origin gossip `snapshot`/`mergeSnapshot`, the memory budget and `resolveConfig` (the `activity` block +
+  per-origin gossip `snapshot`/`mergeSnapshot` and (v1.60.0) the wire — `planSlice` (per-link deltas, byte cap, newest
+  first) / `applySlice` (epoch + seq) / `markOriginDown` / `locateSessions`, the memory budget and `resolveConfig` (the `activity` block +
   `AI_BRIDGE_ACTIVITY_*`); unit-tested in `tests/test_activity_unit.mjs`. `win-env.js`
   rehydrates environment variables that an MCP host stripped at launch (Windows registry) so `${env:…}` secret
   refs resolve. The bridge core (handlers, routing, delivery, gateway) deliberately stays in `bridge.mjs`.
@@ -127,7 +128,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   containment, header filter + server-side inject (#33, 9); and `test_lib_unit.mjs` — the fast pure-`lib/` +
   services units (topics/envelope/refs/consent/reminders/traces, egress incl. server-side auth mint/refresh/
   inject and the secret-resolver, `win-env` reg-parsing, tailscale `hostOf`) (#31/#35/#36, 88); and
-  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 287). Tests run in
+  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 427); `test_activity_gossip_live.mjs`
+  — four loopback "hosts" + a follower: the mesh board, deltas ≤1/s per link, truncation, remote paging / entries / rate
+  limit, going-down, owner down, forged slices, a legacy hub, dashboards (#70 step 4, 44). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -174,7 +177,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 • `set_behavior {behavior, operation?, scope, match?, as?, secret?}` • `list_behaviors {as?, secret?}` • `clear_behavior {operation?, scope?, match?, as?, secret?}` (#29/#32/#44 per-operation behaviour reminders)
 • `allow_project {project, mode?, as?, secret?}` • `revoke_project {project, as?, secret?}` • `request_project_access {to, reason?, as?, secret?}`
 • `http_request {backend, method?, path?, query?, headers?, body?, json?, as?, secret?}` (#33/#36 egress — present only when a backend is configured)
-• `log {as, secret, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?}` • `activity {project?, session?, agent?, active_only?, log?, entry?}` (#70 the activity board — see "Log / activity")
+• `log {as, secret, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?}` • `activity {project?, session?, agent?, host?, active_only?, log?, entry?}` (#70 the mesh-wide activity board — see "Log / activity")
 • `set_wake {…}` (reserved — unsupported).
 
 **Feature detection (#41):** `profile.names` says which facet the operator CONFIGURED; `capabilities` says
@@ -446,16 +449,18 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3)
-Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress. So far
-it is this host only: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2), plus
-`tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below). Gossip (step 4), the dashboard tree
-(step 5) and the agent snippet (step 6) follow.
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4)
+Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
+the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
+`tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
+remote history (step 4, "Mesh-wide" below). The dashboard tree (step 5) and the agent snippet (step 6) follow.
 
 **Reporting — `log {as, secret, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?}`.**
 You report as a registered session (`as` + `secret`). Omit `agent` for the session itself; `agent:"spec-70/research"`
-(≤3 levels) reports for one of your agents — agents never register. The session's identity is **realm + project + user
-+ session name** (not the host, so a session that moves machines stays the same session).
+(≤3 levels) reports for one of your agents — agents never register. The identity is **realm + project + user + session
+name + host** (v1.60.0; + the agent path): each host only ever writes its own entities, so the same session or agent name
+reporting from two hosts is two entities, which the board groups under one session (a session that moves machines
+leaves its old host's entries to go stale or gone).
 - Every message belongs to a **context**: `"@build compiling"` appends to the build context's log; `"@~build
   compiling"` also makes it that context's **current line**; `"@~root …"` sets your own headline; no prefix = `@root`,
   log only. `context:"@~build"` does the same without a prefix (the text is then literal). Quote spaces: `@~"strip 17"`.
@@ -480,12 +485,19 @@ You report as a registered session (`as` + `secret`). Omit `agent` for the sessi
 - Returns `{ ok, id, ts, session, agent, context, current, state, stale_at, logged }` (+ `warnings`, `evicted`; codes
   like `context-too-long`, `too-many-agents`, `activity-disabled`, `activity-loading`, `no-gateway`).
 
-**Reading — `activity {project?, session?, agent?, active_only?, log?, entry?}`.** This host's board: sessions → agents →
-contexts with their current lines (`text` raw, `rendered` filled in), effective state (`stale` / `gone`; `was` = the
-reported one), rollup progress (summed per shared unit, else the mean %), ETA, visibility and log counts.
-`log:{session, project?, agent?, context?, limit?}` is one agent's (or the session's) in-memory log, newest first;
-`entry:{id}` is one entry in full with its `details`/`data` (memory for a current line, else the day file — via an id →
-offset index, else a scan of the day the id's timestamp names). Times are ms epochs.
+**Reading — `activity {project?, session?, agent?, host?, active_only?, log?, entry?}`.** The mesh board: sessions →
+agents → contexts with their current lines (`text` raw, `rendered` filled in), effective state (`stale` / `gone`; `was` =
+the reported one — computed by the READER with its own `stale_after_min`), rollup progress (summed per shared unit, else
+the mean %), ETA, visibility and log counts. Sessions are **grouped** by realm + project + user + name across hosts:
+every agent (and the session's own entity) carries its `host`; a group on one host has `host`, one on several has
+`hosts:[…]`, `multi_host:true`, `self` (the most recently active host's) and `selves` (one per host). `remote_hosts`
+lists each remote host held (`sessions`, `seq`, `linked`, `down_at`, `truncated`).
+`log:{session, project?, user?, host?, agent?, context?, limit?, cursor?}` is one agent's (or the session's) log, newest
+first, paged — `next_cursor` → pass it as `cursor` for the older page; a name on several hosts is `ambiguous-session`
+(with each candidate's host) unless the agent or `host` settles it. `entry:{id, host?}` is one entry in full with its
+`details`/`data` (memory for a current line, else the day file — via an id → offset index, else a scan of the day the
+id's timestamp names); another host's CURRENT line is found by id alone, its older log entries need `host`. A remote
+read answers with `from_host`. Times are ms epochs.
 
 **One writer per host.** The host's **gateway** owns the board and its files; a follower authenticates its own sub-peer
 and forwards the call up its control link (`ACTIVITY` frame + request id → `ACTIVITY_R`, 5 s timeout; only a registered
@@ -513,7 +525,42 @@ checkpoints, and so does the Task Tray before it kills the bridges (`POST /admin
 `log_retention_days` 7 · `log_entries_per_agent` 200 (in memory) · `stale_after_min` 15 · `finished_visible_hours` 24 ·
 `memory_budget_mb` 64 (over it, the oldest finished agents, then the oldest log entries, are evicted) ·
 `progress_checkpoint_sec` 60 (10–3600, 0 = off) · `enabled` true. Test-only env: `AI_BRIDGE_ACTIVITY_CHECKPOINT_MS`,
-`_FWD_MS`, `_LOAD_WAIT_MS`, `_GC_MS`, `_RETENTION_MS`, `_INDEX_MAX`, `_PHASE1_MS`.
+`_FWD_MS`, `_LOAD_WAIT_MS`, `_GC_MS`, `_RETENTION_MS`, `_INDEX_MAX`, `_PHASE1_MS`; step 4 (env only, every host should
+agree): `_GOSSIP_MS` (1000), `_SLICE_MAX_BYTES` (262144), `_PAGE_ENTRIES` (50), `_PAGE_BYTES` (32768), `_FETCH_RATE` (4/s),
+`_REMOTE_MS` (4000), `_DOWN_HOLD_MS` (30000); `AI_BRIDGE_TEST_ACTIVITY_TAP=1` (`activity {tap:true}` returns the recent
+frames) and `AI_BRIDGE_TEST_HOSTNAME` (two loopback "hosts" on one machine) are for tests.
+
+### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
+Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
+(one-hop, like the roster slices; followers hold no board and forward their reads to the gateway as before, so a
+follower's `activity` shows the mesh too):
+- **What travels:** current lines only — never details, data or log entries (a line carries `has_details`/`has_data`).
+- **Full, then deltas:** a peer gets a **full slice** on every (re)link (and when it asks — `resync`), then **deltas**:
+  only the entities that changed (inside their session record) and removals. Each frame carries the sender's `epoch`
+  and a `seq`; a delta applies only on top of exactly the held `seq` (`base`), otherwise the receiver drops it and asks
+  for a full slice. The #63 heartbeat adds a sync beat once a minute.
+- **Rate:** at most **one frame per second per link**. A change only schedules the link's next frame, so a burst (a 1/s
+  `--stream` script plus many agents) coalesces into one frame carrying the latest state.
+- **Byte cap:** `AI_BRIDGE_ACTIVITY_SLICE_MAX_BYTES` (256 KB) per frame. Over it, the newest-active entities go first and
+  the frame is marked `truncated`; the rest follows in the next second(s).
+- **Ownership:** a slice belongs to the host of the link it arrived on (the peer gateway's authenticated `PEER_HELLO`
+  session) — never to a field in the frame. A frame naming another origin is dropped; host fields inside are ignored.
+  Every limit is re-validated on receive. A host never accepts a slice for itself.
+- **Gone:** when a host's link drops, it is retired or expired (#63), or it sends a **going-down notice**, its agents show
+  as **gone** at once, with their last-known lines; when the host comes back its fresh full slice clears it. A slice
+  that stays down is forgotten after `finished_visible_hours`.
+- **Going down:** `POST /admin/prepare-shutdown` (the tray, below) flushes, then sends every peer hub `ACTIVITY_DOWN`;
+  a clean exit (SIGINT / SIGTERM) does too, best effort. After the notice the bridge sends no slices for 30 s (then full
+  ones, if it is still alive).
+- **Remote history, on demand:** `activity {log}` / `{entry}` for another host's entity is a request over the same link
+  to the **owning** gateway: a log comes in **pages** (at most 50 entries / 32 KB, set by the owner; `cursor` →
+  `next_cursor`); details and data only on an explicit `entry` fetch. The owner serves at most 4 fetches per second
+  per link (`rate-limited` + `retry_after_ms` beyond that). Owner down or not answering in 4 s → `owner-unreachable`
+  (its agents stay on the board, gone); a pre-1.60 owner → `owner-unsupported`.
+- **Dashboards** (WS `dashboard` leaves) get `{type:"activity_board", board}` at most once per second when the board
+  changes, and may ask `{type:"activity", ref, query}` (the `activity` tool's query) → `{type:"activity", ref, result}`.
+- **Mixed versions:** a ≤1.59 hub doesn't declare `activity_gossip`, so it gets no activity frames (and would ignore
+  them); its agents simply don't appear on 1.60 boards. Deploy = restart each host's gateway on 1.60.0.
 
 ### The script — `tools/aimb-log.mjs` (v1.59.0, step 3)
 For agents (which never register) and long-running scripts. The orchestrator puts one line in each agent's prompt and the
@@ -542,9 +589,10 @@ locally with the bridge's own parser first, so a bad one costs no connection.
   is **never marked gone** (it has no roster presence to lose) but it goes **stale** like anything else.
 - **Who may report as whom (Robin, 2026-10-01):** anyone holding the realm token may report as any session — the
   doorbell's trust — **except** a session that is LIVE on the mesh roster (a registered sub-peer on ANY host, gossiped
-  slices included) with the same realm + project + name under a **different user** (case-insensitive): that report is
-  refused with `session-user-mismatch`. Checked by the gateway against its roster on every report. Same user → accepted;
-  once the sub-peer leaves the roster, accepted.
+  slices included, or — v1.60.0 — a BARE process-level session: a bridge started with its own project + user, whose
+  name is the session name) with the same realm + project + name under a **different user** (case-insensitive): that
+  report is refused with `session-user-mismatch`. Checked by the gateway against its roster on every report. Same user →
+  accepted; once the session leaves the roster, accepted.
 - **Token / port:** like the doorbell, from the bridge's `config.json` found relative to the **script**
   (`../config.json`; `AI_BRIDGE_CONFIG` names another), or `AI_BRIDGE_TOKEN` / `AI_BRIDGE_TOKEN_FILE`, and
   `--ws-port` / `--url` / `AI_BRIDGE_WS_PORT`. **`--token` is refused** (exit 64, `token-in-argv`; the value is not
@@ -590,8 +638,9 @@ activity file's write queue (queued log entries included), and only then answers
 `200 {ok:true, role, bridge_version, flushed:{cp, rep, files_drained[, skipped]}, ms}` (`skipped`: `replaying`,
 `checkpoints-off`, `no-persistence`). Non-loopback callers get 403, a missing/bad token 401, a non-POST 405, another
 `/admin/…` path 404. **Only the gateway needs it:** followers write no activity files and keep no deferred writes (their
-persistence writes are issued immediately), so nothing is propagated to them. The bridge keeps running afterwards; the
-caller kills it.
+persistence writes are issued immediately), so nothing is propagated to them. v1.60.0: after the flush the gateway also
+sends its peer hubs the going-down notice (`down_notified` = how many) so their boards show this host's agents gone at
+once. The bridge keeps running afterwards; the caller kills it.
 
 ## Behaviour reminders (#29 / #32 / #44)
 A session registers "how to behave" reminders: `set_behavior {behavior, operation?, scope, match?}`

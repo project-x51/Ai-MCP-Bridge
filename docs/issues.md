@@ -6,11 +6,20 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-01, v1.59.0) — read this first after a compact
-**Current version: v1.59.0** (#70 step 3: `tools/aimb-log.mjs` + the tray's prepare-shutdown flush; code done, NOT yet
-deployed — live hosts run v1.54.0). v1.58.0 (#70 step 2) is committed (`8e274b6`); v1.59.0 is in the working tree for
-review. The rebuilt tray (`PrepareShutdown()` before the kill) is NOT installed: only a scratch build proved it
+## RESUME STATE (updated 2026-10-01, v1.60.0) — read this first after a compact
+**Current version: v1.60.0** (#70 step 4: mesh-wide gossip of the activity board + on-demand remote history; code done,
+NOT yet deployed — live hosts run v1.54.0). v1.59.0 (#70 step 3) is committed (`0bbcb5e`); v1.60.0 is in the working
+tree for review. The rebuilt tray (`PrepareShutdown()` before the kill) is NOT installed: only a scratch build proved it
 compiles; Robin runs `tray/windows/build.cmd`. Everything below is durable; nothing important is only in chat.
+
+**2026-10-01 (v1.60.0):** Built **#70 step 4** — the activity identity now includes the HOST (each host writes only its
+own entities; the board groups a session's entities across hosts, every entity tagged with its host); each gateway
+gossips its own host's board to every peer hub (`ACTIVITY_SLICE`: a full slice on (re)link / request, then deltas, ≤1
+frame per second per link, 256 KB cap newest-first, ownership = the link's host); remote `log` (paged) / `entry`
+(details + data) are fetched from the owning gateway over the same link (`ACTIVITY_REQ`/`_RES`, rate-limited by the
+owner; `owner-unreachable` when it is down); prepare-shutdown and a clean exit send `ACTIVITY_DOWN` so peers show that
+host's agents gone at once; a script report is also refused for a BARE session of another user. Deploy = restart each
+host's gateway on 1.60.0 (a ≤1.59 hub simply isn't on the 1.60 boards). See architecture.md §13 "Built (v1.60.0)".
 
 **2026-10-01 (v1.59.0):** Built **#70 step 3** — `tools/aimb-log.mjs` reports to the board without registering (a
 token-gated `logger` leaf on the gateway's WS port; `--session`/`--project`/`--user` identity; one-shot or `--stream`
@@ -39,7 +48,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #70 agent activity board (steps 1–3 built; next: step 4 gossip + on-demand fetch, then dashboard, snippet), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #70 agent activity board (steps 1–4 built; next: step 5 the dashboard Activity tree, then the snippet), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -258,7 +267,7 @@ accepted); `allow_project` let a caller declared `UNCLASSIFIED` grant (compared 
   it in grants, `access`, the roster, `list_sessions` and the dashboard, while matching stays case-insensitive.
   Verify that no path really treats different cases as different projects (topics, consent, parked mail).
 
-## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–3 built, v1.59.0; next: step 4 gossip — Robin + Bridget)**
+## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–4 built, v1.60.0; next: step 5 the dashboard tree — Robin + Bridget)**
 **Why:** sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows what those
 agents are doing right now. **What:** a new dashboard page showing, across the whole mesh, sessions grouped by project,
 each session's agents under it, and each agent's progress. Agents report it themselves with a doorbell-style script (or
@@ -512,9 +521,41 @@ Each step is its own version.
      writes the checkpoints + repeat line and drains its write queue, then answers; the kill follows either way (a
      pre-1.59 gateway answers 404). Followers have nothing to flush, so the request is not propagated. The new tray exe
      is NOT installed yet (Robin builds `tray/windows/build.cmd`).
-4. Gossip, plus on-demand fetch of logs, details and data.
+4. Gossip, plus on-demand fetch of logs, details and data. **BUILT (v1.60.0, 2026-10-01)** — the host is in the identity
+   (`sessionKey` + host; a local entity's host is always this origin; the replay keys pre-1.60 records with this host);
+   `ACTIVITY_SLICE` full on (re)link / `resync`, then deltas against a per-link published view (`planSlice` /
+   `applySlice`, epoch + seq), ≤1 frame/s per link (a change only kicks the link's timer), 256 KB cap newest-active first
+   (`truncated`; the rest next second); ownership = the link's host, a frame naming another origin dropped; a dropped /
+   retired / expired link or `ACTIVITY_DOWN` (prepare-shutdown, clean exit) marks that host's agents gone until its next
+   full slice; the board GROUPS by realm + project + user + session name across hosts (`host` per entity, `hosts` +
+   `selves` when a session spans several); remote `log` paged by the owner (50 entries / 32 KB, `cursor` →
+   `next_cursor`), remote `entry:{id, host?}` with details/data, 4 fetches/s per link (`rate-limited`),
+   `owner-unreachable` / `owner-unsupported`; followers keep forwarding reads; dashboards get `activity_board` pushes
+   (≤1/s) + `{type:"activity"}` requests; bare sessions count for `session-user-mismatch`. `test_activity_unit` 427, new
+   `test_activity_gossip_live` (44; 38 FAIL pre-change). See architecture.md §13 "Built (v1.60.0)". **Open before step
+   5:** see "Questions before step 5" below.
 5. The dashboard Activity tree.
 6. `{log_snippet}` plus a connect reminder.
+
+### Questions before step 5 (raised by the step-4 build, 2026-10-01 — not decided)
+- **Dashboard data path.** v1.60.0 pushes the WHOLE merged board to dashboards (`activity_board`, ≤1/s, only while one
+  is connected) and answers `{type:"activity", query}`. Fine for a few hosts; at a large mesh the dashboard may want the
+  same deltas the hubs exchange. Keep full pushes, or send deltas?
+- **Stale slider.** The board's `state` uses the gateway's `stale_after_min`; the raw `last_activity` / `stale_after_ms`
+  are there, so the dashboard can recompute stale for its own slider client-side. Confirm it does that (no round trip).
+- **A session on several hosts.** The group has `hosts`, `selves` (one per host) and `self` = the most recently active
+  host's. Show one headline row (which?) with per-host sub-rows, or one row per host?
+- **Gone vs host down.** Both show `gone` (a session that left its roster vs. its whole host down / unreachable).
+  `remote_hosts[].down_at` / `linked` tell them apart — should the tree show a host-level "down" marker?
+- **History depth.** Paging (local and remote) covers the in-memory log (`log_entries_per_agent`, 200); older entries
+  are only in the owner's day files (an `entry` lookup still finds them by id). Page on into the files (needs a
+  per-entity offset index), or is 200 enough for the tree?
+- **Remote fetch budget.** The owner serves 4 fetches/s per link; a dashboard expanding many remote logs at once will
+  hit `rate-limited` (`retry_after_ms`). Queue on the requesting gateway instead of failing back?
+- **Who may read.** Reads stay realm-wide (status text is plaintext by decision); the WS request path is dashboards
+  only. Should page leaves get it too?
+- **Same hostname on two machines.** The origin is the hostname (from the peer gateway's session id); two machines with
+  the same hostname would fight over one slice. Accept (it also confuses #63), or key by hostname + advertise address?
 
 ### How sessions learn to use it (proposed)
 The same channels that taught sessions the doorbell (#64/#66b/#67):

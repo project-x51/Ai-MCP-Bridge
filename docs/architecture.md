@@ -309,6 +309,27 @@ default; alternates are `mdns` (single LAN, zero shared state), `presence-folder
 bulletin board where each node writes its own uniquely-named heartbeat file), and `seeds` (explicit
 addresses for hostile networks). Swapping the rendezvous mechanism never touches the mesh core.
 
+**Hub-to-hub frames** (uint32-framed JSON over the hub link; `HELLO` with the realm token first, then `PEER_HELLO`
+adopts the link — every other frame is honoured only on an adopted link, and a frame type a hub doesn't know is
+ignored, which is how mixed versions coexist):
+- `PEER_HELLO {session, name, host, port, realm, gossip_refresh, refresh_ms, activity_gossip}` — the capability flags
+  (#63 refresh; v1.60.0 `activity_gossip:1`) decide what each side sends.
+- `PEER_ROSTER {gateway, host, port, sessions, pages, grants, realm_defaults, project_names, retained?}` — the local
+  slice (§7 above; #62/#66b/#66c/#71 ride it); `PING` / `PONG` (#63 liveness).
+- `CONNECT` / `ACCEPT` / `REJECT` / `MSG` / `CLOSE` — the delivery splice (and #66d page ingress).
+- **Activity (v1.60.0, #70 step 4)** — one-hop, ≤1 `ACTIVITY_SLICE` per second per link:
+  - `ACTIVITY_SLICE {v:1, origin, epoch, seq, full:true, sessions:[…], truncated?}` — a FULL slice (on every (re)link and
+    on request): the sender's own host's sessions in snapshot form (current lines only, `has_details`/`has_data` flags).
+  - `ACTIVITY_SLICE {v:1, origin, epoch, seq, base, sessions:[…changed…], remove?:[{realm, project, user, session,
+    agent?}], truncated?}` — a DELTA: each session record = its header + only the changed `self` / `agents`; applied only
+    when `base` equals the receiver's held seq for that epoch (else dropped + `resync`). An empty delta with
+    `base === seq` (`beat:true`) is the minute heartbeat's sync check.
+  - `ACTIVITY_DOWN {origin, reason}` — going down (prepare-shutdown / clean exit): the receiver shows that host gone.
+  - `ACTIVITY_REQ {rid, op:"log"|"entry", q}` → `ACTIVITY_RES {rid, result}` — on-demand history from the owning hub
+    (paged, rate-limited by the owner); `ACTIVITY_REQ {op:"resync"}` (no rid, no reply) asks for a full slice.
+  - `origin` is informational: ownership is ALWAYS the link's host (the hostname of the peer's `PEER_HELLO` session);
+    a frame whose `origin` names another host is dropped.
+
 **Deliberately out of scope here.** Cross-*realm* bridging stays in §8 (a translator, because keys
 differ). And cross-machine hub **high-availability**: if a machine's hub dies its local mesh re-elects
 locally, but a machine going fully offline simply *leaves* the mesh — its participants leave with it;
@@ -1154,6 +1175,64 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.60.0):** *the agent activity board, build-plan step 4 — mesh-wide gossip of the board + on-demand remote
+  history (#70).* Decisions of 2026-10-01 ("Decisions before step 4"). **Host in the identity:** every entity is keyed by
+  realm + project + user + session + HOST (+ agent path) — `sessionKey` gains the host, and inside `lib/activity.js` the
+  host is always the ORIGIN holding the entity (a local report's `ident.host` is ignored: each host writes only its own;
+  a remote slice's host is the link's). The replay keys every record with this host whatever its `host` field says, so
+  step-2/3 day files (which may lack it) replay unchanged. **The wire** (`lib/activity.js`): `gossipUnits` (one unit per
+  entity + its session header, canonical JSON), `planSlice(state, pub, {full, maxBytes})` — a FULL slice or a DELTA
+  against the link's published view `pub` (changed entities inside their session record + `remove:[{realm, project,
+  user, session[, agent]}]`), newest-active first under the byte cap (the first entity always goes; what didn't fit stays
+  unpublished, so the next frame carries it; `truncated:true`); `applySlice(state, origin, body)` — a full body replaces
+  the origin's slice (`mergeSnapshot`, which now also records `epoch`/`seq` and always replaces a slice marked down), a
+  delta applies only on exactly (epoch, `base` = held seq) else `out-of-sync`, re-validating every record like a
+  snapshot (`wHeader`/`wSession`/`wEntity`; the record's own `host` is never used); `markOriginDown` (unfinished entities
+  of a down origin show gone, last lines kept), `expireRemote` (down longer than `finished_visible_hours` → dropped),
+  `remoteInfo`. **The mesh board:** `boardView` now covers local + every remote slice, GROUPED by realm + project +
+  user + session name (`groupKey`) across hosts; every entity view carries `host`; a one-host group keeps `host`, a
+  multi-host one has `hosts`, `multi_host`, `self` (the most recently active host's) and `selves`; a remote entity's
+  `log` is `{remote:true}`; stale/gone computed on the reader's side; `host` filter. `locateSessions` / `locateEntry`
+  find which host holds a log / current line; `logView` is PAGED (`cursor` = the last id of the previous page →
+  `next_cursor`; `opts.maxEntries` / `maxBytes`; an unknown cursor whose id names a time continues from it).
+  **Bridge:** frames `ACTIVITY_SLICE` / `ACTIVITY_DOWN` / `ACTIVITY_REQ` / `ACTIVITY_RES` on the peer-hub link (§7 "Hub-to-hub
+  frames"), only from an ADOPTED link (`peerEntryOf(sock)`), ownership = `hostOfGw(peer session)`; a frame whose
+  `origin` names another host is dropped; a delta from a link that never sent a full one, or out of sync, triggers
+  `ACTIVITY_REQ {op:"resync"}` (≤ every 2 s per link). `PEER_HELLO` declares `activity_gossip:1`; a link gets a full
+  slice on adoption (`actLinkInit` in `adoptPeer`). **Rate + coalescing:** a local change (`activityLog`, gone sweep, GC
+  expiry/budget, replay publish/finish) only bumps a version and KICKS each link's single timer, due `ACT_GOSSIP_MS`
+  (1 s) after that link's last frame; the frame then carries the current diff — so any burst is ≤1 frame/s per link; the
+  #63 heartbeat adds a sync beat through the same scheduler. Cap `AI_BRIDGE_ACTIVITY_SLICE_MAX_BYTES` (256 KB). The units
+  are computed once per version and shared by every link. `actOwner` maps each remote host to the peer session whose
+  link owns its slice; `dropPeer` (close / retire / expiry) → `actLinkLost` fails that link's in-flight fetches and marks
+  the host down. **Remote history:** `activity {log}` resolves the session on any host (`ambiguous-session` now lists
+  each candidate's host; the agent or `host` disambiguates); a remote one → `ACTIVITY_REQ {op:"log", q}` to the owner,
+  which answers `logView` capped at `AI_BRIDGE_ACTIVITY_PAGE_ENTRIES` (50) / `_PAGE_BYTES` (32 KB); `entry:{id, host?}` →
+  `{op:"entry"}` → the owner's `lookupActivityEntry` (memory → id index → streamed day-file scan; details + data only
+  here). The owner rate-limits per link with a token bucket (`_FETCH_RATE`, 4/s, burst 4) → `rate-limited` +
+  `retry_after_ms`; the requester times out after `_REMOTE_MS` (4 s, < the follower's 5 s) → `owner-unreachable`, as
+  does a missing link; a peer without the flag → `owner-unsupported`. Remote results carry `from_host`; the board head
+  carries `remote_hosts`. **Going down:** `/admin/prepare-shutdown`, after the flush, sends `ACTIVITY_DOWN` to every
+  capable peer and answers `down_notified`; SIGINT/SIGTERM do the same (≤300 ms) before exiting; after a notice no slices
+  go out for `_DOWN_HOLD_MS` (30 s), then full ones (if still alive). Receivers mark that host down at once; its next
+  full slice (a returning host) clears it. **Followers** keep forwarding reads to their gateway (no replicated board on
+  followers: they'd only duplicate memory and traffic, and every follower read already goes up the control link).
+  **Dashboards** get `{type:"activity_board", board}` (≤1/s, only when one is connected) and may send `{type:"activity",
+  ref, query}`. **Bare-session rule:** `loggerUserConflict` also refuses a script report for a BARE process-level
+  session (a roster entry with its own project + user, name = the session) under another user; same user allowed.
+  **Mixed versions:** a ≤1.59 hub doesn't declare the flag → gets no activity frames (and ignores them anyway — unknown
+  frame types fall through); its agents just aren't on 1.60 boards. Test hooks: `AI_BRIDGE_TEST_HOSTNAME` (distinct host
+  names for loopback "hosts"), `AI_BRIDGE_TEST_ACTIVITY_TAP` (`activity {tap:true}` → recent frame summaries), and
+  `AI_BRIDGE_TEST_GOSSIP=legacy` now also mimics a ≤1.59 hub for activity. Tests: `test_activity_unit` 386 → 427 (host
+  key, pre-1.60 replay, grouping, locate, down/clear/expire, planSlice full/delta/removals/convergence, the byte cap
+  newest-first + spill-over, applySlice seq/out-of-sync/ownership, paging); new `test_activity_gossip_live` (44 — four
+  loopback hosts + a follower: on B's board within ~2 s tagged with A's host, also through the follower; one group for
+  the same name on two hosts; a dashboard WS request + push; a 20/s `log:false` burst → ≤1 frame/s with ≥900 ms gaps; the bare-session rule; a link
+  restart (B's gateway killed, the follower takes over) → full slices, C's truncated newest-first and completed by later
+  frames; forged slices; remote paging over 3 pages; remote entry details/data; the rate limit; prepare-shutdown → gone
+  at once, cleared when A returns; owner down → `owner-unreachable`; a legacy hub); against the pre-change bridge 38 of
+  the 44 FAIL. `test_log_script_live`'s version check is now ≥ 1.59.0. Full suite 1668 passed, 0 failed (49 files; `test_federation_heal_live` lost a
+  bridge connection once mid-run in the full suite and then passed 19/19 in 7 solo runs).
 - **Built (v1.59.0):** *the agent activity board, build-plan step 3 — `tools/aimb-log.mjs`, plus the Task Tray's
   prepare-shutdown flush (#70).* **The script** reports to this host's board WITHOUT registering: it attaches to the
   GATEWAY's WS port as a token-gated `logger` leaf — `hello {kind:"logger", token, ident:{session, project, user,

@@ -4,8 +4,10 @@
 // adds here: the `log` flag, the session identity, the persistence markers, checkpoints (cp/rep) and the newest-first replay.
 //
 // THE MODEL (docs/issues.md #70). The tree is project → session → agent → context → message.
-// - A SESSION is keyed by sessionKey(realm, projKey(project), lc(user), lc(session)) within an ORIGIN (the host that hosts
-//   it). The host is NOT part of it, so a session that moves machines stays the same session (#70 "Decisions after step 1").
+// - A SESSION is keyed by sessionKey(realm, projKey(project), lc(user), lc(session), lc(host)). v1.60.0 (#70 "Decisions
+//   before step 4"): the HOST is part of the identity, and it is always the ORIGIN that holds the entity — this state's own
+//   `origin` for the local slice (ident.host is ignored: each host only ever writes its OWN entities), the link's host for
+//   a remote slice. The same session name reporting from two hosts is two entities; the board GROUPS them (boardView).
 //   Its own reports (no `agent`) go to `session.self`, an entity shaped exactly like an agent (path null) that never counts
 //   toward the agents-per-session limit and is never evicted.
 // - An AGENT is a `/`-path label (≤3 segments) under its session. Agents don't register: the first message creates one.
@@ -62,12 +64,18 @@
 // far is resolved, so the board can publish early. Phase 2 fills each entity's log history (bounded, chronological;
 // cp/rep lines never count). last_activity also takes the `last` of any rep line listing the context's key (same file).
 //
-// GOSSIP (build-plan step 4): snapshot() is the compact replicated form — current lines only, no details/data (only
-// has_* flags so a viewer knows to fetch), no log entries, arrays key-sorted and fields in a fixed order so equal state
-// serialises identically. The replication model is PER-ORIGIN OWNERSHIP, not last-writer-wins: each host is
+// GOSSIP (build-plan step 4, v1.60.0): snapshot() is the compact replicated form — current lines only, no details/data
+// (only has_* flags so a viewer knows to fetch), no log entries, arrays key-sorted and fields in a fixed order so equal
+// state serialises identically. The replication model is PER-ORIGIN OWNERSHIP, not last-writer-wins: each host is
 // authoritative for the sessions it hosts, so mergeSnapshot(from, snap) REPLACES everything held for `from` (never a
 // field merge), cannot touch another origin's slice or our own, and is idempotent (a canonical signature per slice).
-// dropOrigin() forgets a host that left.
+// On the wire (v1.60.0) a link carries a FULL slice on (re)link / on request and then DELTAS: planSlice() diffs this
+// host's gossip units (one per entity, plus its session header) against what that link was last sent (a per-link `pub`)
+// and emits only the changed entities + removals, NEWEST-ACTIVE FIRST under a byte cap (the rest follows in the next
+// frame; `truncated` says more is pending). applySlice() patches the held slice by (epoch, seq): a delta whose `base`
+// isn't the held seq is refused 'out-of-sync' (the caller asks for a full one). markOriginDown() shows a slice's
+// unfinished entities as GONE (its host went down / unreachable) until a fresh full slice replaces it; dropOrigin() /
+// expireRemote() forget it.
 //
 // LIMITS are locked in code (they change what crosses the mesh, so every bridge must agree — a change is a version
 // bump); the per-host knobs come from the `activity` config block + AI_BRIDGE_ACTIVITY_* env (resolveConfig).
@@ -136,12 +144,18 @@ const normText = s => s.replace(/\s*[\r\n\t\f\v]+\s*/g, ' ').replace(CONTROL, ''
 function compact(o) { const r = {}; for (const k of Object.keys(o)) { const v = o[k]; if (v !== null && v !== undefined && v !== false) r[k] = v } return r }
 
 /**
- * The session key within an origin: realm + projKey(project) + lc(user) + lc(session), JSON-encoded so no separator can
- * collide (#70 "Decisions after step 1": the host is NOT part of it — a session that moves machines stays the same
- * session). Case-insensitive; the records keep the first-seen spelling. A missing realm is 'default' (the bridge's).
- * @param {{ realm?: string|null, project?: string|null, user?: string|null, session?: string|null }} ident
+ * The session key: realm + projKey(project) + lc(user) + lc(session) + lc(host), JSON-encoded so no separator can collide.
+ * v1.60.0 (#70 "Decisions before step 4"): the HOST is part of it (it was not in steps 1–3) — each host writes only its
+ * own entities, so the same name on two hosts is two sessions, grouped for display by groupKey(). Inside this module the
+ * host is always the ORIGIN holding the session (keyOf). Case-insensitive; records keep the first-seen spelling. A
+ * missing realm is 'default' (the bridge's).
+ * @param {{ realm?: string|null, project?: string|null, user?: string|null, session?: string|null, host?: string|null }} ident
  */
-export const sessionKey = ident => { const i = ident && typeof ident === 'object' ? ident : {}; return JSON.stringify([lc(i.realm) || 'default', projKey(i.project), lc(i.user), lc(i.session)]) }
+export const sessionKey = ident => { const i = ident && typeof ident === 'object' ? ident : {}; return JSON.stringify([lc(i.realm) || 'default', projKey(i.project), lc(i.user), lc(i.session), lc(i.host) || '']) }
+/** The cross-host GROUP key (#70 step 4: the board groups a session's entities from every host): sessionKey minus the host. */
+export const groupKey = ident => { const i = ident && typeof ident === 'object' ? ident : {}; return JSON.stringify([lc(i.realm) || 'default', projKey(i.project), lc(i.user), lc(i.session)]) }
+/** The key of `ident` as held in `origin`'s slice (default: this state's own) — the host is the origin, never ident.host. */
+const keyOf = (state, ident, origin) => sessionKey({ ...(ident && typeof ident === 'object' ? ident : {}), host: origin || state.origin })
 const p2 = n => String(n).padStart(2, '0')
 /** The LOCAL calendar day of a ms time, "YYYY-MM-DD" (the daily JSONL's file name); null for a bad time. */
 export function localDay(ts) { const d = new Date(ts); return Number.isFinite(d.getTime()) ? `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}` : null }
@@ -477,7 +491,7 @@ export function parseMessage(input, opts = {}) {
  * @typedef {{ day:string, keys:Map<string, number>, next:number,
  *   rep:{ keys:number[], since:number, last:number, n:number, offset?:number }|null }} ActivityCpFile
  * @typedef {{ v:1, config:any, origin:string, idPrefix:string, seq:number, local:Map<string, ActivitySession>,
- *   remote:Map<string, { sessions:Map<string, ActivitySession>, sig:string }>,
+ *   remote:Map<string, { sessions:Map<string, ActivitySession>, sig:string|null, down_at?:number|null, epoch?:string|null, seq?:number, truncated?:boolean }>,
  *   cpLive:Map<string, [string, string|null, string]>, cp:ActivityCpFile|null }} ActivityState
  */
 
@@ -556,6 +570,7 @@ const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, d
  *   planCheckpoints(); a logged one closes the open repeat line.
  * @param {ActivityState} state
  * @param {{ session:string, project?:string, user?:string|null, realm?:string, host?:string }} ident  the reporting session
+ *   (v1.60.0: `host` is ignored — a local session's host is always state.origin, part of its key)
  * @param {ActivityMsg} msg  parseMessage(...).msg
  * @param {number} now
  * @returns {ActivityResult} { ok:true, id, ts, logged, entry, current, state, stale_at, agent, context,
@@ -570,7 +585,7 @@ export function apply(state, ident, msg, now) {
   const sessName = str(ident && ident.session)
   if (!sessName) return bad('bad-session', 'the reporting session needs a name')
   const L = ACTIVITY_LIMITS
-  const sKey = sessionKey({ realm: ident.realm, project: ident.project, user: ident.user, session: sessName })
+  const sKey = keyOf(state, { realm: ident.realm, project: ident.project, user: ident.user, session: sessName })   // v1.60.0: host = this origin
   let sess = state.local.get(sKey)
   const aKey = msg.agent == null ? null : lc(msg.agent)
   let ent = sess ? (aKey === null ? sess.self : sess.agents.get(aKey)) : null
@@ -585,12 +600,11 @@ export function apply(state, ident, msg, now) {
   if (!ctx && ent && ent.contexts.size >= L.contextsPerAgent) return bad('too-many-contexts', `this ${aKey === null ? 'session' : 'agent'} already has ${L.contextsPerAgent} contexts (including @root)`)
   // ---- every check passed: mutate ----
   if (!sess) {
-    sess = { key: sKey, origin: state.origin, realm: str(ident.realm) || 'default', session: sessName, project: str(ident.project) || 'unclassified', user: str(ident.user), host: str(ident.host),
+    sess = { key: sKey, origin: state.origin, realm: str(ident.realm) || 'default', session: sessName, project: str(ident.project) || 'unclassified', user: str(ident.user), host: state.origin,
       created_at: now, last_activity: now, gone_at: null, self: newEntity(null, now), agents: new Map(), persisted: false }
     state.local.set(sKey, sess)
     if (aKey === null) ent = sess.self
   }
-  if (str(ident.host)) sess.host = str(ident.host)   // the session may move machines (realm/project/user/name are its identity)
   if (evict) sess.agents.delete(evict.key)
   if (!ent) { ent = newEntity(msg.agent, now); sess.agents.set(aKey, ent) }
   if (!ctx) ctx = ent.contexts.get(cKey)
@@ -706,7 +720,7 @@ function checkpointOf(state, sess, ent, ctx, now, k) {
  * @returns {boolean} whether the session is known
  */
 export function markSessionGone(state, ident, now) {
-  const sess = state.local.get(sessionKey(ident))
+  const sess = state.local.get(keyOf(state, ident))
   if (!sess) return false
   const at = Number.isFinite(now) ? now : null
   sess.gone_at = at; sess.self.gone_at = at
@@ -730,12 +744,11 @@ export function expire(state, now) {
   return out
 }
 
-/** A session record, local by default or from a remote origin's slice. */
+/** A session record, local by default or from a remote origin's slice (the key's host is the origin — ident.host is ignored). */
 export function getSession(state, ident, origin) {
-  const k = sessionKey(ident)
-  if (!origin || origin === state.origin) return state.local.get(k) || null
+  if (!origin || origin === state.origin) return state.local.get(keyOf(state, ident)) || null
   const sl = state.remote.get(origin)
-  return (sl && sl.sessions.get(k)) || null
+  return (sl && sl.sessions.get(keyOf(state, ident, origin))) || null
 }
 /** An entity (agent path, or null/undefined = the session itself), local by default. */
 export function getEntity(state, ident, agent, origin) {
@@ -895,9 +908,11 @@ export function createReplay(state, { now }) {
       const m = repLast.get(d), r = m && m.get(rec.k)
       if (rec.ts < cutoff && r === undefined) return 'old'
       if (r !== undefined) { repL = r; m.delete(rec.k) }   // a rep line lists the NEAREST older cp with its key (same file): consume
-      if (d === today) { const id = cpId(sessionKey(rec), rec.agent == null ? null : lc(rec.agent), lc(rec.context)); if (!cpKeys.has(id)) cpKeys.set(id, rec.k); maxK = Math.max(maxK, rec.k) }
+      if (d === today) { const id = cpId(keyOf(state, rec), rec.agent == null ? null : lc(rec.agent), lc(rec.context)); if (!cpKeys.has(id)) cpKeys.set(id, rec.k); maxK = Math.max(maxK, rec.k) }
     } else if (rec.ts < cutoff) return 'old'
-    const sk = sessionKey(rec), ak = rec.agent == null ? null : lc(rec.agent), ck = lc(rec.context)
+    // v1.60.0: the key's host is THIS origin whatever the record says — the files are per host (one writer), and a
+    // step-2/3 record may lack `host` (or carry the old spelling); keyOf ignores rec.host
+    const sk = keyOf(state, rec), ak = rec.agent == null ? null : lc(rec.agent), ck = lc(rec.context)
     let s = sessions.get(sk)
     if (s && (s.sealed || (ak !== null && s.dead.has(ak)))) { skipped++; return 'skip' }   // an older instance
     let e = s ? (ak === null ? s.self : s.agents.get(ak)) : null
@@ -908,13 +923,12 @@ export function createReplay(state, { now }) {
     if (ak !== null && !e) { const p = normAgentPath(rec.agent); if (!p.ok || (s && s.agents.size >= ACTIVITY_LIMITS.agentsPerSession)) { skipped++; return 'skip' } path = p.path }
     if (!c) { const n = normContextName(rec.context); if (!n.ok || (e && e.contexts.size >= ACTIVITY_LIMITS.contextsPerAgent)) { skipped++; return 'skip' } cname = n.name }
     // ---- accepted: create what's new ----
-    if (!s) { s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: null, created: null, last: -Infinity, sealed: false, self: rEnt(null), agents: new Map(), dead: new Set() }; sessions.set(sk, s) }
+    if (!s) { s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: state.origin, created: null, last: -Infinity, sealed: false, self: rEnt(null), agents: new Map(), dead: new Set() }; sessions.set(sk, s) }
     if (!e) { e = ak === null ? s.self : rEnt(path); if (ak !== null) s.agents.set(ak, e) }
     if (!c) { c = e.contexts.get(ck) || rCtx(cname); e.contexts.set(ck, c) }
     fed++
     // identity spellings: every record carries the canonical (first-seen) one; the OLDEST record's is kept
     s.session = rec.session.trim(); s.project = str(rec.project) || 'unclassified'; s.user = str(rec.user); s.realm = str(rec.realm) || 'default'
-    if (!s.host && str(rec.host)) s.host = str(rec.host)   // the newest record's host (a session may move machines)
     e.touched = c.touched = true
     const act = Math.max(rec.ts, repL)
     s.last = Math.max(s.last, act); e.last = Math.max(e.last, act); c.last = Math.max(c.last, act)
@@ -1074,16 +1088,23 @@ export function renderText(template, progress, eta_at, now) {
 const lineView = (l, p, eta, now) => (l ? compact({ id: l.id, ts: l.ts, text: l.text, rendered: renderText(l.text, p, eta, now), state: l.state,
   has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null)
 /**
- * This host's board: sessions → agents → contexts with their current lines, EFFECTIVE state (stale computed with
- * `staleMin`, default config.stale_after_min; gone), rollup progress and visibility. Sorted by key.
+ * The MESH board (v1.60.0, #70 step 4): every session this host holds — its own (local) and each remote origin's slice —
+ * GROUPED by realm + project + user + session name across hosts (groupKey). Each group lists its agents from every host,
+ * EACH ENTITY TAGGED with its `host` (an agent path on two hosts = two entries); a group spanning one host carries `host`
+ * (as before), one spanning several carries `hosts:[…]` + `multi_host:true`, `self` = the most recently active host's
+ * session entity and `selves` = every host's. EFFECTIVE state is computed HERE, on the reader's side, with `staleMin`
+ * (default this host's config.stale_after_min) — stale, and gone (a session that left its host's roster, or a remote slice
+ * whose origin went down: markOriginDown). Rollup progress, visibility. Groups sorted by key; agents by path then host.
  * @param {ActivityState} state @param {number} now
- * @param {{ project?:string, session?:string, agent?:string, active_only?:boolean, staleMin?:number }} [opts]
- *   agent matches that path or anything under it (`a` → `a`, `a/b`); active_only drops finished/gone agents
+ * @param {{ project?:string, session?:string, agent?:string, host?:string, active_only?:boolean, staleMin?:number }} [opts]
+ *   agent matches that path or anything under it (`a` → `a`, `a/b`); host keeps only that host's entities;
+ *   active_only drops finished/gone agents
  */
 export function boardView(state, now, opts = {}) {
   const sm = Number(opts.staleMin) > 0 ? Number(opts.staleMin) : state.config.stale_after_min
   const hours = state.config.finished_visible_hours
   const pk = str(opts.project) ? projKey(opts.project) : null, sk = str(opts.session) ? lc(opts.session) : null, ak = str(opts.agent) ? lc(opts.agent).replace(/^\/+|\/+$/g, '') : null
+  const hk = str(opts.host) ? lc(opts.host) : null
   const ctxView = (c, e) => {
     const eff = effectiveState(c, now, sm, e)
     return compact({ name: c.name, state: eff.state, was: eff.state !== eff.was ? eff.was : null, stale_at: eff.stale_at,
@@ -1091,38 +1112,86 @@ export function boardView(state, now, opts = {}) {
       progress: c.progress ? { ...c.progress, pct: Math.round(progressPct(c.progress) * 10) / 10 } : null, eta_at: c.eta_at, created_at: c.created_at,
       last_activity: c.last_activity, stale_after_ms: c.stale_after_ms })
   }
-  const entView = e => {
+  // a remote entity's log lives on its owner (fetched on demand): its view says so instead of counting a log it lacks
+  const entView = (e, host, local) => {
     const eff = effectiveState(e, now, sm), root = e.contexts.get('root'), bar = rollup(e)
-    return compact({ agent: e.path, state: eff.state, was: eff.state !== eff.was ? eff.was : null, stale_at: eff.stale_at, active: isActive(e), visible: visible(e, now, hours),
+    return compact({ agent: e.path, host, state: eff.state, was: eff.state !== eff.was ? eff.was : null, stale_at: eff.stale_at, active: isActive(e), visible: visible(e, now, hours),
       current: lineView(root && root.current, bar, root ? root.eta_at : null, now), progress: bar, eta_at: root ? root.eta_at : null, started_at: e.started_at, last_activity: e.last_activity,
       finished_at: e.finished_at, gone_at: e.gone_at, stale_after_ms: e.stale_after_ms,
       contexts: [...e.contexts.values()].sort((a, b) => (a.key === 'root' ? -1 : b.key === 'root' ? 1 : cmp(a.key, b.key))).map(c => ctxView(c, e)),
-      log: { entries: e.log.length, dropped: e.log_dropped } })
+      log: local ? { entries: e.log.length, dropped: e.log_dropped } : { remote: true } })
   }
+  const groups = new Map()   // groupKey -> [{ s, host, local }]
+  const add = (s, host, local) => {
+    if (pk && projKey(s.project) !== pk) return
+    if (sk && lc(s.session) !== sk) return
+    if (hk && lc(host) !== hk) return
+    const g = groupKey(s)
+    if (!groups.has(g)) groups.set(g, [])
+    groups.get(g).push({ s, host, local })
+  }
+  for (const s of state.local.values()) add(s, state.origin, true)
+  for (const [o, sl] of state.remote) for (const s of sl.sessions.values()) add(s, o, false)
   const out = []
-  for (const s of [...state.local.values()].sort((a, b) => cmp(a.key, b.key))) {
-    if (pk && projKey(s.project) !== pk) continue
-    if (sk && lc(s.session) !== sk) continue
-    let agents = [...s.agents.values()].sort((a, b) => cmp(a.key, b.key))
-    if (ak) agents = agents.filter(a => a.key === ak || a.key.startsWith(ak + '/'))
-    if (opts.active_only) agents = agents.filter(isActive)
+  for (const g of [...groups.keys()].sort(cmp)) {
+    const parts = groups.get(g).sort((a, b) => (a.local !== b.local ? (a.local ? -1 : 1) : cmp(lc(a.host), lc(b.host))))
+    let agents = []
+    for (const p of parts) for (const a of p.s.agents.values()) agents.push({ a, p })
+    if (ak) agents = agents.filter(x => x.a.key === ak || x.a.key.startsWith(ak + '/'))
+    if (opts.active_only) agents = agents.filter(x => isActive(x.a))
     if (ak && !agents.length) continue
-    out.push(compact({ session: s.session, project: s.project, user: s.user, realm: s.realm, host: s.host, created_at: s.created_at, last_activity: s.last_activity,
-      gone_at: s.gone_at, self: entView(s.self), agents: agents.map(entView) }))
+    agents.sort((x, y) => cmp(x.a.key, y.a.key) || cmp(lc(x.p.host), lc(y.p.host)))
+    const hosts = [...new Set(parts.map(p => p.host))]
+    const lead = parts[0].s, multi = hosts.length > 1
+    const newest = parts.reduce((b, p) => (p.s.last_activity > b.s.last_activity ? p : b), parts[0])
+    const goneAll = parts.every(p => p.s.gone_at)
+    out.push(compact({ session: lead.session, project: lead.project, user: lead.user, realm: lead.realm, host: multi ? null : hosts[0], hosts: multi ? hosts : null, multi_host: multi,
+      created_at: Math.min(...parts.map(p => p.s.created_at)), last_activity: Math.max(...parts.map(p => p.s.last_activity)),
+      gone_at: goneAll ? Math.max(...parts.map(p => p.s.gone_at)) : null,
+      self: entView(newest.s.self, newest.host, newest.local), selves: multi ? parts.map(p => entView(p.s.self, p.host, p.local)) : null,
+      agents: agents.map(x => entView(x.a, x.p.host, x.p.local)) }))
   }
   return out
+}
+/**
+ * The sessions matching a log query on EVERY host held (v1.60.0): [{ host, local, session }] — by name (+ project / user
+ * / host when given, case-insensitive). The bridge reads a local one here and fetches a remote one from its owner.
+ * @param {ActivityState} state @param {{ session?:string, project?:string, user?:string, host?:string }} q
+ */
+export function locateSessions(state, q) {
+  const sk = q && str(q.session) ? lc(q.session) : null
+  if (!sk) return []
+  const pk = str(q.project) ? projKey(q.project) : null, uk = str(q.user) ? lc(q.user) : null, hk = str(q.host) ? lc(q.host) : null
+  const ok = (s, host) => lc(s.session) === sk && (!pk || projKey(s.project) === pk) && (!uk || lc(s.user) === uk) && (!hk || lc(host) === hk)
+  const out = []
+  for (const s of [...state.local.values()].sort((a, b) => cmp(a.key, b.key))) if (ok(s, state.origin)) out.push({ host: state.origin, local: true, session: s })
+  for (const o of [...state.remote.keys()].sort(cmp)) for (const s of [...state.remote.get(o).sessions.values()].sort((a, b) => cmp(a.key, b.key))) if (ok(s, o)) out.push({ host: o, local: false, session: s })
+  return out
+}
+/** Which host holds the CURRENT line `id` (v1.60.0): { host, local } or null. Remote log entries aren't gossiped — pass entry:{id, host}. */
+export function locateEntry(state, id) {
+  if (typeof id !== 'string' || !id) return null
+  const has = s => [s.self, ...s.agents.values()].some(e => [...e.contexts.values()].some(c => c.current && c.current.id === id))
+  for (const s of state.local.values()) if (has(s)) return { host: state.origin, local: true }
+  for (const [o, sl] of state.remote) for (const s of sl.sessions.values()) if (has(s)) return { host: o, local: false }
+  return null
 }
 /**
  * One entity's in-memory log, NEWEST FIRST (optionally one context's). The session is found by name (+ project/user
  * when the name alone is ambiguous). Checkpoints and repeat lines are never in it. Each entry's `rendered` uses the
  * progress / ETA RECORDED on that entry (history stays accurate), `now` for {eta}.
+ * PAGED (v1.60.0, #70 step 4 — remote history travels in chunks): `cursor` = the id of the last entry of the previous
+ * page → the entries OLDER than it; a page holds at most `limit` (≤ log_entries_per_agent, ≤ opts.maxEntries) entries
+ * and ~opts.maxBytes of JSON (at least one entry); `next_cursor` is set while older entries remain. An unknown cursor
+ * whose id still names a time continues from that time (its entry was dropped meanwhile); otherwise 'bad-cursor'.
  * @param {ActivityState} state
- * @param {{ session:string, project?:string, user?:string, agent?:string|null, context?:string, limit?:number }} q
+ * @param {{ session:string, project?:string, user?:string, agent?:string|null, context?:string, limit?:number, cursor?:string }} q
  * @param {number} [now]
+ * @param {{ maxEntries?: number, maxBytes?: number }} [opts]
  * @returns {ActivityResult}
  */
-export function logView(state, q, now = Date.now()) {
-  if (!q || typeof q !== 'object' || !str(q.session)) return bad('bad-log-query', 'log needs { session, project?, agent?, context?, limit? }')
+export function logView(state, q, now = Date.now(), opts = {}) {
+  if (!q || typeof q !== 'object' || !str(q.session)) return bad('bad-log-query', 'log needs { session, project?, agent?, context?, limit?, cursor? }')
   const sk = lc(q.session), pk = str(q.project) ? projKey(q.project) : null, uk = str(q.user) ? lc(q.user) : null
   const cands = [...state.local.values()].filter(s => lc(s.session) === sk && (!pk || projKey(s.project) === pk) && (!uk || lc(s.user) === uk))
   if (!cands.length) return bad('unknown-session', `no activity from a session "${q.session}" on this host`)
@@ -1132,10 +1201,30 @@ export function logView(state, q, now = Date.now()) {
   if (!ent) return bad('unknown-agent', `session "${s.session}" has no agent "${q.agent}"`)
   let ck = null
   if (str(q.context)) { const c = parseContextParam(q.context); if (!c.ok) return c; ck = lc(c.name) }
-  const lim = Math.max(1, Math.min(Number(q.limit) > 0 ? Math.floor(Number(q.limit)) : 50, state.config.log_entries_per_agent))
+  const maxE = Number(opts && opts.maxEntries) > 0 ? Math.floor(Number(opts.maxEntries)) : Infinity, maxB = Number(opts && opts.maxBytes) > 0 ? Number(opts.maxBytes) : Infinity
+  const lim = Math.max(1, Math.min(Number(q.limit) > 0 ? Math.floor(Number(q.limit)) : 50, state.config.log_entries_per_agent, maxE))
   const list = ck ? ent.log.filter(x => lc(x.context) === ck) : ent.log
+  let end = list.length   // entries [0, end) are older than the cursor
+  if (str(q.cursor)) {
+    let i = -1
+    for (let j = list.length - 1; j >= 0; j--) if (list[j].id === q.cursor) { i = j; break }
+    if (i >= 0) end = i
+    else {
+      const t = entryTime(q.cursor)
+      if (t === null) return bad('bad-cursor', 'cursor must be the next_cursor of a previous page')
+      end = 0; while (end < list.length && list[end].ts < t) end++   // its entry was dropped meanwhile: continue by time
+    }
+  }
+  const entries = []
+  let bytes = 0, i = end - 1
+  for (; i >= 0 && entries.length < lim; i--) {
+    const x = { ...list[i], rendered: renderText(list[i].text, list[i].progress, list[i].eta_at, now) }
+    const b = utf8(JSON.stringify(x)) + 1
+    if (entries.length && bytes + b > maxB) break
+    entries.push(x); bytes += b
+  }
   return { ok: true, session: s.session, project: s.project, user: s.user, agent: ent.path, context: ck ? (ent.contexts.get(ck) || { name: ck }).name : null,
-    entries: list.slice(-lim).reverse().map(x => ({ ...x, rendered: renderText(x.text, x.progress, x.eta_at, now) })), total: list.length, dropped: ent.log_dropped }
+    entries, total: list.length, dropped: ent.log_dropped, next_cursor: i >= 0 && entries.length ? entries[entries.length - 1].id : null }
 }
 /**
  * An entry by id from MEMORY: a current line (with its details/data; `rendered` against the live bar) or a log entry
@@ -1231,14 +1320,20 @@ function wEntity(r, path) {
   if (!e.contexts.has('root')) e.contexts.set('root', newContext('root', e.started_at))
   return e
 }
-function wSession(r, origin) {
+// a session record's header from the wire; host = the ORIGIN (the link's host — never the record's `host` field, v1.60.0)
+function wHeader(r, origin) {
   if (!r || typeof r !== 'object') return null
   const session = str(r.session)
   if (!session) return null
   const project = str(r.project) || 'unclassified'
   const realm = str(r.realm) || 'default', user = str(r.user)
-  const s = { key: sessionKey({ realm, project, user, session }), origin, realm, session, project, user, host: str(r.host), created_at: wTime(r.created_at) || 0,
-    last_activity: wTime(r.last_activity) || 0, gone_at: wPos(r.gone_at), self: wEntity(r.self && typeof r.self === 'object' ? r.self : {}, null), agents: new Map() }
+  return { key: sessionKey({ realm, project, user, session, host: origin }), origin, realm, session, project, user, host: origin, created_at: wTime(r.created_at) || 0,
+    last_activity: wTime(r.last_activity) || 0, gone_at: wPos(r.gone_at) }
+}
+function wSession(r, origin) {
+  const h = wHeader(r, origin)
+  if (!h) return null
+  const s = { ...h, self: wEntity(r.self && typeof r.self === 'object' ? r.self : {}, null), agents: new Map() }
   for (const a of Array.isArray(r.agents) ? r.agents : []) {
     if (s.agents.size >= ACTIVITY_LIMITS.agentsPerSession) break
     if (!a || typeof a !== 'object') continue
@@ -1252,15 +1347,17 @@ function wSession(r, origin) {
  * Fold a remote host's snapshot in. PER-ORIGIN OWNERSHIP: the slice REPLACES everything held for `fromOrigin` (sessions
  * it no longer lists disappear); no other origin's slice is touched, and our own origin is refused. The snapshot is
  * re-validated against the same limits. Idempotent: a slice whose canonical form equals the held one → changed:false.
+ * A slice held while its origin was marked DOWN is always replaced (changed:true), which clears the gone marks.
  * @param {ActivityState} state
  * @param {string} fromOrigin  the host that OWNS the slice (the link it arrived on decides, not the snapshot's field)
  * @param {any} snap  a snapshot() from that host
+ * @param {{ epoch?: any, seq?: number, truncated?: boolean }} [meta]  v1.60.0: the wire position of a full slice (applySlice)
  * @returns {ActivityResult} { ok:true, changed:boolean, sessions:number } or { ok:false, code, what }
  */
-export function mergeSnapshot(state, fromOrigin, snap) {
+export function mergeSnapshot(state, fromOrigin, snap, meta = {}) {
   const origin = typeof fromOrigin === 'string' ? fromOrigin.trim() : ''
   if (!origin) return bad('bad-origin', 'mergeSnapshot needs the owning origin')
-  if (origin === state.origin) return bad('own-origin', 'a remote snapshot may not replace this host\'s own slice')
+  if (lc(origin) === lc(state.origin)) return bad('own-origin', 'a remote snapshot may not replace this host\'s own slice')
   if (!snap || typeof snap !== 'object' || !Array.isArray(snap.sessions)) return bad('bad-snapshot', 'expected { v, origin, sessions:[...] }')
   const sessions = new Map()
   for (const r of snap.sessions) {
@@ -1269,13 +1366,171 @@ export function mergeSnapshot(state, fromOrigin, snap) {
     if (s && !sessions.has(s.key)) sessions.set(s.key, s)
   }
   const sig = JSON.stringify([...sessions.values()].sort((a, b) => cmp(a.key, b.key)).map(snapSession))
+  const pos = { epoch: meta && meta.epoch != null ? String(meta.epoch) : null, seq: meta && Number.isFinite(Number(meta.seq)) ? Number(meta.seq) : 0, truncated: !!(meta && meta.truncated) }
   const held = state.remote.get(origin)
-  if (held && held.sig === sig) return { ok: true, changed: false, sessions: sessions.size }
-  state.remote.set(origin, { sessions, sig })
+  if (held && held.sig === sig && !held.down_at) { Object.assign(held, pos); return { ok: true, changed: false, sessions: sessions.size } }
+  state.remote.set(origin, { sessions, sig, down_at: null, ...pos })
   return { ok: true, changed: true, sessions: sessions.size }
 }
 /** Forget a remote origin's slice (the host left the mesh). Returns whether one was held. */
 export const dropOrigin = (state, origin) => state.remote.delete(origin)
+
+// ---- v1.60.0 (#70 step 4): the wire — per-link deltas under a byte cap, newest-active first
+
+const sessHeader = s => compact({ session: s.session, project: s.project, user: s.user, realm: s.realm, host: s.host, created_at: s.created_at, last_activity: s.last_activity, gone_at: s.gone_at })
+/**
+ * This host's gossip UNITS: one per entity (a session's own entity or an agent), keyed `[sessionKey, agentKey]`, with
+ * its canonical JSON (snapshot form) and last_activity, plus each session's header. Compute once per change and reuse
+ * for every link (planSlice opts.units).
+ * @param {ActivityState} state
+ * @returns {{ sessions: Map<string, any>, ents: Map<string, any> }}
+ */
+export function gossipUnits(state) {
+  const sessions = new Map(), ents = new Map()
+  for (const s of state.local.values()) {
+    const hdr = sessHeader(s)
+    sessions.set(s.key, { sk: s.key, hdr, hj: JSON.stringify(hdr), id: { realm: s.realm, project: s.project, user: s.user, session: s.session }, last: s.last_activity })
+    for (const e of [s.self, ...s.agents.values()]) {
+      const ent = snapEntity(e)
+      const uk = JSON.stringify([s.key, e.key])
+      ents.set(uk, { uk, sk: s.key, path: e.path, self: e.path == null, ent, json: JSON.stringify(ent), last: e.last_activity })
+    }
+  }
+  return { sessions, ents }
+}
+/** A link's published view — what it was last sent: hdrs sk -> { hj, id }, ents uk -> { json, sk, path }. */
+export const createPub = () => ({ hdrs: new Map(), ents: new Map() })
+/**
+ * The next frame body for ONE link: a FULL slice (`full:true` — everything, the link's pub reset) or a DELTA against the
+ * link's `pub` — the changed / new entities (each inside its session record: the header + `self` and/or `agents:[…]`
+ * that changed) and `remove:[{realm, project, user, session[, agent]}]` (no agent = the whole session). Entities go
+ * NEWEST-ACTIVE FIRST (last_activity desc) until `maxBytes` of JSON; the first always goes (an entity is bounded by the
+ * locked limits). What didn't fit stays unpublished, so the NEXT frame carries it: `truncated:true` / pending:true. The
+ * pub is updated to exactly what the body carries. Returns { body:null } when a delta has nothing to say.
+ * @param {ActivityState} state
+ * @param {{ hdrs: Map<string, any>, ents: Map<string, any> }} pub
+ * @param {{ full?: boolean, maxBytes?: number, units?: { sessions: Map<string, any>, ents: Map<string, any> } }} [opts]
+ * @returns {{ body: any, pending: boolean, entities: number, bytes: number }}
+ */
+export function planSlice(state, pub, opts = {}) {
+  const u = opts.units || gossipUnits(state), full = !!opts.full
+  const maxBytes = Number(opts.maxBytes) > 0 ? Number(opts.maxBytes) : Infinity
+  if (full) { pub.hdrs.clear(); pub.ents.clear() }
+  const remove = []
+  if (!full) {
+    const gone = new Set()
+    for (const [sk, h] of pub.hdrs) if (!u.sessions.has(sk)) { remove.push({ ...h.id }); pub.hdrs.delete(sk); gone.add(sk) }
+    for (const [uk, e] of pub.ents) {
+      if (gone.has(e.sk)) { pub.ents.delete(uk); continue }
+      if (!u.ents.has(uk)) { const h = pub.hdrs.get(e.sk); if (h && e.path != null) remove.push({ ...h.id, agent: e.path }); pub.ents.delete(uk) }
+    }
+  }
+  const cand = [], withEnt = new Set()
+  for (const x of u.ents.values()) { const p = pub.ents.get(x.uk); if (!p || p.json !== x.json) { cand.push(x); withEnt.add(x.sk) } }
+  for (const s of u.sessions.values()) { const p = pub.hdrs.get(s.sk); if ((!p || p.hj !== s.hj) && !withEnt.has(s.sk)) cand.push({ sk: s.sk, uk: JSON.stringify([s.sk]), hdrOnly: true, last: s.last }) }
+  cand.sort((a, b) => b.last - a.last || cmp(a.uk, b.uk))
+  const out = new Map()
+  let bytes = 64 + (remove.length ? utf8(JSON.stringify(remove)) : 0), n = 0, pending = false
+  for (const c of cand) {
+    const s = u.sessions.get(c.sk), rec = out.get(c.sk)
+    const add = (rec ? 0 : utf8(s.hj) + 16) + (c.hdrOnly ? 0 : utf8(c.json) + 2)
+    if ((n || out.size) && bytes + add > maxBytes) { pending = true; break }
+    let r = rec
+    if (!r) { r = { ...s.hdr }; out.set(c.sk, r); pub.hdrs.set(c.sk, { hj: s.hj, id: s.id }) }
+    if (!c.hdrOnly) { if (c.self) r.self = c.ent; else (r.agents || (r.agents = [])).push(c.ent); pub.ents.set(c.uk, { json: c.json, sk: c.sk, path: c.path }); n++ }
+    bytes += add
+  }
+  if (!full && !out.size && !remove.length) return { body: null, pending: false, entities: 0, bytes: 0 }
+  const body = /** @type {any} */ (full ? { full: true, sessions: [...out.values()] } : { sessions: [...out.values()], ...(remove.length ? { remove } : {}) })
+  if (pending) body.truncated = true
+  return { body, pending, entities: n, bytes }
+}
+/**
+ * Fold one wire frame body from `fromOrigin` (the link's host — the frame's own fields never decide ownership). A FULL
+ * body (`full:true`) replaces the origin's slice (mergeSnapshot) and records its (epoch, seq). A DELTA applies only on
+ * top of exactly the held position — same epoch and `base` === the held seq, and the slice not marked down — else it is
+ * refused with code 'out-of-sync' (the caller asks the owner for a full slice). Removals first, then each session
+ * record: a new session is created (capped at 1024 per origin), an existing one gets its header, its `self` when
+ * present and each listed agent REPLACED (a new agent beyond 128 is dropped). Everything is re-validated (wSession /
+ * wEntity), exactly like a snapshot. An empty delta with base === seq is a sync beat (changed:false).
+ * @param {ActivityState} state @param {string} fromOrigin @param {any} body
+ * @returns {ActivityResult} { ok:true, changed, full, sessions } or { ok:false, code, what }
+ */
+export function applySlice(state, fromOrigin, body) {
+  const origin = typeof fromOrigin === 'string' ? fromOrigin.trim() : ''
+  if (!origin) return bad('bad-origin', 'applySlice needs the owning origin')
+  if (lc(origin) === lc(state.origin)) return bad('own-origin', 'a remote slice may not touch this host\'s own entities')
+  if (!body || typeof body !== 'object' || (body.sessions != null && !Array.isArray(body.sessions)) || (body.remove != null && !Array.isArray(body.remove))) return bad('bad-slice', 'expected { full?, epoch, seq, base?, sessions:[…], remove?:[…] }')
+  if (body.full) {
+    const r = mergeSnapshot(state, origin, { sessions: body.sessions || [] }, { epoch: body.epoch, seq: body.seq, truncated: body.truncated })
+    return r.ok ? { ...r, full: true } : r
+  }
+  const held = state.remote.get(origin)
+  const epoch = body.epoch != null ? String(body.epoch) : null
+  if (!held || held.down_at || held.epoch !== epoch || held.seq !== Number(body.base)) return bad('out-of-sync', 'this delta does not follow the held slice — ask for a full one')
+  let changed = false
+  for (const r of body.remove || []) {
+    const h = wHeader(r, origin)
+    if (!h) continue
+    const s = held.sessions.get(h.key)
+    if (!s) continue
+    if (r.agent == null) { held.sessions.delete(h.key); changed = true; continue }
+    const p = normAgentPath(r.agent)
+    if (p.ok && s.agents.delete(lc(p.path))) changed = true
+  }
+  for (const r of body.sessions || []) {
+    const h = wHeader(r, origin)
+    if (!h) continue
+    const s = held.sessions.get(h.key)
+    if (!s) {
+      if (held.sessions.size >= MAX_SESSIONS_PER_ORIGIN) continue
+      held.sessions.set(h.key, wSession(r, origin)); changed = true; continue
+    }
+    s.created_at = h.created_at; s.last_activity = h.last_activity; s.gone_at = h.gone_at
+    if (r.self && typeof r.self === 'object') s.self = wEntity(r.self, null)
+    for (const a of Array.isArray(r.agents) ? r.agents : []) {
+      if (!a || typeof a !== 'object') continue
+      const p = normAgentPath(a.path)
+      if (!p.ok) continue
+      if (!s.agents.has(lc(p.path)) && s.agents.size >= ACTIVITY_LIMITS.agentsPerSession) continue
+      s.agents.set(lc(p.path), wEntity(a, p.path))
+    }
+    changed = true
+  }
+  held.seq = Number.isFinite(Number(body.seq)) ? Number(body.seq) : held.seq
+  held.truncated = !!body.truncated
+  if (changed) held.sig = null   // the canonical signature is a full slice's; the next full re-merges
+  return { ok: true, changed, full: false, sessions: held.sessions.size }
+}
+/**
+ * The origin went down or became unreachable (its going-down notice, its link dropped, it was retired / expired): every
+ * session and entity of its slice not already gone is marked gone at `now` — the board keeps the last-known lines and
+ * shows them GONE (done/failed stay as they were). Kept until a fresh full slice replaces it (which clears the marks) or
+ * expireRemote() drops it. Returns whether a slice was held.
+ * @param {ActivityState} state @param {string} origin @param {number} now
+ */
+export function markOriginDown(state, origin, now) {
+  const sl = state.remote.get(origin)
+  if (!sl) return false
+  if (sl.down_at) return true
+  const at = Number.isFinite(now) ? now : Date.now()
+  sl.down_at = at
+  for (const s of sl.sessions.values()) {
+    if (!s.gone_at) s.gone_at = at
+    for (const e of [s.self, ...s.agents.values()]) if (!e.gone_at) e.gone_at = at
+  }
+  return true
+}
+/** Drop remote slices that have been DOWN longer than finished_visible_hours. Returns the origins dropped. */
+export function expireRemote(state, now) {
+  const win = Math.max(0, Number(state.config.finished_visible_hours) || 0) * HOUR, out = []
+  for (const [o, sl] of [...state.remote]) if (sl.down_at && now - sl.down_at >= win) { state.remote.delete(o); out.push(o) }
+  return out
+}
+/** One line per remote origin held: { host, sessions, seq, down_at?, truncated? } (sorted by host). */
+export function remoteInfo(state) {
+  return [...state.remote.keys()].sort(cmp).map(o => { const sl = state.remote.get(o); return compact({ host: o, sessions: sl.sessions.size, seq: sl.seq || 0, down_at: sl.down_at || null, truncated: !!sl.truncated }) })
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // memory budget (an ESTIMATE of V8 heap use: strings at 2 bytes/char + fixed per-object/Map-entry overheads)
