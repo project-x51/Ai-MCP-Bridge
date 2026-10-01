@@ -394,6 +394,25 @@ silent steps such as builds and downloads.
   up. Files are per HOST (`activity/<host>/YYYY-MM-DD.jsonl` under the persist dir), so a newly elected gateway
   continues the same history.
 
+### Logging flag, checkpoints and chunked history (Robin, 2026-10-01; supersedes the implicit "tick" rule above)
+- **An explicit `log` flag (default true) decides whether a message is logged.**
+  - `log:false` still takes effect: an `@~` sets the current line and state, progress and ETA update the bar, and it
+    counts as activity. It is not added to the log or the daily JSONL.
+  - Text is optional only for a `log:false` message that carries progress and/or ETA.
+  - The agent or script decides explicitly. An agent's own tool calls are expensive, so it logs sparingly; a script
+    can report every second with `log:false` and log a milestone now and then.
+- **Bridge progress checkpoints:** every `progress_checkpoint_sec` (per-host config, default 60, 0 = off), the
+  gateway writes at most one compact checkpoint record per context whose bar, ETA or current line changed via
+  `log:false` messages.
+  - Checkpoints are not log entries: they are hidden from log views and entry lookup.
+  - Replay uses them, so the bar survives a restart without log noise.
+- **History across the wire is CHUNKED (step 4):**
+  - Remote log, details and data fetches are paged with a cursor, a bounded page size (entries and bytes) and a
+    request rate limit per link.
+  - Details and data travel only on an explicit per-entry fetch.
+  - A large history never swamps a bridge's CPU or a link's budget.
+  - Replay and history reads are incremental and yield to the event loop.
+
 ### Build plan
 Each step is its own version.
 1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible. **BUILT (2026-09-30)** — `src/lib/activity.js`
