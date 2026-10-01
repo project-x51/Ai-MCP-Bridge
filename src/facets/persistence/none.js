@@ -16,7 +16,7 @@ export function create() {
     behaviors: { async put() {}, async byHolder() { return [] }, async remove() {}, async clear() {}, async all() { return [] } },
     realmDefaults: { async put() {}, async all() { return [] } },
     projectNames: { async put() {}, async all() { return [] } },
-    activity: { async append() { return null }, async replaceTail() { return null }, appendSync() { return null }, async readAt() { return null }, async find() { return null },
+    activity: { async append() { return null }, async replaceTail() { return null }, async drain() { return 0 }, appendSync() { return null }, async readAt() { return null }, async find() { return null },
       async days() { return [] }, async *readBackwards() {}, async prune() { return [] } },   // #70: no daily JSONL (the board is memory-only)
     async snapshot() { return { enabled: false } },
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, ownerlessTtlMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },

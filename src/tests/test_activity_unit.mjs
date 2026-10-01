@@ -896,6 +896,14 @@ check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 
   say(st, I, { agent: 'w', text: '@~other y', log: false }, tomorrow + 2000)
   const fl = A.flushCheckpoints(st, tomorrow + 3000)
   check('flushCheckpoints: a cp per dirty context, regardless of the interval', fl.length === 2 && fl.every(w => w.kind === 'cp'))
+  // v1.59.0 (#70 step 3, the tray's prepare-shutdown): { withRep:true } also returns the repeat line for the alive-but-unchanged
+  say(st, I, { agent: 'w', context: '@~scan', progress: '72/100', log: false }, tomorrow + 4000)
+  say(st, I, { agent: 'w', text: '@~other y', log: false }, tomorrow + 5000)   // identical line: alive, unchanged
+  const fr = A.flushCheckpoints(st, tomorrow + 6000, { withRep: true })
+  const otherK = fr.length === 2 ? st.cp.keys.get([...st.cp.keys.keys()].find(k => k.includes('other'))) : null
+  check('flushCheckpoints withRep: the changed context\'s cp AND a repeat line for the unchanged one', fr.length === 2 && fr[0].kind === 'cp' && fr[0].rec.progress.done === 72
+    && fr[1].kind === 'rep' && J(fr[1].rec.rep) === J([otherK]) && fr[1].rec.last === tomorrow + 6000, J(fr))
+  check('flushCheckpoints (default): still cp lines only', A.flushCheckpoints(st, tomorrow + 7000).every(w => w.kind === 'cp'))
 }
 
 // ================================================================= step 2: replay == chronological apply (seeded random)

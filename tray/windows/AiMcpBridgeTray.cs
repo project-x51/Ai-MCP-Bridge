@@ -5,6 +5,7 @@
 //                 keeps one alive (persistent gateway), staying resident across bridge restarts.
 // Quit weighs what is connected and offers: Cancel / Close tray only / Shut down all bridges.
 // Restart Bridges (confirmed) stops every bridge process on this machine and starts a fresh gateway.
+// Both stops first POST /admin/prepare-shutdown to the gateway (bridge 1.59.0+, #70) so it persists before the kill.
 //
 // Built with the in-box .NET Framework compiler (no SDK / runtime install) — see build.cmd.
 // C# 5 compatible (no string interpolation / null-conditional) so legacy csc.exe accepts it.
@@ -17,6 +18,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Management;
+using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
@@ -198,8 +200,31 @@ class TrayApp : ApplicationContext
 
     void ShutdownAllBridges()
     {
+        PrepareShutdown();                             // let the gateway persist first: Kill() runs no node exit handlers
         foreach (uint pid in BridgePids())
             try { Process.GetProcessById((int)pid).Kill(); } catch { }
+    }
+
+    // #70 step 3 (bridge v1.59.0): ask this machine's gateway to flush its pending activity checkpoints (the log:false
+    // progress since the last interval) and finish its queued writes BEFORE we TerminateProcess it. POST
+    // http://127.0.0.1:<wsPort>/admin/prepare-shutdown with "Authorization: Bearer <token>" (never in the URL); the
+    // gateway answers loopback callers only. Short timeout; any failure (no gateway, a pre-1.59 gateway's 404, a slow
+    // disk) is ignored and the kill goes ahead as before. Followers write no activity files, so only the gateway is asked.
+    void PrepareShutdown()
+    {
+        try
+        {
+            var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + _wsPort + "/admin/prepare-shutdown");
+            req.Method = "POST";
+            req.Proxy = null;                          // never route a loopback call (with the realm token) via a system proxy
+            req.Timeout = 3000;
+            req.ReadWriteTimeout = 3000;
+            req.KeepAlive = false;
+            req.ContentLength = 0;
+            req.Headers.Add(HttpRequestHeader.Authorization, "Bearer " + _token);
+            using (var resp = (HttpWebResponse)req.GetResponse()) { }
+        }
+        catch { }
     }
 
     void OpenDashboard()

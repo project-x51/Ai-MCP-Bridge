@@ -56,6 +56,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
     (or topic) and then exits, so an idle AI session can be woken instead of polling `inbox` every few seconds.
     See "Doorbell" below. Its pure clock maths (next boundary, `HH:MM` label, the #69 6-hour check-in mark) is in
     `tools/aimb-doorbell-clock.mjs`, which must sit beside it.
+  - `tools/aimb-log.mjs` — **the activity reporter (#70 step 3)**: a node CLI that reports an agent's or a script's
+    status to this host's activity board without registering (one report, or `--stream` NDJSON). It imports
+    `lib/activity.js` to validate locally, so it runs from inside the bridge's `src/`. See "Log / activity" below.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -443,10 +446,11 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0, build-plan step 2)
-Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress. Step 2
-is this host only (the `log` + `activity` tools, the gateway-owned state, the daily log files); gossip (step 4), the
-dashboard tree (step 5), `tools/aimb-log.mjs` (step 3) and the agent snippet (step 6) follow.
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3)
+Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress. So far
+it is this host only: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2), plus
+`tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below). Gossip (step 4), the dashboard tree
+(step 5) and the agent snippet (step 6) follow.
 
 **Reporting — `log {as, secret, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?}`.**
 You report as a registered session (`as` + `secret`). Omit `agent` for the session itself; `agent:"spec-70/research"`
@@ -503,13 +507,91 @@ phase 1 fills current lines, bars, states and finished status from the newest re
 publishes the board as soon as everything seen is resolved (or after 300 ms); phase 2 fills each agent's history. It
 covers `finished_visible_hours`; a context's `last_activity` also takes the `last` of any repeat line listing it, so it
 isn't stale after a restart. A garbled final line (a crash mid-write) is skipped. A clean shutdown flushes pending
-checkpoints.
+checkpoints, and so does the Task Tray before it kills the bridges (`POST /admin/prepare-shutdown`, below).
 
 **Config** — an `activity` block in `config.json` (live-reloaded), each key with an `AI_BRIDGE_ACTIVITY_<KEY>` env override:
 `log_retention_days` 7 · `log_entries_per_agent` 200 (in memory) · `stale_after_min` 15 · `finished_visible_hours` 24 ·
 `memory_budget_mb` 64 (over it, the oldest finished agents, then the oldest log entries, are evicted) ·
 `progress_checkpoint_sec` 60 (10–3600, 0 = off) · `enabled` true. Test-only env: `AI_BRIDGE_ACTIVITY_CHECKPOINT_MS`,
 `_FWD_MS`, `_LOAD_WAIT_MS`, `_GC_MS`, `_RETENTION_MS`, `_INDEX_MAX`, `_PHASE1_MS`.
+
+### The script — `tools/aimb-log.mjs` (v1.59.0, step 3)
+For agents (which never register) and long-running scripts. The orchestrator puts one line in each agent's prompt and the
+agent reports with it; no `register_self`, no secret:
+
+```bash
+node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agent spec-70/research "@~root reading the spec"
+node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agent tiles --ctx "@~Tharsis" --progress 4812/12000:tiles --eta 1h25m
+```
+
+`--session <name> --project <P> [--user U] [--agent a/b/c] [--ctx "@~Ctx"] [--state S] [--progress 4812/12000:tiles]
+[--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json] [--no-log] ["<text>"]` — the
+`log` tool's fields as flags. The text is the positional argument (several words are joined; anything after `--` is
+text); it is optional when `--progress`/`--eta` is given (default `"{progress}"` / `"{eta}"`). `--ctx` sets the context
+(the text is then literal), `--no-log` = `log:false`, `--data-file` may start with a BOM. The report is validated
+locally with the bridge's own parser first, so a bad one costs no connection.
+- **Output:** ONE JSON line on stdout — the `log` tool's result (`{ok, id, ts, session, agent, context, current, state,
+  stale_at, logged}`), or `{ok:false, code, what}`. Usage text goes to stderr.
+- **Exit codes** (doorbell conventions): **0** ok · **4** the bridge said no or the transport failed (`link-error` = no
+  bridge, `unauthorized`, `session-user-mismatch`, `gateway-unsupported` = a pre-1.59 gateway, `timeout`, …) · **64**
+  bad usage (a missing `--session`/`--project`, an unknown flag, bad `--data` JSON, a report the bridge would reject
+  such as `bad-state` / `bad-text`, `token-in-argv`, `no-token`).
+- **Identity:** realm + project + user + session — `--session` and `--project` are required, `--user` defaults to
+  `AI_BRIDGE_USER`, else the OS login user (`os.userInfo().username`); the realm is `AI_BRIDGE_REALM`, else
+  `config.json`'s `realm`, else `default` (the bridge's rule; the gateway refuses another realm). A script-only session
+  is **never marked gone** (it has no roster presence to lose) but it goes **stale** like anything else.
+- **Who may report as whom (Robin, 2026-10-01):** anyone holding the realm token may report as any session — the
+  doorbell's trust — **except** a session that is LIVE on the mesh roster (a registered sub-peer on ANY host, gossiped
+  slices included) with the same realm + project + name under a **different user** (case-insensitive): that report is
+  refused with `session-user-mismatch`. Checked by the gateway against its roster on every report. Same user → accepted;
+  once the sub-peer leaves the roster, accepted.
+- **Token / port:** like the doorbell, from the bridge's `config.json` found relative to the **script**
+  (`../config.json`; `AI_BRIDGE_CONFIG` names another), or `AI_BRIDGE_TOKEN` / `AI_BRIDGE_TOKEN_FILE`, and
+  `--ws-port` / `--url` / `AI_BRIDGE_WS_PORT`. **`--token` is refused** (exit 64, `token-in-argv`; the value is not
+  echoed): argv is readable in the process list and the realm token is also the body-encryption key. The script never
+  prints the token.
+
+**`--stream`** — for scripts that report often (every second): ONE connection, newline-delimited JSON on stdin, one
+result line per input line, **in input order**:
+
+```bash
+my-seeder | node aimb-log.mjs --stream --session Bridget --project AIMB --agent seeder --ctx "@~tiles" --no-log
+#   stdin:  {"progress":"4812/12000:tiles"}          stdout: {"line":1,"ok":true,…,"logged":false}
+#           {"text":"@~root done","state":"done","log":true,"ref":"fin"}   {"line":2,"ref":"fin","ok":true,…}
+```
+
+- A line carries the `log` tool's fields minus auth (`agent text context state progress eta stale_after details data
+  log`, + an optional `ref`, echoed back). The command line's identity applies to every line; `--agent`, `--ctx` and
+  `--no-log` are defaults a line may override. Any other field (e.g. `session`) → that line gets `bad-field`; bad JSON
+  → `bad-json` — answered in place, the stream goes on. Only identity flags, those defaults, `--ws-port`/`--url` are
+  allowed with `--stream`.
+- **Exit 0 at stdin EOF**, once every line is answered. A fatal hello error (`unauthorized`, `bad-ident`,
+  `realm-mismatch`, `gateway-unsupported`) reports every pending line and exits 4.
+- **Reconnects** with backoff (200 ms doubling to 5 s; `AIMB_LOG_BACKOFF_MAX_MS`) when the link drops, e.g. a gateway
+  restart. A line in flight when it dropped is reported `link-lost` and NOT resent (it may have been applied; a resend
+  could duplicate a logged entry); a line that waits longer than `AIMB_LOG_LINE_WAIT_MS` (default 10000) for a link is
+  reported `no-bridge`. Lines are sent one at a time (each waits for its answer; `AIMB_LOG_TIMEOUT_MS`, default 8000).
+
+**Protocol** (the gateway's WS port; only the gateway serves it): `hello {type:"hello", kind:"logger", token,
+ident:{session, project, user, realm}}` → `{type:"welcome", logger:true, bridge_version, realm, host, ident}` or
+`{type:"error", code, what}` + close (`unauthorized`, `ident-required`, `bad-ident`, `realm-mismatch`); then
+`{type:"log", ref, input:{…log fields}}` → `{type:"logged", ref, result}` per report. A logger socket is **not** a page
+or a session: it never appears in `list_sessions`, the dashboard or the roster, and gets no roster pushes. A pre-1.59
+gateway takes the hello for a page and answers a plain `welcome` (no `logger:true`); the script then closes at once
+with `gateway-unsupported`.
+
+### Prepare-shutdown — `POST /admin/prepare-shutdown` (v1.59.0)
+The Task Tray's Restart Bridges… and Shut down all kill the bridges with TerminateProcess, which runs no exit handler, so
+the `log:false` progress since the last checkpoint used to be lost. Now the tray first calls the **gateway's** HTTP
+server (the WS port): `POST http://127.0.0.1:<wsPort>/admin/prepare-shutdown` with **`Authorization: Bearer <realm
+token>`** (a token in the URL is not accepted). The gateway waits out an in-flight checkpoint tick, writes every dirty
+context's `cp` line **and** the repeat line now (so the unchanged contexts' last activity survives too), drains the
+activity file's write queue (queued log entries included), and only then answers
+`200 {ok:true, role, bridge_version, flushed:{cp, rep, files_drained[, skipped]}, ms}` (`skipped`: `replaying`,
+`checkpoints-off`, `no-persistence`). Non-loopback callers get 403, a missing/bad token 401, a non-POST 405, another
+`/admin/…` path 404. **Only the gateway needs it:** followers write no activity files and keep no deferred writes (their
+persistence writes are issued immediately), so nothing is propagated to them. The bridge keeps running afterwards; the
+caller kills it.
 
 ## Behaviour reminders (#29 / #32 / #44)
 A session registers "how to behave" reminders: `set_behavior {behavior, operation?, scope, match?}`

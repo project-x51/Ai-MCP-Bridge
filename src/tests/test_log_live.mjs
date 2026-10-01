@@ -74,7 +74,7 @@ const F = await spawn('LogFol'); all.push(F)
 await sleep(800)
 const roles = [(await call(G, 'my_identity')).role, (await call(F, 'my_identity')).role]
 check('harness: one host — a gateway + a FOLLOWER', roles.join('/') === 'gateway/follower', roles.join('/'))
-check('harness: bridge version 1.58.0', (await call(G, 'my_identity')).bridge_version === '1.58.0')
+check('harness: bridge version ≥ 1.58.0', (v => v[0] > 1 || (v[0] === 1 && v[1] >= 58))(String((await call(G, 'my_identity')).bridge_version).split('.').map(Number)))   // v1.59.0: ≥, so a later bump doesn't break it
 
 // ---- retention + startup replay of the seeded files
 check('retention: a day file older than log_retention_days is deleted at gateway start', !fs.existsSync(path.join(hostDir, '2020-01-01.jsonl')))

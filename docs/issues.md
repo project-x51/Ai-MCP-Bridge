@@ -6,11 +6,19 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-01, v1.58.0) — read this first after a compact
-**Current version: v1.58.0** (#70 step 2: the `log` + `activity` tools, gateway-owned activity state, the daily JSONL;
-code done, NOT yet deployed — live hosts run v1.54.0). Work up to v1.57.0 is committed AND pushed to `main` (see
-`git log`); v1.58.0 is in the working tree for review. Everything below is durable;
-nothing important is only in chat.
+## RESUME STATE (updated 2026-10-01, v1.59.0) — read this first after a compact
+**Current version: v1.59.0** (#70 step 3: `tools/aimb-log.mjs` + the tray's prepare-shutdown flush; code done, NOT yet
+deployed — live hosts run v1.54.0). v1.58.0 (#70 step 2) is committed (`8e274b6`); v1.59.0 is in the working tree for
+review. The rebuilt tray (`PrepareShutdown()` before the kill) is NOT installed: only a scratch build proved it
+compiles; Robin runs `tray/windows/build.cmd`. Everything below is durable; nothing important is only in chat.
+
+**2026-10-01 (v1.59.0):** Built **#70 step 3** — `tools/aimb-log.mjs` reports to the board without registering (a
+token-gated `logger` leaf on the gateway's WS port; `--session`/`--project`/`--user` identity; one-shot or `--stream`
+NDJSON; exit 0/4/64; `--token` refused). The gateway refuses a report for a session live on the mesh under another
+user (`session-user-mismatch`). The gateway answers `POST /admin/prepare-shutdown` (loopback + bearer token) by
+flushing activity checkpoints and draining writes; the tray calls it before it kills the bridges. Deploy = restart
+each bridge on 1.59.0 (only the gateway matters: the script says `gateway-unsupported` to a 1.58 gateway), then
+rebuild + restart the tray.
 
 **DEPLOYED (2026-09-30):** every live host runs **v1.54.0**: ROBIN-Z790, LITTLE-001, Robins-Mac, phub-lnx-01 (checked
 with `list_sessions`).
@@ -31,7 +39,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #70 agent activity board (steps 1–2 built; next: step 3 `tools/aimb-log.mjs`, then gossip, dashboard, snippet), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #70 agent activity board (steps 1–3 built; next: step 4 gossip + on-demand fetch, then dashboard, snippet), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -250,7 +258,7 @@ accepted); `allow_project` let a caller declared `UNCLASSIFIED` grant (compared 
   it in grants, `access`, the roster, `list_sessions` and the dashboard, while matching stays case-insensitive.
   Verify that no path really treats different cases as different projects (topics, consent, parked mail).
 
-## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (spec in progress — Robin + Bridget, 2026-09-30)**
+## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–3 built, v1.59.0; next: step 4 gossip — Robin + Bridget)**
 **Why:** sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows what those
 agents are doing right now. **What:** a new dashboard page showing, across the whole mesh, sessions grouped by project,
 each session's agents under it, and each agent's progress. Agents report it themselves with a doorbell-style script (or
@@ -334,14 +342,17 @@ log({ as, secret,                 // the reporting session (registered sub-peer)
   → { ok, id, ts, session, agent, context, current, state, stale_at, logged }   (BUILT v1.58.0)
 ```
 
-**Script:** `tools/aimb-log.mjs`, token-gated like the doorbell, no registration needed.
+**Script:** `tools/aimb-log.mjs`, token-gated like the doorbell, no registration needed. (BUILT v1.59.0; `--project` is
+required, plus `--user`, `--stale-after`, `--no-log` and `--stream` — see build-plan step 3.)
 ```
-node aimb-log.mjs --session <name> [--project P] [--agent <label>] [--ctx "@~Ctx"] [--state S]
-  [--progress 4812/12000:tiles] [--eta 1h25m] [--details "..."] [--data '{...}' | --data-file f.json] "<text>"
+node aimb-log.mjs --session <name> --project <P> [--user U] [--agent <label>] [--ctx "@~Ctx"] [--state S]
+  [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json]
+  [--no-log] ["<text>"]
 ```
 - It prints one JSON line. Exit codes: 0 ok, 4 bridge error, 64 usage.
 - Anyone holding the realm token can report as any session via the script. That is the same trust as the doorbell,
-  and was accepted (Robin); the bridge tool checks `as`/`secret`.
+  and was accepted (Robin); the bridge tool checks `as`/`secret`. Exception (2026-10-01): not as a session that is live
+  on the mesh under another user (`session-user-mismatch`).
 
 ### Limits and configuration (decided, Robin, 2026-09-30)
 **Fixed in code, versioned** (these change what crosses the mesh, so every bridge must agree):
@@ -467,7 +478,25 @@ Each step is its own version.
    `rep`), newest-first replay with an early phase-1 publish, retention, expiry, budget, gone on leave; `log:false`,
    text templates and checkpoints (decided during the step). `test_activity_unit` 384 checks, new `test_log_live` (52).
    See architecture.md §13 "Built (v1.58.0)".
-3. `tools/aimb-log.mjs`.
+3. `tools/aimb-log.mjs`. **BUILT (v1.59.0, 2026-10-01)** — the script attaches to the GATEWAY's WS port as a
+   token-gated `logger` leaf (`hello {kind:"logger", token, ident}` → `{type:"log", ref, input}` → `{type:"logged", ref,
+   result}`; never on the roster), one JSON line out, exit 0 / 4 / 64, `--token` refused; `--stream` (NDJSON on stdin,
+   one result per line in order, reconnect with backoff, in-flight line `link-lost` and not resent, exit 0 at EOF).
+   Plus the Task Tray's prepare-shutdown flush (below). New `test_log_script_live` (40). See architecture.md §13
+   "Built (v1.59.0)". **Decisions (Robin, 2026-10-01):**
+   - The script reaches the gateway's WS port gated by the realm token, like the doorbell, and registers no sub-peer.
+     Identity = `--session` + `--project` (both required) + `--user` (default: the OS login user; `AI_BRIDGE_USER`
+     wins like the bridge) + the realm (the bridge's rule). Script-only sessions are never marked gone; they can go
+     stale.
+   - **Refuse to speak for another user's live session:** a report whose realm + project + session name matches a
+     sub-peer currently REGISTERED on the mesh roster (any host) under a DIFFERENT user (case-insensitive) is rejected
+     with `session-user-mismatch`. Otherwise anyone holding the realm token may report as any session (accepted).
+   - **The tray persists before it kills:** Restart Bridges… and Quit → Shut down all used to `Process.Kill()` the
+     bridges, losing the gateway's pending checkpoints (`log:false` progress since the last interval). The tray now first
+     POSTs `http://127.0.0.1:<wsPort>/admin/prepare-shutdown` (bearer token, loopback only, 3 s timeout); the gateway
+     writes the checkpoints + repeat line and drains its write queue, then answers; the kill follows either way (a
+     pre-1.59 gateway answers 404). Followers have nothing to flush, so the request is not propagated. The new tray exe
+     is NOT installed yet (Robin builds `tray/windows/build.cmd`).
 4. Gossip, plus on-demand fetch of logs, details and data.
 5. The dashboard Activity tree.
 6. `{log_snippet}` plus a connect reminder.

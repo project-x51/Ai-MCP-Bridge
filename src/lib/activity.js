@@ -674,11 +674,20 @@ export function planCheckpoints(state, now) {
   else { cp.rep = { keys: same, since: now, last: now, n: 1 }; writes.push({ kind: 'rep', rewrite: false, rec: repRecord(cp.rep) }) }
   return writes
 }
-/** Every dirty context's cp NOW, regardless of the interval (a clean shutdown's flush). */
-export function flushCheckpoints(state, now) {
+/**
+ * Every dirty context's cp NOW, regardless of the interval (a clean shutdown's flush). By default only the cp lines (the
+ * process 'exit' flush appends synchronously and can't rewrite a repeat line); `{ withRep: true }` (v1.59.0, #70 step 3:
+ * the tray's prepare-shutdown) returns the whole plan — the repeat line too, so the alive-but-unchanged contexts' last
+ * activity also survives the kill that follows.
+ * @param {ActivityState} state
+ * @param {number} now
+ * @param {{ withRep?: boolean }} [opts]
+ */
+export function flushCheckpoints(state, now, opts = {}) {
   for (const s of state.local.values()) for (const e of [s.self, ...s.agents.values()]) for (const c of e.contexts.values())
     if (c.cp_dirty) state.cpLive.set(cpId(s.key, e.key, c.key), [s.key, e.key, c.key])
-  return planCheckpoints(state, now).filter(w => w.kind === 'cp')
+  const plan = planCheckpoints(state, now)
+  return opts && opts.withRep ? plan : plan.filter(w => w.kind === 'cp')
 }
 const repRecord = r => ({ rep: r.keys.slice(), n: r.n, since: r.since, last: r.last })
 /** One context's full checkpoint line (a snapshot: current line incl. details/data, state, bar, ETA; root: finished_at). */

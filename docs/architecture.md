@@ -1154,6 +1154,48 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.59.0):** *the agent activity board, build-plan step 3 — `tools/aimb-log.mjs`, plus the Task Tray's
+  prepare-shutdown flush (#70).* **The script** reports to this host's board WITHOUT registering: it attaches to the
+  GATEWAY's WS port as a token-gated `logger` leaf — `hello {kind:"logger", token, ident:{session, project, user,
+  realm}}` → `welcome {logger:true, …}` | `error {code}` (+ close: `unauthorized` — now said out loud for a logger,
+  `ident-required`, `bad-ident`, `realm-mismatch`), then `{type:"log", ref, input}` → `{type:"logged", ref, result}`, the
+  result being `activityLog`'s (the `log` tool's shape) with `opts.script` so the session is never tracked for gone. A
+  logger socket is kept OUT of `leaves` / `pages`: never on the roster, `list_sessions` or the dashboard, no roster
+  pushes, no connect/disconnect log lines. **Decisions (Robin, 2026-10-01):** (1) no sub-peer; identity = `--session`
+  + `--project` (required) + `--user` (default `AI_BRIDGE_USER`, else `os.userInfo().username`) + the realm
+  (`AI_BRIDGE_REALM` / config `realm` / `default`, as the bridge); script-only sessions are never marked gone but go
+  stale. (2) anyone holding the realm token may report as any session, EXCEPT a session LIVE on the mesh roster (a
+  sub-peer with the same realm + project + name on ANY host — this gateway's, its followers' and the gossiped remote
+  slices) under a DIFFERENT user (case-insensitive) → `session-user-mismatch` (`loggerUserConflict`, checked on every
+  report against the current roster). CLI: `--agent --ctx --state --progress --eta --stale-after --details --data |
+  --data-file --no-log [text]`, validated locally with `lib/activity.js parseMessage` (a bad report exits 64 without
+  connecting); ONE JSON line out; exit 0 / 4 (bridge or transport: `link-error`, `unauthorized`, `session-user-mismatch`,
+  `gateway-unsupported` for a pre-1.59 gateway that took the hello for a page, `timeout`) / 64 (usage). `--token` is
+  REFUSED (`token-in-argv`, value not echoed): the token comes from `AI_BRIDGE_TOKEN` / `AI_BRIDGE_TOKEN_FILE` / the
+  `config.json` beside the script (`AI_BRIDGE_CONFIG` overrides; the test hook, with `AI_BRIDGE_WS_PORT` / `--ws-port`).
+  **`--stream`:** one connection, NDJSON on stdin (the `log` fields minus auth, + an echoed `ref`), the command line's
+  identity on every line and `--agent`/`--ctx`/`--no-log` as per-line-overridable defaults; one result line per input
+  line IN ORDER (a bad line answered in place: `bad-json`, `bad-field`, a parser code); one report in flight at a time;
+  reconnect with backoff (200 ms → 5 s) on a drop — the in-flight line is reported `link-lost` and NOT resent (no
+  duplicate entries), a line waiting longer than `AIMB_LOG_LINE_WAIT_MS` (10 s) for a link → `no-bridge`; exit 0 at EOF,
+  4 on a fatal hello error. **Prepare-shutdown:** the tray's Restart Bridges… / Shut down all `Process.Kill()` the
+  bridges (TerminateProcess: no `exit` handler, so the `log:false` progress since the last checkpoint was lost). The
+  gateway's HTTP server (the WS port) now answers `POST /admin/prepare-shutdown` — loopback callers only (403), `Authorization:
+  Bearer <realm token>` only (401; never a URL token), POST only (405) — with `flushActivityNow()`: wait out an
+  in-flight tick, `flushCheckpoints(…, {withRep:true})` (new option: the repeat line too, so unchanged contexts' last
+  activity survives) through the refactored `writeCheckpoints`, then `persistence.activity.drain()` (new facet method:
+  await every per-file write chain) → `{ok, role, bridge_version, flushed:{cp, rep, files_drained[, skipped]}, ms}`.
+  Followers write no activity files and issue their persistence writes immediately, so nothing is propagated to them.
+  **Tray:** `PrepareShutdown()` (HttpWebRequest, no proxy, 3 s timeout, C# 5) runs first inside `ShutdownAllBridges`
+  (so both `OnRestart` and Quit → Shut down all); any failure (a pre-1.59 gateway's 404, none running) → kill anyway.
+  Tests: new `test_log_script_live` (40 checks — one-shot, the default text, `--no-log`, `--data-file`/`--data`, 13
+  usage errors → 64, no bridge / bad token → 4, the mismatch rule on this host AND a federated one, script-only never
+  gone, the logger off the roster, `--stream` (153 lines in order, bad lines in place, overrides + `ref`, EOF 0, a
+  reconnect across a HARD-killed gateway with a line queued while it was down, `no-bridge` per line), the endpoint's
+  auth (bad / missing / URL token, GET, unknown path) and the flush: a `log:false` burst survives a hard kill + restart
+  only via the endpoint — a negative control without it falls back to the last logged bar); against the pre-change
+  bridge 31 of the 40 FAIL (the 9 that pass are the script's own local checks). `test_activity_unit` 384 → 386
+  (`withRep`). `test_log_live`'s version check is now ≥ 1.58.0. Full suite 1583 passed, 0 failed (48 files; no flakes this run).
 - **Built (v1.58.0):** *the agent activity board, build-plan step 2 — the `log` + `activity` tools, gateway-owned state,
   the host's daily JSONL (#70).* **Model changes in `lib/activity.js`** (the step-1 pure core; decisions of 2026-10-01):
   the session key is realm + project + user + session name (the host is not part of it); state and the current line

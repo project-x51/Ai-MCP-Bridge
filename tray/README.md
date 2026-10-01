@@ -21,6 +21,13 @@ tray/
   `ai-mcp-bridge` MCP server afterwards.
 - **Quit** — weighs what is connected and asks: **Cancel** / **Close tray only** (leave bridges
   running) / **Shut down all bridges** (disconnects every session + page on the machine).
+- **Persist before the kill (bridge 1.59.0+, #70).** Restart Bridges… and Shut down all stop the bridges with
+  `Process.Kill()` (TerminateProcess), which runs no node exit handlers. So just before killing, the tray POSTs
+  `http://127.0.0.1:<wsPort>/admin/prepare-shutdown` with `Authorization: Bearer <token>` (both from `config.json`; the
+  token never goes in the URL; no proxy). The gateway writes its pending activity checkpoints (the `log:false`
+  progress since the last interval), finishes its queued writes and answers `{ok:true, flushed:{…}}`. The call has a
+  3 s timeout; if it fails (no gateway, a pre-1.59 gateway answers 404, a slow disk) the tray kills the bridges anyway,
+  exactly as before. Only the gateway is asked: followers write no activity files.
 - The icon shows green when at least one bridge is running, grey when none.
 
 ## Two launch modes

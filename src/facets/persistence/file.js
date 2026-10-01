@@ -531,6 +531,8 @@ export function create(ctx) {
         return { day, offset, length: buf.length - 1, rewritten: true }
       })
     },
+    /** Wait for every queued append / rewrite to land (v1.59.0, #70 step 3: the tray's prepare-shutdown, before a kill). → files drained */
+    async drain() { const qs = [...actQ.values()]; await Promise.all(qs); return qs.length },
     /** Synchronous append (a clean shutdown's checkpoint flush, from process 'exit'). */
     appendSync(host, day, line) {
       const file = actFile(host, day), buf = lineBuf(line)

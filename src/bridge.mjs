@@ -110,7 +110,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.58.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.59.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -946,15 +946,37 @@ function scheduleActivityCheckpoints() {
 async function checkpointActivity() {
   if (!activity || role !== 'gateway' || !PERSIST || actCpBusy || (actReplay && actReplay.phase !== 'done')) return
   actCpBusy = true
-  try {
-    const writes = Act.planCheckpoints(activity, Date.now()), day = activity.cp.day
-    for (const w of writes) {
-      if (w.kind === 'cp') { await persistActivity(w.rec); continue }
-      const rep = activity.cp.rep, line = JSON.stringify(w.rec)   // a log entry may have closed it meanwhile (rep null): then just append
-      const loc = w.rewrite && rep && rep.offset != null ? await persistence.activity.replaceTail(HOSTNAME, day, rep.offset, line) : await persistence.activity.append(HOSTNAME, day, line)
-      if (rep && loc && activity.cp.rep === rep) rep.offset = loc.offset
-    }
-  } finally { actCpBusy = false }
+  try { await writeCheckpoints(Act.planCheckpoints(activity, Date.now())) } finally { actCpBusy = false }
+}
+async function writeCheckpoints(writes) {   // the planned cp lines + the repeat line (appended, or rewritten in place) → { cp, rep }
+  const day = activity.cp.day, n = { cp: 0, rep: 0 }
+  for (const w of writes) {
+    if (w.kind === 'cp') { if (await persistActivity(w.rec)) n.cp++; continue }
+    const rep = activity.cp.rep, line = JSON.stringify(w.rec)   // a log entry may have closed it meanwhile (rep null): then just append
+    const loc = w.rewrite && rep && rep.offset != null ? await persistence.activity.replaceTail(HOSTNAME, day, rep.offset, line) : await persistence.activity.append(HOSTNAME, day, line)
+    if (rep && loc && activity.cp.rep === rep) rep.offset = loc.offset
+    if (loc) n.rep++
+  }
+  return n
+}
+// #70 step 3 (v1.59.0): PREPARE-SHUTDOWN — the tray calls POST /admin/prepare-shutdown right before it TerminateProcess()es
+// the bridges (a kill runs no 'exit' handler, so the log:false progress since the last checkpoint was lost). Waits out an
+// in-flight tick, writes every dirty context's cp + the repeat line NOW (flushCheckpoints withRep), then drains the
+// facet's write queues so every queued append (log entries too) is on disk before we answer. Followers write no activity
+// files and keep no deferred writes (their persistence writes are issued immediately), so only the gateway needs it.
+async function flushActivityNow() {
+  const out = { cp: 0, rep: 0, files_drained: 0 }
+  if (!activity || role !== 'gateway') return { ...out, skipped: 'no-activity-board' }
+  if (!PERSIST) return { ...out, skipped: 'no-persistence' }
+  for (const t0 = Date.now(); actCpBusy && Date.now() - t0 < 2000;) await new Promise(r => setTimeout(r, 20))   // a checkpoint tick is mid-write
+  if (actReplay && actReplay.phase !== 'done') out.skipped = 'replaying'      // nothing new is applied before the replay ends
+  else if (!actCheckpointMs()) out.skipped = 'checkpoints-off'               // progress_checkpoint_sec 0: log:false is memory-only by choice
+  else if (!actCpBusy) {
+    actCpBusy = true
+    try { Object.assign(out, await writeCheckpoints(Act.flushCheckpoints(activity, Date.now(), { withRep: true }))) } finally { actCpBusy = false }
+  }
+  out.files_drained = await persistence.activity.drain()
+  return out
 }
 process.on('exit', () => {   // a clean shutdown flushes the pending checkpoints (sync appends; a kill skips this — one interval lost)
   if (!activity || !PERSIST || !actCheckpointMs() || (actReplay && actReplay.phase !== 'done')) return
@@ -984,7 +1006,7 @@ function syncActivityGone() {
   }
 }
 // ---- the gateway's handlers (a follower reaches them through activityCall → ACTIVITY frame)
-async function activityLog(ident, input) {
+async function activityLog(ident, input, opts = {}) {   // opts.script: an aimb-log.mjs report (#70 step 3) — never tracked for gone
   if (!ACT_CFG.enabled) return actDisabled()
   if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   if (actReplay && actReplay.phase !== 'done') {   // a new gateway finishes the replay before it applies anything
@@ -996,7 +1018,7 @@ async function activityLog(ident, input) {
   if (!p.ok) return p
   const r = Act.apply(activity, ident, p.msg, now)
   if (!r.ok) return r
-  actPresent.add(Act.sessionKey(ident))
+  if (!opts.script) actPresent.add(Act.sessionKey(ident))   // a script-only session is never marked gone (it can still go stale)
   const persisted = r.entry && PERSIST ? !!(await persistActivity(r.entry)) : null
   if (++actApplies % 50 === 0) actBudget()
   return { ok: true, id: r.id, ts: r.ts, session: ident.session, agent: r.agent, context: r.context, current: r.current, state: r.state, stale_at: r.stale_at, logged: r.logged,
@@ -1067,6 +1089,37 @@ async function activityCall(op, payload) {   // op 'log' { ident, input } | 'rea
     if (Date.now() - t0 >= ACT_FWD_MS) return { ok: false, code: 'no-gateway', what: 'no gateway on this host right now (re-election in progress?) — retry in a moment' }
     await new Promise(r => setTimeout(r, 100))
   }
+}
+// ---- #70 step 3 (v1.59.0): tools/aimb-log.mjs — a token-gated `logger` WS leaf on the GATEWAY's ws port (no sub-peer).
+// Identity = realm + project + user + session from its hello (Robin, 2026-10-01: anyone holding the realm token may report
+// as any session, like the doorbell) — EXCEPT a session that is LIVE on the mesh roster (a registered sub-peer on ANY
+// host: our followers' and the gossiped remote slices) under a DIFFERENT user (case-insensitive): session-user-mismatch.
+// Checked per report against the current roster. A script-only session is never marked gone; it can go stale.
+const LOGGER_IDENT_MAX = 128
+function loggerIdent(m) {   // the hello's ident → { realm, project, user, session } | { err }
+  const i = m && m.ident && typeof m.ident === 'object' ? m.ident : {}
+  const str = v => (typeof v === 'string' ? v.trim() : '')
+  const session = str(i.session), project = str(i.project), user = str(i.user), realm = str(i.realm) || REALM
+  if (!session || !project || !user) return { err: { code: 'ident-required', what: 'logger hello needs ident { session, project, user }' } }
+  if ([session, project, user, realm].some(v => v.length > LOGGER_IDENT_MAX || /[\u0000-\u001f\u007f]/.test(v))) return { err: { code: 'bad-ident', what: `ident fields are one-line strings of at most ${LOGGER_IDENT_MAX} chars` } }
+  if (lc(realm) !== lc(REALM)) return { err: { code: 'realm-mismatch', what: `this bridge serves realm "${REALM}"` } }
+  return { ident: { realm: REALM, project, user, session } }
+}
+function loggerUserConflict(ident) {   // a live sub-peer with this realm + project + name under another user, or null
+  for (const s of roster.values()) for (const sp of (s.subpeers || [])) {
+    if (lc(sp.realm || s.realm || REALM) !== lc(ident.realm) || projKey(sp.project) !== projKey(ident.project) || !ciEq(sp.name, ident.session)) continue
+    if (lc(sp.user) !== lc(ident.user)) return sp
+  }
+  return null
+}
+async function loggerLog(ident, input) {
+  if (role !== 'gateway') return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  if (!ACT_CFG.enabled) return actDisabled()
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, code: 'bad-input', what: 'log needs an input object' }
+  if (loggerUserConflict(ident)) return { ok: false, code: 'session-user-mismatch', what: `session "${ident.session}" (${projName(ident.project)}) is live on the mesh under another user — a script may not report for it` }
+  const clean = {}
+  for (const k of LOG_FIELDS) if (input[k] !== undefined) clean[k] = input[k]
+  return activityLog({ ...ident, host: HOSTNAME }, clean, { script: true })
 }
 
 // ---------------------------------------------------------------- delivery (inbound to THIS process)
@@ -1981,6 +2034,7 @@ function startWsIngress(wsPort) {
   try {
     const httpd = profile.transport.createHttpServer((req, res) => {
       let u = decodeURIComponent(String(req.url || '/').split('?')[0])
+      if (u.startsWith('/admin/')) { adminHttp(req, res, u); return }   // #70 step 3: /admin/prepare-shutdown (loopback + bearer token)
       if (u === '/') u = '/dashboard.html'
       // serve the bundled client pages + the page-client tools over http (same origin as the WS, so
       // they aren't subject to the file:// restrictions). Allowlisted paths only — no traversal.
@@ -1999,12 +2053,36 @@ function startWsIngress(wsPort) {
   } catch (e) { log('ws listener failed', e.code) }
 }
 
+// #70 step 3 (v1.59.0): the gateway's admin endpoint, for the Task Tray. POST /admin/prepare-shutdown with
+// `Authorization: Bearer <realm token>` (never in the URL), from a LOOPBACK caller only → flushActivityNow() → 200
+// { ok, flushed:{cp, rep, files_drained[, skipped]}, ms }. Wrong method 405, non-loopback 403, missing/bad token 401,
+// unknown path 404. The tray calls it right before it kills the bridges, then kills them whatever the answer.
+const isLoopback = a => { const s = String(a || '').toLowerCase().replace(/^::ffff:/, ''); return s === '::1' || /^127\./.test(s) }
+const bearerOf = req => { const m = String(req.headers.authorization || '').match(/^\s*Bearer\s+(\S+)\s*$/i); return m ? m[1] : '' }
+function adminHttp(req, res, u) {
+  const reply = (code, body) => { try { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)) } catch { } }
+  req.resume()   // no request body is needed — drain whatever came
+  if (!isLoopback(req.socket && req.socket.remoteAddress)) { log(`admin: refused ${u} from non-loopback ${req.socket && req.socket.remoteAddress}`); return reply(403, { ok: false, code: 'loopback-only', what: 'admin endpoints answer loopback callers only' }) }
+  if (u !== '/admin/prepare-shutdown') return reply(404, { ok: false, code: 'not-found' })
+  if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return reply(405, { ok: false, code: 'method-not-allowed', what: 'POST only' }) }
+  const tok = bearerOf(req)
+  if (!profile.auth.verify(tok)) return reply(401, { ok: false, code: tok ? 'unauthorized' : 'token-required', what: 'send Authorization: Bearer <realm token>' })
+  const t0 = Date.now()
+  flushActivityNow().then(flushed => {
+    log(`admin: prepare-shutdown — flushed ${flushed.cp} checkpoint(s), ${flushed.rep} repeat line(s)${flushed.skipped ? ` (${flushed.skipped})` : ''} in ${Date.now() - t0}ms`)
+    reply(200, { ok: true, role, bridge_version: BRIDGE_VERSION, flushed, ms: Date.now() - t0 })
+  }, e => reply(500, { ok: false, code: 'flush-failed', what: String((e && e.message) || e) }))
+}
+
 // A WS leaf connection (listener / page / dashboard).
 function onWsConnection(ws) {
       ws.on('message', async raw => {
         let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
         if (m.type === 'hello') {
-          if (!profile.auth.verify(m.token)) { ws.close(); return }
+          if (!profile.auth.verify(m.token)) {
+            if (m.kind === 'logger') { try { ws.send(JSON.stringify({ type: 'error', code: 'unauthorized', what: 'bad realm token' })) } catch {} }   // #70 step 3: the script says why
+            ws.close(); return
+          }
           if (m.kind === 'listener') {     // T14 wake attach point — the doorbell (#39). Counts-only, no secret.
             ws.kind = 'listener'
             ws.instance = m.instance || crypto.randomBytes(4).toString('hex')
@@ -2018,6 +2096,15 @@ function onWsConnection(ws) {
             log(`listener connected: watch=${JSON.stringify(ws.watch)} (${ws.instance})`)
             try { ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, capabilities: CAPS, realm: REALM, watch: ws.watch })) } catch {}
             notifyOne(ws)   // fire IMMEDIATELY if mail is already waiting — arming must not miss what's already there
+            return
+          }
+          if (m.kind === 'logger' || ws.kind === 'logger') {   // #70 step 3: tools/aimb-log.mjs — token-gated, no sub-peer; NOT in leaves/pages (never on the roster)
+            if (ws.kind) { try { ws.send(JSON.stringify({ type: 'error', code: 'already-hello', what: 'one hello per connection' })) } catch {} ; ws.close(); return }
+            const li = loggerIdent(m)
+            if (li.err) { try { ws.send(JSON.stringify({ type: 'error', ...li.err })) } catch {} ; ws.close(); return }
+            ws.kind = 'logger'; ws.ident = li.ident; ws.instance = crypto.randomBytes(4).toString('hex')
+            try { ws.send(JSON.stringify({ type: 'welcome', logger: true, instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, realm: REALM, host: HOSTNAME,
+              ident: { project: projName(li.ident.project), user: li.ident.user, session: li.ident.session } })) } catch {}
             return
           }
           ws.kind = m.kind === 'dashboard' ? 'dashboard' : 'page'
@@ -2042,6 +2129,12 @@ function onWsConnection(ws) {
           ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, profile: profile.names, capabilities: CAPS, realm: REALM, ...rosterFor(ws) }))
           if (ws.kind === 'dashboard') { ws.send(JSON.stringify({ type: 'trace_history', traces: traces.history() })); pushPersistence(ws) }
           broadcastRoster()
+        } else if (m.type === 'log' && ws.kind === 'logger') {   // #70 step 3: one report → { type:'logged', ref, result } (the `log` tool's result shape)
+          let result
+          try { result = await loggerLog(ws.ident, m.input) } catch (e) { result = { ok: false, code: 'gateway-error', what: String((e && e.message) || e) } }
+          try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result })) } catch {}
+        } else if (ws.kind === 'logger') {
+          try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'bad-op', what: `a logger sends only {type:"log"} (got ${JSON.stringify(String(m.type)).slice(0, 40)})` } })) } catch {}
         } else if (m.type === 'set_alias' && ws.kind === 'dashboard') {
           if (m.scope === 'host') { ALIASES[m.target] = m.alias; persistAliases() }
           else if (m.scope === 'session') {
@@ -2091,6 +2184,7 @@ function onWsConnection(ws) {
         }
       })
       ws.on('close', () => {
+        if (ws.kind === 'logger') return   // #70 step 3: never on the roster — nothing to announce (and a 1/s script would flood the log)
         if (ws.kind) log(`${ws.kind} disconnected (${ws.instance})`)
         if (ws.kind === 'page') {
           const p = pages.get(ws.instance)

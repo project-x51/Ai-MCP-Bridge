@@ -69,6 +69,7 @@ export function create(ctx) {
     activity: {                                    // #70: the host's daily JSONL (activity/<host>/YYYY-MM-DD.jsonl); ONE writer per host (its gateway)
       async append(host, day, line) { return null },              // append one record line -> { day, offset, length }
       async replaceTail(host, day, offset, line) { return null }, // rewrite the LAST line (the open repeat line) in place, else append -> { ..., rewritten }
+      async drain() { return 0 },                                 // wait for queued appends / rewrites to land (prepare-shutdown) -> files drained
       appendSync(host, day, line) { return null },                // synchronous append (shutdown flush)
       async readAt(host, day, offset, length) { return null },    // the record at an offset (the id -> offset index)
       async find(host, day, id) { return null },                  // a LOGGED entry by id in one day's file (never a cp/rep line)
