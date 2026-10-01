@@ -416,6 +416,13 @@ silent steps such as builds and downloads.
   - Replay takes `last` as the context's last-alive time, so stale is right after a restart.
   - Log views ignore `cp` and `rep` lines.
   - A garbled final line (a crash mid-rewrite) is skipped, losing at most one interval of liveness.
+- **Text placeholders, rendered when READ (stored raw):** `{progress}` ("4,812 of 12,000 tiles"), `{pct}`, `{done}`,
+  `{total}`, `{unit}` and `{eta}`.
+  - Current lines render against the CURRENT bar, so a template headline counts up live with `log:false` updates.
+  - Log entries render against the progress recorded on that entry.
+  - An unknown `{word}` is left as is; `{{` and `}}` are literal braces.
+  - **Default text:** a message with progress but no text gets `"{progress}"`, logged or not. No text and no
+    progress or ETA is rejected.
 - **History across the wire is CHUNKED (step 4):**
   - Remote log, details and data fetches are paged with a cursor, a bounded page size (entries and bytes) and a
     request rate limit per link.
