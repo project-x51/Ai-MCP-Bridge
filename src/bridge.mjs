@@ -114,7 +114,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.66.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.68.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1193,8 +1193,101 @@ async function actApplyAction(q, by) {
   if (PERSIST && r.records.length) { persisted = true; for (const rec of r.records) if (!(await persistActivity(rec))) persisted = false }
   actChanged()   // gossip (≤1/s per link) + the dashboards' deltas
   log(`activity: ${r.action} on ${q.session}/${r.path || '@root'} (${projName(q.project || 'unclassified')}) ${Act.byText(by)}${r.dismissed ? ` — ${r.dismissed.nodes} node(s) off the board` : ''}`)
+  if (r.ident) notifyActivitySession(r.ident, Act.actionNotice(r, { by, host: HOSTNAME, ts: actNow() }))   // #80: tell the session (batched; never fails the action)
   return { ok: true, host: HOSTNAME, action: r.action, path: r.path, applied: r.applied, ...(r.dismissed ? { dismissed: r.dismissed } : {}), ...(r.warnings && r.warnings.length ? { warnings: r.warnings } : {}),
     ...(persisted === false ? { persisted: false } : {}) }
+}
+// #80 (v1.68.0): NOTICES TO THE OWNING SESSION — the one internal hook for "the board changed under you" messages.
+//   notifyActivitySession(ident, { verb, subject, body }, { now? }) → Promise<result | { queued:true, in_ms }>
+//   ident = an activity session { realm?, project, user, session } (applyAction's r.ident: canonical spellings); body = a JSON
+//   object. Called on the gateway that OWNS the node (a forwarded ACTIVITY_ACT is applied — and notified — by its owner).
+// BATCHING per session: notices queue for notice_batch_sec (activity config, default 3 s; 0 = each at once); each new one
+// re-arms the window, at most ACT_NOTICE_MAX_WINDOWS windows after the first, or at ACT_NOTICE_MAX queued. At the flush the
+// queue is grouped by verb (first-seen order): one notice goes as it is; several of one verb become ONE message through
+// ACT_NOTICE_COMBINE[verb] (activity_changed: lib/activity.js combineActionNotices; any other verb: actCombineNotices — subject
+// "<first subject> (+N more)", body { notices:[…], count }). opts.now flushes the session's queue (with this one) at once —
+// for a notice a person waits on (#84 a message, #85 an answer). Prepare-shutdown and a clean exit flush every queue.
+// DELIVERY (actDeliverNotice): a SYSTEM envelope (env.system — the exemption #72's notices ride; set only here, by bridge
+// code, for the session's OWN board) from this gateway to every LIVE sub-peer of the session, mesh-wide (realm + project +
+// user + name, case-insensitive — #71), else a live BARE session of that name (loggerUserConflict's rule); none live → PARKED
+// for the session's durable registration in this host's store (drained on its next register_self, §19); none at all (a
+// script-only session) → nothing but the log entry the action already wrote. A live sub-peer's doorbell wakes as for any
+// mail (deliverSub → counts). #83 (activity_text_edited), #84 (activity_message) and #85 (activity_answer) send through it.
+const ACT_NOTICE_COMBINE = { [Act.NOTICE_VERB]: Act.combineActionNotices }   // verb → (notices) => { subject, body }
+const ACT_NOTICE_MAX = 64, ACT_NOTICE_MAX_WINDOWS = 5
+const actNoticeQ = new Map()   // session key → { ident, notices:[{ verb, subject, body }], first, timer }
+const actNoticeKey = i => [lc(i.realm || REALM), projKey(i.project || ''), lc(i.user || ''), lc(i.session || '')].join('\u0001')
+function actCombineNotices(list) {
+  return { subject: String(list[0].subject).slice(0, 180) + ` (+${list.length - 1} more)`, body: { notices: list.map(n => n.body), count: list.length } }
+}
+function notifyActivitySession(ident, notice, opts = {}) {
+  if (!ident || !ident.session || !notice || typeof notice.verb !== 'string' || !notice.verb) return Promise.resolve({ ok: false, code: 'bad-notice' })
+  const key = actNoticeKey(ident), now = Date.now()
+  let q = actNoticeQ.get(key)
+  if (!q) { q = { ident: { realm: ident.realm || REALM, project: ident.project || 'unclassified', user: ident.user || null, session: ident.session }, notices: [], first: now, timer: null }; actNoticeQ.set(key, q) }
+  q.notices.push({ verb: notice.verb, subject: String(notice.subject || notice.verb).slice(0, 200), body: notice.body === undefined ? null : notice.body })
+  const win = ACT_CFG.notice_batch_sec * 1000
+  if (opts.now || win <= 0 || q.notices.length >= ACT_NOTICE_MAX) return actFlushNotices(key)
+  if (q.timer) clearTimeout(q.timer)
+  const at = Math.min(now + win, q.first + ACT_NOTICE_MAX_WINDOWS * win)
+  q.timer = setTimeout(() => { actFlushNotices(key).catch(e => log('activity: notice flush failed', String((e && e.message) || e))) }, Math.max(0, at - now))
+  q.timer.unref()
+  return Promise.resolve({ ok: true, queued: true, in_ms: Math.max(0, at - now) })
+}
+async function actFlushNotices(key) {
+  const q = actNoticeQ.get(key)
+  if (!q) return { ok: true, none: true }
+  actNoticeQ.delete(key)
+  if (q.timer) clearTimeout(q.timer)
+  const byVerb = new Map()
+  for (const n of q.notices) { if (!byVerb.has(n.verb)) byVerb.set(n.verb, []); byVerb.get(n.verb).push(n) }
+  const out = []
+  for (const [verb, list] of byVerb) {
+    let m
+    try { m = list.length === 1 ? { subject: list[0].subject, body: list[0].body } : (ACT_NOTICE_COMBINE[verb] || actCombineNotices)(list) } catch { m = actCombineNotices(list) }
+    out.push(await actDeliverNotice(q.ident, verb, m.subject, m.body, list.length))
+  }
+  return out.length === 1 ? out[0] : { ok: true, messages: out }
+}
+/** Flush every queued notice now (prepare-shutdown, a clean exit) → how many messages went. */
+async function actFlushAllNotices() {
+  const rs = await Promise.all([...actNoticeQ.keys()].map(k => actFlushNotices(k).catch(() => null)))
+  return rs.reduce((n, r) => n + (!r ? 0 : r.messages ? r.messages.length : r.none ? 0 : 1), 0)
+}
+/** The session's live recipients, mesh-wide: its sub-peers (realm + project + user + name), else a bare session of that name. */
+function actSessionTargets(ident) {
+  const realm = lc(ident.realm || REALM), pk = projKey(ident.project || ''), u = lc(ident.user || ''), nm = lc(ident.session || '')
+  const match = (r, p, us, n) => lc(r || REALM) === realm && projKey(p || '') === pk && lc(us || '') === u && lc(n || '') === nm
+  const out = new Set()
+  for (const sp of subpeers.values()) if (match(sp.identity?.realm, sp.identity?.project, sp.identity?.user, sp.name)) out.add(sp.id)
+  for (const s of roster.values()) for (const sp of (s.subpeers || [])) if (match(sp.realm || s.realm, sp.project, sp.user, sp.name)) out.add(sp.id)
+  if (!out.size) for (const s of roster.values()) if (s.project && s.user && match(s.realm, s.project, s.user, s.name)) out.add(s.session)
+  return [...out]
+}
+async function actDeliverNotice(ident, verb, subject, body, n) {
+  const from = { session: SESSION, name: NAME, kind: 'session' }
+  const mk = to => { const env = makeEnvelope({ to, verb, body: JSON.stringify(body), subject, from }); env.system = true; return env }
+  const who = `${ident.session} (${projName(ident.project)})`
+  const targets = actSessionTargets(ident)
+  let live = 0
+  for (const t of targets) { try { const r = await routeEnvelope(mk(t)); if (r && r.ok) live++ } catch { } }
+  if (live) { log(`activity: notice ${verb} → ${who}${n > 1 ? ` (${n} batched)` : ''}: delivered to ${live}`); return { ok: true, verb, delivered: live } }
+  if (PERSIST) {   // offline: park for its durable registration (this host's store), like any mail to an offline peer by name
+    let regs = []
+    try { regs = await persistence.registrations.byName(ident.session) } catch { }
+    const reg = regs.find(r => r && lc(r.realm || REALM) === lc(ident.realm || REALM) && projKey(r.project) === projKey(ident.project) && lc(r.user || '') === lc(ident.user || ''))
+    if (reg) {
+      const env = mk(`name:${reg.name}`)
+      try {
+        await persistence.mailbox.put({ realm: reg.realm || REALM, project: reg.project, user: reg.user, name: reg.name }, env.id, env)
+        emitTraceRaw({ dir: 'send', verb, from: SESSION, from_name: NAME, to: reg.name, to_name: reg.name, to_kind: 'subpeer', subject, pattern: 'send', size: 0, note: `parked for offline peer ${reg.name}`, envelope_id: env.id })
+        log(`activity: notice ${verb} → ${who}${n > 1 ? ` (${n} batched)` : ''}: parked (offline)`)
+        return { ok: true, verb, parked: 1 }
+      } catch { }
+    }
+  }
+  log(`activity: notice ${verb} → ${who}: no sub-peer${targets.length ? ' reachable' : ''} (a script-only session) — the log entry is all`)
+  return { ok: true, verb, none: true, ...(targets.length ? { unreachable: targets.length } : {}) }
 }
 /** v1.65.0 (#70 6d): this host's aimb-log paths for the dashboard's "Copy its aimb-log command" (paths only — NEVER a token:
  * token_file is the PATH the bridge read its token from, as {log_snippet} hands out). Rides the board head + full slices. */
@@ -2631,9 +2724,10 @@ function adminHttp(req, res, u) {
   if (!profile.auth.verify(tok)) return reply(401, { ok: false, code: tok ? 'unauthorized' : 'token-required', what: 'send Authorization: Bearer <realm token>' })
   const t0 = Date.now()
   flushActivityNow().then(async flushed => {
+    const notices = await actFlushAllNotices().catch(() => 0)   // #80: queued session notices go now (before the peers hear we are going)
     const down = await actAnnounceDown('prepare-shutdown')   // #70 step 4: after the flush, tell the peer hubs (their boards show our agents gone at once)
-    log(`admin: prepare-shutdown — flushed ${flushed.cp} checkpoint(s), ${flushed.rep} repeat line(s)${flushed.skipped ? ` (${flushed.skipped})` : ''}, going-down notice to ${down} peer hub(s), in ${Date.now() - t0}ms`)
-    reply(200, { ok: true, role, bridge_version: BRIDGE_VERSION, flushed, down_notified: down, ms: Date.now() - t0 })
+    log(`admin: prepare-shutdown — flushed ${flushed.cp} checkpoint(s), ${flushed.rep} repeat line(s)${flushed.skipped ? ` (${flushed.skipped})` : ''}, ${notices} session notice(s), going-down notice to ${down} peer hub(s), in ${Date.now() - t0}ms`)
+    reply(200, { ok: true, role, bridge_version: BRIDGE_VERSION, flushed, notices, down_notified: down, ms: Date.now() - t0 })
   }, e => reply(500, { ok: false, code: 'flush-failed', what: String((e && e.message) || e) }))
 }
 
@@ -2859,6 +2953,8 @@ const mcp = new Server(
       'you rarely need to poll blindly. (queue_epoch change ⇒ reset cursor to 0.) Use list_sessions for the roster. ' +
       'ACTIVITY BOARD (#70): report what you and your agents are doing with the log tool (text "@~root <status>" sets your ' +
       'headline; plan:["A","B"] makes a checklist; at milestones only, never secrets); the activity tool reads the mesh-wide board. ' +
+      'A message with verb activity_changed means someone changed your board from the dashboard (an item skipped, a plan abandoned, …): ' +
+      'summarise it for your user and do not act on it (stop or redo work) without their permission. ' +
       'IMPORTANT for Cowork/Desktop conversations and for subagents: this bridge process may be SHARED — ' +
       'call register_self with a name, a self-invented secret, and your project + user (the project the ' +
       'conversation is for, and the human supervising it) to get your own peer id and private inbox ' +
@@ -3477,6 +3573,11 @@ mcp.oninitialized = () => {
 await mcp.connect(new StdioServerTransport())
 // #70 step 4: a clean exit tells the peer hubs first (best effort, ≤300 ms; a hard kill can't — the link drop does it then)
 let exiting = false
-function cleanExit() { if (exiting) return; exiting = true; const down = actAnnounceDown('exit'); role = 'stopping'; down.finally(() => process.exit(0)) }
+function cleanExit() {
+  if (exiting) return; exiting = true
+  // #80: queued session notices go first (≤1.5 s), then the going-down notice as before
+  const notes = actNoticeQ.size ? Promise.race([actFlushAllNotices().catch(() => 0), new Promise(r => { setTimeout(r, 1500).unref() })]) : Promise.resolve()
+  notes.then(() => { const down = actAnnounceDown('exit'); role = 'stopping'; return down }).finally(() => process.exit(0))
+}
 process.on('SIGTERM', cleanExit)
 process.on('SIGINT', cleanExit)

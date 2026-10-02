@@ -154,7 +154,11 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   auto-abandon under the clock hook (31); `test_activity_actions_live.mjs` — #70 6d: every dashboard action with its codes
   and attribution, local and forwarded to the owning host (ACTIVITY_ACT) with the effect gossiped back, the agent-finish
   rule, abandon_plan leaving an agent running, dismiss (open items refused, gossiped, persisting across a restart), page
-  leaves / loggers / hello-less sockets and forged hub frames refused, the exact entry count across restarts (43). Tests run in
+  leaves / loggers / hello-less sockets and forged hub frames refused, the exact entry count across restarts (43);
+  `test_activity_notices_live.mjs` — #80: a dashboard action tells the owning session (`activity_changed`: subject, body,
+  entry id), a burst batched into one message, view-only / refused actions and reads send nothing, the doorbell wakes,
+  both directions across two hosts (the OWNER sends), a recipient on another host matched case-insensitively, an offline
+  session's notice parked and drained, a script-only session gets nothing, prepare-shutdown flushes the queue (26). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -524,7 +528,7 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
@@ -764,7 +768,8 @@ checkpoints, and so does the Task Tray before it kills the bridges (`POST /admin
 `memory_budget_mb` 64 (over it, the oldest finished agents, then the oldest log entries, are evicted) ·
 `progress_checkpoint_sec` 60 (10–3600, 0 = off) · v1.64.0: `abandoned_plan_days` 90 (1–3650; a gone session's open plans are
 abandoned by the bridge after this long) · `finished_plan_open_min` 120 (0–10080; how long an ended plan stays expanded on
-dashboards — sent with the board) · `enabled` true. Test-only env: `AI_BRIDGE_ACTIVITY_CHECKPOINT_MS`,
+dashboards — sent with the board) · v1.68.0: `notice_batch_sec` 3 (0–60, 0 = no batching; dashboard-change notices to one
+session within this long go as one message — #80) · `enabled` true. Test-only env: `AI_BRIDGE_ACTIVITY_CHECKPOINT_MS`,
 `_FWD_MS`, `_LOAD_WAIT_MS`, `_GC_MS`, `_RETENTION_MS`, `_INDEX_MAX`, `_PHASE1_MS`; step 4 (env only, every host should
 agree): `_GOSSIP_MS` (1000), `_SLICE_MAX_BYTES` (262144), `_PAGE_ENTRIES` (50), `_PAGE_BYTES` (32768), `_FETCH_RATE` (4/s),
 `_REMOTE_MS` (4000), `_DOWN_HOLD_MS` (30000); v1.63.0: `_ROLLOVER_CHECK_MS` (30000, the day-rollover check);
@@ -912,6 +917,7 @@ carry `plan_end_how`: `all-done`, `done` (marked complete) or `abandoned`.
   `owner-unreachable`, `owner-unsupported`, `activity-loading`.
 - The MCP tools get no new actions: a session already resolves its own items and plans with states (`@~…/@~B` + `done` /
   `skipped` / `todo` / `abandoned`; a context plan node `done` / `abandoned`). The dashboard is the manual override.
+- **The session is told (v1.68.0, #80)** — see "Dashboard-change notices" below.
 - **Copy its aimb-log command** builds the session's `{log_snippet}` command for the node's HOST: its absolute node + script
   paths, `--session` / `--project`, `--token-file "<path>"` when that bridge reads its token from a file — never a token —
   and `--path "<the node>"` (the board head now carries `log_cmd` for this host and each remote host, from its full slices).
@@ -948,6 +954,43 @@ restart — no "N+" from that cause.
 **Formats (v1.65.0).** Records + slices are **v5** (the plan-end marker on agents, `dismiss` entries, `line_text`, `act` and
 an object `by`, the cf `log_n`); v2–v4 records are still read; hubs declare `activity_gossip:5`. Deploy = restart every
 host's gateway on 1.65.0 together.
+
+### Dashboard-change notices — the session is told (v1.68.0, #80)
+A dashboard action used to be only LOGGED on the node, so an orchestrator could keep working on an item a person had just
+skipped or abandoned. Now the gateway that **owns** the node (the one that applied it — another host's node is applied, and
+notified, by that host) sends the node's session a **system message** after every state-changing action: `done`, `skip`,
+`reopen`, `abandon`, `complete`, `abandon_plan`, `reopen_plan`, `finish`, `dismiss`. Copy, pin and hide never reach the
+bridge (they live in the browser), and a refused action or a read sends nothing.
+
+- **Message:** verb **`activity_changed`**, from the owning gateway. Subject (public — status paths are realm-visible
+  anyway), e.g. `robin skipped @Dash test/@Docs`, `robin marked @Rplan/@R1 done`, `robin abandoned the open plans of lead`.
+  Body:
+  ```json
+  { "action": "skip", "path": "@\"Dash test\"/@Docs", "host": "ROBIN-Z790", "from_state": "todo", "to_state": "skipped",
+    "by": { "user": "robin", "host": "LITTLE-001" }, "entry_id": "act_…", "session": "Lead", "project": "ACTS",
+    "text": "Docs", "ts": 1790948729303 }
+  ```
+  `host` = the owner, `by.host` = the dashboard's host; `entry_id` = the logged entry that did it (`activity {entry:{id}}`).
+  For `complete` / `abandon_plan` / `reopen_plan`, `of:"plan"` and the two states are the PLAN's (`open`, `done`,
+  `all-done`, `abandoned`); `abandon_plan` adds `items:[{path, from_state, to_state, entry_id}]` for the items it abandoned.
+- **Batched:** actions on one session within **`activity.notice_batch_sec`** (default **3**, 0 – 60; 0 = each at once; env
+  `AI_BRIDGE_ACTIVITY_NOTICE_BATCH_SEC`) become ONE message — each new one re-arms the window, at most 5 windows after the
+  first. Subject e.g. `robin skipped 2 items and abandoned 1 in @Dash test`; body `{actions:[…the bodies above…], count,
+  session, project, host}`. `POST /admin/prepare-shutdown` and a clean exit flush every queue first.
+- **Recipient:** the session's registered sub-peer(s), anywhere on the mesh, matched by realm + project + user + session
+  name, case-insensitively (else a live bare session of that name). None live → the message is **parked** for the session's
+  durable registration in the owning host's store and delivered on its next `register_self`. A **script-only** session (no
+  sub-peer ever registered) gets the log entry only. A live session's doorbell wakes as for any mail.
+- **Consent:** it rides the system-message path #72's grant notices use (`system`, set only by bridge code for the
+  session's own board) — nothing else is opened.
+- **What the session does:** the server instructions and the `log` tool say it: summarise the change for the user and don't
+  act on it (stop or redo work) without their permission.
+- **For later notices (#83 edit text, #84 message the session, #85 answers):** the gateway's one internal hook
+  `notifyActivitySession(ident, {verb, subject, body}, {now})` (`bridge.mjs`) batches per session and delivers as above;
+  `ACT_NOTICE_COMBINE[verb]` merges several notices of one verb (the default: `{notices:[…], count}`), `now:true` sends at
+  once.
+- **Compatibility:** no wire change (gossip and `ACTIVITY_ACT` are unchanged); a 1.65 / 1.66 host just sends no notices
+  for its own nodes. Receivers of any version accept the message (a `system` envelope, as since 1.56).
 
 ### Three-part progress, colours and session glyphs (v1.66.0, #79)
 **Progress has three parts: done, skipped, total** (+ the unit). *Skipped* is resolved without being done — neither done
@@ -1211,7 +1254,8 @@ activity file's write queue (queued log entries included), and only then answers
 `/admin/…` path 404. **Only the gateway needs it:** followers write no activity files and keep no deferred writes (their
 persistence writes are issued immediately), so nothing is propagated to them. v1.60.0: after the flush the gateway also
 sends its peer hubs the going-down notice (`down_notified` = how many) so their boards show this host's agents gone at
-once. The bridge keeps running afterwards; the caller kills it.
+once. v1.68.0 (#80): before that it sends every queued dashboard-change notice (`notices` = how many messages went). The
+bridge keeps running afterwards; the caller kills it.
 
 ## Behaviour reminders (#29 / #32 / #44)
 A session registers "how to behave" reminders: `set_behavior {behavior, operation?, scope, match?}`

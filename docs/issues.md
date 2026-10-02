@@ -6,8 +6,10 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-03, v1.66.0) — read this first after a compact
-**Current version: v1.66.0** (#79: the `--plan` text footgun + THREE-PART progress done / skipped / total, a done node = 100%;
+## RESUME STATE (updated 2026-10-03, v1.68.0) — read this first after a compact
+**Current version: v1.68.0** (#80: a dashboard action tells the owning session — `activity_changed` system messages,
+batched per session; code done in a worktree for review, NOT committed, NOT deployed; **wire-compatible with 1.65 / 1.66**,
+so hosts can upgrade one at a time — a ≤1.66 owner simply sends no notices). Before that **v1.66.0** (#79: the `--plan` text footgun + THREE-PART progress done / skipped / total, a done node = 100%;
 plus the live-checklist snippet + orchestrator briefing, cyan = in progress, a session glyph — code done in the working
 tree for review, NOT committed, NOT deployed. **v1.65.0 is deployed live on every host; 1.66 is wire-compatible with 1.65
 (format stays v5), so hosts can upgrade one at a time** — then republish the realm block from config.example.json). Before
@@ -20,6 +22,16 @@ tags only where they differ; record / slice format v3; code done, NOT yet deploy
 (#70 step 6a) is committed (`2d78a21`); v1.63.0 is in the working tree for review. The rebuilt tray (`PrepareShutdown()`
 before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
 Everything below is durable; nothing important is only in chat.
+
+**2026-10-03 (v1.68.0):** Built **#80** (see "#80 as built" and architecture.md §13 "Built (v1.68.0)"). After every applied
+state-changing dashboard action the OWNING gateway sends the node's session a `system` message, verb `activity_changed`
+(subject "robin skipped @Dash test/@Docs"; body `{action, path, host, from_state, to_state, by:{user, host}, entry_id, …}`);
+several within `activity.notice_batch_sec` (3 s) become one ("robin skipped 2 items and abandoned 1 in @Dash test", body
+`actions:[…]`). Recipient: the session's live sub-peers mesh-wide (case-insensitive), else parked for its durable
+registration on the owning host, else nothing (script-only). Prepare-shutdown / a clean exit flush the queue. The generic
+hook for #83 / #84 / #85 is `notifyActivitySession(ident, {verb, subject, body}, {now})` in `bridge.mjs`. New
+`test_activity_notices_live` (26; 18 FAIL on 1.66); `test_activity_unit` 694. **Deploy:** any order (no wire change);
+nothing to publish.
 
 **2026-10-03 (v1.67.0, tests only — `BRIDGE_VERSION` stays 1.66.0, nothing to deploy):** Built **#81 step 1 + "test
 groups"** (see "#81 as built" and architecture.md §13 "Tests (v1.67.0)"). The 54 scripts moved into nine group folders
@@ -182,7 +194,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #82 plan workflow (move + agent-on-item + live item lines), #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #80 dashboard-change notices to the owning session, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #82 plan workflow (move + agent-on-item + live item lines), #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #83 / #84 / #85 (edit text, message the session, questions — they send through #80's `notifyActivitySession`), #86, #87, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -345,6 +357,7 @@ Robin, 2026-10-03.
 - Robin answers on the dashboard (pick a choice or type free text). The answer is logged, attributed, and delivered to
   the asking session as a message (uses #80's notice path, or #78's channels when there).
 - The asker reads the answer from the tool result or inbox; the node moves to answered.
+- **Hook (built in v1.68.0):** `notifyActivitySession(ident, {verb:"activity_answer", subject, body}, {now:true})`.
 - **To decide:** timeouts, who may answer (any viewer, or only the project's user), and whether an agent's question
   goes to its orchestrator first.
 
@@ -355,12 +368,16 @@ Robin, 2026-10-03.
 - Attributed to the dashboard viewer; logged on the node ("Robin: …").
 - Shares delivery with #80 (notices) and #85 (answers). Peer-relayed text is not authorization; the session still
   treats it as a request from the user.
+- **Hook (built in v1.68.0):** `notifyActivitySession(ident, {verb:"activity_message", subject, body}, {now:true})` — `now`
+  so a person's message isn't held for the batch window.
 
 ## #83 — edit a context's text from the dashboard  ·  **OPEN (next release)**
 Robin, 2026-10-03.
 - **Proposal:** right-click a node → **Edit text…** sets its current line (and optionally its state) from the dashboard.
 - Goes through the 6d action path (`ACTIVITY_ACT`, routed to the owning host), is attributed ("edited by Robin"),
   logged, and notifies the owning session (#80).
+- **Hook (built in v1.68.0):** `notifyActivitySession(ident, {verb:"activity_text_edited", subject, body})` — batched with
+  the session's other notices; add an `ACT_NOTICE_COMBINE` entry if several edits should merge into one message.
 - The session's next report overwrites the line as usual.
 
 ## #82 — plan workflow: move nodes between contexts, agents shown on the item they work on, live item lines  ·  **OPEN (next release)**
@@ -482,7 +499,7 @@ by file or by single check, and run them in parallel — ports first (a disjoint
 - **Later:** native describe/it per file (then `--test-name-pattern`, per-test reporter detail); `mock.timers` for the
   clock hooks; the activity group is the critical path (~3.5 min of the ~3m50s) — split it if the suite grows.
 
-## #80 — tell the owning session when the dashboard changes its activity  ·  **OPEN (next, after #79)**
+## #80 — tell the owning session when the dashboard changes its activity  ·  **DONE (v1.68.0)**
 Robin, 2026-10-03.
 - **The gap:** dashboard actions (#70 6d) are only LOGGED on the node ("skipped by robin via dashboard (…)"). The
   session that owns the plan isn't told, so an orchestrator may keep working on something a human just skipped or
@@ -502,6 +519,40 @@ Robin, 2026-10-03.
     it is the session's own project). The doorbell wakes the session, and the receive reminder applies, so the
     session summarises for its user before acting.
 - **Compatibility:** wire-compatible with 1.65, so no simultaneous redeploy.
+
+**#80 as built (v1.68.0, 2026-10-03):**
+- **When / who sends:** after every APPLIED state-changing action (`done`, `skip`, `reopen`, `abandon`, `complete`,
+  `abandon_plan`, `reopen_plan`, `finish`, `dismiss`), from `actApplyAction` — so the gateway that OWNS the node sends it,
+  also for an action forwarded as `ACTIVITY_ACT` from another host's dashboard. Copy / pin / hide are browser-only (the
+  bridge never sees them); refused actions and reads send nothing.
+- **Message:** a `system` envelope from the owning gateway, verb `activity_changed`. Subject e.g. `robin skipped @Dash
+  test/@Docs` (display path: quotes dropped; the root = the session's name; agents: "completed the plan of lead",
+  "abandoned the open plans of lead", "marked helper finished (failed)", "dismissed helper from the board"). Body
+  `{action, path, host, from_state, to_state, of?, by:{user, host}, entry_id, session, project, text, ts, items?}` — `host`
+  = the owner, `by.host` = the dashboard's host, `entry_id` = the logged entry; complete / abandon_plan / reopen_plan carry
+  `of:"plan"` and the PLAN's states (open | done | all-done | abandoned); abandon_plan adds `items:[{path, from_state,
+  to_state, entry_id}]`. A batch: subject e.g. `robin skipped 2 items and abandoned 1 in @Dash test`, body `{actions:[…],
+  count, session, project, host}`.
+- **Batching:** per session (realm + project + user + name, lower-cased), window `activity.notice_batch_sec` (3 s default,
+  0–60, 0 = each at once; env `AI_BRIDGE_ACTIVITY_NOTICE_BATCH_SEC`); each notice re-arms it, capped at 5 windows after
+  the first or 64 queued. `POST /admin/prepare-shutdown` flushes every queue before the going-down notice (`notices` in its
+  answer); a clean exit flushes too (≤1.5 s).
+- **Recipient:** every live sub-peer of the session, mesh-wide, matched case-insensitively (else a live bare session of that
+  name); none live → PARKED for its durable registration in the owning host's store (drained on the next register_self);
+  none → nothing but the log entry (a script-only session). Delivery is the normal sub-peer path, so the doorbell wakes.
+- **Consent:** the `system` exemption #72's notices use, set only by bridge code — not widened.
+- **The generic hook (for #83 / #84 / #85):** `notifyActivitySession(ident, {verb, subject, body}, {now?})` in `bridge.mjs`
+  (`ident` = `{realm?, project, user, session}`, e.g. applyAction's `r.ident`) → `Promise<{ok, delivered|parked|none} |
+  {queued, in_ms}>`. Several notices of one verb in a window merge through `ACT_NOTICE_COMBINE[verb]` (default: subject
+  "<first> (+N more)", body `{notices, count}`); `now:true` sends at once (a message a person waits on). Planned verbs:
+  `activity_text_edited` (#83), `activity_message` (#84), `activity_answer` (#85).
+- **Library:** `applyAction` also returns `ident`, `kind`, `text`, `from_state`, `to_state`, `of`, `entry_id`; pure builders
+  `actionNotice` + `combineActionNotices` + `displayPath`; `NOTICE_VERB`.
+- **Session guidance:** one sentence in the server instructions and in the `log` tool description: summarise an
+  `activity_changed` message for your user; don't act on it without their permission. No reminder text changed.
+- **Compatibility:** no frame or format change; a ≤1.66 owner just sends nothing; any receiver accepts a `system` envelope.
+- **Tests:** `test_activity_unit` 694 (+9), new `test_activity_notices_live` 26 (18 FAIL against the 1.66 bridge). Full
+  parallel `npm test` (typecheck included): 2351 checks in 55 files, all green on the first run, 4m03s; no flakes.
 
 ## #79 — `--plan` swallows trailing text; three-part progress (done / skipped / total)  ·  **DONE (v1.66.0)**
 Found by Bridget and Robin, 2026-10-02, on the first live use after the v1.65.0 deploy.

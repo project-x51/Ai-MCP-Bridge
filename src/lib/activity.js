@@ -169,10 +169,11 @@ export const ACTIVITY_DEFAULTS = Object.freeze({
   progress_checkpoint_sec: 60,      // cp/rep cadence for log:false activity (0 = off; else 10..3600)
   abandoned_plan_days: 90,          // 6c: a gone session's open plans are abandoned (by the bridge) after this long (1..3650)
   finished_plan_open_min: 120,      // 6c: an ENDED plan stays expanded on dashboards this long (0..10080; sent with the board)
+  notice_batch_sec: 3,              // #80 (v1.68.0): notices to one session within this many seconds go as ONE message (0 = each at once; 0..60)
   enabled: true,
 })
 /** @typedef {Readonly<{ log_retention_days:number, log_entries_per_agent:number, stale_after_min:number, finished_visible_hours:number,
- *   memory_budget_mb:number, progress_checkpoint_sec:number, abandoned_plan_days:number, finished_plan_open_min:number, enabled:boolean }>} ActivityConfig */
+ *   memory_budget_mb:number, progress_checkpoint_sec:number, abandoned_plan_days:number, finished_plan_open_min:number, notice_batch_sec:number, enabled:boolean }>} ActivityConfig */
 /** config key -> env override name (AI_BRIDGE_ACTIVITY_<KEY>). */
 export const ACTIVITY_ENV = Object.freeze(Object.fromEntries(Object.keys(ACTIVITY_DEFAULTS).map(k => [k, 'AI_BRIDGE_ACTIVITY_' + k.toUpperCase()])))
 /** The message fields of a `log` call / batch item (6a: + path; 6b: + plan). */
@@ -189,6 +190,7 @@ const CONFIG_RANGES = {
   progress_checkpoint_sec: [10, 3600],   // plus 0 = off (resolveConfig special-cases it)
   abandoned_plan_days: [1, 3650],        // 6c
   finished_plan_open_min: [0, 10080],    // 6c: 0 = an ended plan collapses at once; ≤ 7 days
+  notice_batch_sec: [0, 60],             // #80: 0 = no batching (each notice goes at once)
 }
 const MIN = 60000, HOUR = 3600000, DAY = 86400000, MB = 1024 * 1024
 const MAX_SESSIONS_PER_ORIGIN = 1024   // bounds a junk/huge gossiped slice (a sane host never gets near it)
@@ -1360,14 +1362,16 @@ function markerAction(state, sess, node, planEnd, now, o) {
  * End OPEN plans by abandoning them (auto-abandon; the dashboard's abandon_plan), DEEPEST first: each plan's OPEN items (todo /
  * running / blocked) get an abandoned line, then the plan node itself — a CONTEXT by its line, an AGENT / the session by the
  * plan-end marker (it keeps running: #70 "Decisions after 6c, for 6d" 2). o.text = the entry text (default: the action's
- * attribution). Returns { records, done:[{ path, item }] }.
+ * attribution). Returns { records, done:[{ path, item, from, entry_id }] } (#80: from = the item's state before / 'open' for a
+ * plan; entry_id = the logged entry that did it).
  */
 function abandonPlans(state, sess, plans, now, o) {
   const out = { records: [], done: [] }
   const one = (n, item) => {
     const text = o.text || actText(item ? ACTION_LABEL.abandon : ACTION_LABEL.abandon_plan, o.by)
+    const from = item ? stateOf(n) : 'open'
     const r = !item && n.kind === 'agent' ? markerAction(state, sess, n, 'abandoned', now, { by: o.by, act: o.act, text }) : lineAction(state, sess, n, 'abandoned', now, { by: o.by, act: o.act, text })
-    if (r.ok) { out.records.push(...r.records); out.done.push({ path: n.path, item }) }
+    if (r.ok) { out.records.push(...r.records); out.done.push({ path: n.path, item, from, entry_id: r.records.length ? r.records[r.records.length - 1].id : null }) }
   }
   for (const n of [...plans].sort((a, b) => b.depth - a.depth || cmp(a.key, b.key))) {
     if (sess.nodes.get(n.key) !== n) continue
@@ -1403,7 +1407,9 @@ function quietAgent(sess, n, now, sm) {
 }
 /**
  * 6d: ONE dashboard action on a LOCAL node → { ok, action, path, records:[…] (persist in order), applied:[{ path, state }],
- * dismissed?, warnings? } or { ok:false, code, what }. q = { session, project?, user?, path ('' = the session), action, args? };
+ * dismissed?, warnings? } or { ok:false, code, what }. #80 (v1.68.0) adds what the session's notice says: ident (realm, project,
+ * user, session), kind, text (the line's), from_state, to_state, of ("plan" when the two are the plan's), entry_id; abandon_plan's
+ * applied entries carry from + entry_id. q = { session, project?, user?, path ('' = the session), action, args? };
  * opts.by = { kind:'dashboard', user, host } (required — normBy). Codes: bad-action, bad-args, bad-by, unknown-session,
  * bad-path, unknown-node, not-a-plan-item, no-change, not-a-plan, already-ended, not-ended, all-items-done, no-open-plan,
  * not-an-agent, already-finished, not-stale, has-open-items. args.stale_min (1..1440; default the host's stale_after_min) =
@@ -1431,8 +1437,15 @@ export function applyAction(state, q, now, opts = {}) {
   if (!node) return bad('unknown-node', `session "${sess.session}" has no node "${pp.path}"`)
   const smArg = Number(args.stale_min), sm = Number.isFinite(smArg) && smArg >= 1 && smArg <= 1440 ? smArg : state.config.stale_after_min
   const o = { by, act: action, text: actText(ACTION_LABEL[action], by) }
-  const done = (recs, extra = {}) => ({ ok: true, action, path: node.path, records: recs, applied: extra.applied || [{ path: node.path, state: sess.nodes.get(node.key) ? stateOf(node) : null }], ...extra })
   const isAgent = node.kind === 'agent', plan = planOf(sess, node)
+  // #80 (v1.68.0): what the owning session is told — the node's state before → after (`of:"plan"` when they are its PLAN's:
+  // open | done | all-done | abandoned), the logged entry that did it, the session's identity (canonical spellings) and the
+  // line's text. Read BEFORE the action applies.
+  const from0 = stateOf(node), planFrom0 = plan ? (planEndAt(sess, node, plan) != null ? planEndHow(sess, node, plan) : 'open') : null
+  const lineText = node.current ? node.current.text : null
+  const entryOf = recs => { for (let i = recs.length - 1; i >= 0; i--) if (recs[i].path === node.path) return recs[i].id; return recs.length ? recs[recs.length - 1].id : null }
+  const done = (recs, to, extra = {}) => ({ ok: true, action, path: node.path, records: recs, applied: extra.applied || [{ path: node.path, state: sess.nodes.get(node.key) ? stateOf(node) : null }], ...extra,
+    ident: identOf(sess), kind: node.kind, text: lineText, from_state: to.of === 'plan' ? planFrom0 : from0, to_state: to.state, ...(to.of ? { of: to.of } : {}), entry_id: entryOf(recs) })
   switch (action) {
     case 'done': case 'skip': case 'reopen': case 'abandon': {   // ---- a PLAN ITEM
       if (!node.plan) return bad('not-a-plan-item', `"${node.path || '@root'}" is not a plan item`)
@@ -1442,27 +1455,27 @@ export function applyAction(state, q, now, opts = {}) {
       if (!r.ok) return r
       const par = sess.nodes.get(node.parent), pp2 = par ? planOf(sess, par) : null
       const warn = action === 'reopen' && pp2 && planEndAt(sess, par, pp2) != null ? ['plan-ended'] : []   // its plan was marked complete / abandoned: reopen the plan too
-      return done(r.records, warn.length ? { warnings: warn } : {})
+      return done(r.records, { state: st }, warn.length ? { warnings: warn } : {})
     }
     case 'complete': {   // ---- a PLAN NODE: ends its plan (a context: its line done; an agent / the session: the marker)
       if (!plan) return bad('not-a-plan', `"${node.path || '@root'}" holds no plan items`)
       if (planEndAt(sess, node, plan) != null) return bad('already-ended', `the plan of "${node.path || '@root'}" has already ended`)
       const r = isAgent ? markerAction(state, sess, node, 'done', now, o) : lineAction(state, sess, node, 'done', now, o)
-      return r.ok ? done(r.records) : r
+      return r.ok ? done(r.records, { state: 'done', of: 'plan' }) : r
     }
     case 'reopen_plan': {
       if (!plan) return bad('not-a-plan', `"${node.path || '@root'}" holds no plan items`)
       if (planEndAt(sess, node, plan) == null) return bad('not-ended', `the plan of "${node.path || '@root'}" is open`)
       if (plan.allDoneAt != null) return bad('all-items-done', 'every item of this plan is done — reopen an item instead')
       const r = isAgent ? markerAction(state, sess, node, 'open', now, o) : lineAction(state, sess, node, 'running', now, o)
-      return r.ok ? done(r.records) : r
+      return r.ok ? done(r.records, { state: 'open', of: 'plan' }) : r
     }
     case 'abandon_plan': {   // a plan node: its open items, then it; an agent / the session: every open plan it holds (it keeps running)
       if (!isAgent && !plan) return bad('not-a-plan', `"${node.path}" holds no plan items`)
       const plans = heldPlans(sess, node)
       if (!plans.length) return bad('no-open-plan', `"${node.path || '@root'}" holds no open plan`)
       const r = abandonPlans(state, sess, plans, now, { by, act: action })
-      return done(r.records, { applied: r.done.map(d => ({ path: d.path, state: 'abandoned', item: d.item })) })
+      return done(r.records, { state: 'abandoned', of: 'plan' }, { applied: r.done.map(d => ({ path: d.path, state: 'abandoned', item: d.item, from: d.from, entry_id: d.entry_id })) })
     }
     case 'finish': {   // ---- an agent / the session that is stale or gone
       if (!isAgent) return bad('not-an-agent', `"${node.path}" is a context — only an agent or the session finishes`)
@@ -1471,7 +1484,7 @@ export function applyAction(state, q, now, opts = {}) {
       if (node.finished_at) return bad('already-finished', `"${node.path || '@root'}" has already finished`)
       if (!quietAgent(sess, node, now, sm)) return bad('not-stale', `"${node.path || '@root'}" is neither stale nor gone — only a quiet agent can be marked finished`)
       const r = lineAction(state, sess, node, st, now, { ...o, text: actText(`${ACTION_LABEL.finish} (${st})`, by) })
-      return r.ok ? done(r.records) : r
+      return r.ok ? done(r.records, { state: st }) : r
     }
     case 'dismiss': {   // ---- remove an agent / the session (with its subtree) from the board now; the files keep everything
       if (!isAgent) return bad('not-an-agent', `"${node.path}" is a context — dismiss removes an agent or a session`)
@@ -1479,7 +1492,8 @@ export function applyAction(state, q, now, opts = {}) {
       if (!sub.every(x => x.kind !== 'agent' || (x.key !== node.key && x.implicit) || quietAgent(sess, x, now, sm)))
         return bad('not-stale', `"${node.path || '@root'}" (or an agent under it) is still active — only a stale, gone or finished agent can be dismissed`)
       if (openPlanKeys(sess).has(node.key)) return bad('has-open-items', `"${node.path || '@root'}" holds part of an OPEN plan — complete or abandon it first (open plan items are never removed)`)
-      return { ...dismissNode(state, sess, node, now, o), action }
+      const r = dismissNode(state, sess, node, now, o)
+      return { ...r, action, ident: identOf(sess), kind: node.kind, text: lineText, from_state: from0, to_state: 'dismissed', entry_id: entryOf(r.records) }
     }
   }
   return bad('bad-action', action)
@@ -1504,6 +1518,69 @@ function dismissNode(state, sess, node, now, o) {
   } else state.local.delete(sess.key)
   if (state.cp) state.cp.rep = null   // any other write closes the open repeat line
   return { ok: true, path: node.path, records: [rec], dismissed: { path: node.path, nodes: removed, session: !node.key }, applied: [{ path: node.path, state: 'dismissed' }] }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// #80 (v1.68.0): DASHBOARD-CHANGE NOTICES. After an action applies, the OWNING gateway tells the node's session — a system
+// message, verb `activity_changed`, to its registered sub-peer (parked when it is offline; a script-only session gets the
+// log entry only). These two PURE builders make the message; the bridge batches them per session (notice_batch_sec) and
+// delivers them (bridge.mjs notifyActivitySession). Subjects are public (status paths are realm-visible anyway); a body is
+// { action, path, host, from_state, to_state, of?, by:{ user, host }, entry_id, session, project, text, ts, items? } and a
+// batch is { actions:[…those], count, session, project, host }.
+export const NOTICE_VERB = 'activity_changed'
+const NOTICE_ONE = Object.freeze({ done: 'marked {p} done', skip: 'skipped {p}', reopen: 'reopened {p}', abandon: 'abandoned {p}', complete: 'completed the plan {p}',
+  abandon_plan: 'abandoned the plan {p}', reopen_plan: 'reopened the plan {p}', finish: 'marked {p} finished ({s})', dismiss: 'dismissed {p} from the board' })
+const NOTICE_MANY = Object.freeze({ done: 'marked {n} done', skip: 'skipped {n}', reopen: 'reopened {n}', abandon: 'abandoned {n}', complete: 'completed {n}',
+  abandon_plan: 'abandoned {n}', reopen_plan: 'reopened {n}', finish: 'finished {n}', dismiss: 'dismissed {n}' })
+const NOTICE_NOUN = Object.freeze({ done: 'item', skip: 'item', reopen: 'item', abandon: 'item', complete: 'plan', abandon_plan: 'plan', reopen_plan: 'plan', finish: 'agent', dismiss: 'agent' })
+const NOTICE_SUBJECT_MAX = 200
+const segsOf = p => (typeof p === 'string' && p ? p.match(/@"[^"]*"|[^/]+/g) || [] : [])
+/** A node path for people: `@"Next release"/@Docs` → `@Next release/@Docs`; the session root → the session's name. */
+export function displayPath(path, session) { return path ? String(path).replace(/@"([^"]*)"/g, '@$1') : String(session || '@root') }
+/**
+ * One applied action (applyAction's result) → { verb, subject, body }. opts = { by (the action's author), host (the owner), ts }.
+ * @param {any} r @param {{ by?: any, host?: string, ts?: number }} [opts]
+ */
+export function actionNotice(r, opts = {}) {
+  const b = normBy(opts.by), by = b && typeof b === 'object' ? { user: b.user, host: b.host } : { user: typeof b === 'string' ? b : 'dashboard', host: opts.host || '?' }
+  const id = r.ident || {}, action = r.action
+  const p = displayPath(r.path, id.session)
+  const pp = (r.kind === 'agent' && NOTICE_NOUN[action] === 'plan') ? `of ${p}` : p   // "completed the plan of lead"
+  const tpl = action === 'abandon_plan' && r.kind === 'agent' ? 'abandoned the open plans {p}' : (NOTICE_ONE[action] || `${action} {p}`)
+  const subject = cpSlice(`${by.user} ${tpl.replace('{p}', pp).replace('{s}', r.to_state || '')}`, NOTICE_SUBJECT_MAX)
+  const items = (r.applied || []).filter(a => a.path !== r.path).map(a => compact({ path: a.path, from_state: a.from || null, to_state: a.state, entry_id: a.entry_id || null }))
+  const body = { action, path: r.path || '', host: opts.host || null, from_state: r.from_state || null, to_state: r.to_state || null, ...(r.of ? { of: r.of } : {}), by,
+    entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, text: r.text || null, ts: opts.ts || null, ...(items.length ? { items } : {}) }
+  return { verb: NOTICE_VERB, subject, body }
+}
+/**
+ * Several notices for ONE session (bodies from actionNotice) → ONE { subject, body }: "robin skipped 2 items and abandoned 1 in
+ * @Dashboard test" — per action in first-seen order, the noun on the first group (and again where it changes), "in" the deepest
+ * common container (a plan item's parent; another node itself), else the session's name. body = { actions, count, session,
+ * project, host }. One notice is returned as it is.
+ * @param {Array<{ subject: string, body: any }>} notices
+ */
+export function combineActionNotices(notices) {
+  const list = (notices || []).filter(n => n && n.body)
+  if (list.length === 1) return { subject: list[0].subject, body: list[0].body }
+  const acts = list.map(n => n.body), first = acts[0] || {}
+  const users = [...new Set(acts.map(a => (a.by && a.by.user) || 'dashboard'))]
+  const groups = new Map()
+  for (const a of acts) groups.set(a.action, (groups.get(a.action) || 0) + 1)
+  let lastNoun = null
+  const parts = [...groups].map(([action, n]) => {
+    const noun = NOTICE_NOUN[action] || 'change'
+    const what = noun !== lastNoun ? `${n} ${noun}${n === 1 ? '' : 's'}` : String(n)
+    lastNoun = noun
+    return (NOTICE_MANY[action] || `${action} {n}`).replace('{n}', what)
+  })
+  const said = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0] || 'changed nothing'
+  const containers = acts.map(a => { const s = segsOf(a.path); return NOTICE_NOUN[a.action] === 'item' ? s.slice(0, -1) : s })
+  let common = containers[0] || []
+  for (const c of containers) { let i = 0; while (i < common.length && i < c.length && common[i].toLowerCase() === c[i].toLowerCase()) i++; common = common.slice(0, i) }
+  const where = displayPath(common.join('/'), first.session)
+  const subject = cpSlice(`${users.join(', ')} ${said} in ${where}`, NOTICE_SUBJECT_MAX)
+  return { subject, body: { actions: acts, count: acts.length, session: first.session || null, project: first.project || null, host: first.host || null } }
 }
 
 /** A session record, local by default or from a remote origin's slice (the key's host is the origin — ident.host is ignored). */

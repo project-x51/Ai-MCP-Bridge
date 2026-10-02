@@ -42,9 +42,9 @@ check('limits: the locked #70 values (6a: depth 6, 128 agents, 4096 nodes, batch
   && !('contextsPerAgent' in A.ACTIVITY_LIMITS) && !('pathDepth' in A.ACTIVITY_LIMITS))
 check('format: records + slices are v5 (6d; v4 = 6c, v3 = 6b)', A.ACTIVITY_FORMAT === 5 && mk().v === 5)
 check('limits + defaults are frozen', Object.isFrozen(A.ACTIVITY_LIMITS) && Object.isFrozen(A.ACTIVITY_DEFAULTS) && Object.isFrozen(A.ACTIVITY_STATES))
-check('defaults: the #70 per-host config (+ step 2 progress_checkpoint_sec; 6b: finished_visible_hours 168 = 7 days; 6c: abandoned_plan_days 90, finished_plan_open_min 120)', J(A.ACTIVITY_DEFAULTS) === J({ log_retention_days: 7, log_entries_per_agent: 200, stale_after_min: 15, finished_visible_hours: 168, memory_budget_mb: 64, progress_checkpoint_sec: 60, abandoned_plan_days: 90, finished_plan_open_min: 120, enabled: true }))
+check('defaults: the #70 per-host config (+ step 2 progress_checkpoint_sec; 6b: finished_visible_hours 168 = 7 days; 6c: abandoned_plan_days 90, finished_plan_open_min 120; #80: notice_batch_sec 3)', J(A.ACTIVITY_DEFAULTS) === J({ log_retention_days: 7, log_entries_per_agent: 200, stale_after_min: 15, finished_visible_hours: 168, memory_budget_mb: 64, progress_checkpoint_sec: 60, abandoned_plan_days: 90, finished_plan_open_min: 120, notice_batch_sec: 3, enabled: true }))
 check('states: running|blocked|failed|done|idle + (6b) todo|skipped + (6c) abandoned', J(A.ACTIVITY_STATES) === J(['running', 'blocked', 'failed', 'done', 'idle', 'todo', 'skipped', 'abandoned']))
-check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 'AI_BRIDGE_ACTIVITY_STALE_AFTER_MIN' && A.ACTIVITY_ENV.enabled === 'AI_BRIDGE_ACTIVITY_ENABLED' && A.ACTIVITY_ENV.progress_checkpoint_sec === 'AI_BRIDGE_ACTIVITY_PROGRESS_CHECKPOINT_SEC' && A.ACTIVITY_ENV.abandoned_plan_days === 'AI_BRIDGE_ACTIVITY_ABANDONED_PLAN_DAYS' && A.ACTIVITY_ENV.finished_plan_open_min === 'AI_BRIDGE_ACTIVITY_FINISHED_PLAN_OPEN_MIN' && Object.keys(A.ACTIVITY_ENV).length === 9)
+check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 'AI_BRIDGE_ACTIVITY_STALE_AFTER_MIN' && A.ACTIVITY_ENV.enabled === 'AI_BRIDGE_ACTIVITY_ENABLED' && A.ACTIVITY_ENV.progress_checkpoint_sec === 'AI_BRIDGE_ACTIVITY_PROGRESS_CHECKPOINT_SEC' && A.ACTIVITY_ENV.abandoned_plan_days === 'AI_BRIDGE_ACTIVITY_ABANDONED_PLAN_DAYS' && A.ACTIVITY_ENV.finished_plan_open_min === 'AI_BRIDGE_ACTIVITY_FINISHED_PLAN_OPEN_MIN' && A.ACTIVITY_ENV.notice_batch_sec === 'AI_BRIDGE_ACTIVITY_NOTICE_BATCH_SEC' && Object.keys(A.ACTIVITY_ENV).length === 10)
 check('message fields: + path (6a), + plan (6b)', J(A.MESSAGE_FIELDS) === J(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan']))
 
 // ================================================================= resolveConfig
@@ -2144,6 +2144,46 @@ await section(async () => {
   check('#79 records: the entry record keeps skipped (absent when 0); the replay restores it', J(rec.progress) === J({ done: 3, total: 10, unit: 'tiles', skipped: 2 }) && (B => { A.replayNewestFirst(B, [rec], T0 + MIN); return J(A.getNode(B, I, '@sk').progress) === J({ done: 3, total: 10, unit: 'tiles', skipped: 2 }) })(mk({}, 'HOST-B')))
   const cf = A.planCarryForward(there, T0 + 9 * DAY).map(w => w.rec).find(r => r.path === '@sk')
   check('#79 carry-forward: a cf snapshot carries skipped too', cf && J(cf.progress) === J({ done: 3, total: 10, unit: 'tiles', skipped: 2 }), J(cf))
+})
+
+// ================================================================= #80 (v1.68.0): what an applied action tells its session — applyAction's
+// notice fields, actionNotice (one message) and combineActionNotices (a batch), the notice_batch_sec knob
+await section(async () => {
+  const R = A.resolveConfig
+  check('#80 config: notice_batch_sec defaults to 3, clamps to 0..60, env AI_BRIDGE_ACTIVITY_NOTICE_BATCH_SEC overrides',
+    R({}).notice_batch_sec === 3 && R({ notice_batch_sec: 0 }).notice_batch_sec === 0 && R({ notice_batch_sec: 999 }).notice_batch_sec === 60 && R({ notice_batch_sec: -1 }).notice_batch_sec === 0
+    && R({}, { AI_BRIDGE_ACTIVITY_NOTICE_BATCH_SEC: '1' }).notice_batch_sec === 1)
+  const st = mk(), I = { ...S1, session: 'Lead', project: 'ACTS' }
+  sayC(st, I, { path: '@"Dash test"', plan: ['Docs', 'Code', 'Ship'] }, T0)
+  sayC(st, I, { path: 'lead/@~root', text: 'leading', plan: ['L1', 'L2'] }, T0)
+  sayC(st, I, { path: 'helper/@~root', text: 'helping' }, T0)
+  const sk = ACT(st, I, '@"Dash test"/@Docs', 'skip', {}, T0 + MIN)
+  check('#80 applyAction: an item action reports its session (canonical ident), the line text, from_state → to_state and the logged entry\'s id',
+    sk.ok && J(sk.ident) === J({ realm: 'default', project: 'ACTS', user: 'robin', session: 'Lead' }) && sk.kind === 'context' && sk.text === 'Docs' && sk.from_state === 'todo' && sk.to_state === 'skipped' && !sk.of && sk.entry_id === sk.records[0].id, J(sk))
+  const n1 = A.actionNotice(sk, { by: BY, host: 'HOST-A', ts: T0 + MIN })
+  check('#80 actionNotice: verb activity_changed; subject "robin skipped @Dash test/@Docs" (quotes dropped); body { action, path, host, from_state, to_state, by:{user, host}, entry_id, session, project, text, ts }',
+    n1.verb === 'activity_changed' && n1.subject === 'robin skipped @Dash test/@Docs'
+    && J(n1.body) === J({ action: 'skip', path: '@"Dash test"/@Docs', host: 'HOST-A', from_state: 'todo', to_state: 'skipped', by: { user: 'robin', host: 'DASH-HOST' }, entry_id: sk.entry_id, session: 'Lead', project: 'ACTS', text: 'Docs', ts: T0 + MIN }), J(n1))
+  const ab = ACT(st, I, '@"Dash test"/@Code', 'abandon', {}, T0 + MIN), sk2 = ACT(st, I, '@"Dash test"/@Ship', 'skip', {}, T0 + MIN)
+  const many = A.combineActionNotices([n1, A.actionNotice(ab, { by: BY, host: 'HOST-A' }), A.actionNotice(sk2, { by: BY, host: 'HOST-A' })])
+  check('#80 combineActionNotices: ONE message — "robin skipped 2 items and abandoned 1 in @Dash test"; body { actions:[3, in order], count, session, project, host }',
+    many.subject === 'robin skipped 2 items and abandoned 1 in @Dash test' && many.body.count === 3 && J(many.body.actions.map(a => a.action)) === J(['skip', 'abandon', 'skip']) && many.body.session === 'Lead' && many.body.host === 'HOST-A', J(many))
+  check('#80 combineActionNotices: a single notice is returned unchanged', J(A.combineActionNotices([n1])) === J({ subject: n1.subject, body: n1.body }))
+  const cp = ACT(st, I, 'lead', 'abandon_plan', {}, T0 + 2 * MIN)
+  const n2 = A.actionNotice(cp, { by: BY, host: 'HOST-A' })
+  check('#80 abandon_plan on an agent: of:"plan", open → abandoned; "robin abandoned the open plans of lead"; items = the cascaded items (from → to, each entry id)',
+    cp.ok && cp.of === 'plan' && cp.from_state === 'open' && cp.to_state === 'abandoned' && n2.subject === 'robin abandoned the open plans of lead'
+    && J(n2.body.items.map(x => [x.path, x.from_state, x.to_state])) === J([['lead/@L1', 'todo', 'abandoned'], ['lead/@L2', 'todo', 'abandoned']]) && n2.body.items.every(x => typeof x.entry_id === 'string'), J(n2))
+  const rp = ACT(st, I, 'lead', 'reopen_plan', {}, T0 + 3 * MIN)
+  check('#80 reopen_plan: the plan\'s states (abandoned → open) — "robin reopened the plan of lead"', rp.ok && rp.from_state === 'abandoned' && rp.to_state === 'open' && A.actionNotice(rp, { by: BY }).subject === 'robin reopened the plan of lead', J([rp.from_state, rp.to_state]))
+  const fn = ACT(st, I, 'helper', 'finish', { state: 'failed' }, T0 + DAY), dz = ACT(st, I, 'helper', 'dismiss', {}, T0 + DAY)
+  check('#80 finish / dismiss: running → failed ("robin marked helper finished (failed)"), failed → dismissed ("robin dismissed helper from the board"), each with its entry id',
+    fn.ok && fn.to_state === 'failed' && A.actionNotice(fn, { by: BY }).subject === 'robin marked helper finished (failed)' && dz.ok && dz.from_state === 'failed' && dz.to_state === 'dismissed' && !!dz.entry_id
+    && A.actionNotice(dz, { by: BY }).subject === 'robin dismissed helper from the board', J([fn.to_state, dz.from_state, dz.to_state]))
+  const mixed = A.combineActionNotices([A.actionNotice(fn, { by: BY }), A.actionNotice(dz, { by: BY }), A.actionNotice(cp, { by: { kind: 'dashboard', user: 'ann', host: 'H2' } })])
+  check('#80 a mixed batch: per-action groups with their nouns, every author named, "in" the session when nothing is shared — "robin, ann finished 1 agent, dismissed 1 and abandoned 1 plan in Lead"',
+    mixed.subject === 'robin, ann finished 1 agent, dismissed 1 and abandoned 1 plan in Lead', mixed.subject)
+  check('#80 displayPath: quotes dropped; the root = the session name', A.displayPath('@"Next release"/@"#80 x"/notices-80', 'S') === '@Next release/@#80 x/notices-80' && A.displayPath('', 'Lead') === 'Lead')
 })
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

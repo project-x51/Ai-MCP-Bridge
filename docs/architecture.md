@@ -347,7 +347,9 @@ host, wait_ms, position}` while a remote fetch waits) → `{type:"activity", ref
 WRITE: `{type:"activity_action", ref, host, session, project, user, path, action, args?}` → (`activity_queued` while a
 forward waits) → `{type:"activity_action", ref, result}`; accepted only from an authenticated `dashboard` socket (a page
 leaf, a logger or a socket without a hello → `unauthorized`); the board `head` carries `log_cmd` (this host's aimb-log
-paths), `user` (who actions are attributed to) and each `remote_hosts[]` entry its own `log_cmd`.
+paths), `user` (who actions are attributed to) and each `remote_hosts[]` entry its own `log_cmd`. v1.68.0 (#80): the
+gateway that APPLIES an action (the owner) then tells the node's session with a `system` envelope, verb `activity_changed`
+(batched per session) — an ordinary message on the existing delivery paths, so no frame changes.
 
 **Deliberately out of scope here.** Cross-*realm* bridging stays in §8 (a translator, because keys
 differ). And cross-machine hub **high-availability**: if a machine's hub dies its local mesh re-elects
@@ -1194,6 +1196,39 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.68.0):** *#80 — a dashboard action TELLS the owning session.* Before, a right-click action (6d) was only
+  logged on the node, so an orchestrator could keep working on an item a person had just skipped or abandoned.
+  **Wire-compatible with 1.65 / 1.66** (no frame or format change; hosts upgrade one at a time — a ≤1.66 owner just sends
+  no notices). **When:** after every APPLIED state-changing action — `done`, `skip`, `reopen`, `abandon`, `complete`,
+  `abandon_plan`, `reopen_plan`, `finish`, `dismiss` — by the gateway that applied it, i.e. the node's OWNER (a forwarded
+  `ACTIVITY_ACT` is applied and notified by the owner, not by the dashboard's host). Copy / pin / hide never reach the
+  bridge; refused actions and reads send nothing. **Model (`lib/activity.js`):** `applyAction` now also returns what the
+  notice says — `ident` (the session's realm / project / user / name, canonical spellings), `kind`, the line's `text`,
+  `from_state` → `to_state` (read before the action applies; `of:"plan"` for complete / abandon_plan / reopen_plan, whose
+  states are the PLAN's: open | done | all-done | abandoned) and `entry_id` (the logged entry that did it); abandon_plan's
+  `applied[]` carries each item's `from` + `entry_id`. Two pure builders: `actionNotice(r, {by, host, ts})` → `{verb:
+  "activity_changed", subject, body}` — subject "robin skipped @Dash test/@Docs" (quotes dropped; the root = the session's
+  name; "… the plan of lead" / "… the open plans of lead" for an agent), body `{action, path, host, from_state, to_state,
+  of?, by:{user, host}, entry_id, session, project, text, ts, items?}` — and `combineActionNotices(list)` → ONE `{subject,
+  body}`: per action in first-seen order with its noun on the first group and wherever it changes ("robin skipped 2 items
+  and abandoned 1 in @Dash test"), "in" the deepest common container (a plan item's parent; another node itself; else the
+  session), every author named; body `{actions:[…], count, session, project, host}`. New config key
+  `notice_batch_sec` (3, 0–60, 0 = no batching; `AI_BRIDGE_ACTIVITY_NOTICE_BATCH_SEC`). **Bridge — one generic hook:**
+  `notifyActivitySession(ident, {verb, subject, body}, {now?})` queues per session key (realm + projKey + user + name,
+  lower-cased); each notice re-arms the window, capped at 5 windows after the first or 64 queued; `now:true` flushes at
+  once. A flush groups by verb (first-seen order): one notice goes as it is, several of one verb through
+  `ACT_NOTICE_COMBINE[verb]` (activity_changed → combineActionNotices; else "<first subject> (+N more)", `{notices,
+  count}`). `actDeliverNotice` sends a `system` envelope (the #72 exemption — set only by bridge code; the session's own
+  board, so consent is not widened) from the gateway to every LIVE sub-peer of the session mesh-wide (realm + project +
+  user + name, case-insensitive per #71; else a live bare session of that name, loggerUserConflict's rule); none live →
+  PARKED for the session's durable registration in this host's store (§19; drained on its next register_self); none →
+  only the log entry (a script-only session). Delivery is `deliverSub`'s, so a live session's doorbell wakes.
+  `POST /admin/prepare-shutdown` flushes every queue before the going-down notice (`notices` in its answer); a clean exit
+  flushes too (≤1.5 s). The server instructions and the `log` tool description tell a session to summarise an
+  `activity_changed` message for its user and not act on it without their permission. **For #83 / #84 / #85:**
+  `activity_text_edited`, `activity_message` (`now:true`) and `activity_answer` send through the same hook (add a combiner
+  if several should merge). Tests: `test_activity_unit` 694 (+9: the notice fields per action, both builders, the knob),
+  new `test_activity_notices_live` (26 — 18 FAIL against the 1.66 bridge).
 - **Tests (v1.67.0, tests only — `BRIDGE_VERSION` unchanged):** *#81 step 1 + "test groups" — the suite runs under
   Node's built-in runner (node:test), in parallel, with live progress on the activity board.* The 54 test scripts are
   unchanged plain Node scripts (own `check()`, PASS/FAIL lines, exit code); **node:test drives them**: each script is

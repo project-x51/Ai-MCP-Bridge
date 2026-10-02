@@ -28,7 +28,7 @@ export const ORDER = Object.freeze([
   'test_retain_federate_live', 'test_page_remote_live', 'test_roster_secrets_live', 'test_reclaim_preserve_live',
   'test_from_topic_live', 'test_grant_notice_live', 'test_project_case_live', 'test_activity_unit', 'test_log_live',
   'test_log_script_live', 'test_activity_gossip_live', 'test_dashboard_activity', 'test_activity_dashboard_live',
-  'test_activity_carry_live', 'test_activity_6c_live', 'test_activity_actions_live',
+  'test_activity_carry_live', 'test_activity_6c_live', 'test_activity_actions_live', 'test_activity_notices_live',
 ])
 
 export const GROUPS = Object.freeze({
@@ -46,7 +46,8 @@ export const GROUPS = Object.freeze({
   dashboard: ['test_dashboard', 'test_page_e2e', 'test_dashboard_multihost', 'test_dashboard_persistence',
     'test_dashboard_collapse', 'test_page_remote_live'],
   activity: ['test_log_live', 'test_log_script_live', 'test_activity_gossip_live', 'test_dashboard_activity',
-    'test_activity_dashboard_live', 'test_activity_carry_live', 'test_activity_6c_live', 'test_activity_actions_live'],
+    'test_activity_dashboard_live', 'test_activity_carry_live', 'test_activity_6c_live', 'test_activity_actions_live',
+    'test_activity_notices_live'],
 })
 
 /** name → group */
