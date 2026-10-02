@@ -157,7 +157,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #79 --plan text footgun + 3-part progress (v1.66.0), #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -296,6 +296,31 @@ the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) 
 whenever a send returns `unknown-subpeer`.
 
 ---
+
+## #79 — `--plan` swallows trailing text; three-part progress (done / skipped / total)  ·  **OPEN (fixing now, v1.66.0)**
+Found by Bridget and Robin, 2026-10-02, on the first live use after the v1.65.0 deploy.
+
+1. **`aimb-log --plan` swallows trailing text.**
+   - What happened: `--plan` takes every argument after it as an item name, so
+     `--plan "A" "B" "@~root headline"` treats the headline as a third item and the call fails with `bad-plan`.
+     Retrying piecemeal then creates ordinary contexts instead of plan items.
+   - Fix:
+     - the snippet line teaches "put any text BEFORE --plan";
+     - `bad-plan` for a name that looks like text (starts with `@`/`@~`, or contains spaces beyond a short name)
+       says so explicitly;
+     - the README and the tool description say the same.
+2. **A done task counts as 100%,** and progress always has three parts.
+   - A node whose state is **done** contributes **100% done** to its parents, and shows a full bar itself, whatever
+     its own reported or rolled-up bar says. (Seen live: `@Test plan` was done but showed a partial striped bar.)
+   - **Progress is {done, skipped, total}.** The bar draws done (green/blue), then **skipped** as a separate,
+     non-green segment right after it, then the remainder. The label reads e.g. "1 of 5 done · 1 skipped".
+   - Rollups carry all three parts:
+     - a skipped plan item counts as skipped, not done and not remaining;
+     - a done node counts as fully done;
+     - with a common unit, the parts are summed;
+     - with mixed units, they are averaged as fractions.
+   - Pending decisions: how abandoned and failed count. (Proposed: abandoned in the skipped segment; failed as
+     remaining.)
 
 ## #78 — making use of latest Claude features  ·  **OPEN (after the #70 deploy)**
 Robin, 2026-10-02. Prompted by: "Is the doorbell still the best way to wake a session? Is the MCP bridge still the
