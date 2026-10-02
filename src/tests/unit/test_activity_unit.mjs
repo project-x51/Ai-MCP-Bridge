@@ -45,7 +45,7 @@ check('limits + defaults are frozen', Object.isFrozen(A.ACTIVITY_LIMITS) && Obje
 check('defaults: the #70 per-host config (+ step 2 progress_checkpoint_sec; 6b: finished_visible_hours 168 = 7 days; 6c: abandoned_plan_days 90, finished_plan_open_min 120; #80: notice_batch_sec 3)', J(A.ACTIVITY_DEFAULTS) === J({ log_retention_days: 7, log_entries_per_agent: 200, stale_after_min: 15, finished_visible_hours: 168, memory_budget_mb: 64, progress_checkpoint_sec: 60, abandoned_plan_days: 90, finished_plan_open_min: 120, notice_batch_sec: 3, enabled: true }))
 check('states: running|blocked|failed|done|idle + (6b) todo|skipped + (6c) abandoned', J(A.ACTIVITY_STATES) === J(['running', 'blocked', 'failed', 'done', 'idle', 'todo', 'skipped', 'abandoned']))
 check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 'AI_BRIDGE_ACTIVITY_STALE_AFTER_MIN' && A.ACTIVITY_ENV.enabled === 'AI_BRIDGE_ACTIVITY_ENABLED' && A.ACTIVITY_ENV.progress_checkpoint_sec === 'AI_BRIDGE_ACTIVITY_PROGRESS_CHECKPOINT_SEC' && A.ACTIVITY_ENV.abandoned_plan_days === 'AI_BRIDGE_ACTIVITY_ABANDONED_PLAN_DAYS' && A.ACTIVITY_ENV.finished_plan_open_min === 'AI_BRIDGE_ACTIVITY_FINISHED_PLAN_OPEN_MIN' && A.ACTIVITY_ENV.notice_batch_sec === 'AI_BRIDGE_ACTIVITY_NOTICE_BATCH_SEC' && Object.keys(A.ACTIVITY_ENV).length === 10)
-check('message fields: + path (6a), + plan (6b)', J(A.MESSAGE_FIELDS) === J(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan']))
+check('message fields: + path (6a), + plan (6b), + move / to / before / after / position (#82)', J(A.MESSAGE_FIELDS) === J(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan', 'move', 'to', 'before', 'after', 'position']))
 
 // ================================================================= resolveConfig
 await section(async () => {
@@ -1773,8 +1773,8 @@ await section(async () => {
   const it = sayC(st, I, { path: '@#70/@~B', state: 'abandoned' }, T0 + MIN)
   check('6c abandoned: a plan ITEM can be set abandoned (a tick: no text needed; it stays a plan item, never stale)', it.ok && stOf(st, I, '@#70/@B') === 'abandoned' && N(st, I, '@#70/@B').plan === true && N(st, I, '@#70/@B').current.text === 'B'
     && A.effectiveState(N(st, I, '@#70/@B'), T0 + 30 * DAY, 15).state === 'abandoned', J(it))
-  check('6c abandoned: an ordinary context → not-a-plan; an agent holding no plan → not-a-plan; a new node → not-a-plan (nothing created)', sayC(st, I, { path: '@plain/@~x', state: 'abandoned' }, T0).code === 'not-a-plan'
-    && sayC(st, I, { path: 'worker/@~root', state: 'abandoned' }, T0).code === 'not-a-plan' && sayC(st, I, { path: '@nope/@~y', text: 'z', state: 'abandoned' }, T0).code === 'not-a-plan' && !N(st, I, '@nope'))
+  check('6c abandoned (#82 part 4: any CONTEXT now): an ordinary context → abandoned; an agent holding no plan → not-a-plan; a new agent → not-a-plan (nothing created)', sayC(st, I, { path: '@plain/@~x', state: 'abandoned' }, T0).ok && stOf(st, I, '@plain/@x') === 'abandoned'
+    && sayC(st, I, { path: 'worker/@~root', state: 'abandoned' }, T0).code === 'not-a-plan' && sayC(st, I, { path: 'nope/@~root', text: 'z', state: 'abandoned' }, T0).code === 'not-a-plan' && !N(st, I, 'nope'))
   check('6c abandoned: parseMessage accepts it (the target decides, at apply)', P({ path: '@x/@~y', state: 'abandoned' }, { now: T0 }).ok && P({ path: 'ag/@~root', state: 'abandoned' }, { now: T0 }).ok)
   const pn = sayC(st, I, { path: '@~#70', text: 'giving up on #70', state: 'abandoned' }, T0 + 2 * MIN)
   check('6c abandoned: a plan NODE (a context holding plan items) can be set abandoned — that ends its plan (plan_end_at on the board)', pn.ok && stOf(st, I, '@#70') === 'abandoned'
@@ -1783,7 +1783,7 @@ await section(async () => {
   check('6c abandoned: an AGENT holding a plan may be abandoned — it finishes like done / failed (no ETA, never gone)', ag.ok && N(st, I, 'lead').finished_at === T0 + 3 * MIN && stOf(st, I, 'lead') === 'abandoned' && ag.entry.finished_at === T0 + 3 * MIN)
   const R = p => A.rollup(S(), N(st, I, p))
   sayC(st, I, { path: '@#70/@~A', state: 'done' }, T0 + 4 * MIN)
-  check('6c rollup: an abandoned item stays in M and (#79) counts in the skipped part; the plan node itself abandoned → its whole remainder is skipped (1 of 3 done · 2 skipped)', (b => b.done === 1 && b.total === 3 && b.abandoned === 1 && b.skipped === 2 && b.forced === 'abandoned' && b.todos)(R('@#70')), J(R('@#70')))
+  check('6c rollup: an abandoned item stays in M and (#79) counts in the skipped part; the plan node itself abandoned → its whole remainder is skipped (1 of 3 done · 2 skipped; #82: the cascade abandoned the open C too)', (b => b.done === 1 && b.total === 3 && b.abandoned === 2 && b.skipped === 2 && b.forced === 'abandoned' && b.todos)(R('@#70')), J(R('@#70')))
   check('6c render: the dashboard units carry the abandoned state of items and of the plan node', (u => u.some(x => x.obj.path === '@#70/@B' && x.obj.state === 'abandoned') && u.some(x => x.obj.path === '@#70' && x.obj.plan_node === true))([...A.dashUnits(A.boardView(st, T0 + 5 * MIN, { raw: true })).values()]))
 })
 await section(async () => {
@@ -2184,6 +2184,289 @@ await section(async () => {
   check('#80 a mixed batch: per-action groups with their nouns, every author named, "in" the session when nothing is shared — "robin, ann finished 1 agent, dismissed 1 and abandoned 1 plan in Lead"',
     mixed.subject === 'robin, ann finished 1 agent, dismissed 1 and abandoned 1 plan in Lead', mixed.subject)
   check('#80 displayPath: quotes dropped; the root = the session name', A.displayPath('@"Next release"/@"#80 x"/notices-80', 'S') === '@Next release/@#80 x/notices-80' && A.displayPath('', 'Lead') === 'Lead')
+})
+
+// ================================================================= #82 (v1.69.0): the plan workflow — ORDER (fractional ranks), insert
+// anywhere, reorder, MOVE (re-parent with history), abandon any context + the cascade, dashboard move / reorder, the replay
+const sib = (st, I, p, origin) => { const s = A.getSession(st, I, origin), n = A.getNode(st, I, p, origin); return A.childrenOf(s, n).sort(A.siblingCmp).map(x => x.name) }
+const RECS = []
+function sayR(st, ident, input, now) { const r = sayC(st, ident, input, now); if (r && r.ok && r.records) RECS.push(...r.records.map(x => JSON.parse(J(x)))); return r }
+const ACTR = (st, I, path, action, args, now) => { const r = ACT(st, I, path, action, args, now); if (r && r.ok && r.records) RECS.push(...r.records.map(x => JSON.parse(J(x)))); return r }
+await section(async () => {
+  // ---- ranks
+  const D = A.RANK_DIGITS
+  let ok = true, worst = ''
+  const rnd = rng(82)
+  const randRank = () => { let s = ''; const n = 1 + Math.floor(rnd() * 6); for (let i = 0; i < n; i++) s += D[Math.floor(rnd() * 36)]; return s.replace(/0+$/, '') || 'i' }
+  for (let i = 0; i < 2000; i++) {
+    let a = randRank(), b = randRank(); if (a === b) continue; if (a > b) [a, b] = [b, a]
+    const m = A.rankBetween(a, b), lo = A.rankBetween(null, a), hi = A.rankBetween(b, null)
+    if (!(a < m && m < b) || !(lo < a) || !(hi > b) || ![m, lo, hi].every(x => A.validRank(x))) { ok = false; worst = J([a, b, m, lo, hi]); break }
+  }
+  check('#82 rankBetween: strictly between (and below / above an open end) for 2000 random base-36 pairs; never a trailing "0"', ok, worst)
+  let lo = 'a', hi = 'b', grow = 0
+  for (let i = 0; i < 200; i++) { const m = A.rankBetween(lo, hi); if (!(lo < m && m < hi)) { grow = -1; break } hi = m; grow = m.length }
+  check('#82 rankBetween: 200 inserts at ONE spot keep strict order, growing slowly (≤ 50 chars)', grow > 0 && grow <= 50, grow)
+  check('#82 validRank: base-36, no trailing 0, ≤128 chars', A.validRank('a1') === 'a1' && A.validRank('a0') === null && A.validRank('A') === null && A.validRank('') === null && A.validRank('z'.repeat(129)) === null && A.validRank(5) === null)
+  check('#82 derivedRank: creation order (ms) then plan position — an older node and a lower plan_ix sort first', A.derivedRank(T0, 0) < A.derivedRank(T0, 1) && A.derivedRank(T0, 5) < A.derivedRank(T0 + 1, null) && A.derivedRank(T0, null) < A.derivedRank(T0, 0) && A.derivedRank(T0, 0).length === 12)
+  // ---- parsing
+  check('#82 parse: before / after / position — one at most; position first | last; an anchor is ONE sibling', C({ path: '@P/@~X', before: 'Y', after: 'Z' }) === 'bad-position' && C({ path: '@P/@~X', position: 'middle' }) === 'bad-position'
+    && C({ path: '@P/@~X', before: 'a/b' }) === 'bad-position' && C({ path: '@P/@~X', before: '@a/@b' }) === 'bad-position' && C({ path: '@P/@~X', position: 'FIRST' }) === 'OK' && C({ before: 'X' }) === 'bad-position')
+  check('#82 parse: a placement needs no text (posOnly) — with text it is a normal message that also places the node', (m => m.posOnly === true && m.pos.before.name === 'Y')(M({ path: '@P/@~X', before: 'Y' })) && (m => !m.posOnly && m.text === 'hi' && m.pos.after.kind === 'context')(M({ path: '@P/@X', text: 'hi', after: '@Y' })))
+  check('#82 parse: move — needs to; takes no text / state / plan; relative to path (a leading "/" absolute); never into itself; the root can\'t move',
+    C({ move: '@A/@x' }) === 'bad-move' && C({ to: '@B' }) === 'bad-move' && C({ move: '@A/@x', to: '@B', text: 'hi' }) === 'bad-move' && C({ move: '@A/@x', to: '@B', plan: ['q'] }) === 'bad-move'
+    && C({ move: '@A', to: '@A/@b' }) === 'bad-move' && C({ move: '/', to: '@B' }) === 'bad-move'
+    && (m => m.path === 'w/@A/@x' && m.move.toPath === 'w/@B')(M({ path: 'w', move: '@A/@x', to: '@B' })) && (m => m.path === '@A/@x' && m.move.toPath === '')(M({ path: 'w', move: '/@A/@x', to: '/' })))
+  check('#82 usesPlan82: the fields a ≤1.68 gateway would drop (also inside a batch)', A.usesPlan82({ before: 'x' }) && A.usesPlan82({ items: [{ text: 'a' }, { move: 'x', to: 'y' }] }) && !A.usesPlan82({ text: 'a', plan: ['x'] }))
+})
+await section(async () => {
+  // ---- INSERT anywhere + REORDER
+  const st = mk(), I = { ...S1, session: 'Ord' }
+  sayR(st, I, { path: '@Next', plan: ['A', 'B', 'C'] }, T0)
+  const ins = sayR(st, I, { path: '@Next', plan: ['X', 'Y'], before: 'B' }, T0 + MIN)
+  check('#82 insert: plan + before "B" → the new items go there IN THE GIVEN ORDER (A X Y B C); each carries its stored rank (records too)', J(sib(st, I, '@Next')) === J(['A', 'X', 'Y', 'B', 'C']) && ins.plan.every(p => p.rank) && ins.records.every(r => A.validRank(r.rank)), J(sib(st, I, '@Next')))
+  sayR(st, I, { path: '@Next', plan: ['F'], position: 'first' }, T0 + 2 * MIN)
+  sayR(st, I, { path: '@Next', plan: ['L'], after: 'C' }, T0 + 2 * MIN)
+  sayR(st, I, { path: '@Next', plan: ['M1', 'M2'], after: 'A' }, T0 + 2 * MIN)
+  check('#82 insert: position first; after the LAST item; several after A', J(sib(st, I, '@Next')) === J(['F', 'A', 'M1', 'M2', 'X', 'Y', 'B', 'C', 'L']), J(sib(st, I, '@Next')))
+  const dflt = sayR(st, I, { path: '@Next', plan: ['Z'] }, T0 + 3 * MIN)
+  check('#82 insert: no position (or last) = the END, with NO stored rank (its derived rank — its creation time — already sorts last)', sib(st, I, '@Next').at(-1) === 'Z' && !N(st, I, '@Next/@Z').rank && !('rank' in dflt.records[0]))
+  const rp = sayR(st, I, { path: '@Next', plan: ['A', 'B', 'N'], before: 'F' }, T0 + 3 * MIN)
+  check('#82 re-plan with a position: existing items never move; only the NEW name is placed', J(sib(st, I, '@Next').slice(0, 3)) === J(['N', 'F', 'A']) && rp.plan.filter(p => p.created).length === 1)
+  // reorder an existing node
+  const ro = sayR(st, I, { path: '@Next/@~C', before: 'A' }, T0 + 4 * MIN)
+  check('#82 reorder: path "@Next/@~C" + before "A" — no text; ONE logged entry "placed before @A" (not a current line: the line is untouched) with its rank', ro.ok && ro.records.length === 1 && ro.records[0].text === 'placed before @A' && ro.records[0].current === false && A.validRank(ro.records[0].rank)
+    && N(st, I, '@Next/@C').current.text === 'C' && J(sib(st, I, '@Next').slice(0, 4)) === J(['N', 'F', 'C', 'A']), J([ro.records, sib(st, I, '@Next')]))
+  sayR(st, I, { path: '@Next/@~C', position: 'last' }, T0 + 5 * MIN)
+  check('#82 reorder: position last → after every item (an explicit rank below anything created later)', sib(st, I, '@Next').at(-1) === 'C' && !!N(st, I, '@Next/@C').rank)
+  sayR(st, I, { path: '@Next', plan: ['After'] }, T0 + 6 * MIN)
+  check('#82 order: a node created LATER (no position) still goes after a node placed last before it', sib(st, I, '@Next').at(-1) === 'After' && sib(st, I, '@Next').at(-2) === 'C')
+  const rw = sayR(st, I, { path: '@Next/@~A', text: 'working on A', state: 'running', after: 'B' }, T0 + 7 * MIN)
+  check('#82 reorder + a message: the line is set AND the node placed (one record, rank on it)', rw.ok && rw.current && N(st, I, '@Next/@A').current.text === 'working on A' && sib(st, I, '@Next').indexOf('A') === sib(st, I, '@Next').indexOf('B') + 1 && A.validRank(rw.records[0].rank))
+  // groups: plan items, then contexts, then agents — rows never jump on a state change
+  sayR(st, I, { path: '@Next/w1/@~root', text: 'an agent' }, T0 + 8 * MIN)
+  sayR(st, I, { path: '@Next/@~notes', text: 'a plain context' }, T0 + 8 * MIN)
+  const order0 = sib(st, I, '@Next')
+  check('#82 groups: plan items first, then the other contexts, then agents (whatever the creation order)', order0.at(-1) === 'w1' && order0.at(-2) === 'notes' && order0.indexOf('After') < order0.indexOf('notes'), J(order0))
+  sayR(st, I, { path: '@Next/@~B', state: 'done' }, T0 + 9 * MIN); sayR(st, I, { path: '@Next/@~X', state: 'blocked', text: 'stuck' }, T0 + 9 * MIN)
+  check('#82 order: a state change never moves a row', J(sib(st, I, '@Next')) === J(order0))
+  check('#82 anchors: unknown → unknown-anchor; another kind → bad-anchor; itself → bad-position; bare name = an agent first',
+    sayC(st, I, { path: '@Next/@~A', before: 'nope' }, T0).code === 'unknown-anchor' && sayC(st, I, { path: '@Next/@~A', before: 'w1' }, T0).code === 'bad-anchor'
+    && sayC(st, I, { path: '@Next/@~A', before: 'A' }, T0).code === 'bad-position' && sayC(st, I, { path: '@Next/@~notes', after: 'A' }, T0).code === 'bad-anchor'
+    && sayC(st, I, { path: '@Next', plan: ['Q'], before: 'notes' }, T0).code === 'bad-anchor' && !N(st, I, '@Next/@Q'))
+  // the board + gossip carry the rank
+  const bv = A.boardView(st, T0 + 10 * MIN, { raw: true })[0]
+  check('#82 board: every node has its effective rank (rank_set when stored); sorting siblings by group + rank = the tree order', (() => {
+    const kids = bv.nodes.filter(n => n.parent === '@Next'), g = n => (n.plan_item ? 0 : n.kind === 'context' ? 1 : 2)
+    return kids.every(n => typeof n.rank === 'string') && nodeOf(bv, '@Next/@C').rank_set === true && !nodeOf(bv, '@Next/@Z').rank_set
+      && J(kids.slice().sort((a, b) => g(a) - g(b) || (a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : 0)).map(n => n.name)) === J(sib(st, I, '@Next'))
+  })())
+  const snap = A.snapshot(st), there = mk({}, 'HOST-B')
+  A.mergeSnapshot(there, 'HOST-A', snap)
+  check('#82 gossip: a STORED rank rides the node unit (a derived one does not); the receiver orders the same; format stays v5', snap.v === 5 && !!snap.sessions[0].nodes.find(n => n.path === '@Next/@C').rank && !('rank' in snap.sessions[0].nodes.find(n => n.path === '@Next/@Z'))
+    && J(sib(there, I, '@Next', 'HOST-A')) === J(sib(st, I, '@Next')), J(sib(there, I, '@Next')))
+  check('#82 gossip: a 1.68 receiver\'s view — a unit without rank — falls back to creation order (derived), never fails', (() => { const s2 = JSON.parse(J(snap)); for (const n of s2.sessions[0].nodes) delete n.rank; const t2 = mk({}, 'HOST-C'); return A.mergeSnapshot(t2, 'HOST-A', s2).ok && sib(t2, I, '@Next', 'HOST-A').length === sib(st, I, '@Next').length })())
+  // replay: the order survives
+  const B = mk(); A.replayNewestFirst(B, RECS.filter(r => r.session === 'Ord').slice().reverse(), T0 + 11 * MIN)
+  check('#82 replay: every stored rank (and so the order) is rebuilt from the records', J(sib(B, I, '@Next')) === J(sib(st, I, '@Next')) && N(B, I, '@Next/@C').rank === N(st, I, '@Next/@C').rank, J(sib(B, I, '@Next')))
+  const cp = A.flushCheckpoints((sayC(st, I, { path: '@Next/@~C', text: 'x', log: false }, T0 + 12 * MIN), st), T0 + 12 * MIN)[0]
+  const cf = A.planCarryForward(st, T0 + 20 * DAY).map(w => w.rec).find(r => r.path === '@Next/@C')
+  check('#82 cp / cf snapshots carry the stored rank (null = derived)', cp && cp.rec.rank === N(st, I, '@Next/@C').rank && cf && cf.rank === N(st, I, '@Next/@C').rank && A.planCarryForward(st, T0 + 20 * DAY).map(w => w.rec).find(r => r.path === '@Next/@Z').rank === null)
+})
+await section(async () => {
+  // ---- MOVE
+  const st = mk(), I = { ...S1, session: 'Mov' }
+  sayR(st, I, { path: '@"Next release"', plan: ['A', 'B'] }, T0)
+  sayR(st, I, { path: '@"Next release"/@~A', text: 'working A', state: 'running', progress: '1/4' }, T0 + MIN)
+  sayR(st, I, { path: '@"Next release"/@A/@~sub', text: 'sub of A' }, T0 + MIN)
+  sayR(st, I, { path: '@"Next release"/@A/w9/@~root', text: 'an agent on A' }, T0 + MIN)
+  sayR(st, I, { path: '@"Potential changes"', plan: ['P1', 'P2'] }, T0 + 2 * MIN)
+  const n0 = N(st, I, '@"Next release"/@A'), cnt0 = n0.log.length + n0.log_dropped, created0 = n0.created_at
+  const mv = sayR(st, I, { move: '@"Next release"/@A', to: '@"Potential changes"' }, T0 + 3 * MIN)
+  const n1 = N(st, I, '@"Potential changes"/@A')
+  check('#82 move: the node + its subtree under the new parent; nothing left at the old path', mv.ok && !!n1 && !N(st, I, '@"Next release"/@A') && !!N(st, I, '@"Potential changes"/@A/@sub') && !!N(st, I, '@"Potential changes"/@A/w9') && n1 === n0, J(mv))
+  check('#82 move: it keeps everything — plan item, line, bar, state, created_at, its log (+1 entry: the move)', n1.plan && n1.current.text === 'working A' && n1.progress.done === 1 && A.stateOf(n1) === 'running' && n1.created_at === created0 && n1.log.length + n1.log_dropped === cnt0 + 1)
+  check('#82 move: a plan item goes to the END of the target plan (P1 P2 A) with a stored rank', J(sib(st, I, '@"Potential changes"')) === J(['P1', 'P2', 'A']) && !!n1.rank && J(sib(st, I, '@"Next release"')) === J(['B']))
+  const mr = mv.records[0]
+  check('#82 move: ONE logged entry at the NEW path — "moved by Mov from @Next release/@A to @Potential changes", moved_from = the old path, rank, not a current line',
+    mv.records.length === 1 && mr.path === '@"Potential changes"/@A' && mr.text === 'moved by Mov from @Next release/@A to @Potential changes' && mr.moved_from === '@"Next release"/@A' && mr.rank === n1.rank && mr.current === false, J(mr))
+  check('#82 move: the node remembers where it came from (moved: { from, at })', J(n1.moved) === J([{ from: '@"Next release"/@A', at: T0 + 3 * MIN }]))
+  const ownerA = N(st, I, '@"Potential changes"/@A/w9/@sub')
+  check('#82 move: descendants are re-keyed (path, parent, depth) — kids map and all', N(st, I, '@"Potential changes"/@A/@sub').parent === A.pathKey('@"Potential changes"/@A') && N(st, I, '@"Potential changes"/@A/@sub').depth === 3 && kidPaths(A.getSession(st, I), '@"Potential changes"/@A').length === 2 && !ownerA)
+  // positions + errors
+  const mv2 = sayR(st, I, { move: '@"Potential changes"/@A', to: '@"Next release"', before: 'B' }, T0 + 4 * MIN)
+  check('#82 move with a position: back to Next release, BEFORE B', mv2.ok && J(sib(st, I, '@"Next release"')) === J(['A', 'B']) && J(N(st, I, '@"Next release"/@A').moved.map(m => m.from)) === J(['@"Next release"/@A', '@"Potential changes"/@A']))
+  sayR(st, I, { path: '@Other/@~A', text: 'another A' }, T0 + 4 * MIN)
+  check('#82 move errors: target-exists (same name there), no-change (already there), into itself, unknown-node, too deep',
+    sayC(st, I, { move: '@"Next release"/@A', to: '@Other' }, T0 + 5 * MIN).code === 'target-exists' && sayC(st, I, { move: '@"Next release"/@A', to: '@"Next release"' }, T0 + 5 * MIN).code === 'no-change'
+    && sayC(st, I, { move: '@"Next release"', to: '@"Next release"/@A/@sub' }, T0 + 5 * MIN).code === 'bad-move' && sayC(st, I, { move: '@Nope', to: '@Other' }, T0 + 5 * MIN).code === 'unknown-node'
+    && sayC(st, I, { move: '@"Next release"/@A', to: '@d1/@d2/@d3/@d4/@d5' }, T0 + 5 * MIN).code === 'path-too-deep' && !N(st, I, '@d1'))
+  const same = sayR(st, I, { move: '@"Next release"/@A', to: '@"Next release"', after: 'B' }, T0 + 5 * MIN)
+  check('#82 move to the SAME parent with a position = a reorder ("placed after @B")', same.ok && same.records[0].text === 'placed after @B' && J(sib(st, I, '@"Next release"')) === J(['B', 'A']))
+  const nw = sayR(st, I, { path: 'lead', move: '@q/@r', to: '@s' }, T0 + 5 * MIN)
+  check('#82 move: paths relative to path ("lead" + "@q/@r") — an unknown node is refused', nw.code === 'unknown-node')
+  sayR(st, I, { path: 'lead/@q/@~r', text: 'r under lead' }, T0 + 5 * MIN)
+  const rel = sayR(st, I, { path: 'lead', move: '@q/@r', to: '/@"New parent"/@deeper' }, T0 + 6 * MIN)
+  check('#82 move: to a NEW parent path (created implicit, absolute with "/") — moving a node out of an agent', rel.ok && !!N(st, I, '@"New parent"/@deeper/@r') && N(st, I, '@"New parent"/@deeper').implicit === true && !N(st, I, 'lead/@q/@r') && !!N(st, I, 'lead/@q'), J(rel))
+  // REPLAY: the moves are honoured
+  const B = mk(); A.replayNewestFirst(B, RECS.filter(r => r.session === 'Mov').slice().reverse(), T0 + 7 * MIN)
+  check('#82 replay: a restart rebuilds the MOVED tree — every node where it is now, nothing at the old paths, its log (old entries too) and its move history', dump(st) === dump(B) && !N(B, I, '@"Potential changes"/@A') && N(B, I, '@"Next release"/@A').log.length === N(st, I, '@"Next release"/@A').log.length
+    && J(N(B, I, '@"Next release"/@A').moved) === J(N(st, I, '@"Next release"/@A').moved) && N(B, I, '@"Next release"/@A').rank === N(st, I, '@"Next release"/@A').rank, firstDiff(dump(st), dump(B)))
+  // the gossip: removals at the old path + the node at its new one
+  const pubA = A.createPub(), st2 = mk(), I2 = { ...S1, session: 'G' }
+  sayC(st2, I2, { path: '@X', plan: ['a', 'b'] }, T0); sayC(st2, I2, { path: '@Y', plan: ['c'] }, T0)
+  A.planSlice(st2, pubA, { full: true })
+  sayC(st2, I2, { move: '@X/@a', to: '@Y' }, T0 + MIN)
+  const d = A.planSlice(st2, pubA, {}).body
+  check('#82 gossip: a move = a delta removing the old path + the node at its new path (any receiver, 1.68 too, applies it)', (d.remove || []).some(r => r.path === '@X/@a') && d.sessions[0].nodes.some(n => n.path === '@Y/@a' && n.plan_item && n.rank))
+})
+await section(async () => {
+  // ---- history under the OLD path: day-file paging follows the node (aliases), and the move is never the run's start
+  const st = mk(), I = { ...S1, session: 'Hist' }, recs = []
+  const go = (input, t) => { const r = sayC(st, I, input, t); if (r.ok) recs.push(...r.records.map(x => JSON.parse(J(x)))); return r }
+  go({ path: '@Old/@~x', text: 'x one' }, T0); go({ path: '@Old/@x/@~deep', text: 'deep one' }, T0 + MIN); go({ path: '@Old/@~x', text: 'x two' }, T0 + 2 * MIN)
+  go({ path: '@~New', text: 'the new parent' }, T0 + 3 * MIN)
+  go({ move: '@Old/@x', to: '@New' }, T0 + 4 * MIN)
+  go({ path: '@New/@~x', text: 'x three' }, T0 + 5 * MIN)
+  const nx = N(st, I, '@New/@x')
+  nx.log.length = 0; nx.log_floor = T0 + 6 * MIN   // as if memory had dropped everything: the page must come from the files
+  N(st, I, '@New/@x/@deep').log.length = 0; N(st, I, '@New/@x/@deep').log_floor = T0 + 6 * MIN
+  const lv = A.logView(st, { session: 'Hist', path: '@New/@x' }, T0 + 10 * MIN, { files: true })
+  check('#82 history: the file target names the node\'s old path (an alias, with its time window)', lv.ok && (lv.files.target.aliases || []).some(a => a.key === A.pathKey('@Old/@x') && a.before === T0 + 4 * MIN && a.start), J(lv.files && lv.files.target))
+  const rows = recs.slice().reverse().map((rec, i) => ({ rec, day: A.localDay(rec.ts), offset: 1000 - i, length: 10 }))
+  const pg = await A.filePage(lv, lv.files, rows, { now: T0 + 10 * MIN })
+  check('#82 history: paging the files finds every entry — under the new path AND the old one (shown at the node\'s path now); the move is not where the run starts',
+    J(pg.entries.map(e => e.text)) === J(['x three', 'moved by Hist from @Old/@x to @New', 'x two', 'deep one', 'x one']) && pg.entries.every(e => e.path.startsWith('@New/@x')) && J(pg.entries.map(e => e.rel)) === J(['', '', '', '@deep', '']) && pg.run_start === true, J(pg))
+  const own = A.logView(st, { session: 'Hist', path: '@New/@x', own: true }, T0 + 10 * MIN, { files: true })
+  const pg2 = await A.filePage(own, own.files, rows, { now: T0 + 10 * MIN })
+  check('#82 history: own:true — the node\'s own entries under both paths (not its child\'s)', J(pg2.entries.map(e => e.text)) === J(['x three', 'moved by Hist from @Old/@x to @New', 'x two', 'x one']), J(pg2.entries.map(e => e.text)))
+  const lvNew = A.logView(st, { session: 'Hist', path: '@New' }, T0 + 10 * MIN, { files: true })
+  N(st, I, '@New').log.length = 0; N(st, I, '@New').log_floor = T0 + 6 * MIN
+  const lvNew2 = A.logView(st, { session: 'Hist', path: '@New' }, T0 + 10 * MIN, { files: true })
+  const pg3 = await A.filePage(lvNew2, lvNew2.files, rows, { now: T0 + 10 * MIN })
+  const lvNew3 = A.logView(st, { session: 'Hist', path: '@New' }, T0 + 10 * MIN, { files: true })
+  const pg4 = await A.filePage(lvNew3, lvNew3.files, rows, { now: T0 + 10 * MIN, earlier: true })
+  check('#82 history: the NEW parent\'s subtree log stops at ITS run start (the moved-in node\'s entries from before it are there with "show earlier runs")',
+    lvNew.ok && J(pg3.entries.map(e => e.text)) === J(['x three', 'moved by Hist from @Old/@x to @New', 'the new parent']) && pg3.run_start === true
+    && J(pg4.entries.map(e => e.text)) === J(['x three', 'moved by Hist from @Old/@x to @New', 'the new parent', 'x two', 'deep one', 'x one']), J([pg3.entries.map(e => e.text), pg4.entries.map(e => e.text)]))
+  check('#82 counts: the moved node\'s count includes its entries from before the move (memory moved with it; a replay counts the old records too)',
+    (B => { A.replayNewestFirst(B, recs.slice().reverse(), T0 + 10 * MIN); const n = N(B, I, '@New/@x'); return n.log.length + n.log_dropped === 4 })(mk()))
+})
+await section(async () => {
+  // ---- ABANDON any context + the CASCADE (part 4 + 5)
+  const st = mk(), I = { ...S1, session: 'Ab' }
+  sayR(st, I, { path: '@Big/@~ctx1', text: 'an open context' }, T0)
+  sayR(st, I, { path: '@Big/@ctx1', plan: ['i1', 'i2'] }, T0)
+  sayR(st, I, { path: '@Big/@ctx1/@~i2', state: 'done' }, T0)
+  sayR(st, I, { path: '@Big/@~idle', text: 'resting', state: 'idle' }, T0)
+  sayR(st, I, { path: '@Big/w1/@~root', text: 'an agent' }, T0)
+  sayR(st, I, { path: '@Big/w1/@~wc', text: 'the agent\'s own context' }, T0)
+  sayR(st, I, { path: '@Big/@grp/@~leaf', text: 'a leaf under a grouping context' }, T0)
+  const ab = sayR(st, I, { path: '@~Big', text: 'dropping this', state: 'abandoned' }, T0 + MIN)
+  check('#82 abandon: ANY context can be abandoned (an ordinary one, no plan)', ab.ok && stOf(st, I, '@Big') === 'abandoned')
+  check('#82 cascade: its OPEN descendants — open items and contexts (todo / running / blocked) and a context whose plan is still open — are abandoned too, deepest first, each logged "abandoned with @Big"',
+    J(ab.records.slice(1).map(r => r.path)) === J(['@Big/@ctx1/@i1', '@Big/@grp/@leaf', '@Big/@ctx1']) && ab.records.slice(1).every(r => r.text === 'abandoned with @Big' && r.state === 'abandoned')
+    && J(ab.cascade.map(c => [c.path, c.from])) === J([['@Big/@ctx1/@i1', 'todo'], ['@Big/@grp/@leaf', 'running'], ['@Big/@ctx1', 'running']]), J(ab.records.map(r => [r.path, r.text])))
+  check('#82 cascade: done / idle nodes keep their state; nothing inside an AGENT is touched (w1 and its context keep running); a line keeps its text',
+    stOf(st, I, '@Big/@ctx1/@i2') === 'done' && stOf(st, I, '@Big/@idle') === 'idle' && stOf(st, I, '@Big/w1') === 'running' && stOf(st, I, '@Big/w1/@wc') === 'running' && N(st, I, '@Big/@ctx1/@i1').current.text === 'i1')
+  const B = mk(); A.replayNewestFirst(B, RECS.filter(r => r.session === 'Ab').slice().reverse(), T0 + 2 * MIN)
+  check('#82 cascade + replay: the restart shows the same', dump(st) === dump(B), firstDiff(dump(st), dump(B)))
+  // the tool's abandoned on an AGENT holding a plan keeps 6c / 6d's meaning (finish + end the plan) and cascades over ITS contexts
+  sayR(st, I, { path: 'lead/@~root', text: 'leading', plan: ['L1', 'L2'] }, T0)
+  sayR(st, I, { path: 'lead/sub/@~root', text: 'a sub-agent' }, T0); sayR(st, I, { path: 'lead/sub/@~sc', text: 'its context' }, T0)
+  const la = sayR(st, I, { path: 'lead/@~root', state: 'abandoned' }, T0 + MIN)
+  check('#82 abandon an agent holding a plan: it finishes, its plan ends (6d marker) and its open items are cascaded — a sub-agent\'s work is its own', la.ok && !!N(st, I, 'lead').finished_at && N(st, I, 'lead').plan_end.state === 'abandoned'
+    && stOf(st, I, 'lead/@L1') === 'abandoned' && stOf(st, I, 'lead/sub/@sc') === 'running')
+  check('#82 abandon an agent WITHOUT a plan → not-a-plan (unchanged)', sayC(st, I, { path: 'lead/sub/@~root', state: 'abandoned' }, T0).code === 'not-a-plan')
+  // dashboard: abandon any context, with the cascade; abandon_plan reports what the cascade did
+  sayR(st, I, { path: '@D/@~c1', text: 'c1' }, T0); sayR(st, I, { path: '@D/@c1', plan: ['d1'] }, T0)
+  const da = ACT(st, I, '@D', 'abandon', {}, T0 + MIN)
+  check('#82 dashboard abandon on an ordinary context: applied (cascading), entries attributed — "abandoned with @D by robin via dashboard (DASH-HOST)"; applied lists the cascade',
+    da.ok && stOf(st, I, '@D/@c1/@d1') === 'abandoned' && stOf(st, I, '@D/@c1') === 'abandoned' && da.records.some(r => r.text === 'abandoned with @D by robin via dashboard (DASH-HOST)' && r.act === 'abandon')
+    && J(da.applied.map(a => a.path)) === J(['@D', '@D/@c1/@d1', '@D/@c1']) && A.actionNotice(da, { by: BY }).body.items.length === 2, J(da))
+  check('#82 dashboard abandon: a context already abandoned → no-change; an agent → not-a-plan-item', ACT(st, I, '@D', 'abandon', {}, T0 + 2 * MIN).code === 'no-change' && ACT(st, I, 'lead/sub', 'abandon', {}, T0).code === 'not-a-plan-item')
+})
+await section(async () => {
+  // ---- dashboard MOVE / REORDER actions + their notices
+  const st = mk(), I = { ...S1, session: 'Dash', project: 'ACTS' }
+  sayR(st, I, { path: '@"Next release"', plan: ['A', 'B', 'C'] }, T0)
+  sayR(st, I, { path: '@"Potential changes"', plan: ['P'] }, T0)
+  const up = ACTR(st, I, '@"Next release"/@C', 'reorder', { before: '@"B"' }, T0 + MIN)
+  check('#82 action reorder: before a sibling — a SYSTEM entry "placed before @B by robin via dashboard (DASH-HOST)" (act reorder), the node moved up', up.ok && J(sib(st, I, '@"Next release"')) === J(['A', 'C', 'B'])
+    && up.records[0].text === 'placed before @B by robin via dashboard (DASH-HOST)' && up.records[0].act === 'reorder' && up.where === 'before @B', J(up))
+  const n1 = A.actionNotice(up, { by: BY, host: 'HOST-A' })
+  check('#82 notice: "robin moved @Next release/@C before @B" (body.where)', n1.subject === 'robin moved @Next release/@C before @B' && n1.body.where === 'before @B' && n1.body.action === 'reorder', J(n1))
+  const mv = ACTR(st, I, '@"Next release"/@A', 'move', { to: '@"Potential changes"' }, T0 + 2 * MIN)
+  check('#82 action move: applied — "moved by robin via dashboard (DASH-HOST) from @Next release/@A to @Potential changes", at the end of that plan', mv.ok && J(sib(st, I, '@"Potential changes"')) === J(['P', 'A'])
+    && mv.records[0].text === 'moved by robin via dashboard (DASH-HOST) from @Next release/@A to @Potential changes' && mv.moved_from === '@"Next release"/@A' && mv.to === '@"Potential changes"' && mv.path === '@"Potential changes"/@A', J(mv))
+  const n2 = A.actionNotice(mv, { by: BY, host: 'HOST-A' })
+  check('#82 notice: "robin moved @Next release/@A to @Potential changes" (body: path = the new one, moved_from, to)', n2.subject === 'robin moved @Next release/@A to @Potential changes' && n2.body.path === '@"Potential changes"/@A' && n2.body.moved_from === '@"Next release"/@A' && n2.body.to === '@"Potential changes"', J(n2))
+  check('#82 notices batch: "robin moved 1 node and reordered 1 in Dash"', A.combineActionNotices([n2, n1]).subject === 'robin moved 1 node and reordered 1 in Dash', A.combineActionNotices([n2, n1]).subject)
+  check('#82 action errors: move without args.to → bad-args; reorder without a place → bad-args; to the root ("") works', ACT(st, I, '@"Next release"/@B', 'move', {}, T0).code === 'bad-args' && ACT(st, I, '@"Next release"/@B', 'reorder', {}, T0).code === 'bad-args'
+    && ACTR(st, I, '@"Next release"/@B', 'move', { to: '' }, T0 + 3 * MIN).ok && !!N(st, I, '@B'))
+  check('#82 actions: move / reorder are in ACTIVITY_ACTIONS and flagged PLAN82_ACTIONS (forwarded only to a 1.69 owner)', A.ACTIVITY_ACTIONS.includes('move') && A.ACTIVITY_ACTIONS.includes('reorder') && J(A.PLAN82_ACTIONS) === J(['move', 'reorder']))
+  const B = mk(); A.replayNewestFirst(B, RECS.filter(r => r.session === 'Dash').slice().reverse(), T0 + 4 * MIN)
+  check('#82 dashboard move / reorder + replay: the same tree after a restart', dump(st) === dump(B), firstDiff(dump(st), dump(B)))
+})
+await section(async () => {
+  // ---- carry-forward: a moved / placed node past the replay window keeps its rank and its move history
+  const st = mk({ finished_visible_hours: 48 }), I = { ...S1, session: 'Cf' }, recs = []
+  const go = (input, t) => { const r = sayC(st, I, input, t); if (r.ok) recs.push(...r.records.map(x => JSON.parse(J(x)))); return r }
+  go({ path: '@P', plan: ['a', 'b'] }, T0); go({ path: '@Q', plan: ['q'] }, T0)
+  go({ move: '@P/@a', to: '@Q', position: 'first' }, T0 + MIN)
+  const later = T0 + 10 * DAY
+  const cfs = A.planCarryForward(st, later).map(w => w.rec)
+  const cfa = cfs.find(r => r.path === '@Q/@a')
+  check('#82 carry-forward: the moved item\'s cf carries its rank and moved history', cfa && cfa.rank === N(st, I, '@Q/@a').rank && J(cfa.moved) === J([{ from: '@P/@a', at: T0 + MIN }]))
+  const B = mk({ finished_visible_hours: 48 }); A.replayNewestFirst(B, cfs.slice().reverse(), later + MIN)
+  check('#82 carry-forward + replay (only the cf in the window): order and history aliases survive', J(sib(B, I, '@Q')) === J(['a', 'q']) && J(N(B, I, '@Q/@a').moved) === J(N(st, I, '@Q/@a').moved), J(sib(B, I, '@Q')))
+})
+await section(async () => {
+  // ---- replay == chronological apply, with MOVES (to old, new and agent parents), placements, abandons + their cascade, dashboard
+  // actions (move / reorder / abandon / done / skip / dismiss / finish / abandon_plan), mid-stream expiry, same-ms neighbours (seeded
+  // random; 400 such seeds were fuzzed clean during the build — a dismissed name re-used, a node moved into a later instance's
+  // place, an old parent emptied by a move, …)
+  const BYF = { kind: 'dashboard', user: 'robin', host: 'D' }
+  for (const seed of [11, 26, 28, 82, 102, 143, 187, 282, 1069, 7777]) {
+    const r = rng(seed), pick = a => a[Math.floor(r() * a.length)]
+    const cap = 4 + Math.floor(r() * 10)
+    const st = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: cap } }), recs = []
+    const idents = [{ session: 'Alpha', project: 'AIMB', user: 'robin' }, { session: 'Beta', project: 'AIMB', user: 'robin' }]
+    let t = T0, applied = 0, moves = 0
+    for (let i = 0; i < 700; i++) {
+      t += 1000 + Math.floor(r() * 60000)
+      if (r() < 0.02) t -= 500
+      const id = pick(idents), s = A.getSession(st, id)
+      const nodes = s ? [...s.nodes.values()].filter(n => n.key) : []
+      let input = null, res = null
+      const x = r()
+      if (x < 0.14 && nodes.length) {   // a move
+        const n = pick(nodes), tgts = nodes.filter(m => m.kind === 'context' || r() < 0.3)
+        input = { move: '/' + n.path, to: r() < 0.15 ? '/' : r() < 0.15 ? '/@fresh' + i + (r() < 0.5 ? '/w' + i : '') : '/' + (tgts.length ? pick(tgts).path : '@new' + i) }
+        if (r() < 0.3) input.position = pick(['first', 'last'])
+      } else if (x < 0.2 && nodes.length) input = { path: pick(nodes).path, position: pick(['first', 'last']) }   // a reorder
+      else if (x < 0.27) input = { path: pick(['@P', '@Q', 'w1/@R', '@P/@sub', 'w2']), plan: [`i${i}`, `j${i}`], ...(r() < 0.5 ? { position: pick(['first', 'last']) } : {}) }
+      else if (x < 0.31 && nodes.length) { const n = pick(nodes.filter(m => m.kind === 'context')); if (n) input = { path: n.path.replace(/@(?=[^/]*$)/, '@~'), state: 'abandoned' } }   // abandon (+ its cascade)
+      else if (x < 0.36 && nodes.length) {   // a dashboard action
+        const n = pick(nodes), act = pick(['move', 'reorder', 'abandon', 'done', 'skip', 'dismiss', 'finish', 'abandon_plan'])
+        const args = act === 'move' ? { to: r() < 0.3 ? '' : (pick(nodes.filter(m => m.kind === 'context')) || { path: '' }).path } : act === 'reorder' ? { position: pick(['first', 'last']) } : act === 'finish' ? { state: 'done', stale_min: 1 } : { stale_min: 1 }
+        res = A.applyAction(st, { session: id.session, project: id.project, user: id.user, path: n.path, action: act, args }, t, { by: BYF })
+        if (res.ok && act === 'move') moves++
+      } else if (x < 0.37) A.expire(st, t)
+      if (!res) {
+        if (!input) input = { path: pick(['@P/@~a', '@Q/@~b', 'w1/@~root', 'w1/@R/@~c', '@P/@sub/@~d', 'w2/@~root', '@~P', 'w2/@x/@~y']), text: `m${i}`, ...(r() < 0.3 ? { state: pick(['running', 'blocked', 'done', 'idle', 'failed']) } : {}), ...(r() < 0.2 ? { progress: `${i % 9}/9` } : {}) }
+        res = sayC(st, id, input, t)
+        if (res.ok && input.move) moves++
+      }
+      if (res && res.ok && res.records) { applied++; recs.push(...res.records.map(q => JSON.parse(J(q)))) }
+    }
+    const now = t + MIN
+    A.expire(st, now)
+    const B = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: cap } })
+    A.replayNewestFirst(B, recs.slice().reverse(), now)
+    const d82 = s => J([...s.local.values()].sort(byKey).map(x => [...x.nodes.values()].sort(byKey).map(n => [n.key, n.rank || null, n.moved || null, n.plan, n.plan_ix, n.plan_end])))
+    check(`#82 replay == chronological apply with moves (seed ${seed}: ${applied} applied, ${moves} moves): the whole state incl. logs, ranks and move histories`, dump(st) === dump(B) && d82(st) === d82(B), firstDiff(dump(st) + d82(st), dump(B) + d82(B)))
+  }
 })
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

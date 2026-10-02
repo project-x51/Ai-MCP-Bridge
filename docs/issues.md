@@ -6,8 +6,12 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-03, v1.68.0) — read this first after a compact
-**Current version: v1.68.0** (#80: a dashboard action tells the owning session — `activity_changed` system messages,
+## RESUME STATE (updated 2026-10-03, v1.69.0) — read this first after a compact
+**Current version: v1.69.0** (#82: the plan workflow — move / re-parent with history, insert anywhere + reorder by a
+fractional rank, abandon any context with a cascade, the agent on its item, dashboard Move up / down / to + drag and drop; code
+done in a worktree for review, NOT committed, NOT deployed; **wire-compatible with 1.66 – 1.68** — format stays v5, hosts
+upgrade one at a time; a ≤1.68 owner just can't be moved / reordered from a 1.69 dashboard, `owner-unsupported`). Before that
+**v1.68.0** (#80: a dashboard action tells the owning session — `activity_changed` system messages,
 batched per session; code done in a worktree for review, NOT committed, NOT deployed; **wire-compatible with 1.65 / 1.66**,
 so hosts can upgrade one at a time — a ≤1.66 owner simply sends no notices). Before that **v1.66.0** (#79: the `--plan` text footgun + THREE-PART progress done / skipped / total, a done node = 100%;
 plus the live-checklist snippet + orchestrator briefing, cyan = in progress, a session glyph — code done in the working
@@ -22,6 +26,17 @@ tags only where they differ; record / slice format v3; code done, NOT yet deploy
 (#70 step 6a) is committed (`2d78a21`); v1.63.0 is in the working tree for review. The rebuilt tray (`PrepareShutdown()`
 before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
 Everything below is durable; nothing important is only in chat.
+
+**2026-10-03 (v1.69.0):** Built **#82** (see "#82 as built" and architecture.md §13 "Built (v1.69.0)"). Order = a fractional
+base-36 rank per node, STORED only when placed (else derived from created_at + plan_ix, so the default stays creation order);
+siblings: plan items, then contexts, then agents. `log` / `aimb-log`: `before` / `after` / `position` (`--before` / `--after` /
+`--first` / `--last`) for new items or a reorder; `move` + `to` (`--move` / `--to`) re-parents a node with its subtree — one
+record with `moved_from`, the replay maps older records onto the new path, the log pages into the day files under the old path.
+`abandoned` on any context, cascading to open descendants ("abandoned with <path>"). Dashboard: rank order, the working agent
+beside its plan item, greyed abandoned subtrees, Move up / down / to… (picker + confirm), Abandon…, drag and drop — new actions
+`move` / `reorder` (#80-notified). PEER_HELLO `activity_plan:1`. Tests: `test_activity_unit` 764, `test_dashboard_activity` 230,
+new `test_activity_plan82_live` 26; mixed 1.68 ↔ 1.69 live check 11/11; full parallel `npm test` (typecheck included) 2472 checks in 56 files, all green on the first run, 4m17s, no flakes. **Deploy:** any order; nothing to publish (the snippet
+is unchanged).
 
 **2026-10-03 (v1.68.0):** Built **#80** (see "#80 as built" and architecture.md §13 "Built (v1.68.0)"). After every applied
 state-changing dashboard action the OWNING gateway sends the node's session a `system` message, verb `activity_changed`
@@ -194,7 +209,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #82 plan workflow (move + agent-on-item + live item lines), #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #83 / #84 / #85 (edit text, message the session, questions — they send through #80's `notifyActivitySession`), #86, #87, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #83 / #84 / #85 (edit text, message the session, questions — they send through #80's `notifyActivitySession`), #86, #87, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -380,7 +395,7 @@ Robin, 2026-10-03.
   the session's other notices; add an `ACT_NOTICE_COMBINE` entry if several edits should merge into one message.
 - The session's next report overwrites the line as usual.
 
-## #82 — plan workflow: move nodes between contexts, agents shown on the item they work on, live item lines  ·  **OPEN (next release)**
+## #82 — plan workflow: move nodes between contexts, agents shown on the item they work on, live item lines  ·  **DONE (v1.69.0)**
 Robin, 2026-10-03, from using the live board.
 1. **Move / re-parent.**
    - A `move` operation re-parents a node and its whole subtree to another path in the SAME session on the SAME
@@ -424,6 +439,62 @@ Robin, 2026-10-03, from using the live board.
      **Move up / Move down / Move to…** and drag-and-drop, attributed like the other actions (and #80-notified).
    - **Attention without reordering:** open questions (#85) and blocked items keep their place; a badge bubbles up to
      collapsed parents. An optional "needs attention first" filter may come later.
+
+**#82 as built (v1.69.0, 2026-10-03)** — see README "The plan workflow" and architecture.md §13 "Built (v1.69.0)".
+1. **Move / re-parent.** `log {move:"@Next release/@X", to:"@Potential changes"}` / `aimb-log --move … --to …` / the dashboard's
+   **Move to…** (a picker of valid targets, then a confirm) and drag-and-drop onto another node. Same session, same host.
+   Both paths relative to `path` / `--path` (`/` = absolute; `--to "/"` = the root); a new parent path is created implicit.
+   The node keeps everything (line, state, bar, plan-item marker, created_at, log, count) and goes to the END of its kind
+   there (a plan item at the end of the target plan) unless placed. One logged entry at the new path: "moved by <session |
+   robin via dashboard (HOST)> from … to …" with `moved_from` + `rank`. **History follows it:** in memory its log moves; the
+   replay maps every older record under the old path onto the new one, node by node (an old parent keeps those records'
+   activity); `node.moved:[{from, at}]` (carried forward) gives its log aliases, so paging continues into the day files under
+   the old path(s) — shown at the node's path now — and counts include them. Errors: unknown-node, no-change (a same-parent
+   move with a position = a reorder), target-exists, bad-move, path-too-deep. Dashboard moves are attributed and #80-notified
+   ("robin moved @Next release/@B to @Later").
+2. **Agents on the item they work on.** A plan item with agent children shows the WORKING agent (the most recently active one
+   still running, else the latest) beside its box — glyph, name, current line — even closed. Ticking stays explicit.
+3. **Live item lines:** nothing more needed — the v1.66 snippet / briefing wording already covers it (confirmed: the
+   `{log_snippet}` lines are unchanged in v1.69).
+4. **Abandon any context.** `abandoned` is valid on every context; agents / the session keep their rule (only when holding plan
+   items: it finishes them and ends their plan). The dashboard greys the abandoned node AND everything under it, and offers
+   **Abandon…** (confirmed) on an ordinary context.
+5. **Cascade.** An abandoned line (tool, script or dashboard) abandons every OPEN context / item under it (todo / running /
+   blocked, or holding an open plan) — not inside another agent — deepest first, each logged "abandoned with <path>"; the result
+   lists them (`cascade:[{path, from_state}]`); the dashboard's action reports them in `applied` (and the #80 notice's `items`).
+6. **Ordering.** A fractional base-36 rank per node; most nodes store none and use their DERIVED rank (creation time + plan
+   position) — so the default stays creation order for old and new nodes — and only a PLACED node stores one (one record per
+   reorder, nothing renumbered). Siblings: plan items, then contexts, then agents, each by rank; a state change never moves a
+   row. Insert anywhere: `--item "X" --before "Y"` / `--after` / `--first` / `--last` (tool `before` / `after` /
+   `position`), several new items keep their order at that spot. Reorder: the same flags on an existing node, or the
+   dashboard's **Move up / Move down** and drag-and-drop onto a sibling (attributed, #80-notified). Ranks persist in
+   records / cp / cf and ride gossip (stored ones only). Open questions / blocked items keep their place; no attention badge
+   (that is #85).
+- **Wire:** format stays v5. New optional fields: gossip node `rank`; records `rank`, `moved_from`; cf `moved`. PEER_HELLO
+  `activity_plan:1`; move / reorder are forwarded only to an owner that declared it (`owner-unsupported` otherwise; the board
+  head's `remote_hosts[].plan` tells the dashboard). A 1.69 follower and the 1.69 script refuse move / to / before / after /
+  position against a ≤1.68 gateway (`gateway-unsupported`), which would drop them silently. **Mixed versions, live:** a 1.68 and
+  a 1.69 bridge on loopback test ports — boards both ways (the 1.68 one shows a move as removal + new node, no ranks), 6d
+  actions both ways, move on a 1.68 node `owner-unsupported`, the script's `--before` refused against 1.68: 11/11.
+- **Replay hardening found by fuzzing (400 random sequences with moves + dashboard actions + expiry, all equal to a
+  chronological apply):** a record lands on a moved node only if that node's later moves carried it there; a dismissed /
+  evicted path follows only its parent's later moves; two pre-existing 6d gaps closed — a dismissal entry is kept when its name
+  was re-used later, and the ancestors of a record skipped for an ended descendant are kept (an implicit parent emptied by a
+  dismissal, or a session whose only node was dismissed, now survive a restart as they are live).
+- **Tests:** `test_activity_unit` 764 (+70: ranks, parsing, insert / reorder / groups, move + errors + replay, history under the
+  old path via filePage, the cascade, dashboard move / reorder + notices, carry-forward, 10 seeded replay == apply runs with
+  moves), `test_dashboard_activity` 230 (+25), new `test_activity_plan82_live` 26. Full `npm test`: 2472 checks in 56 files, all green
+  on the first run (4m17s; no #74 flakes).
+
+**Questions after #82 (not decided):**
+- **Downgrade after a move** is unsupported (a ≤1.68 replay rebuilds the moved node at both paths). Mark move records with a
+  newer record format so an old replay skips them instead (it would then show the node at its old path only)?
+- **The new parent's merged log** stops at ITS run start, so a node moved in shows its older entries only after "show earlier
+  runs". Fine, or should a subtree's run boundary ignore records of nodes moved in?
+- **Moving a live agent** is allowed; its next report (to its old path) creates a new node there. Refuse moving an agent that
+  is still running, or leave it to the orchestrator?
+- **Anchors across kinds** are refused (`bad-anchor`): a context can't be placed among plan items. Allow it (a rank only, the
+  group still wins), or keep the error?
 
 ## #81 — move the test suite to Node's built-in test runner (node:test), with live dashboard progress  ·  **OPEN — step 1 + "test groups" DONE (v1.67.0, tests only); later: native conversion**
 Robin, 2026-10-03. No runner script and no CI for now: go straight to `node:test`, incrementally.

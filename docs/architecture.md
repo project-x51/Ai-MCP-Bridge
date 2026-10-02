@@ -1196,6 +1196,69 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.69.0):** *#82 — the plan workflow: ORDER (fractional ranks), insert anywhere, reorder, MOVE (re-parent with
+  history), abandon any context with a CASCADE, the agent on its item, dashboard Move up / down / to + drag and drop.*
+  **Wire-compatible with 1.66 – 1.68** (format stays v5; hosts upgrade one at a time). **Order (`lib/activity.js`):** a node's
+  position among its siblings is a fractional rank — base-36 (`RANK_DIGITS`), compared as text, never ending in `0`
+  (`validRank`, ≤128 chars); `rankBetween(lo, hi)` = the classic midpoint (shared prefix, the middle digit, else one more
+  digit). Most nodes store NO rank: `rankOf(n)` = the stored one, else `derivedRank(created_at, plan_ix)` = 9 base-36 digits
+  of the creation ms + 2 of the plan position + `i` — so the default is creation order (1.68 nodes and every unplaced 1.69 node
+  alike) and a later node sorts after. A rank is STORED only when a node is placed; an open end is bounded by
+  `derivedRank(now + 1)` so later nodes still go after. `siblingCmp` = group (`rankGroup`: plan items 0, contexts 1, agents 2)
+  → rank → key; the board gives every node `rank` (+ `rank_set`). **Messages:** `parseMessage` takes `before` / `after`
+  (`parseAnchor`: `"@X"` a context, a bare name an agent first, else a context) / `position` (first | last), at most one
+  (`bad-position`); with a plan they place the NEW items (k ranks between the neighbours, in order — `placeRanks`; existing
+  names never move: `position-unused`), else the target (a `posOnly` message — no text — writes one logged, non-current entry
+  "placed before @Y" carrying `rank`; with text it is a normal message that also places). An anchor must be a sibling of the
+  same group (`unknown-anchor`, `bad-anchor`). **Move:** `move` + `to` (relative to path / agent, `/` = absolute; `parseMove`,
+  no text / state / bar / plan: `bad-move`) → `applyMove`: re-keys the node and its subtree (`rekeySubtree`: nodes, kids, the
+  parents' child sets, cpLive, a dismissal entry's path), creates a new parent path implicit, places it (default: the end of
+  its group; a same-parent move with a position = a reorder; `no-change`, `target-exists`, `path-too-deep`, `unknown-node`),
+  appends `{from, at}` to `node.moved` (≤8) and writes ONE logged entry at the new path ("moved by <session | user via
+  dashboard (host)> from … to …", `moved_from`, `rank`). A session's own move counts as its activity; a dashboard's is a
+  system entry. **Replay:** a move record registers `{fromKey, fromLen, toSegs}` on its session (even when skipped); every
+  OLDER record is replayed through the moves made after it, oldest first, NODE BY NODE (`remapSegs` per chain prefix): the
+  target and its current chain take the record as before, an OLD parent the node moved away from keeps the record's
+  created_at / activity (created if nothing else names it; skipped when it ended since — `goneAt`: dead, a dead ancestor, or a
+  sealed ancestor with nothing moved in after the record), the new parents never see it. A node that got where it is by a
+  move made after the record owns the record only if that move carried it (`foreign` — else it is a dead instance's record
+  landing by name). Sealing (`sealRuns`) seals each run of the record's chain as it is now; a node moved in under a sealed
+  node at or after the sealing record (`movedAt`) is left out, the moved node is never sealed by its own move record. A
+  dismissal / an `evicted` path follows only its PARENT's moves (`remapGone`). Two pre-6d replay gaps closed on the way: a
+  dismissal's entry is attached even when its name was used again later; a record skipped for an ended descendant still
+  keeps its ancestors (an implicit parent emptied by a dismissal survives a restart, with the session). Proven by the seeded
+  replay == chronological-apply test, now with moves / placements / abandons / dashboard actions / expiry in the mix (10
+  seeds in the suite; 400 + 200 seeds fuzzed during the build). **History under the old path:** `nodeAliases(sess, node,
+  subtree)` → `{aliases:[{key, depth, base, before, after, start}], after}` from the moves of the node, its ancestors and (a
+  subtree log) nodes moved in under it; `logView`'s file target carries them; `fileEntryMatches` / `fileRunStart` accept a
+  record under an alias in its time window (a record at the current path before the latest move belongs to an older
+  occupant), a move record is never the moved node's run start, and `fileEntryView` shows an alias entry at the node's path
+  now. Counts move with the node (memory) and are rebuilt from the remapped records. **Persistence:** cp + cf carry `rank`
+  (null = derived); cf carries `moved`; `carryDue` re-carries a stored rank / a move history the window would lose (`pt.r`,
+  `pt.m`). **Abandon:** `abandoned` on ANY context (an agent / the session still only when it holds plan items); an `@~`
+  abandoned line cascades (`cascadeAbandon`): every context under it, not crossing another agent, that is open (todo /
+  running / blocked) or holds an open plan gets an abandoned line, deepest first, logged "abandoned with <path>" (+ the
+  attribution), `cascade:[{path, from}]` on the result (abandon_plan / auto-abandon report theirs in `applied` too).
+  **Actions:** `ACTIVITY_ACTIONS` + `move` (args.to + a position) and `reorder` (args.before | after | position);
+  `PLAN82_ACTIONS`; `abandon` on any context; notices "robin moved @Next/@B to @Later" / "robin moved @Next/@Y before @X"
+  (body `moved_from` + `to` / `where`; nouns "node" in a batch). **Wire:** gossip nodes carry a STORED rank only (a 1.68
+  receiver ignores it); PEER_HELLO `activity_plan:1`; a 1.69 gateway forwards move / reorder only to such an owner (else
+  `owner-unsupported`) and lists `plan:true` in the board head's `remote_hosts`; `actActionQuery` passes args.to / before /
+  after / position; a follower and the script refuse the new `log` fields against a ≤1.68 gateway (`usesPlan82` →
+  `gateway-unsupported`). **Tool / script:** `log` gets `before` / `after` / `position` / `move` / `to` (+ result `rank`,
+  `moved`, `cascade`); `aimb-log` `--before` / `--after` / `--first` / `--last` / `--move` / `--to`. **Dashboard:** siblings
+  by group + rank (`cmpRank`; `rankOf` fills in for an old bridge); a plan item shows its working agent (`workingAgent`: its
+  glyph, name, current line) beside its box even closed; an abandoned node greys its whole subtree (`abd`); right-click Move
+  up / Move down (`moveSteps`), Move to… (`moveTargets` picker → a confirm; `canMoveInto`: same host, not into itself, not its
+  parent, depth, no name clash), Abandon… on an ordinary context (confirmed); drag and drop (`dropPlan`: a sibling of its kind
+  → reorder before / after, another node → move into it, confirmed); only for a host that applies them (`hostPlan`).
+  **Mixed versions (live, loopback):** a 1.68 (`git archive HEAD`) and a 1.69 bridge exchanged boards both ways (the 1.68
+  board shows the move as removal + new node, no rank), 6d actions worked both ways, a move on a 1.68 node was refused
+  `owner-unsupported`, the 1.69 script refused `--before` against the 1.68 gateway — 11/11. Downgrading a host after a move
+  is not supported (a ≤1.68 replay would rebuild the moved node at both paths). **Tests:** `test_activity_unit` 764 (+70),
+  `test_dashboard_activity` 230 (+25), new `test_activity_plan82_live` 26; 4 dashboard / unit expectations changed with the
+  new rules (contexts sort before agents; abandoned on an ordinary context; the cascade in a 6c rollup; the menu's Move items).
+  Full parallel `npm test` (typecheck included): 2472 checks in 56 files, all green on the first run, 4m17s.
 - **Built (v1.68.0):** *#80 — a dashboard action TELLS the owning session.* Before, a right-click action (6d) was only
   logged on the node, so an orchestrator could keep working on an item a person had just skipped or abandoned.
   **Wire-compatible with 1.65 / 1.66** (no frame or format change; hosts upgrade one at a time — a ≤1.66 owner just sends

@@ -28,6 +28,13 @@
 // (repeatable, in order), so nothing depends on argument position: --text "the plan" --item "A" --item "B". Positional text
 // and --plan "A" "B" still work (1.65 snippets); --text with positional text is refused. JSON stays for --batch / --stream.
 //
+// v1.69.0 (#82): THE PLAN WORKFLOW. --before "Y" / --after "Y" / --first / --last place things among their siblings (plan items, then
+// contexts, then agents — each kind among its own): with --item they place the NEW items there (several keep their order; default:
+// the end); without, they REORDER the addressed node (--path "@Plan/@~X" --before "Y", no text needed). --move "<node>" --to "<new
+// parent>" re-parents a node with its whole subtree (both relative to --path; a leading "/" = from the session root; --to "/" = the
+// session root), at the end of its kind there unless placed; its history follows it. --state abandoned works on any context and
+// cascades to the open contexts / items under it. A gateway older than 1.69.0 would ignore these flags: refused (gateway-unsupported).
+//
 // Usage (one report):
 //   node tools/aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path p] [--ctx "@~Ctx"] [--state S | --done]
 //        [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."]
@@ -74,13 +81,14 @@ import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
-import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS } from '../lib/activity.js'
+import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS, usesPlan82 } from '../lib/activity.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …]\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
+const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …] [--before "Y" | --after "Y" | --first | --last]\n       aimb-log.mjs --session <name> --project <P> [--path base] --move "<node>" --to "<new parent>" [--before "Y" | --after "Y" | --first | --last]   (re-parent a node + its subtree; "/" = the session root)\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
 const LOG_FIELDS = MESSAGE_FIELDS   // v1.62.0: + path
-const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url', 'token-file', 'text'])   // v1.64.0: + token-file (#75); v1.66.0: + text (#79)
-const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done'])   // v1.63.0: + done (= --state done)
+const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url', 'token-file', 'text',
+  'move', 'to', 'before', 'after'])   // v1.64.0: + token-file (#75); v1.66.0: + text (#79); v1.69.0: + move / to / before / after (#82)
+const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done', 'first', 'last'])   // v1.63.0: + done (= --state done); v1.69.0: + first / last (#82)
 const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'stream', 'ws-port', 'url', 'token-file'])
 const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'batch', 'ws-port', 'url', 'token-file'])
 const num = (v, d) => (Number(v) > 0 ? Number(v) : d)
@@ -200,7 +208,10 @@ if (!exiting) {
     else if (words.length) input.text = words.join(' ')
     for (const [f, k] of [['state', 'state'], ['progress', 'progress'], ['eta', 'eta'], ['stale-after', 'stale_after'], ['details', 'details']]) if (flags[f] != null) input[k] = flags[f]
     if (flags.plan) input.plan = flags.plan                                   // v1.63.0 (#70 6b)
-    if (flags.done && flags.state != null) usage('usage', '--done and --state are exclusive (--done = --state done)')
+    for (const k of ['move', 'to', 'before', 'after']) if (flags[k] != null) input[k] = flags[k]   // v1.69.0 (#82): move / re-parent; place before / after a sibling
+    if (flags.first && flags.last) usage('usage', '--first and --last are exclusive')
+    else if (flags.first || flags.last) input.position = flags.first ? 'first' : 'last'
+    if (exiting) { /* usage printed */ } else if (flags.done && flags.state != null) usage('usage', '--done and --state are exclusive (--done = --state done)')
     else if (flags.done) input.state = 'done'
     if (exiting) { /* usage printed */ } else if (flags.data != null && flags['data-file'] != null) usage('usage', '--data and --data-file are exclusive')
     else if (flags.data != null) { try { input.data = JSON.parse(flags.data) } catch (e) { usage('bad-data', `--data is not JSON: ${e.message}`) } }
@@ -220,6 +231,10 @@ if (!exiting) {
 // ---- the link
 function hello(ws) { ws.send(JSON.stringify({ type: 'hello', kind: 'logger', token: TOKEN, ident })) }
 const unsupported = m => ({ ok: false, code: 'gateway-unsupported', what: `the gateway on ${URL_} runs bridge ${m.bridge_version || '?'}; aimb-log needs 1.59.0+ on this host's gateway (restart it on the new version)` })
+// v1.69.0 (#82): a ≤1.68 gateway drops --move / --to / --before / --after / --first / --last without a word (an item lands at the end, a move
+// never happens) — refuse up front instead
+const verLt = (a, b) => { const x = String(a || '0').split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); return false }
+const plan82Unsupported = m => ({ ok: false, code: 'gateway-unsupported', what: `the gateway on ${URL_} runs bridge ${m.bridge_version || '?'}; --move / --to / --before / --after / --first / --last need 1.69.0+ on this host's gateway (restart it on the new version)` })
 
 // ---- a batch: read the array (file or stdin), check it locally, then ONE call like a one-shot (exit 0 only when every item applied)
 async function readBatch() {
@@ -249,6 +264,7 @@ function sendOne() {
     if (m.type === 'welcome' && !welcomed) {
       welcomed = true
       if (!m.logger) return done(4, unsupported(m))   // a pre-1.59 gateway took the hello for a page: close at once
+      if (usesPlan82(oneShot) && verLt(m.bridge_version, '1.69.0')) return done(4, plan82Unsupported(m))   // #82: it would silently ignore the fields
       ws.send(JSON.stringify({ type: 'log', ref: 1, input: oneShot }))
     } else if (m.type === 'logged') done(m.result && m.result.ok && !(m.result.failed > 0) ? 0 : 4, m.result || { ok: false, code: 'bad-reply' })   // a batch with a failed item → 4
     else if (m.type === 'error') done(4, { ok: false, code: m.code || 'error', what: m.what || null })
@@ -262,12 +278,13 @@ if (!exiting && STREAM) {
   // The queue holds every line: a pending report { n, ref, input, deadline } or an already-answered one { n, ref, result }
   // (a bad line) that waits its turn behind the reports before it.
   const queue = []
-  let ws = null, ready = false, inflight = null, backoff = 200, eof = false, nextRef = 0, retry = null
+  let ws = null, ready = false, inflight = null, backoff = 200, eof = false, nextRef = 0, retry = null, gwVer = null
   const emit = (item, result) => { process.stdout.write(JSON.stringify({ line: item.n, ...(item.ref !== undefined ? { ref: item.ref } : {}), ...result }) + '\n') }
   function settle() { if (eof && !queue.length && !inflight && !exiting) { clearInterval(sweep); if (retry) clearTimeout(retry); try { ws && ws.close() } catch { } finish(0, null) } }
   function pump() {   // emit answered heads; send the next report when the link is up and nothing is in flight
     if (inflight || exiting) return
-    while (queue.length && queue[0].result) { const it = queue.shift(); emit(it, it.result) }
+    const old82 = it => ready && ws && usesPlan82(it.input) && verLt(gwVer, '1.69.0')   // #82: a ≤1.68 gateway would drop the fields silently
+    while (queue.length && (queue[0].result || old82(queue[0]))) { const it = queue.shift(); emit(it, it.result || plan82Unsupported({ bridge_version: gwVer })) }
     if (ready && ws && queue.length) {
       const it = queue.shift()
       it.wire = ++nextRef
@@ -295,6 +312,7 @@ if (!exiting && STREAM) {
       if (m.type === 'welcome' && !ready) {
         clearTimeout(helloTimer)
         if (!m.logger) return fatal(unsupported(m))   // a pre-1.59 gateway took the hello for a page
+        gwVer = m.bridge_version || null
         ready = true; backoff = 200; pump()
       } else if (m.type === 'logged') {
         if (!inflight || m.ref !== inflight.wire) return   // a late answer to a line already reported (timeout)

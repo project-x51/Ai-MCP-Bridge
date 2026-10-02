@@ -129,6 +129,15 @@
 // A DONE node is 100% done whatever its bar says, an ABANDONED one has its remainder skipped (forceBar). WIRE-COMPATIBLE with
 // 1.65: `skipped` is an optional field on a progress object (records, cp / cf, gossip), present only when > 0 — a 1.65 reader
 // ignores it and a missing one is 0 — so the format stays v5 and hosts can upgrade one at a time.
+//
+// #82 (v1.69.0): THE PLAN WORKFLOW. ORDER: each node's position among its siblings is a FRACTIONAL RANK (rankOf / siblingCmp:
+// plan items, then contexts, then agents) — stored only when a node is PLACED (before / after / position on new plan items or a
+// reorder, or a move), else derived from created_at + plan_ix, so the default is creation order and a reorder writes one record.
+// MOVE (`move` + `to`; applyMove) re-parents a node with its subtree: one logged entry at the new path with `moved_from`; the
+// replay maps every older record onto the path its node has now (node by node), and `node.moved` gives its log aliases into the
+// day files (nodeAliases). `abandoned` is valid on ANY context and CASCADES to the open contexts / items under it
+// (cascadeAbandon). Dashboard actions `move` / `reorder`. Still format v5: rank / moved_from / moved are optional fields a 1.68
+// host ignores.
 import { lc, projKey } from './keys.js'
 
 /** The locked #70 limits (6a: depth/nodes replace "agent path depth 3" + "32 contexts per agent"). text/context in code
@@ -176,8 +185,13 @@ export const ACTIVITY_DEFAULTS = Object.freeze({
  *   memory_budget_mb:number, progress_checkpoint_sec:number, abandoned_plan_days:number, finished_plan_open_min:number, notice_batch_sec:number, enabled:boolean }>} ActivityConfig */
 /** config key -> env override name (AI_BRIDGE_ACTIVITY_<KEY>). */
 export const ACTIVITY_ENV = Object.freeze(Object.fromEntries(Object.keys(ACTIVITY_DEFAULTS).map(k => [k, 'AI_BRIDGE_ACTIVITY_' + k.toUpperCase()])))
-/** The message fields of a `log` call / batch item (6a: + path; 6b: + plan). */
-export const MESSAGE_FIELDS = Object.freeze(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan'])
+/** The message fields of a `log` call / batch item (6a: + path; 6b: + plan; #82: + move / to (re-parent) and before / after /
+ * position (where new plan items, a moved node or the addressed node go among their siblings)). */
+export const MESSAGE_FIELDS = Object.freeze(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan', 'move', 'to', 'before', 'after', 'position'])
+/** #82: the fields a ≤1.68 gateway doesn't know (it would silently ignore them) — a 1.69 follower / script refuses to send them there. */
+export const PLAN82_FIELDS = Object.freeze(['move', 'to', 'before', 'after', 'position'])
+/** Does a `log` input (or a batch of them) use any #82 field? */
+export const usesPlan82 = input => !!input && typeof input === 'object' && (PLAN82_FIELDS.some(k => input[k] !== undefined) || (Array.isArray(input.items) && input.items.some(it => it && typeof it === 'object' && PLAN82_FIELDS.some(k => it[k] !== undefined))))
 /** Batch-level DEFAULTS allowed beside items:[…] (each item's own field wins). */
 export const BATCH_DEFAULT_FIELDS = Object.freeze(['path', 'agent', 'context', 'log'])
 // numeric ranges: an out-of-range number is CLAMPED into [lo, hi] and rounded to an integer
@@ -257,6 +271,54 @@ export function entryTime(id) {
 /** An entry's ORDER key [ts, seq]: logs are kept sorted by it and merged by it (ties within one ms keep apply order). */
 const seqOf = id => { const m = typeof id === 'string' && id.match(/-([0-9a-z]+)$/); const n = m ? parseInt(m[1], 36) : 0; return Number.isFinite(n) ? n : 0 }
 const ordCmp = (a, b) => a.ts - b.ts || seqOf(a.id) - seqOf(b.id) || cmp(a.id, b.id)
+
+// ---------------------------------------------------------------------------------------------------------------
+// #82 (v1.69.0): ORDER — a node's POSITION among its siblings is a FRACTIONAL RANK: a string of base-36 digits (0-9a-z)
+// compared in code-unit order, never ending in "0", so there is always room between two ranks and a reorder writes ONE
+// record (only the moved node's rank) — nothing is ever renumbered. Most nodes never STORE a rank: a node without one has its
+// DERIVED rank — its creation time (9 base-36 digits, ms) + its plan position (2 digits; 0 = none, else plan_ix + 1) + "i" —
+// so the default order is creation order exactly as before (1.68 nodes, and every node created on 1.69 without a position),
+// and a new node created later sorts after every existing one. A node gets a STORED rank only when it is placed: inserted at a
+// position (before / after / first / last), reordered, or moved; that rank is computed between its neighbours' ranks (stored
+// or derived) and always stays below the derived rank of any node created later (an open "end" is bounded by the next ms).
+// SIBLING ORDER (siblingCmp): plan items first, then the other contexts, then agents (rankGroup) — each by rank, then key.
+export const RANK_DIGITS = '0123456789abcdefghijklmnopqrstuvwxyz'
+const RANK_MAX = 128   // chars: ~600 inserts at ONE spot before a rank would outgrow it ('rank-exhausted')
+const RANK_RE = /^[0-9a-z]*[1-9a-z]$/
+/** A stored rank from a record / the wire: a non-empty base-36 string (≤128 chars, no trailing "0"), else null. */
+export const validRank = r => (typeof r === 'string' && r.length > 0 && r.length <= RANK_MAX && RANK_RE.test(r) ? r : null)
+const pad36 = (n, w) => { const s = Math.max(0, Math.floor(Number(n) || 0)).toString(36); return s.length >= w ? s.slice(-w) : '0'.repeat(w - s.length) + s }
+/** The DERIVED rank of a node with no stored one: creation order (created_at, then its plan position). */
+export const derivedRank = (createdAt, planIx) => pad36(createdAt, 9) + pad36(Number.isInteger(planIx) && planIx >= 0 ? planIx + 1 : 0, 2) + 'i'
+/** A node's effective rank: its stored one, else derived. */
+export const rankOf = n => (n && validRank(n.rank)) || derivedRank(n ? n.created_at : 0, n && n.plan ? n.plan_ix : null)
+/** The sibling GROUP: plan items 0, other contexts 1, agents 2 (rows never jump on a state change — only a node becoming a plan item moves it). */
+export const rankGroup = n => (n && n.plan ? 0 : n && n.kind === 'context' ? 1 : 2)
+/** Sibling order: group, then rank, then key (a derived tie: the same ms and plan position). */
+export const siblingCmp = (a, b) => rankGroup(a) - rankGroup(b) || cmp(rankOf(a), rankOf(b)) || cmp(a.key, b.key)
+/**
+ * A rank strictly between `lo` and `hi` (either may be null: an open end). The midpoint of two base-36 fractions with no
+ * trailing zero (the classic fractional-index construction): shared prefix, then the middle digit, else one more digit. lo ≥ hi
+ * (two equal derived ranks) → just above lo (the tie then falls to the key).
+ * @param {string|null} lo @param {string|null} hi @returns {string}
+ */
+export function rankBetween(lo, hi) {
+  const a = lo || '', b = hi || null
+  if (b !== null && a >= b) return a + 'i'
+  return midRank(a, b)
+}
+function midRank(a, b) {
+  const D = RANK_DIGITS
+  if (b !== null) {
+    let n = 0
+    while ((a[n] || '0') === b[n]) n++
+    if (n > 0) return b.slice(0, n) + midRank(a.slice(n), b.slice(n))
+  }
+  const dA = a ? D.indexOf(a[0]) : 0, dB = b !== null ? D.indexOf(b[0]) : D.length
+  if (dB - dA > 1) return D[Math.round((dA + dB) / 2)]
+  if (b !== null && b.length > 1) return b.slice(0, 1)
+  return D[dA] + midRank(a.slice(1), null)
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // config
@@ -592,7 +654,8 @@ const ownerIndex = segs => { for (let i = segs.length - 1; i >= 0; i--) if (segs
  * @typedef {{
  *   segs: PathSeg[], path: string, key: string, agent: string|null, context: string, root: boolean, current: boolean,
  *   text: string, state: string|null, progress?: ActivityProgress|null, eta_at?: number|null, stale_after_ms: number|null,
- *   details: string|null, data: any, log: boolean, warnings: string[], plan?: string[], keepText?: boolean, planOnly?: boolean }} ActivityMsg
+ *   details: string|null, data: any, log: boolean, warnings: string[], plan?: string[], keepText?: boolean, planOnly?: boolean,
+ *   pos?: any, posOnly?: boolean, move?: { toSegs: PathSeg[], toPath: string, toKey: string } }} ActivityMsg
  *   `path`/`key` address the TARGET node ('' = the session root); `agent` = its OWNER's path (null = the session), `context`
  *   = the target's name when it is a context, else 'root' (the old shape); `root` = the target is an agent or the session.
  *   `progress` / `eta_at` are ABSENT when not given and null when explicitly cleared ("none").
@@ -619,6 +682,8 @@ export function parseMessage(input, opts = {}) {
   const warnings = []
   const log = has(input, 'log') ? boolVal(input.log) : true
   if (log === null) return bad('bad-log', 'log must be true (append to the log; the default) or false (update the board only)')
+  const pos = parsePosition(input); if (!pos.ok) return pos
+  if (has(input, 'move') || has(input, 'to')) return parseMove(input, pos.pos, warnings)   // #82: a MOVE (re-parent) is its own operation
   let plan = null
   if (input.plan !== undefined) { const pl = parsePlan(input.plan); if (!pl.ok) return pl; plan = pl.names; if (pl.warning) warnings.push(pl.warning) }
   let state = null
@@ -629,22 +694,24 @@ export function parseMessage(input, opts = {}) {
   const bar = has(input, 'progress') || has(input, 'eta')   // a bar update may omit text: it defaults to a template
   if (input.text != null && typeof input.text !== 'string') return bad('bad-text', 'text must be a string')
   const ad = resolveAddress(input, { text: input.text || '' }); if (!ad.ok) return ad
-  let text = normText(ad.text), keepText = false, planOnly = false
+  let text = normText(ad.text), keepText = false, planOnly = false, posOnly = false
   if (!text) {
     if (bar) text = has(input, 'progress') ? '{progress}' : '{eta}'   // #70: the default text of a bar update (rendered at read time)
     else if (state && ad.current) keepText = true                     // 6b: a tick (`@~…/@B` + state) keeps the line's text
     else if (plan && !state) planOnly = true                          // 6b: just the plan (the target gets no message of its own)
-    else if (typeof input.text !== 'string') return bad('bad-text', 'text must be a string (it may be omitted only with progress / eta, a plan, or a state on an @~ line)')
+    else if (pos.pos && !state) posOnly = true                        // #82: just a placement (the entry says where it went)
+    else if (typeof input.text !== 'string') return bad('bad-text', 'text must be a string (it may be omitted only with progress / eta, a plan, a position, or a state on an @~ line)')
     else return bad('text-empty', 'text is empty (a context prefix alone is not a message)')
   }
   if (cpLen(text) > ACTIVITY_LIMITS.text) { text = cpSlice(text, ACTIVITY_LIMITS.text - 1) + '…'; warnings.push('text-truncated') }
   const segs = ad.segs, oi = ownerIndex(segs), tgt = segs[segs.length - 1]
   if (state && PLAN_STATES.has(state) && (!tgt || tgt.kind === 'agent')) return bad('bad-agent-state', `${state} is a plan state — only a context (a plan item) can be ${state}; an agent or the session reports running|blocked|failed|done|idle`)
   if (plan && segs.length + 1 > ACTIVITY_LIMITS.depth) return tooDeep(segs.length + 1)
+  if (pos.pos && !plan && !segs.length) return bad('bad-position', 'before / after / position place a node among its siblings — the session root has none (address a node with path)')
   /** @type {ActivityMsg} */
   const msg = { segs, path: ad.path, key: ad.key, agent: oi ? formatPath(segs.slice(0, oi)) : null, context: tgt && tgt.kind === 'context' ? tgt.name : 'root',
     root: !tgt || tgt.kind === 'agent', current: ad.current, text, state, stale_after_ms: null, details: null, data: null, log, warnings,
-    ...(plan ? { plan } : {}), ...(keepText ? { keepText } : {}), ...(planOnly ? { planOnly } : {}) }
+    ...(plan ? { plan } : {}), ...(keepText ? { keepText } : {}), ...(planOnly ? { planOnly } : {}), ...(pos.pos ? { pos: pos.pos } : {}), ...(posOnly ? { posOnly } : {}) }
   if (has(input, 'progress')) {
     if (typeof input.progress === 'string' && input.progress.trim().toLowerCase() === 'none') msg.progress = null
     else {
@@ -709,6 +776,74 @@ export function parsePlan(v) {
     seen.add(lc(n.name)); names.push(n.name)
   }
   return { ok: true, names, ...(dup ? { warning: 'plan-duplicates' } : {}) }
+}
+/**
+ * #82: an ANCHOR — the sibling a node goes before / after. "@Docs" / "@\"Two words\"" = a context; a bare name = an agent of that
+ * name when the parent has one, else a context ("Build docs", "Docs"). Resolved against the actual siblings in apply.
+ * @param {any} raw @returns {ActivityResult} { ok, anchor:{ ref, kind:'context'|'either', name } }
+ */
+export function parseAnchor(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return bad('bad-position', 'before / after name a sibling: "Docs", "@Docs" or an agent\'s name')
+  const s = raw.trim()
+  if (s[0] === '@') {
+    const r = scanPath(s, 0, false)
+    if (!r.ok) return bad('bad-position', `anchor "${cpSlice(s, 40)}": ${r.what}`)
+    if (r.segs.length !== 1 || r.segs[0].current || r.segs[0].root) return bad('bad-position', `anchor "${cpSlice(s, 40)}" must be ONE sibling (no / , @~ or @root)`)
+    return { ok: true, anchor: { ref: s, kind: 'context', name: r.segs[0].name } }
+  }
+  if (s.includes('/')) return bad('bad-position', `anchor "${cpSlice(s, 40)}" must be ONE sibling's name (no /)`)
+  const n = normContextName(s)
+  if (!n.ok) return bad('bad-position', `anchor "${cpSlice(s, 40)}": ${n.what}`)
+  return { ok: true, anchor: { ref: s, kind: SEGMENT.test(s) && cpLen(s) <= ACTIVITY_LIMITS.pathSegment ? 'either' : 'context', name: n.name } }
+}
+/** #82: before / after / position (first | last) — at most one. → { ok, pos: null | { before? | after? : anchor, position? } } */
+function parsePosition(input) {
+  const given = ['before', 'after', 'position'].filter(k => has(input, k))
+  if (!given.length) return { ok: true, pos: null }
+  if (given.length > 1) return bad('bad-position', `give ONE of before / after / position (got ${given.join(' + ')})`)
+  if (given[0] === 'position') {
+    const p = typeof input.position === 'string' ? input.position.trim().toLowerCase() : ''
+    if (p !== 'first' && p !== 'last') return bad('bad-position', 'position must be "first" or "last" (or give before / after a sibling)')
+    return { ok: true, pos: { position: p } }
+  }
+  const a = parseAnchor(input[given[0]]); if (!a.ok) return a
+  return { ok: true, pos: { [given[0]]: a.anchor } }
+}
+/** Segments of a path RELATIVE to `base` (a leading "/" = from the session root); '/' alone = the root. */
+function relSegs(base, raw, what) {
+  if (typeof raw !== 'string' || !raw.trim()) return bad('bad-move', `${what} must be a path like "@Next release/@Docs" (relative to path; a leading "/" = from the session root)`)
+  const s = raw.trim(), abs = s.startsWith('/')
+  const p = parsePath(s)
+  if (!p.ok) return bad(p.code === 'path-too-deep' ? 'path-too-deep' : 'bad-move', `${what}: ${p.what}`)
+  if (p.current) return bad('bad-move', `${what} names a node, not a current line (no @~)`)
+  const segs = abs ? p.segs : [...base, ...p.segs]
+  if (segs.length > ACTIVITY_LIMITS.depth) return tooDeep(segs.length)
+  return { ok: true, segs }
+}
+const MOVE_ONLY = ['text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'plan']
+/**
+ * #82: a MOVE — `move` (the node to move) and `to` (its NEW PARENT; "/" = the session root), both RELATIVE to the message's
+ * address (path / agent; a leading "/" = from the session root) — plus an optional before / after / position among the new
+ * siblings (default: the end of its group). A move is its own operation: it takes no text / state / bar / plan (the entry it
+ * writes says "moved by … from … to …"). → { ok, msg } with msg.move = { toSegs, toPath, toKey } and segs/path/key = the node.
+ */
+function parseMove(input, pos, warnings) {
+  if (!has(input, 'move')) return bad('bad-move', 'to is the NEW PARENT of a move — give move (the node to move) too')
+  if (!has(input, 'to')) return bad('bad-move', 'move needs to: the new parent ("/" = the session root)')
+  const extra = MOVE_ONLY.filter(k => input[k] !== undefined && input[k] !== null && !(k === 'text' && input.text === ''))
+  if (extra.length) return bad('bad-move', `a move takes only path / agent (the base its paths are relative to), move, to and before / after / position — not ${extra.join(', ')}`)
+  const ad = resolveAddress({ agent: input.agent, path: input.path }); if (!ad.ok) return ad
+  if (ad.current) return bad('bad-move', 'the base path of a move names a node (no @~)')
+  const f = relSegs(ad.segs, input.move, 'move'); if (!f.ok) return f
+  if (!f.segs.length) return bad('bad-move', 'the session root can\'t be moved — move a node under it')
+  const t = relSegs(ad.segs, input.to, 'to'); if (!t.ok) return t
+  const path = formatPath(f.segs), toPath = formatPath(t.segs), oi = ownerIndex(f.segs), tgt = f.segs[f.segs.length - 1]
+  const key = pathKey(path), toKey = pathKey(toPath)
+  if (toKey === key || toKey.startsWith(key + '/')) return bad('bad-move', `"${path}" can't move into itself`)
+  /** @type {ActivityMsg} */
+  const msg = { segs: f.segs, path, key, agent: oi ? formatPath(f.segs.slice(0, oi)) : null, context: tgt.kind === 'context' ? tgt.name : 'root', root: tgt.kind === 'agent', current: false,
+    text: '', state: null, stale_after_ms: null, details: null, data: null, log: true, warnings, move: { toSegs: t.segs, toPath, toKey }, ...(pos ? { pos } : {}) }
+  return { ok: true, msg }
 }
 const trimSlashes = s => String(s).trim().replace(/^\/+|\/+$/g, '')
 /**
@@ -778,7 +913,8 @@ export function splitBatch(input) {
  *   created_at:number, last_activity:number, stale_after_ms:number|null, current:ActivityLine|null,
  *   progress:ActivityProgress|null, eta_at:number|null, finished_at:number|null, gone_at:number|null, implicit:boolean,
  *   log:any[], log_dropped:number, log_floor:number, persisted?:boolean, cp_dirty?:number, plan?:boolean, plan_ix?:number|null,
- *   pt?:{ a:number, l:number, p:number, e:number }, partial?:boolean, cpartial?:boolean, log_n?:number, plan_end?:{ state:string, ts:number }|null }} ActivityNode
+ *   pt?:{ a:number, l:number, p:number, e:number, r?:number, m?:number }, partial?:boolean, cpartial?:boolean, log_n?:number, plan_end?:{ state:string, ts:number }|null,
+ *   rank?:string|null, moved?:{ from:string, at:number }[]|null }} ActivityNode
  * @typedef {{ key:string, origin:string, realm?:string, session:string, project:string, user:string|null,
  *   host:string|null, created_at:number, last_activity:number, gone_at:number|null, nodes:Map<string, ActivityNode>,
  *   kids:Map<string, Set<string>>, nAgents:number, bell?:boolean }} ActivitySession
@@ -815,7 +951,7 @@ function newNode(path, segs, now) {
   const last = segs.length ? segs[segs.length - 1] : null, key = pathKey(path)
   return { key, path, name: last ? last.name : '', kind: last ? last.kind : 'agent', parent: parentKeyOf(key), depth: segs.length, created_at: now, last_activity: now,
     stale_after_ms: null, current: null, progress: null, eta_at: null, finished_at: null, gone_at: null, implicit: true, log: [], log_dropped: 0, log_floor: 0, persisted: false, cp_dirty: 0,
-    plan: false, plan_ix: null, pt: { a: 0, l: 0, p: 0, e: 0 }, partial: false, cpartial: false, plan_end: null }
+    plan: false, plan_ix: null, pt: { a: 0, l: 0, p: 0, e: 0, r: 0, m: 0 }, partial: false, cpartial: false, plan_end: null, rank: null, moved: null }
 }
 /** 6d: a plan-end marker from a record / the wire: { state, ts } (state done | abandoned), else null. */
 const wPlanEnd = v => (v && typeof v === 'object' && PLAN_END.has(v.state) && Number.isFinite(Number(v.ts)) && Number(v.ts) >= 0 ? { state: v.state, ts: Math.floor(Number(v.ts)) } : null)
@@ -961,11 +1097,13 @@ function persistMarks(chain) {
 }
 /** 6b: note what a record persisted — activity for every node of `span` (owner..target), the target's line / bar / ETA. */
 function notePersisted(span, tgt, what, ts) {
-  for (const n of span) { const p = n.pt || (n.pt = { a: 0, l: 0, p: 0, e: 0 }); if (ts > p.a) p.a = ts }
-  const p = tgt.pt || (tgt.pt = { a: 0, l: 0, p: 0, e: 0 })
+  for (const n of span) { const p = n.pt || (n.pt = { a: 0, l: 0, p: 0, e: 0, r: 0, m: 0 }); if (ts > p.a) p.a = ts }
+  const p = tgt.pt || (tgt.pt = { a: 0, l: 0, p: 0, e: 0, r: 0, m: 0 })
   if (what.line && ts > p.l) p.l = ts
   if (what.prog && ts > p.p) p.p = ts
   if (what.eta && ts > p.e) p.e = ts
+  if (what.rank && ts > (p.r || 0)) p.r = ts     // #82: the stored rank
+  if (what.moved && ts > (p.m || 0)) p.m = ts    // #82: the moved_from history
 }
 /** The record fields of a plan item (6b): the marker + its plan position. */
 const planFields = n => (n && n.plan ? { plan_item: true, ...(Number.isInteger(n.plan_ix) ? { plan_ix: n.plan_ix } : {}) } : {})
@@ -1000,7 +1138,7 @@ const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, d
  * @param {{ session:string, project?:string, user?:string|null, realm?:string, host?:string }} ident  the reporting session
  * @param {ActivityMsg} msg  parseMessage(...).msg
  * @param {number} now
- * @param {{ by?: any, act?: string, entryText?: string, planEnd?: string }} [opts]  by (6d) may be a dashboard { kind, user, host }; act / entryText (the LOG text; the line keeps its own) / planEnd (done | abandoned | open)
+ * @param {{ by?: any, act?: string, entryText?: string, planEnd?: string, cascade?: boolean }} [opts]  by (6d) may be a dashboard { kind, user, host }; act / entryText (the LOG text; the line keeps its own) / planEnd (done | abandoned | open); cascade:false (#82) = no abandon cascade (the cascade's own entries)
  * @returns {ActivityResult} { ok:true, id, ts, logged, entry, records, current, state, stale_at, path, agent, context,
  *   evicted:string[], warnings:string[], plan? } or { ok:false, code, what } — `records` = every JSONL record this call
  *   wrote, in order (the target's entry first, then each new plan item's)
@@ -1009,8 +1147,9 @@ export function apply(state, ident, msg, now, opts = {}) {
   if (!state || !(state.local instanceof Map)) return bad('bad-state-object', 'pass a createActivity() state')
   if (!state.config.enabled) return bad('activity-disabled', 'the activity board is disabled on this host (activity.enabled)')
   if (!Number.isFinite(now)) return bad('bad-now', 'now must be a ms epoch')
-  if (!msg || typeof msg.text !== 'string' || !(msg.text || msg.keepText || msg.planOnly) || !Array.isArray(msg.segs)) return bad('bad-message', 'pass the msg from parseMessage()')
-  const logged = msg.log !== false, planOnly = !!msg.planOnly
+  if (!msg || typeof msg.text !== 'string' || !(msg.text || msg.keepText || msg.planOnly || msg.posOnly || msg.move) || !Array.isArray(msg.segs)) return bad('bad-message', 'pass the msg from parseMessage()')
+  if (msg.move) return applyMove(state, ident, msg, now, opts)   // #82: a re-parent is its own operation
+  const posOnly = !!msg.posOnly, logged = msg.log !== false || posOnly, planOnly = !!msg.planOnly   // #82: a placement is always logged (its rank must reach the files)
   const sessName = str(ident && ident.session)
   if (!sessName) return bad('bad-session', 'the reporting session needs a name')
   const L = ACTIVITY_LIMITS
@@ -1018,13 +1157,14 @@ export function apply(state, ident, msg, now, opts = {}) {
   let sess = state.local.get(sKey)
   const segs = msg.segs, keys = chainKeys(segs), tKey = keys[keys.length - 1]
   const tgtKind = segs.length ? segs[segs.length - 1].kind : 'agent', tgt0 = sess ? sess.nodes.get(tKey) : null
-  if (!planOnly && msg.state && PLAN_STATES.has(msg.state)) {   // 6b: todo / skipped are plan states
+  if (!planOnly && !posOnly && msg.state && PLAN_STATES.has(msg.state)) {   // 6b: todo / skipped are plan states
     if (tgtKind === 'agent') return bad('bad-agent-state', `${msg.state} is a plan state — only a context (a plan item) can be ${msg.state}`)
     if (!(tgt0 && tgt0.plan) && (msg.state === 'skipped' || !msg.current || (tgt0 && tgt0.current)))
       return bad('not-a-plan-item', `"${msg.path}" is ${tgt0 && tgt0.current ? 'an ordinary context (it already has a line of its own)' : 'not a plan item'} — ${msg.state} is for plan items: create them with plan:[…] (or a FIRST @~ line with state todo)`)
   }
-  if (!planOnly && msg.state === 'abandoned' && !(tgt0 && (tgt0.plan || childrenOf(sess, tgt0).some(c => c.plan))))   // 6c: plans + plan items only
-    return bad('not-a-plan', `"${msg.path || '@root'}" is neither a plan item nor a plan (a node holding plan items) — abandoned is only for plans and their items`)
+  // 6c: abandoned only on plans + plan items; #82 (part 4): on ANY context — an agent / the session still only when it holds plan items
+  if (!planOnly && !posOnly && msg.state === 'abandoned' && tgtKind !== 'context' && !(tgt0 && (tgt0.plan || childrenOf(sess, tgt0).some(c => c.plan))))
+    return bad('not-a-plan', `"${msg.path || '@root'}" is ${msg.path ? 'an agent' : 'the session'} holding no plan — abandoned is for contexts, plan items and plans (an agent or the session that holds plan items)`)
   const by = normBy(opts && opts.by)   // 6c: a SYSTEM message (the bridge's); 6d: or a dashboard action's { kind, user, host }
   const act = opts && typeof opts.act === 'string' && ACTIVITY_ACTIONS.includes(opts.act) ? opts.act : null                                       // 6d: which action wrote it
   const entryText = opts && typeof opts.entryText === 'string' && normText(opts.entryText) ? cpSlice(normText(opts.entryText), L.text) : null   // 6d: the LOG text (the line keeps its own)
@@ -1034,6 +1174,21 @@ export function apply(state, ident, msg, now, opts = {}) {
   for (const name of msg.plan || []) {
     const seg = { kind: /** @type {'context'} */ ('context'), name }, key = pathKey(formatPath([...segs, seg])), ex = sess ? sess.nodes.get(key) : null
     items.push({ name, seg, key, ex, act: !ex ? 'create' : ex.plan ? 'keep' : !ex.current ? 'adopt' : 'other' })
+  }
+  // #82: where the PLACED nodes go — new plan items (a position with a plan), else the target itself — computed before anything
+  // changes (atomic): the anchor must be a sibling of the same group (plan items / other contexts / agents)
+  let ranks = null, placeTxt = null
+  if (msg.pos) {
+    if (msg.plan) {
+      const k = items.filter(it => it.act === 'create').length
+      if (k) { const r = placeRanks(sess, tKey, 0, msg.pos, k, null, now, true); if (!r.ok) return r; ranks = r.ranks }
+      else (msg.warnings || []).push('position-unused')   // every name already exists: a re-plan never moves an item (reorder it on its own)
+    } else {
+      const willPlan = tgtKind === 'context' && ((tgt0 && tgt0.plan) || (msg.current && msg.state === 'todo' && !(tgt0 && tgt0.current)))
+      const r = placeRanks(sess, parentKeyOf(tKey), willPlan ? 0 : tgtKind === 'context' ? 1 : 2, msg.pos, 1, tKey, now, !tgt0)
+      if (!r.ok) return r
+      ranks = r.ranks; placeTxt = r.text
+    }
   }
   const writes = (logged && !planOnly) || items.some(it => it.act === 'create' || it.act === 'adopt')   // does this call write a record?
   // the nodes this message would create, and room for them (simulate evictions first: atomic)
@@ -1082,16 +1237,19 @@ export function apply(state, ident, msg, now, opts = {}) {
     agent: oi ? owner.path : null, context: tgt.kind === 'context' ? tgt.name : 'root', evicted, warnings: msg.warnings || [] }
   if (!planOnly) {   // ---- the message to the target itself
     tgt.implicit = false; if (!by) owner.implicit = false
+    const cur = !!msg.current && !posOnly   // #82: a placement alone never sets the line
     const before = { cur: tgt.current, prog: JSON.stringify(tgt.progress), eta: tgt.eta_at }
     const c0 = tgt.current
     let entryState = msg.state || (c0 ? c0.state : null) || 'running'
-    if (!msg.state && msg.current && tgt.plan && c0 && c0.state === 'todo') entryState = 'running'   // 6b: a line on a ☐ item starts it
-    const text = msg.keepText ? (c0 ? c0.text : (tgt.name || entryState)) : msg.text                // 6b: a tick keeps the line's text
-    if (msg.current && msg.state === 'todo' && tgt.kind === 'context' && !tgt.plan) tgt.plan = true   // 6b: a first line of todo makes a plan item (validated above)
+    if (!msg.state && cur && tgt.plan && c0 && c0.state === 'todo') entryState = 'running'   // 6b: a line on a ☐ item starts it
+    const text = posOnly ? cpSlice(placeTxt + (by ? ' ' + byText(by) : ''), L.text) : msg.keepText ? (c0 ? c0.text : (tgt.name || entryState)) : msg.text   // 6b: a tick keeps the line's text; #82: a placement says where
+    if (cur && msg.state === 'todo' && tgt.kind === 'context' && !tgt.plan) tgt.plan = true   // 6b: a first line of todo makes a plan item (validated above)
+    const rankSet = !msg.plan && !!(ranks && ranks[0])
+    if (rankSet) tgt.rank = ranks[0]   // #82: placed (before / after / first / last)
     const id = `${state.idPrefix}${now.toString(36)}-${(++state.seq).toString(36)}`
     touch(chain.slice(oi))
     let lineId = id, planEnd = planEndOpt
-    if (msg.current) {
+    if (cur) {
       // a log:false line IDENTICAL to the current one (text, state, details, data) keeps it — "alive, unchanged" (a rep, not a cp)
       const same = !logged && c0 && c0.text === text && c0.state === entryState && (c0.details || null) === (msg.details || null)
         && JSON.stringify(c0.data != null ? c0.data : null) === JSON.stringify(msg.data != null ? msg.data : null)
@@ -1110,36 +1268,43 @@ export function apply(state, ident, msg, now, opts = {}) {
     if ('progress' in msg) tgt.progress = msg.progress ? { ...msg.progress } : null   // ANY message moves the bar
     if ('eta_at' in msg) tgt.eta_at = msg.eta_at || null
     if (DONE_OR_FAILED.has(stateOf(tgt))) tgt.eta_at = null                          // dropped on done/failed, ignored while it is
-    Object.assign(res, { id: lineId, logged, current: !!msg.current, state: entryState, stale_at: staleAt(tgt, state.config.stale_after_min, owner) })
+    Object.assign(res, { id: lineId, logged, current: cur, state: entryState, stale_at: staleAt(tgt, state.config.stale_after_min, owner), ...(rankSet ? { rank: tgt.rank } : {}) })
     if (!logged) {   // the board only: mark what changed for the next checkpoint, and the node as live this interval
       const bits = (tgt.current !== before.cur ? CP_CUR : 0) | (JSON.stringify(tgt.progress) !== before.prog ? CP_PROG : 0) | (tgt.eta_at !== before.eta ? CP_ETA : 0)
       tgt.cp_dirty = (tgt.cp_dirty || 0) | bits
       state.cpLive.set(cpId(sKey, tKey), [sKey, tKey])
     } else {
-      const small = smallOf({ id, ts: now, current: msg.current, text: entryText || text, state: entryState,
+      const small = smallOf({ id, ts: now, current: cur, text: entryText || text, state: entryState,
         progress: 'progress' in msg ? msg.progress : undefined, eta_at: 'eta_at' in msg ? msg.eta_at : undefined, stale_after_ms: msg.stale_after_ms,
         has_details: !!msg.details, has_data: msg.data != null, by, act })
       logInsert(tgt, small)
       while (tgt.log.length > cap) logDropOldest(tgt)
       // this entry persists what it carries: the line (+ its state, and a done/failed line's dropped ETA), the bar, the ETA
-      const etaW = 'eta_at' in msg || (msg.current && DONE_OR_FAILED.has(entryState))
-      if (tgt.cp_dirty) tgt.cp_dirty &= ~((msg.current ? CP_CUR : 0) | (etaW ? CP_ETA : 0) | ('progress' in msg ? CP_PROG : 0))
-      notePersisted(by ? [] : chain.slice(oi), tgt, { line: msg.current, prog: 'progress' in msg, eta: etaW }, now)
-      res.entry = { v: ACTIVITY_FORMAT, ...small, current: !!msg.current, path: tgt.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
+      const etaW = 'eta_at' in msg || (cur && DONE_OR_FAILED.has(entryState))
+      if (tgt.cp_dirty) tgt.cp_dirty &= ~((cur ? CP_CUR : 0) | (etaW ? CP_ETA : 0) | ('progress' in msg ? CP_PROG : 0))
+      notePersisted(by ? [] : chain.slice(oi), tgt, { line: cur, prog: 'progress' in msg, eta: etaW, rank: rankSet }, now)
+      res.entry = { v: ACTIVITY_FORMAT, ...small, current: cur, path: tgt.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
         details: msg.details || null, data: msg.data != null ? msg.data : null, ...planFields(tgt), ...persistMarks(chain),
-        ...(msg.current && tgt.kind === 'agent' ? { finished_at: tgt.finished_at } : {}),
-        ...(msg.current && entryText && entryText !== text ? { line_text: text } : {}),   // 6d: the LINE kept its text; the entry says what was done (+ by whom)
-        ...(planEnd ? { plan_end: planEnd } : {}) }
+        ...(cur && tgt.kind === 'agent' ? { finished_at: tgt.finished_at } : {}),
+        ...(cur && entryText && entryText !== text ? { line_text: text } : {}),   // 6d: the LINE kept its text; the entry says what was done (+ by whom)
+        ...(planEnd ? { plan_end: planEnd } : {}), ...(rankSet ? { rank: tgt.rank } : {}) }   // #82: the node's new position
       res.records.push(res.entry)
+    }
+    // #82 (part 5): CASCADE — abandoning a context / plan / plan item (or an agent / the session holding a plan) abandons its OPEN
+    // descendants too (not crossing another agent), each with an entry saying why — as the dashboard's "Abandon plan" does
+    if (cur && entryState === 'abandoned' && !(opts && opts.cascade === false)) {
+      const cs = cascadeAbandon(state, sess, tgt, now, { by, act })
+      if (cs.records.length) { res.records.push(...cs.records); res.cascade = cs.done }
     }
   }
   if (msg.plan) {   // ---- 6b: the plan's items, in the given order (each a LOGGED ☐ line)
     const out = []
+    let ci = 0
     items.forEach((it, ix) => {
       let n = it.ex && sess.nodes.has(it.key) ? it.ex : null
-      if (it.act === 'create') { n = newNode(childPath(tgt, it.seg), [...segs, it.seg], now); addNode(sess, n) }
+      if (it.act === 'create') { n = newNode(childPath(tgt, it.seg), [...segs, it.seg], now); addNode(sess, n); if (ranks && ranks[ci]) n.rank = ranks[ci]; ci++ }   // #82: inserted at a position (in the given order)
       if (n && (it.act === 'create' || it.act === 'adopt')) {
-        const ichain = [...chain, n]
+        const ichain = [...chain, n], rk = it.act === 'create' && !!n.rank
         n.plan = true; n.plan_ix = ix; n.implicit = false; owner.implicit = false
         touch(ichain.slice(oi))
         const id = `${state.idPrefix}${now.toString(36)}-${(++state.seq).toString(36)}`
@@ -1147,11 +1312,11 @@ export function apply(state, ident, msg, now, opts = {}) {
         const small = smallOf({ id, ts: now, current: true, text: it.name, state: 'todo', stale_after_ms: msg.stale_after_ms })
         logInsert(n, small)
         while (n.log.length > cap) logDropOldest(n)
-        notePersisted(ichain.slice(oi), n, { line: true }, now)
+        notePersisted(ichain.slice(oi), n, { line: true, rank: rk }, now)
         res.records.push({ v: ACTIVITY_FORMAT, ...small, current: true, path: n.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
-          details: null, data: null, ...planFields(n), ...persistMarks(ichain) })
+          details: null, data: null, ...planFields(n), ...persistMarks(ichain), ...(rk ? { rank: n.rank } : {}) })
       }
-      out.push({ ...compact({ name: n ? n.name : it.name, path: n ? n.path : childPath(tgt, it.seg), created: it.act === 'create', adopted: it.act === 'adopt' }), plan_item: !!(n && n.plan), state: n ? stateOf(n) : null })
+      out.push({ ...compact({ name: n ? n.name : it.name, path: n ? n.path : childPath(tgt, it.seg), created: it.act === 'create', adopted: it.act === 'adopt', rank: it.act === 'create' && n && n.rank ? n.rank : null }), plan_item: !!(n && n.plan), state: n ? stateOf(n) : null })
     })
     res.plan = out
   }
@@ -1160,6 +1325,169 @@ export function apply(state, ident, msg, now, opts = {}) {
     if (state.cp) state.cp.rep = null                      // any other write closes the open repeat line
   }
   return res
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// #82 (v1.69.0): PLACING, MOVING and CASCADE-ABANDONING nodes
+
+/** The sibling an anchor names under `parentKey` — for a bare name an agent of that name first, else a context. */
+function findAnchor(sess, parentKey, anchor) {
+  const kids = sess ? [...(sess.kids.get(parentKey) || [])].map(k => sess.nodes.get(k)).filter(Boolean) : []
+  const ctx = kids.find(n => n.kind === 'context' && lc(n.name) === lc(anchor.name))
+  if (anchor.kind === 'context') return ctx || null
+  return kids.find(n => n.kind === 'agent' && lc(n.name) === lc(anchor.ref)) || ctx || null
+}
+const anchorText = n => (n.kind === 'context' ? `@${n.name}` : n.name)
+/** The siblings in group g under parentKey (without `selfKey`), in order. */
+function groupSibs(sess, parentKey, g, selfKey) {
+  return sess ? [...(sess.kids.get(parentKey) || [])].map(k => sess.nodes.get(k)).filter(n => n && n.key !== selfKey && rankGroup(n) === g).sort(siblingCmp) : []
+}
+/** The open "end" of a group: below the derived rank of anything created from the next ms on (so new nodes still go after). */
+const openHi = now => derivedRank(now + 1, null)
+/**
+ * k ranks for nodes of group g placed per `pos` under `parentKey` (selfKey = the node being reordered, left out of its own
+ * siblings). `fresh` (new nodes): the end ("last", or no position) stores NO rank — their derived rank already puts them last.
+ * → { ok, ranks:(string|null)[], text } or { ok:false, code:'unknown-anchor'|'bad-anchor'|'bad-position'|'rank-exhausted' }.
+ */
+function placeRanks(sess, parentKey, g, pos, k, selfKey, now, fresh) {
+  const sibs = groupSibs(sess, parentKey, g, selfKey), GROUP = ['plan items', 'contexts', 'agents']
+  let lo = null, hi = null, text
+  if (pos.before || pos.after) {
+    const an = pos.before || pos.after, a = findAnchor(sess, parentKey, an)
+    if (!a) return bad('unknown-anchor', `no sibling "${cpSlice(an.ref, 60)}" to place it ${pos.before ? 'before' : 'after'}`)
+    if (a.key === selfKey) return bad('bad-position', 'a node can\'t be placed before / after itself')
+    if (rankGroup(a) !== g) return bad('bad-anchor', `"${anchorText(a)}" is among the ${GROUP[rankGroup(a)]} — plan items come first, then contexts, then agents; place it among the ${GROUP[g]}`)
+    const i = sibs.indexOf(a)
+    if (pos.before) { lo = i > 0 ? rankOf(sibs[i - 1]) : null; hi = rankOf(a) } else { lo = rankOf(a); hi = i < sibs.length - 1 ? rankOf(sibs[i + 1]) : openHi(now) }
+    text = `placed ${pos.before ? 'before' : 'after'} ${anchorText(a)}`
+  } else if (pos.position === 'first') {
+    if (!sibs.length) return { ok: true, ranks: new Array(k).fill(null), text: 'placed first' }
+    hi = rankOf(sibs[0]); text = 'placed first'
+  } else {
+    text = 'placed last'
+    if (fresh || !sibs.length) return { ok: true, ranks: new Array(k).fill(null), text }
+    lo = rankOf(sibs[sibs.length - 1]); hi = openHi(now)
+    if (lo >= hi) hi = null
+  }
+  const ranks = []
+  for (let i = 0; i < k; i++) { const r = rankBetween(lo, hi); if (r.length > RANK_MAX) return bad('rank-exhausted', 'too many insertions at one spot — place it elsewhere'); ranks.push(r); lo = r }
+  return { ok: true, ranks, text }
+}
+/**
+ * #82 (part 5): the cascade of an abandoned node — every CONTEXT under `top` (not crossing another agent: an agent's work is its
+ * own), deepest first, that is OPEN (its line todo / running / blocked) or holds an open plan, gets an abandoned line; the entry
+ * says why ("abandoned with @X", + the dashboard's attribution). → { records, done:[{ path, from, entry_id }] }.
+ */
+function cascadeAbandon(state, sess, top, now, o) {
+  const out = { records: [], done: [] }
+  const list = subtreeKeys(sess, top.key).slice(1).map(k => sess.nodes.get(k)).filter(x => x && x.kind === 'context' && !crossesAgent(sess, x, top))
+  list.sort((a, b) => b.depth - a.depth || cmp(a.key, b.key))
+  const why = cpSlice(`abandoned with ${displayPath(top.path, sess.session)}${o.by ? ' ' + byText(o.by) : ''}`, ACTIVITY_LIMITS.text)
+  for (const x of list) {
+    if (sess.nodes.get(x.key) !== x) continue
+    const p = planOf(sess, x)
+    if (!((x.current && OPEN_ITEM.has(x.current.state)) || (p && planEndAt(sess, x, p) == null))) continue
+    const from = x.current ? x.current.state : 'open'
+    const pm = parseMessage({ path: lineAddr(x), state: 'abandoned' }, { now })
+    if (!pm.ok) continue
+    const r = apply(state, identOf(sess), pm.msg, now, { by: o.by, act: o.act, entryText: why, cascade: false })
+    if (r.ok) { out.records.push(...r.records); out.done.push({ path: x.path, from, entry_id: r.records.length ? r.records[r.records.length - 1].id : null }) }
+  }
+  return out
+}
+/** Re-key `node` and its subtree under `newParentKey` as `newPath` (sess.nodes, sess.kids, the parents' child sets, cpLive). */
+function rekeySubtree(state, sess, node, newParentKey, newPath, newDepth) {
+  const oldKey = node.key, oldPath = node.path, newKey = pathKey(newPath), dd = newDepth - node.depth
+  const sub = subtreeKeys(sess, oldKey).map(k => sess.nodes.get(k))
+  const op = sess.kids.get(node.parent)
+  if (op) { op.delete(oldKey); if (!op.size) sess.kids.delete(node.parent) }
+  const kidsOf = new Map(sub.map(n => [n.key, sess.kids.get(n.key)]))
+  for (const n of sub) { sess.nodes.delete(n.key); sess.kids.delete(n.key) }
+  const map = new Map()
+  for (const n of sub) {
+    const nk = newKey + n.key.slice(oldKey.length)
+    map.set(n.key, nk)
+    n.key = nk; n.path = newPath + n.path.slice(oldPath.length); n.depth += dd
+    n.parent = n === node ? newParentKey : parentKeyOf(nk)
+    for (const e of n.log) if (e.path != null && under(pathKey(e.path), oldKey)) e.path = newPath + e.path.slice(oldPath.length)   // a dismissal's entry names the path under it
+    sess.nodes.set(nk, n)
+  }
+  for (const [ok, ks] of kidsOf) if (ks && ks.size) sess.kids.set(map.get(ok), new Set([...ks].map(k => map.get(k) || k)))
+  let np = sess.kids.get(newParentKey); if (!np) sess.kids.set(newParentKey, (np = new Set())); np.add(newKey)
+  for (const [id, [sk, nk]] of [...state.cpLive]) if (sk === sess.key && map.has(nk)) { state.cpLive.delete(id); state.cpLive.set(cpId(sk, map.get(nk)), [sk, map.get(nk)]) }
+  return map
+}
+/**
+ * #82 (part 1): MOVE a node with its whole subtree to a new parent in the same session (each host writes only its own nodes).
+ * The node keeps everything (line, bar, state, plan-item marker, log, counts, created_at); it goes to the END of its group under
+ * the new parent unless msg.pos says where (a stored rank); intermediates `to` names are created implicit, like any path. ONE
+ * logged entry at the NEW path: "moved by <who> from <old> to <new parent>" with `moved_from` (the old path) and `rank` — the
+ * replay maps every older record under the old path onto the new one, and the node keeps `moved` ({ from, at }…) so its log
+ * pages on into the day files under the old path (logView aliases). A same-parent move with a position is a reorder.
+ * Codes: unknown-node, no-change, target-exists, path-too-deep, too-many-nodes, bad-move, unknown-anchor / bad-anchor / …
+ */
+function applyMove(state, ident, msg, now, opts = {}) {
+  const sessName = str(ident && ident.session)
+  if (!sessName) return bad('bad-session', 'the reporting session needs a name')
+  const sKey = keyOf(state, { realm: ident.realm, project: ident.project, user: ident.user, session: sessName })
+  const sess = state.local.get(sKey), node = sess ? sess.nodes.get(msg.key) : null
+  if (!node) return bad('unknown-node', `no node "${msg.path}" in this session to move`)
+  const mv = msg.move, toKey = mv.toKey, by = normBy(opts && opts.by)
+  const act = opts && typeof opts.act === 'string' && ACTIVITY_ACTIONS.includes(opts.act) ? opts.act : null
+  if (toKey === node.parent) {   // the same parent: with a position it is a REORDER, else nothing to do
+    if (!msg.pos) return bad('no-change', `"${node.path}" is already there`)
+    return apply(state, ident, { ...msg, move: undefined, current: false, text: '', posOnly: true, log: true }, now, opts)
+  }
+  const parent = sess.nodes.get(toKey)
+  const parentPath = parent ? parent.path : mv.toPath
+  const newPath = (parentPath ? parentPath + '/' : '') + segText({ kind: node.kind, name: node.name }), newKey = pathKey(newPath)
+  if (sess.nodes.has(newKey)) return bad('target-exists', `"${newPath}" already exists — the new parent has a node of that name`)
+  const sub = subtreeKeys(sess, node.key).map(k => sess.nodes.get(k))
+  const height = Math.max(...sub.map(n => n.depth)) - node.depth
+  if (mv.toSegs.length + 1 + height > ACTIVITY_LIMITS.depth) return tooDeep(mv.toSegs.length + 1 + height)
+  const tkeys = chainKeys(mv.toSegs)
+  let newN = 0, newA = 0
+  for (let i = 1; i < tkeys.length; i++) if (!sess.nodes.has(tkeys[i])) { newN++; if (mv.toSegs[i - 1].kind === 'agent') newA++ }
+  if (sess.nodes.size - 1 + newN > ACTIVITY_LIMITS.nodesPerSession || sess.nAgents + newA > ACTIVITY_LIMITS.agentsPerSession) return bad(newA ? 'too-many-agents' : 'too-many-nodes', 'the new parent\'s path would take the session over its node limits')
+  const g = rankGroup(node)
+  // the position among the new siblings (default: the END of its group — the node's own derived rank is its creation time)
+  const pr = placeRanksUnder(sess, toKey, tkeys, g, msg.pos || { position: 'last' }, node.key, now)
+  if (!pr.ok) return pr
+  // ---- mutate
+  const chain0 = [sess.nodes.get('')]
+  for (let i = 1; i < tkeys.length; i++) {
+    let n = sess.nodes.get(tkeys[i])
+    if (!n) { n = newNode(childPath(chain0[i - 1], mv.toSegs[i - 1]), mv.toSegs.slice(0, i), now); addNode(sess, n) }
+    chain0.push(n)
+  }
+  const oldPath = node.path
+  rekeySubtree(state, sess, node, toKey, (chain0[chain0.length - 1].path ? chain0[chain0.length - 1].path + '/' : '') + segText({ kind: node.kind, name: node.name }), mv.toSegs.length + 1)
+  node.rank = pr.ranks[0] || null   // null: alone in its group there — its derived rank (creation time) is the end; a rank from the old parent never carries over
+  node.moved = [...(node.moved || []), { from: oldPath, at: now }].slice(-8)
+  const chain = [...chain0, node], oi = lastAgentIx(chain), owner = chain[oi]
+  if (!by) {   // the session's own move is its activity (a dashboard's is not)
+    sess.last_activity = Math.max(sess.last_activity, now)
+    for (const n of chain.slice(oi)) { n.last_activity = Math.max(n.last_activity, now); n.stale_after_ms = null }
+    sess.gone_at = null; owner.gone_at = null; owner.implicit = false
+  }
+  node.implicit = false
+  const who = by ? byText(by).replace(/^by /, '') : sess.session
+  const text = cpSlice(`moved by ${who} from ${displayPath(oldPath, sess.session)} to ${displayPath(parentPath, sess.session)}`, ACTIVITY_LIMITS.text)
+  const id = `${state.idPrefix}${now.toString(36)}-${(++state.seq).toString(36)}`
+  const small = smallOf({ id, ts: now, current: false, text, state: stateOf(node), by, act })
+  logInsert(node, small)
+  while (node.log.length > state.config.log_entries_per_agent) logDropOldest(node)
+  notePersisted(by ? [] : chain.slice(oi), node, { rank: true, moved: true }, now)
+  const rec = { v: ACTIVITY_FORMAT, ...small, current: false, path: node.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
+    details: null, data: null, ...planFields(node), ...persistMarks(chain), moved_from: oldPath, rank: node.rank }
+  if (state.cp) state.cp.rep = null
+  return { ok: true, id, ts: now, logged: true, entry: rec, records: [rec], current: false, state: stateOf(node), stale_at: staleAt(node, state.config.stale_after_min, owner), path: node.path,
+    agent: oi ? owner.path : null, context: node.kind === 'context' ? node.name : 'root', evicted: [], warnings: msg.warnings || [], moved: { from: oldPath, to: node.path, parent: parentPath }, rank: node.rank }
+}
+/** placeRanks under a parent that may not exist yet (no siblings then: the end). */
+function placeRanksUnder(sess, toKey, tkeys, g, pos, selfKey, now) {
+  if (!sess.nodes.has(toKey)) return (pos.before || pos.after) ? bad('unknown-anchor', `the new parent is new — it has no sibling to place it ${pos.before ? 'before' : 'after'}`) : { ok: true, ranks: [null] }
+  return placeRanks(sess, toKey, g, pos, 1, selfKey, now, false)
 }
 
 /**
@@ -1210,10 +1538,10 @@ const lastAgentIx = chain => { let k = 0; chain.forEach((n, i) => { if (n.kind =
 /** One node's full checkpoint line (a snapshot: current line incl. details/data, state, bar, ETA; an agent: finished_at; 6b: the plan-item marker + created_at). */
 function checkpointOf(state, sess, node, now, k) {
   const chain = chainOf(sess, node)
-  notePersisted(chain.slice(lastAgentIx(chain)), node, { line: true, prog: true, eta: true }, now)
+  notePersisted(chain.slice(lastAgentIx(chain)), node, { line: true, prog: true, eta: true, rank: true }, now)
   return { v: ACTIVITY_FORMAT, kind: 'cp', k, ts: now, path: node.path, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
     current: fullLine(node.current), state: stateOf(node), progress: node.progress ? { ...node.progress } : null, eta_at: node.eta_at || null, created_at: node.created_at,
-    ...planFields(node), ...(node.kind === 'agent' ? { finished_at: node.finished_at, plan_end: node.plan_end ? { ...node.plan_end } : null } : {}), ...persistMarks(chain) }
+    ...planFields(node), ...(node.kind === 'agent' ? { finished_at: node.finished_at, plan_end: node.plan_end ? { ...node.plan_end } : null } : {}), rank: node.rank || null, ...persistMarks(chain) }   // #82: + its stored rank (null = derived)
 }
 /**
  * 6b CARRY-FORWARD (#70 "Decisions before 6b" 4): the `cf` records the gateway writes into the NEW day's file at each local
@@ -1243,16 +1571,18 @@ export function planCarryForward(state, now) {
 function carryDue(n, thr) {
   const p = n.pt || { a: 0, l: 0, p: 0, e: 0 }
   return (!!n.current && p.l < thr) || (!!n.progress && p.p < thr) || (!!n.eta_at && p.e < thr) || (!n.implicit && p.a < thr)
+    || (!!n.rank && (p.r || 0) < thr) || (!!(n.moved && n.moved.length) && (p.m || 0) < thr)   // #82: a stored rank / a moved_from history the window would lose
 }
 /** One node's carry-forward record (a full snapshot that also restores created_at / last_activity / implicit). */
 function carryOf(state, sess, node, now) {
   const chain = chainOf(sess, node)
-  notePersisted([node], node, { line: true, prog: true, eta: true }, now)
+  notePersisted([node], node, { line: true, prog: true, eta: true, rank: true, moved: true }, now)
   return { v: ACTIVITY_FORMAT, kind: 'cf', ts: now, path: node.path, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
     current: fullLine(node.current), state: stateOf(node), progress: node.progress ? { ...node.progress } : null, eta_at: node.eta_at || null,
     created_at: node.created_at, last_activity: node.last_activity, stale_after_ms: node.stale_after_ms || null, implicit: !!node.implicit,
     ...planFields(node), ...(node.kind === 'agent' ? { finished_at: node.finished_at, plan_end: node.plan_end ? { ...node.plan_end } : null } : {}),
     log_n: ownCount(node), ...(node.cpartial ? { log_partial: true } : {}),   // 6d (#70 "Decisions after 6c, for 6d" 8): the node's own entry count, so it stays exact past the window
+    rank: node.rank || null, ...(node.moved && node.moved.length ? { moved: node.moved.map(m => ({ ...m })) } : {}),   // #82: its stored rank; where it was moved from (its log's aliases)
     ...persistMarks(chain) }
 }
 /** A LOCAL node's own logged-entry count (memory + dropped; 6d: exact across restarts via the cf's log_n). */
@@ -1339,11 +1669,15 @@ export function autoAbandon(state, now, opts = {}) {
 
 /** The actions (wire names). Plan items: done / skip / reopen (→ todo) / abandon; plan nodes: complete / abandon_plan /
  * reopen_plan (the table's "Reopen" on a plan); agents and the session: abandon_plan / finish (args.state done|failed) / dismiss. */
-export const ACTIVITY_ACTIONS = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss'])
+export const ACTIVITY_ACTIONS = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss', 'move', 'reorder'])   // #82: + move (args.to, + a position) and reorder (args.before | after | position); abandon on ANY context
+/** #82: the actions a ≤1.68 owner doesn't know (its dashboard path answers bad-action) — a 1.69 gateway forwards them only to a 1.69 owner. */
+export const PLAN82_ACTIONS = Object.freeze(['move', 'reorder'])
 const ITEM_ACTIONS = Object.freeze({ done: 'done', skip: 'skipped', reopen: 'todo', abandon: 'abandoned' })
 const ACTION_LABEL = Object.freeze({ done: 'marked done', skip: 'skipped', reopen: 'reopened (back to to do)', abandon: 'abandoned', complete: 'plan marked complete',
-  abandon_plan: 'plan abandoned', reopen_plan: 'plan reopened', finish: 'marked finished', dismiss: 'dismissed from the board' })
+  abandon_plan: 'plan abandoned', reopen_plan: 'plan reopened', finish: 'marked finished', dismiss: 'dismissed from the board', move: 'moved', reorder: 'moved' })
 const identOf = s => ({ realm: s.realm, project: s.project, user: s.user, session: s.session })
+/** #82: an action's position args (before / after / position) as message fields. */
+const posArgs = a => { const o = {}; for (const k of ['before', 'after', 'position']) if (a && typeof a[k] === 'string' && a[k].trim()) o[k] = a[k]; return o }
 const lineAddr = n => (n.path ? n.path + '/@~root' : '@~root')
 const actText = (label, by) => cpSlice(`${label} ${byText(by)}`.trim(), ACTIVITY_LIMITS.text)
 /** An `@~` line with `st` on `node`, keeping the line's text (a tick); the LOGGED entry's text is o.text (attribution). */
@@ -1371,7 +1705,11 @@ function abandonPlans(state, sess, plans, now, o) {
     const text = o.text || actText(item ? ACTION_LABEL.abandon : ACTION_LABEL.abandon_plan, o.by)
     const from = item ? stateOf(n) : 'open'
     const r = !item && n.kind === 'agent' ? markerAction(state, sess, n, 'abandoned', now, { by: o.by, act: o.act, text }) : lineAction(state, sess, n, 'abandoned', now, { by: o.by, act: o.act, text })
-    if (r.ok) { out.records.push(...r.records); out.done.push({ path: n.path, item, from, entry_id: r.records.length ? r.records[r.records.length - 1].id : null }) }
+    if (r.ok) {
+      const own = r.records.find(x => x.path === n.path) || r.records[r.records.length - 1]
+      out.records.push(...r.records); out.done.push({ path: n.path, item, from, entry_id: own ? own.id : null })
+      for (const c of r.cascade || []) out.done.push({ path: c.path, item: !!(sess.nodes.get(pathKey(c.path)) || {}).plan, from: c.from, entry_id: c.entry_id, cascade: true })   // #82: what the cascade abandoned under it
+    }
   }
   for (const n of [...plans].sort((a, b) => b.depth - a.depth || cmp(a.key, b.key))) {
     if (sess.nodes.get(n.key) !== n) continue
@@ -1447,15 +1785,37 @@ export function applyAction(state, q, now, opts = {}) {
   const done = (recs, to, extra = {}) => ({ ok: true, action, path: node.path, records: recs, applied: extra.applied || [{ path: node.path, state: sess.nodes.get(node.key) ? stateOf(node) : null }], ...extra,
     ident: identOf(sess), kind: node.kind, text: lineText, from_state: to.of === 'plan' ? planFrom0 : from0, to_state: to.state, ...(to.of ? { of: to.of } : {}), entry_id: entryOf(recs) })
   switch (action) {
-    case 'done': case 'skip': case 'reopen': case 'abandon': {   // ---- a PLAN ITEM
-      if (!node.plan) return bad('not-a-plan-item', `"${node.path || '@root'}" is not a plan item`)
+    case 'done': case 'skip': case 'reopen': case 'abandon': {   // ---- a PLAN ITEM (#82: abandon — any context, with its open descendants)
+      if (!node.plan && !(action === 'abandon' && node.kind === 'context')) return bad('not-a-plan-item', `"${node.path || '@root'}" is not a plan item${action === 'abandon' ? ' or a context' : ''}`)
       const st = ITEM_ACTIONS[action]
-      if (stateOf(node) === st) return bad('no-change', `"${node.path}" is already ${st}`)
+      if (node.current && stateOf(node) === st) return bad('no-change', `"${node.path}" is already ${st}`)
       const r = lineAction(state, sess, node, st, now, o)
       if (!r.ok) return r
       const par = sess.nodes.get(node.parent), pp2 = par ? planOf(sess, par) : null
       const warn = action === 'reopen' && pp2 && planEndAt(sess, par, pp2) != null ? ['plan-ended'] : []   // its plan was marked complete / abandoned: reopen the plan too
-      return done(r.records, { state: st }, warn.length ? { warnings: warn } : {})
+      const casc = (r.cascade || []).map(c => ({ path: c.path, state: 'abandoned', from: c.from, entry_id: c.entry_id }))
+      return done(r.records, { state: st }, { ...(warn.length ? { warnings: warn } : {}), ...(casc.length ? { applied: [{ path: node.path, state: st }, ...casc] } : {}) })
+    }
+    case 'move': {   // ---- #82: re-parent a node (+ its subtree) in its session; args.to = the new parent's path ('' = the session root)
+      if (!node.key) return bad('bad-move', 'the session root can\'t be moved')
+      if (typeof args.to !== 'string') return bad('bad-args', 'move takes args.to: the new parent\'s path ("" = the session root)')
+      const pm = parseMessage({ move: '/' + node.path, to: '/' + args.to.replace(/^\/+/, ''), ...posArgs(args) }, { now })
+      if (!pm.ok) return pm
+      const r = apply(state, identOf(sess), pm.msg, now, { by, act: action })
+      if (!r.ok) return r
+      const st = stateOf(node)
+      return { ...done(r.records, { state: st }), from_state: st, moved_from: r.moved ? r.moved.from : null, to: r.moved ? r.moved.parent : null, rank: r.rank || null }
+    }
+    case 'reorder': {   // ---- #82: a new place among its siblings (args.before | after = a sibling, or position first | last)
+      if (!node.key) return bad('bad-position', 'the session root has no siblings')
+      const pa = posArgs(args)
+      if (!Object.keys(pa).length) return bad('bad-args', 'reorder takes args.before / args.after (a sibling) or args.position ("first" | "last")')
+      const pm = parseMessage({ path: node.path, ...pa }, { now })
+      if (!pm.ok) return pm
+      const r = apply(state, identOf(sess), pm.msg, now, { by, act: action })
+      if (!r.ok) return r
+      const st = stateOf(node), w = (r.records[0] && r.records[0].text || '').replace(/^placed /, '').replace(/ by .*$/, '')
+      return { ...done(r.records, { state: st }), from_state: st, where: w === 'first' ? 'to the top' : w === 'last' ? 'to the end' : w, rank: r.rank || null }
     }
     case 'complete': {   // ---- a PLAN NODE: ends its plan (a context: its line done; an agent / the session: the marker)
       if (!plan) return bad('not-a-plan', `"${node.path || '@root'}" holds no plan items`)
@@ -1529,10 +1889,11 @@ function dismissNode(state, sess, node, now, o) {
 // batch is { actions:[…those], count, session, project, host }.
 export const NOTICE_VERB = 'activity_changed'
 const NOTICE_ONE = Object.freeze({ done: 'marked {p} done', skip: 'skipped {p}', reopen: 'reopened {p}', abandon: 'abandoned {p}', complete: 'completed the plan {p}',
-  abandon_plan: 'abandoned the plan {p}', reopen_plan: 'reopened the plan {p}', finish: 'marked {p} finished ({s})', dismiss: 'dismissed {p} from the board' })
+  abandon_plan: 'abandoned the plan {p}', reopen_plan: 'reopened the plan {p}', finish: 'marked {p} finished ({s})', dismiss: 'dismissed {p} from the board',
+  move: 'moved {p} to {t}', reorder: 'moved {p} {w}' })   // #82
 const NOTICE_MANY = Object.freeze({ done: 'marked {n} done', skip: 'skipped {n}', reopen: 'reopened {n}', abandon: 'abandoned {n}', complete: 'completed {n}',
-  abandon_plan: 'abandoned {n}', reopen_plan: 'reopened {n}', finish: 'finished {n}', dismiss: 'dismissed {n}' })
-const NOTICE_NOUN = Object.freeze({ done: 'item', skip: 'item', reopen: 'item', abandon: 'item', complete: 'plan', abandon_plan: 'plan', reopen_plan: 'plan', finish: 'agent', dismiss: 'agent' })
+  abandon_plan: 'abandoned {n}', reopen_plan: 'reopened {n}', finish: 'finished {n}', dismiss: 'dismissed {n}', move: 'moved {n}', reorder: 'reordered {n}' })
+const NOTICE_NOUN = Object.freeze({ done: 'item', skip: 'item', reopen: 'item', abandon: 'item', complete: 'plan', abandon_plan: 'plan', reopen_plan: 'plan', finish: 'agent', dismiss: 'agent', move: 'node', reorder: 'node' })
 const NOTICE_SUBJECT_MAX = 200
 const segsOf = p => (typeof p === 'string' && p ? p.match(/@"[^"]*"|[^/]+/g) || [] : [])
 /** A node path for people: `@"Next release"/@Docs` → `@Next release/@Docs`; the session root → the session's name. */
@@ -1544,13 +1905,14 @@ export function displayPath(path, session) { return path ? String(path).replace(
 export function actionNotice(r, opts = {}) {
   const b = normBy(opts.by), by = b && typeof b === 'object' ? { user: b.user, host: b.host } : { user: typeof b === 'string' ? b : 'dashboard', host: opts.host || '?' }
   const id = r.ident || {}, action = r.action
-  const p = displayPath(r.path, id.session)
-  const pp = (r.kind === 'agent' && NOTICE_NOUN[action] === 'plan') ? `of ${p}` : p   // "completed the plan of lead"
+  const p = displayPath(action === 'move' && r.moved_from != null ? r.moved_from : r.path, id.session)   // #82: "moved @A/@x to @B" names the OLD path
+  const pp =(r.kind === 'agent' && NOTICE_NOUN[action] === 'plan') ? `of ${p}` : p   // "completed the plan of lead"
   const tpl = action === 'abandon_plan' && r.kind === 'agent' ? 'abandoned the open plans {p}' : (NOTICE_ONE[action] || `${action} {p}`)
-  const subject = cpSlice(`${by.user} ${tpl.replace('{p}', pp).replace('{s}', r.to_state || '')}`, NOTICE_SUBJECT_MAX)
+  const subject = cpSlice(`${by.user} ${tpl.replace('{p}', pp).replace('{s}', r.to_state || '').replace('{t}', displayPath(r.to || '', id.session)).replace('{w}', r.where || 'elsewhere')}`, NOTICE_SUBJECT_MAX)
   const items = (r.applied || []).filter(a => a.path !== r.path).map(a => compact({ path: a.path, from_state: a.from || null, to_state: a.state, entry_id: a.entry_id || null }))
   const body = { action, path: r.path || '', host: opts.host || null, from_state: r.from_state || null, to_state: r.to_state || null, ...(r.of ? { of: r.of } : {}), by,
-    entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, text: r.text || null, ts: opts.ts || null, ...(items.length ? { items } : {}) }
+    entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, text: r.text || null, ts: opts.ts || null, ...(items.length ? { items } : {}),
+    ...(r.moved_from != null ? { moved_from: r.moved_from, to: r.to || '' } : {}), ...(r.where ? { where: r.where } : {}) }   // #82: a move's old path + new parent; a reorder's place
   return { verb: NOTICE_VERB, subject, body }
 }
 /**
@@ -1786,17 +2148,54 @@ export function createReplay(state, { now }) {
     return { key: pathKey(path), path, segs, name: last ? last.name : '', kind: last ? last.kind : 'agent', created: null, cFeed: 0, last: -Infinity, sa: null, saSet: false,
       current: null, curFound: false, progress: null, progFound: false, eta: null, etaRes: false, pend: null, hasPend: false, finAt: null, finRes: false,
       implicit: true, seen: false, sealed: false, marker: false, log: [], total: 0, floor: 0, plan: false, planIx: null, tA: 0, tL: 0, tP: 0, tE: 0, tPend: 0,
-      pe: null, peRes: false, cnt: null, cntAt: 0, cntPartial: false }   // 6d: the plan-end marker; the exact own-entry count a cf carried (+ when)
+      pe: null, peRes: false, cnt: null, cntAt: 0, cntPartial: false,   // 6d: the plan-end marker; the exact own-entry count a cf carried (+ when)
+      rank: null, rankRes: false, tR: 0, moved: [], tM: 0, movedAt: 0 }   // #82: the stored rank (newest record carrying one); move events ({ from, at }) + when persisted; the latest move's time
   }
   const resolveEta = (c, v, t) => { c.eta = v; c.etaRes = true; c.tE = t || 0 }
-  function sealNode(s, n, marker) {
+  // `except` (#82): a key whose subtree is NOT sealed — a MOVE record's new_from may point above the moved node (its new parents
+  // were new), but the moved node's own older records (under its old path) still follow. `recTs` (#82): the sealing record's time
+  // — a node that was MOVED in under `n` at or after it (it, or a node between it and n: movedAt) wasn't part of that instance then
+  function sealNode(s, n, marker, except, recTs, own) {   // own: the sealing record's own chain (always part of it — even moved away and back)
     for (const x of s.nodes.values()) {
       if (x.sealed || !(x.key === n.key || n.key === '' || x.key.startsWith(n.key + '/'))) continue
+      if (except != null && (x.key === except || x.key.startsWith(except + '/'))) continue
+      if (recTs != null && x !== n && !(own && own.has(x))) { let y = x, later = false; while (y && y !== n) { if (y.movedAt >= recTs) { later = true; break } y = s.nodes.get(parentKeyOf(y.key)) } if (later) continue }
       if (!x.etaRes) resolveEta(x, x.hasPend ? x.pend : null, x.hasPend ? x.tPend : 0)
-      x.curFound = x.progFound = x.finRes = x.peRes = true; x.sealed = true; if (marker) x.marker = true
+      x.curFound = x.progFound = x.finRes = x.peRes = x.rankRes = true; x.sealed = true; if (marker) x.marker = true
     }
   }
+  /**
+   * #82: the PATH HISTORY. A move record (moved_from) registers { fromKey, fromLen, toSegs } on its session (newest first, as fed);
+   * the path an OLDER record names is replayed through the moves made after it, OLDEST FIRST, giving the path that node has NOW.
+   * feed() maps every node of a record's chain this way, one by one (a moved node's old parents stay where they are).
+   */
+  function remapSegs(s, segs, used) {   // used (a Set, optional): the moves that applied
+    if (!s || !s.mv.length || !segs.length) return segs
+    for (let i = s.mv.length - 1; i >= 0; i--) {
+      const m = s.mv[i]
+      if (under(pathKey(formatPath(segs)), m.fromKey)) { segs = [...m.toSegs, ...segs.slice(m.fromLen)]; if (used) used.add(m) }
+    }
+    return segs
+  }
+  /** The replay node at `sg` (created with its missing ancestors, implicit). */
+  function ensureIn(s, sg) {
+    const ks = chainKeys(sg)
+    let p = s.nodes.get('')
+    for (let j = 1; j < ks.length; j++) {
+      let n = s.nodes.get(ks[j])
+      if (!n) { const x = sg.slice(0, j); n = rNode(childPath(p, x[j - 1]), x); s.nodes.set(ks[j], n); if (n.kind === 'agent') s.nAgents++ }
+      p = n
+    }
+    return p
+  }
+  // a node that ENDED with a record (dismissed, evicted) never moved again: only its PARENT's path follows the later moves
+  const remapGone = (s, segs) => (segs.length ? [...remapSegs(s, segs.slice(0, -1)), segs[segs.length - 1]] : segs)
   const nodeDone = n => !n.seen || (n.curFound && n.progFound && n.etaRes && (n.kind !== 'agent' || n.finRes))
+  const newRSession = (sk, rec) => {
+    const s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: state.origin, created: null, last: -Infinity, nodes: new Map(), dead: new Set(), dms: [], nAgents: 0, mv: [] }
+    s.nodes.set('', rNode('', []))
+    return s
+  }
   /**
    * One record (newest first). `day` = the file it came from (default: its own local day).
    * @returns {'ok'|'skip'|'old'}
@@ -1825,57 +2224,118 @@ export function createReplay(state, { now }) {
       if (d === today) { const id = cpId(keyOf(state, rec), pp.key); if (!cpKeys.has(id)) cpKeys.set(id, rec.k); maxK = Math.max(maxK, rec.k) }
     } else if (rec.ts < cutoff) return 'old'
     // the key's host is THIS origin whatever the record says — the files are per host (one writer); keyOf ignores rec.host
-    const sk = keyOf(state, rec), keys = chainKeys(pp.segs)
+    const sk = keyOf(state, rec)
     let s = sessions.get(sk)
+    // #82: every node of the record's chain AS IT IS NOW — each node's path replayed through the moves made after the record (a
+    // moved node's OLD parents stay where they are: they keep this record's activity; its NEW parents never saw it)
+    const orig = pp.segs, L = orig.length, oseg = [], okey = [], isDismiss = kind === 'entry' && rec.dismiss === true
+    const used = []   // #82: per chain node, the moves that applied to its path
+    for (let i = 0; i <= L; i++) { used.push(new Set()); const sg = isDismiss && i === L ? remapGone(s, orig) : remapSegs(s, orig.slice(0, i), used[i]); oseg.push(sg); okey.push(pathKey(formatPath(sg))) }   // a dismissed node itself never moved again
+    const tKey = okey[L], nf0 = Number.isInteger(rec.new_from) && rec.new_from >= 0 ? rec.new_from : null
+    const onChain = i => i === L || !okey[i] || tKey === okey[i] || tKey.startsWith(okey[i] + '/')   // still an ancestor-or-self of the target
+    const isMove = kind === 'entry' && typeof rec.moved_from === 'string'
+    let mvAlias = null
+    if (isMove) {   // #82: a MOVE — register it (even if this record is skipped below: what was under the old path moved all the same)
+      const fp = parsePath(rec.moved_from)
+      if (fp.ok && fp.key) {
+        if (!s) { s = newRSession(sk, rec); sessions.set(sk, s) }
+        s.mv.push(mvAlias = { fromKey: fp.key, fromLen: fp.segs.length, toSegs: orig, node: null })
+      }
+    }
+    // #82: a node that got where it is by a MOVE made after this record owns the record only if that move carried it there — else the
+    // record belongs to whatever was at that path before (an instance that ended) and lands on it by name only
+    const foreign = i => { const X = s && s.nodes.get(okey[i]); if (!X) return false; for (const a of s.mv) if (a.node === X && !used[i].has(a)) return true; return false }
+    const deadAt = i => !!s && (s.dead.has(okey[i]) || !!(s.nodes.get(okey[i]) && s.nodes.get(okey[i]).sealed) || foreign(i))
+    // #82: an old ancestor the record's node moved away from is gone when it ended since — or, no longer there, when a node above it now
+    // ended or BEGAN after this record (it would be a new child of a later instance: the old one went with an ancestor)
+    const goneAt = i => {
+      if (!s) return false
+      if (deadAt(i)) return true
+      const ks = chainKeys(oseg[i])
+      if (ks.some(x => s.dead.has(x))) return true
+      // a node above it that BEGAN after this record (sealed), with nothing between them moved in since: it was under that node's
+      // older instance, which ended (dismissed / expired / evicted with it) — its name only lands on the new one
+      for (let j = ks.length - 2; j >= 0; j--) {
+        const S = s.nodes.get(ks[j])
+        if (!S || !S.sealed) continue
+        let movedIn = false
+        for (let k = j + 1; k < ks.length; k++) { const y = s.nodes.get(ks[k]); if (y && y.movedAt >= rec.ts) { movedIn = true; break } }
+        if (!movedIn) return true
+      }
+      return false
+    }
     if (s) {
-      const bad = keys.findIndex(k => s.dead.has(k) || !!(s.nodes.get(k) && s.nodes.get(k).sealed))   // an evicted (6d: or dismissed) older instance, or an older instance of a node on the chain
+      let bad = -1
+      // an evicted (6d: or dismissed) older instance, or an older instance of a node on the chain (#82: a DISMISSAL is checked above its
+      // target only — its entry belongs to the parent's log even when the name was used again later, which seals the target)
+      for (let i = 0; i <= (isDismiss ? L - 1 : L); i++) if (onChain(i) && deadAt(i)) { bad = i; break }
+      if (bad < 0 && !isDismiss && goneAt(L)) bad = L   // #82: it was moved under a node that ended later (dismissed / evicted with it), or now names a later instance's subtree
       if (bad >= 0) {
+        // #82: the ancestors ABOVE that point were there then (this record named them, maybe created them): keep them as the live apply
+        // did — created_at, and the activity it gave the ones from its owner down (an implicit parent left empty by a dismissal stays)
+        const oi0 = ownerIndex(orig), sys0 = kind === 'entry' && !!normBy(rec.by), cAt0 = kind === 'cf' && finite(rec.created_at) ? Math.min(rec.created_at, rec.ts) : rec.ts
+        const kept = new Array(L + 1).fill(null)
+        if (bad > 0) {   // the session itself was there then too (a session whose only node was dismissed still shows, as live)
+          kept[0] = s.nodes.get('')
+          if (kept[0].created == null || cAt0 < kept[0].created) { kept[0].created = cAt0; kept[0].cFeed = feedNo }
+          s.session = rec.session.trim(); s.project = str(rec.project) || 'unclassified'; s.user = str(rec.user); s.realm = str(rec.realm) || 'default'
+          s.created = s.created == null ? cAt0 : Math.min(s.created, cAt0)
+          if (finite(rec.s0) && rec.s0 > 0 && rec.s0 < s.created) s.created = rec.s0
+          if (kind !== 'cf' && !sys0) { s.last = Math.max(s.last, rec.ts); if (oi0 === 0) { kept[0].seen = true; kept[0].last = Math.max(kept[0].last, rec.ts); kept[0].tA = Math.max(kept[0].tA, rec.ts); kept[0].implicit = false } }
+        }
+        for (let i = 1; i < L; i++) {   // the target's ancestors above `bad`, and any old ancestor it has moved away from
+          if ((onChain(i) && i >= bad) || goneAt(i)) continue
+          const n = kept[i] = ensureIn(s, oseg[i])
+          if (n.created == null || cAt0 < n.created) { n.created = cAt0; n.cFeed = feedNo }
+          if (kind !== 'cf' && i >= oi0 && !sys0) { n.seen = true; n.last = Math.max(n.last, rec.ts); n.tA = Math.max(n.tA, rec.ts); if (i === oi0) n.implicit = false }
+        }
         // 6d: the record still BEGAN the run of a live ancestor above that point (new_from) — mark it (else a session whose first
-        // record was on a dismissed / evicted path would look partial after a restart)
-        const nf = rec.new_from, anc = Number.isInteger(nf) && nf >= 0 && nf < bad ? s.nodes.get(keys[nf]) : null
-        if (anc && !anc.sealed) sealNode(s, anc, true)
+        // record was on a dismissed / evicted path would look partial after a restart); #82: each of them, where it is now
+        if (nf0 != null) sealRuns(s, kept, nf0, rec.ts)
         skipped++; return 'skip'
       }
     }
     if (kind === 'entry' && rec.dismiss === true) {   // 6d: a DISMISSAL — what was at / under that path then is an ended instance (like `evicted`)
-      if (!s) { s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: state.origin, created: null, last: -Infinity, nodes: new Map(), dead: new Set(), dms: [], nAgents: 0 }; s.nodes.set('', rNode('', [])); sessions.set(sk, s) }
+      if (!s) { s = newRSession(sk, rec); sessions.set(sk, s) }
       fed++
-      if (!pp.key) { if (!s.nodes.get('').sealed) s.dead.add('') }   // the whole session: no newer run of it (that would have sealed the root)
-      else { if (!s.nodes.has(pp.key)) s.dead.add(pp.key); s.dms.push(rec) }   // the entry belongs to the PARENT's log (attached in build)
+      if (!tKey) { if (!s.nodes.get('').sealed) s.dead.add('') }   // the whole session: no newer run of it (that would have sealed the root)
+      else { if (!s.nodes.has(tKey)) s.dead.add(tKey); s.dms.push(tKey !== pp.key ? { ...rec, path: formatPath(oseg[L]) } : rec) }   // the entry belongs to the PARENT's log (attached in build)
       return 'ok'
     }
+    // the nodes to hold: the target's chain now, and each old ancestor it has moved away from (unless that one ended since)
+    const want = [L]
+    for (let i = 1; i < L; i++) if (!onChain(i) && !goneAt(i)) want.push(i)
     if (s) {
-      let newN = 0, newA = 0
-      for (let i = 1; i < keys.length; i++) if (!s.nodes.has(keys[i])) { newN++; if (pp.segs[i - 1].kind === 'agent') newA++ }
-      if (s.nodes.size - 1 + newN > ACTIVITY_LIMITS.nodesPerSession || s.nAgents + newA > ACTIVITY_LIMITS.agentsPerSession) { skipped++; return 'skip' }
+      const miss = new Map()
+      for (const i of want) { const ks = chainKeys(oseg[i]); for (let j = 1; j < ks.length; j++) if (!s.nodes.has(ks[j])) miss.set(ks[j], oseg[i][j - 1].kind) }
+      const newA = [...miss.values()].filter(k => k === 'agent').length
+      if (s.nodes.size - 1 + miss.size > ACTIVITY_LIMITS.nodesPerSession || s.nAgents + newA > ACTIVITY_LIMITS.agentsPerSession) { skipped++; return 'skip' }
     }
     // ---- accepted: create what's new ----
-    if (!s) {
-      s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: state.origin, created: null, last: -Infinity, nodes: new Map(), dead: new Set(), dms: [], nAgents: 0 }
-      s.nodes.set('', rNode('', [])); sessions.set(sk, s)
-    }
-    const chain = [s.nodes.get('')]
-    for (let i = 1; i < keys.length; i++) {
-      let n = s.nodes.get(keys[i])
-      if (!n) { const sg = pp.segs.slice(0, i); n = rNode(childPath(chain[i - 1], sg[i - 1]), sg); s.nodes.set(keys[i], n); if (n.kind === 'agent') s.nAgents++ }
-      chain.push(n)
-    }
+    if (!s) { s = newRSession(sk, rec); sessions.set(sk, s) }
+    const sess0 = s, ensure = sg => ensureIn(sess0, sg)
+    const tgt = ensure(oseg[L])
+    const onode = okey.map((k, i) => (onChain(i) ? s.nodes.get(k) : want.includes(i) ? ensure(oseg[i]) : null))   // the record's chain, node by node, as it is now (null: ended since)
     fed++
     // identity spellings: every record carries the canonical (first-seen) one; the OLDEST record's is kept
     s.session = rec.session.trim(); s.project = str(rec.project) || 'unclassified'; s.user = str(rec.user); s.realm = str(rec.realm) || 'default'
-    const tgt = chain[chain.length - 1], oi = ownerIndex(pp.segs), isCf = kind === 'cf'
+    const oi = ownerIndex(orig), isCf = kind === 'cf'
     const isSys = kind === 'entry' && !!normBy(rec.by)   // 6c: a SYSTEM entry (auto-abandon; 6d: a dashboard action) is nobody's activity
     // a cf restores its TARGET only (its own implicit flag, created_at, last_activity); any other record marks target + owner reported
-    if (isCf) { if (rec.implicit !== true) tgt.implicit = false } else { tgt.implicit = false; if (!isSys) chain[oi].implicit = false }
+    if (isCf) { if (rec.implicit !== true) tgt.implicit = false } else { tgt.implicit = false; if (!isSys && onode[oi]) onode[oi].implicit = false }
     if (rec.plan_item === true) { tgt.plan = true; if (tgt.planIx == null && Number.isInteger(rec.plan_ix)) tgt.planIx = rec.plan_ix }
+    if (!tgt.rankRes && 'rank' in rec) { tgt.rank = validRank(rec.rank); tgt.rankRes = true; tgt.tR = rec.ts }   // #82: the newest record that placed it (or a snapshot)
+    if (isMove) { tgt.moved.push({ from: String(rec.moved_from), at: rec.ts }); tgt.movedAt = Math.max(tgt.movedAt, rec.ts); if (mvAlias) mvAlias.node = tgt }
+    if (isCf && Array.isArray(rec.moved)) for (const m of rec.moved) if (m && typeof m.from === 'string' && finite(m.at)) { tgt.moved.push({ from: m.from, at: m.at }); tgt.movedAt = Math.max(tgt.movedAt, m.at) }
+    if (isMove || (isCf && Array.isArray(rec.moved))) tgt.tM = Math.max(tgt.tM, rec.ts)
     const act = isCf ? (finite(rec.last_activity) ? Math.min(rec.last_activity, rec.ts) : rec.ts) : Math.max(rec.ts, repL)
     const cAt = isCf && finite(rec.created_at) ? Math.min(rec.created_at, rec.ts) : rec.ts
     if (!isSys) s.last = Math.max(s.last, act)
-    for (const n of chain) if (n.created == null || cAt < n.created || (cAt === n.created && feedNo > n.cFeed)) { n.created = cAt; n.cFeed = feedNo }   // the oldest known; on a tie, the earlier-written record
+    for (const n of onode) if (n && (n.created == null || cAt < n.created || (cAt === n.created && feedNo > n.cFeed))) { n.created = cAt; n.cFeed = feedNo }   // the oldest known; on a tie, the earlier-written record
     s.created = s.created == null ? cAt : Math.min(s.created, cAt)
     if (finite(rec.s0) && rec.s0 > 0 && rec.s0 < s.created) s.created = rec.s0   // 6c: every record carries the session's created_at — exact even past the window (the HOME host)
-    const lo = isCf ? chain.length - 1 : oi
-    for (let i = lo; i < chain.length; i++) { chain[i].seen = true; if (!isSys) { chain[i].last = Math.max(chain[i].last, act); chain[i].tA = Math.max(chain[i].tA, rec.ts) } }   // phase 1 waits only for nodes a record TOUCHED (target..owner), not bare ancestors
+    const lo = isCf ? L : oi
+    for (let i = lo; i <= L; i++) { const n = onode[i]; if (!n) continue; n.seen = true; if (!isSys) { n.last = Math.max(n.last, act); n.tA = Math.max(n.tA, rec.ts) } }   // phase 1 waits only for nodes a record TOUCHED (target..owner), not bare ancestors
     if (kind === 'cp' || isCf) {
       if (kind === 'cp') cps++; else { cfs++; if (d === today) cfToday = true }
       const st = rec.current && ACTIVITY_STATES.includes(rec.current.state) ? rec.current.state : 'running'
@@ -1891,7 +2351,7 @@ export function createReplay(state, { now }) {
       tgt.total++
       if (tgt.log.length < N) tgt.log.push(smallOf(rec))
       else if (!tgt.floor) tgt.floor = rec.ts   // the newest entry that doesn't fit = the newest one only in the files
-      if (!isSys) for (let i = oi; i < chain.length; i++) if (!chain[i].saSet) { chain[i].sa = rec.stale_after_ms > 0 ? rec.stale_after_ms : null; chain[i].saSet = true }
+      if (!isSys) for (let i = oi; i <= L; i++) { const n = onode[i]; if (n && !n.saSet) { n.sa = rec.stale_after_ms > 0 ? rec.stale_after_ms : null; n.saSet = true } }
       if (!tgt.progFound && 'progress' in rec) { const p = wProgress(rec.progress); if (p !== undefined) { tgt.progress = p; tgt.progFound = true; tgt.tP = rec.ts } }
       if (rec.current && !tgt.curFound) { tgt.current = lineOf(rec); tgt.curFound = true; tgt.tL = rec.ts }
       if (!tgt.etaRes) {   // the newest ETA-bearing record wins, unless the state when it arrived was done/failed
@@ -1907,10 +2367,24 @@ export function createReplay(state, { now }) {
         const pe = typeof rec.plan_end === 'string' ? rec.plan_end : rec.v < 5 && rec.current && rec.state === 'abandoned' ? 'abandoned' : null
         if (pe) { tgt.pe = pe === 'open' ? null : wPlanEnd({ state: pe, ts: rec.ts }); tgt.peRes = true }
       }
-      if (Array.isArray(rec.evicted)) for (const p of rec.evicted) { const q = parsePath(String(p)); if (q.ok && q.key && !s.nodes.has(q.key)) s.dead.add(q.key) }   // that subtree's older instance ended here
+      if (Array.isArray(rec.evicted)) for (const p of rec.evicted) { const q = parsePath(String(p)); if (!q.ok || !q.key) continue; const k = pathKey(formatPath(remapGone(s, q.segs))); if (k && !s.nodes.has(k)) s.dead.add(k) }   // that subtree's older instance ended here (#82: under its path now)
     }
-    if (Number.isInteger(rec.new_from) && rec.new_from >= 0 && rec.new_from < chain.length) sealNode(s, chain[rec.new_from], true)
+    // the record that BEGAN an instance seals it: every node of its chain from new_from down (#82: node by node as they are now —
+    // each run of nodes still parent → child is sealed by its head; a MOVE's new_from may name its NEW parents: the moved node itself
+    // is never sealed by it, its older records follow)
+    if (nf0 != null && nf0 <= L) sealRuns(s, isMove && nf0 < L ? onode.map(n => (n === tgt ? null : n)) : onode, nf0, rec.ts)   // a move's own node is never sealed by it (its movedAt = this record's time keeps its subtree out too)
     return 'ok'
+  }
+  /** Seal what a record BEGAN: nodes[nf0..] (its chain node by node as they are now; null = left out), each run of nodes still
+   * parent → child by its head; nodes moved in under them at / after recTs are left out (sealNode); the record's own chain never is. */
+  function sealRuns(s, nodes, nf0, recTs) {
+    const own = new Set(nodes.slice(nf0).filter(Boolean))
+    for (let i = nf0; i < nodes.length; i++) {
+      const n = nodes[i]
+      if (!n || n.sealed) continue
+      if (i > nf0 && nodes[i - 1] && parentKeyOf(n.key) === nodes[i - 1].key) continue   // sealed with its run's head
+      sealNode(s, n, true, null, recTs, own)
+    }
   }
   function lineOf(r) {
     const data = r.data != null && typeof r.data === 'object' ? r.data : null
@@ -1924,7 +2398,7 @@ export function createReplay(state, { now }) {
   function build(withLogs) {
     const out = new Map()
     for (const s of sessions.values()) {
-      if (s.dead.has('') && s.nodes.size === 1) continue   // 6d: a dismissed session with no newer run
+      if ((s.dead.has('') && s.nodes.size === 1) || s.created == null) continue   // 6d: a dismissed session with no newer run (#82: or one only a skipped move named)
       if (withLogs) for (const dm of s.dms) {   // 6d: a dismissal's entry is in its PARENT's log (when that instance was there then)
         const r = s.nodes.get(parentKeyOf(pathKey(dm.path)))
         if (!r || r.sealed && r.created != null && r.created > dm.ts) continue
@@ -1959,12 +2433,19 @@ export function createReplay(state, { now }) {
     if (n.kind === 'agent') n.plan_end = r.pe || null   // 6d: the plan-end marker
     n.partial = !r.marker   // 6c: the replay never saw the record that began this run (it began before the window)
     n.cpartial = !r.marker && (r.cnt == null || r.cntPartial)   // 6d: …but a carry-forward's count makes its count exact
-    n.pt = { a: r.tA, l: r.tL, p: r.tP, e: r.tE }   // what the window holds: the carry-forward re-checkpoints what would fall out of it
+    n.pt = { a: r.tA, l: r.tL, p: r.tP, e: r.tE, r: r.tR, m: r.tM }   // what the window holds: the carry-forward re-checkpoints what would fall out of it
+    n.rank = r.rank || null   // #82: its stored rank (null = derived)
+    if (r.moved.length) {   // #82: its move history (move records + a carry-forward's list), oldest first, de-duplicated, the newest 8
+      const seen = new Set(), ms = []
+      for (const m of r.moved.slice().sort((a, b) => a.at - b.at)) { const k = m.at + '\u0001' + m.from; if (!seen.has(k)) { seen.add(k); ms.push({ from: m.from, at: m.at }) } }
+      n.moved = ms.slice(-8)
+    }
     if (withLogs) {
       n.log = r.log.slice().reverse().sort(ordCmp)
-      while (n.log.length > N) n.log.shift()   // 6d: a dismissal's entry attached late may push the log over its cap
+      let shiftedTs = 0
+      while (n.log.length > N) shiftedTs = Math.max(shiftedTs, n.log.shift().ts)   // 6d: a dismissal's entry attached late may push the log over its cap (#82: its floor moves up as a live drop's does)
       n.log_dropped = Math.max(0, (r.cnt != null ? r.cnt : r.total) - n.log.length)   // 6d: the cf's count when one was met (exact)
-      n.log_floor = r.floor || (r.marker ? 0 : (r.total ? cutoff : 0))   // an instance that began before the window: older entries are only in the files
+      n.log_floor = Math.max(r.floor || (r.marker ? 0 : (r.total ? cutoff : 0)), shiftedTs)   // an instance that began before the window: older entries are only in the files
     }
     return n
   }
@@ -2100,7 +2581,8 @@ export function boardView(state, now, opts = {}) {
     const isAg = n.kind === 'agent', pl = planOf(s, n)
     const base = { path: n.path, kind: n.kind, name: n.key ? n.name : null, depth: n.depth, parent: n.key ? (s.nodes.get(n.parent) || { path: n.parent }).path : null, host,
       plan_item: n.plan || null, plan_ix: n.plan && Number.isInteger(n.plan_ix) ? n.plan_ix : null,
-      plan_node: pl ? true : null, plan_end_at: pl ? planEndAt(s, n, pl) : null, plan_end_how: pl ? planEndHow(s, n, pl) : null }   // 6c: a node holding plan items; when its plan ended (null = open); 6d: how (all-done | done | abandoned)
+      plan_node: pl ? true : null, plan_end_at: pl ? planEndAt(s, n, pl) : null, plan_end_how: pl ? planEndHow(s, n, pl) : null,   // 6c: a node holding plan items; when its plan ended (null = open); 6d: how (all-done | done | abandoned)
+      rank: n.key ? rankOf(n) : null, rank_set: n.key && validRank(n.rank) ? true : null }   // #82: its position among its siblings (plan items, then contexts, then agents — each by rank); rank_set = placed explicitly
     if (raw) return compact({ ...base, key: n.key, parent_key: n.parent, state: !isContext(n) && eff.gone ? 'gone' : eff.was, was: !isContext(n) && eff.gone ? eff.was : null, implicit: n.implicit,
       active: isAg ? isActive(n) : null, host_down: down || null, current: rawLine(n.current), progress: n.progress ? { ...n.progress } : null, bar, eta_at: n.eta_at,
       created_at: n.created_at, last_activity: n.last_activity, finished_at: n.finished_at, gone_at: isAg ? n.gone_at : null, stale_after_ms: n.stale_after_ms, log: lg })
@@ -2292,7 +2774,8 @@ export function logView(state, q, now = Date.now(), opts = {}) {
   let total = 0, dropped = 0
   for (const n of scope) { total += n.log.length; dropped += n.log_dropped }
   const head = { ok: true, session: s.session, project: s.project, user: s.user, path: node.path, kind: node.kind, own }
-  const target = { realm: s.realm, project: s.project, user: s.user, session: s.session, key: node.key, own, depth: node.depth, partial: !!node.partial }   // 6c: depth + partial for the run boundary (filePage)
+  const target = { realm: s.realm, project: s.project, user: s.user, session: s.session, key: node.key, own, depth: node.depth, partial: !!node.partial,   // 6c: depth + partial for the run boundary (filePage)
+    ...nodeAliases(s, node, !own) }   // #82: the old paths its history was written under (moved_from) — the day files are searched under them too
   const fc = parseFileCursor(q.cursor)
   if (fc) {
     if (!(opts && opts.files)) return bad('bad-cursor', 'that cursor pages the day files, which this reader does not serve')
@@ -2362,11 +2845,58 @@ export function fileEntryMatches(rec, target) {
   if (recordKind(rec) !== 'entry' || !target) return false
   if (lc(rec.session) !== lc(target.session) || projKey(rec.project) !== projKey(target.project) || lc(rec.user) !== lc(target.user)) return false
   if ((lc(rec.realm) || 'default') !== (lc(target.realm) || 'default')) return false
-  const k = pathKey(rec.path), t = target.key || ''
-  return target.own ? k === t : under(k, t)
+  return !!matchAlias(rec, target)
 }
-/** A day-file entry in logView's entry shape (the small in-memory form + path, rel and `rendered` as recorded). */
-export const fileEntryView = (rec, now, basePath = '') => ({ ...smallOf(rec), path: rec.path, rel: relPath(rec.path, basePath), rendered: renderText(rec.text, rec.progress, rec.eta_at, now) })
+/**
+ * #82: which name of `target` a day-file record was written under: { a:null } = its current path (written after its last move —
+ * `after`), { a: alias } = an OLD path (a moved_from of the node, of an ancestor, or — a subtree log — of a node now under it,
+ * written in [alias.after, alias.before]); null = neither.
+ */
+function matchAlias(rec, target) {
+  const k = pathKey(rec.path), t = target.key || '', ts = Number(rec.ts) || 0
+  if ((target.own ? k === t : under(k, t)) && !(target.after > ts)) return { a: null }
+  for (const a of target.aliases || []) if ((target.own ? k === a.key : under(k, a.key)) && ts <= a.before && ts >= a.after) return { a }
+  return null
+}
+/**
+ * #82: the old paths a node's history was written under — { aliases:[{ key, depth, base, before, after, start }], after } (both
+ * absent when it never moved). For each move event of the node or an ancestor (node.moved: { from, at }): records under that old
+ * path (+ the node's relative path below the moved one) written in [after, before] are the node's — `after` = the latest earlier
+ * move on the path between them (before that the node wasn't there yet); `start` = it can hold the record that BEGAN the node's
+ * run. A subtree log adds each node under it that was moved in (start:false). `after` on the result: a record at the CURRENT
+ * path written before the latest move on the node's path belongs to whatever was there before. At most 32 aliases.
+ */
+export function nodeAliases(sess, node, subtree) {
+  const up = []
+  for (let n = node; n; n = n.parent != null ? sess.nodes.get(n.parent) : null) up.push(n)
+  const evs = []
+  for (const A of up) for (const m of A.moved || []) evs.push({ A, m })
+  const aliases = []
+  const add = (from, rel, depth, base, before, after, start) => { const p = parsePath(from + rel); if (p.ok && aliases.length < 32) aliases.push({ key: p.key, depth, base, before, after, start }) }
+  let latest = 0
+  for (const { A, m } of evs) {
+    latest = Math.max(latest, m.at)
+    let after = 0
+    for (const e of evs) if (e.m.at < m.at && e.A.depth >= A.depth) after = Math.max(after, e.m.at)
+    const fp = parsePath(m.from)
+    if (!fp.ok) continue
+    add(m.from, node.path.slice(A.path.length), fp.segs.length + (node.depth - A.depth), node.path, m.at, after, true)
+  }
+  if (subtree) for (const k of subtreeKeys(sess, node.key).slice(1)) {
+    const D = sess.nodes.get(k)
+    const ms = (D && D.moved) || []
+    ms.forEach((m, i) => { const fp = parsePath(m.from); if (fp.ok) add(m.from, '', fp.segs.length, D.path, m.at, i ? ms[i - 1].at : 0, false) })
+  }
+  return aliases.length ? { aliases, after: latest } : {}
+}
+/** A day-file entry in logView's entry shape (the small in-memory form + path, rel and `rendered` as recorded). #82: with the
+ * target, an entry written under an OLD path (an alias) shows the path its node has now. */
+export const fileEntryView = (rec, now, basePath = '', target = null) => {
+  let path = rec.path
+  const hit = target && target.aliases ? matchAlias(rec, target) : null
+  if (hit && hit.a) { const p = parsePath(rec.path); if (p.ok) { const rest = formatPath(p.segs.slice(hit.a.depth)); path = hit.a.base && rest ? `${hit.a.base}/${rest}` : (hit.a.base || rest) } }
+  return { ...smallOf(rec), path, rel: relPath(path, basePath), rendered: renderText(rec.text, rec.progress, rec.eta_at, now) }
+}
 /**
  * 6c: did this day-file record BEGIN the current run of `target` (logView's files.target)? It is the first persisted record of
  * that node's instance: a record of the same session at or under the node whose `new_from` (the first new index on its chain
@@ -2378,7 +2908,11 @@ export function fileRunStart(rec, target) {
   if (!k || k === 'rep' || !target || !Number.isInteger(rec.new_from) || rec.new_from < 0) return false
   if (lc(rec.session) !== lc(target.session) || projKey(rec.project) !== projKey(target.project) || lc(rec.user) !== lc(target.user)) return false
   if ((lc(rec.realm) || 'default') !== (lc(target.realm) || 'default')) return false
-  return under(pathKey(rec.path), target.key || '') && rec.new_from <= (Number(target.depth) || 0)
+  // #82: a MOVE record's new_from names the moved node's NEW parents — it began their run, never the moved node's (or anything under it)
+  if (typeof rec.moved_from === 'string' && under(target.key || '', pathKey(rec.path))) return false
+  const hit = matchAlias(rec, { ...target, own: false })
+  if (!hit) return false
+  return hit.a ? (hit.a.start && rec.new_from <= hit.a.depth) : rec.new_from <= (Number(target.depth) || 0)
 }
 /**
  * 6c: the DAY-FILE half of a log page (the I/O-free part of the bridge's actLogPage; `records` is the facet's readBackwards
@@ -2407,7 +2941,7 @@ export async function filePage(lv, files, records, opts = {}) {
       continue
     }
     if (rec && fileEntryMatches(rec, f.target) && !(f.before && (rec.ts > f.before.ts || f.before.ids.has(rec.id)))) {
-      const x = fileEntryView(rec, now, lv.path), b = utf8(JSON.stringify(x)) + 1
+      const x = fileEntryView(rec, now, lv.path, f.target), b = utf8(JSON.stringify(x)) + 1   // #82: an entry under an old path shows the node's path now
       if (n >= f.need || (out.length && bytes + b > maxB)) { stop = 'full'; break }
       out.push(x); bytes += b; n++; lastHit = r
     }
@@ -2459,7 +2993,8 @@ function snapNode(n) {
     stale_after_ms: n.stale_after_ms, implicit: n.implicit, progress: n.progress ? { done: n.progress.done, total: n.progress.total, unit: n.progress.unit, ...(n.progress.skipped > 0 ? { skipped: n.progress.skipped } : {}) } : null,   // #79: + skipped, only when > 0 (a 1.65 reader ignores it)
     eta_at: n.eta_at, current: snapLine(n.current), plan_item: !!n.plan, plan_ix: n.plan && Number.isInteger(n.plan_ix) ? n.plan_ix : null,
     log_n: (n.log_n != null ? n.log_n : n.log.length + n.log_dropped) || null, log_partial: !!n.cpartial,   // 6d: partial = the COUNT understates (a cf's count makes it exact)
-    plan_end: n.kind === 'agent' && n.plan_end ? { state: n.plan_end.state, ts: n.plan_end.ts } : null })   // 6d: the plan-end marker (receivers compute plan_end_at)
+    plan_end: n.kind === 'agent' && n.plan_end ? { state: n.plan_end.state, ts: n.plan_end.ts } : null,
+    rank: validRank(n.rank) })   // #82: a STORED rank only (a 1.68 receiver ignores it; every receiver derives the rest from created_at + plan_ix)   // 6d: the plan-end marker (receivers compute plan_end_at)
 }
 const sortedNodes = s => [...s.nodes.values()].sort((a, b) => cmp(a.key, b.key))
 function snapSession(s) {
@@ -2517,6 +3052,7 @@ function wNode(r) {
   n.log_n = Number.isInteger(r.log_n) && r.log_n > 0 ? Math.min(r.log_n, 1e9) : 0   // 6c: the owner's own-entry count
   n.partial = n.cpartial = r.log_partial === true
   if (n.kind === 'agent') n.plan_end = wPlanEnd(r.plan_end)   // 6d
+  n.rank = validRank(r.rank)   // #82
   n.persisted = true
   return n
 }

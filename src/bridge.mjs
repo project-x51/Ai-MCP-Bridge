@@ -114,7 +114,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.68.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.69.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1106,7 +1106,8 @@ async function actApplyOne(ident, input) {
   if (PERSIST && r.records.length) { persisted = true; for (const rec of r.records) if (!(await persistActivity(rec))) persisted = false }
   if (++actApplies % 50 === 0) actBudget()
   return { ok: true, id: r.id, ts: r.ts, session: ident.session, path: r.path, agent: r.agent, context: r.context, current: r.current, state: r.state, stale_at: r.stale_at, logged: r.logged,
-    ...(r.plan ? { plan: r.plan } : {}), ...(persisted === false ? { persisted: false } : {}), ...(r.evicted.length ? { evicted: r.evicted } : {}), ...(r.warnings.length ? { warnings: r.warnings } : {}) }
+    ...(r.plan ? { plan: r.plan } : {}), ...(persisted === false ? { persisted: false } : {}), ...(r.evicted.length ? { evicted: r.evicted } : {}), ...(r.warnings.length ? { warnings: r.warnings } : {}),
+    ...(r.rank ? { rank: r.rank } : {}), ...(r.moved ? { moved: r.moved } : {}), ...(r.cascade ? { cascade: r.cascade.map(c => ({ path: c.path, from_state: c.from })) } : {}) }   // v1.69.0 (#82): placed / moved / what the abandon cascaded to
 }
 const actShow = o => (o && typeof o === 'object' && o.project != null ? { ...o, project: projName(o.project) } : o)   // #71: canonical project spelling
 // ctx (v1.61.0, #70 step 5): who is asking — { ws } a dashboard (its queued remote fetches are bounded per dashboard),
@@ -1165,7 +1166,10 @@ function actActionQuery(m) {
   const q = {}, src = m && typeof m === 'object' ? m : {}
   for (const k of ['session', 'project', 'user', 'path', 'action']) if (src[k] != null && typeof src[k] !== 'object') q[k] = String(src[k]).slice(0, 512)
   const a = src.args && typeof src.args === 'object' && !Array.isArray(src.args) ? src.args : null
-  if (a) { q.args = {}; if (typeof a.state === 'string') q.args.state = a.state.slice(0, 16); if (Number.isFinite(Number(a.stale_min))) q.args.stale_min = Number(a.stale_min) }
+  if (a) {
+    q.args = {}; if (typeof a.state === 'string') q.args.state = a.state.slice(0, 16); if (Number.isFinite(Number(a.stale_min))) q.args.stale_min = Number(a.stale_min)
+    for (const k of ['to', 'before', 'after', 'position']) if (typeof a[k] === 'string') q.args[k] = a[k].slice(0, 512)   // v1.69.0 (#82): move's new parent; reorder / move's place
+  }
   return q
 }
 async function activityAction(m, ctx = {}) {   // on the gateway a dashboard is attached to
@@ -1178,6 +1182,10 @@ async function activityAction(m, ctx = {}) {   // on the gateway a dashboard is 
   if (lc(host) === lc(HOSTNAME)) return actApplyAction(q, { kind: 'dashboard', user: ACT_DASH_USER, host: HOSTNAME })
   const remote = actKnownHost(host)
   if (!remote) return { ok: false, code: 'unknown-host', host, what: `no activity from a host "${host.slice(0, 80)}" is held here` }
+  if (Act.PLAN82_ACTIONS.includes(q.action)) {   // v1.69.0 (#82): only an owner that declared activity_plan applies move / reorder
+    const pl = peerGw.get(actOwner.get(remote))
+    if (pl && pl.act && pl.act.cap && !pl.act.plan) return { ok: false, code: 'owner-unsupported', host: remote, what: `host ${remote} runs a bridge older than 1.69.0 — ${q.action} needs 1.69.0+ on the node's host` }
+  }
   return activityRemote(remote, 'action', q, { ...ctx, by: { user: ACT_DASH_USER } })   // queued like a fetch; owner-unreachable / owner-unsupported / busy
 }
 /** The OWNER applies one action to its own node, persists its records in order and publishes the change. */
@@ -1195,6 +1203,7 @@ async function actApplyAction(q, by) {
   log(`activity: ${r.action} on ${q.session}/${r.path || '@root'} (${projName(q.project || 'unclassified')}) ${Act.byText(by)}${r.dismissed ? ` — ${r.dismissed.nodes} node(s) off the board` : ''}`)
   if (r.ident) notifyActivitySession(r.ident, Act.actionNotice(r, { by, host: HOSTNAME, ts: actNow() }))   // #80: tell the session (batched; never fails the action)
   return { ok: true, host: HOSTNAME, action: r.action, path: r.path, applied: r.applied, ...(r.dismissed ? { dismissed: r.dismissed } : {}), ...(r.warnings && r.warnings.length ? { warnings: r.warnings } : {}),
+    ...(r.moved_from != null ? { moved_from: r.moved_from, to: r.to } : {}), ...(r.where ? { where: r.where } : {}), ...(r.rank ? { rank: r.rank } : {}),   // v1.69.0 (#82)
     ...(persisted === false ? { persisted: false } : {}) }
 }
 // #80 (v1.68.0): NOTICES TO THE OWNING SESSION — the one internal hook for "the board changed under you" messages.
@@ -1360,6 +1369,8 @@ async function activityCall(op, payload) {   // op 'log' { ident, input } | 'rea
     if (role === 'follower' && gwSock && !gwSock.destroyed && gwRegistered) {
       const gv = roster.get(gatewayId)?.bridge_version   // a ≤1.57 gateway ignores ACTIVITY frames: say so now, not after a timeout
       if (gv && verLt(gv, '1.58.0')) return { ok: false, code: 'gateway-unsupported', what: `this host's gateway runs bridge ${gv}; the activity board needs 1.58.0+ on the gateway (restart it on the new version)` }
+      // v1.69.0 (#82): a ≤1.68 gateway would silently IGNORE move / to / before / after / position (an item appended, a move not made)
+      if (gv && op === 'log' && verLt(gv, '1.69.0') && Act.usesPlan82(payload.input)) return { ok: false, code: 'gateway-unsupported', what: `this host's gateway runs bridge ${gv}; move / to / before / after / position need 1.69.0+ on the gateway (restart it on the new version)` }
       return activityForward(op, payload)
     }
     if (Date.now() - t0 >= ACT_FWD_MS) return { ok: false, code: 'no-gateway', what: 'no gateway on this host right now (re-election in progress?) — retry in a moment' }
@@ -1445,7 +1456,7 @@ function actUnitsNow() { if (!actUnits || actUnitsVer !== actVer) { actUnits = A
 // adoptPeer: a fresh link state; a 1.60+ peer gets a FULL slice right away (#63 rule: a full slice on every (re)link)
 function actLinkInit(p, gw, hello) {
   if (!p) return
-  p.act = { gw, host: hostOfGw(gw), cap: !actLegacy() && !!(hello && hello.activity_gossip === Act.ACTIVITY_FORMAT), seq: 0, pub: Act.createPub(), needFull: true, last: 0, timer: null, beat: false,
+  p.act = { gw, host: hostOfGw(gw), cap: !actLegacy() && !!(hello && hello.activity_gossip === Act.ACTIVITY_FORMAT), plan: !!(hello && Number(hello.activity_plan) >= 1), seq: 0, pub: Act.createPub(), needFull: true, last: 0, timer: null, beat: false,   // v1.69.0 (#82): plan = it applies move / reorder
     bucket: ACT_FETCH_RATE, bucketAt: Date.now(), resyncAt: 0 }
   if (p.act.cap) actKick(p)
 }
@@ -1648,7 +1659,7 @@ function actKnownHost(h) {
   return null
 }
 function actRemoteInfo() {
-  return Act.remoteInfo(activity).map(x => { const p = peerGw.get(actOwner.get(x.host)); return { ...x, linked: !!(p && p.sock && !p.sock.destroyed), ...(actHostCmd.has(x.host) ? { log_cmd: actHostCmd.get(x.host) } : {}) } })   // v1.65.0: + that host's aimb-log paths
+  return Act.remoteInfo(activity).map(x => { const p = peerGw.get(actOwner.get(x.host)); return { ...x, linked: !!(p && p.sock && !p.sock.destroyed), ...(p && p.act && p.act.plan ? { plan: true } : {}), ...(actHostCmd.has(x.host) ? { log_cmd: actHostCmd.get(x.host) } : {}) } })   // v1.65.0: + that host's aimb-log paths; v1.69.0 (#82): plan = it applies move / reorder
 }
 // a peer link went away (dropPeer: closed, retired, expired): its in-flight fetches fail, and if it owned a host's slice
 // that slice's agents show as GONE until the host returns
@@ -2354,7 +2365,9 @@ const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = co
 // #70 step 4 (v1.60.0): `activity_gossip:N` = this hub sends + understands ACTIVITY_SLICE / _DOWN / _REQ / _RES in format N (a ≤1.59
 // peer ignores the field, never gets the frames, and ignores them if it did; 'legacy' test gossip mimics that). v1.62.0 (#70
 // step 6a, the node tree): N = 2 — a 1.60/1.61 peer (N = 1) and this hub exchange no slices or fetches (owner-unsupported)
-const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap(), ...(TEST_GOSSIP === 'legacy' ? {} : { activity_gossip: Act.ACTIVITY_FORMAT }) })
+// v1.69.0 (#82): `activity_plan:1` = this hub's owner applies the plan-workflow actions (move / reorder) — a ≤1.68 peer ignores
+// the field; a 1.69 gateway forwards those actions only to an owner that declared it (else owner-unsupported). The format stays v5.
+const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap(), ...(TEST_GOSSIP === 'legacy' ? {} : { activity_gossip: Act.ACTIVITY_FORMAT, activity_plan: 1 }) })
 // #66c: `retained` (the replicated retained-value set) is NOT in gossipFrame — it can be MBs and the roster is re-gossiped
 // on every unread-count change — so it rides a PEER_ROSTER only when that link hasn't had the set's current version yet
 // (a fresh link has none → it gets the whole set). LWW makes a repeat harmless; a ≤1.47 receiver ignores the field.

@@ -186,6 +186,17 @@
   .s-abandoned { color:var(--abandon); } .bg-abandoned { background:transparent !important; box-shadow:inset 0 0 0 1.5px var(--abandon); border-radius:2px !important; }
   .ar.abandoned .nm, .ar.abandoned .ln, .ar.abandoned .nm.pi, .ar.abandoned .nm.ctx { color:var(--faint); }
   .ar.abandoned .pb { opacity:.45; }
+  /* #82 (v1.69.0): everything UNDER an abandoned node is greyed too; the agent working on a plan item (its glyph + line); drag and drop */
+  .ar.abd .nm, .ar.abd .ln, .ar.abd .nm.pi, .ar.abd .nm.ctx, .ar.abd .nm.path { color:var(--faint); }
+  .ar.abd .gl { opacity:.45; } .ar.abd .pb { opacity:.45; }
+  .ar .ln .agon { display:inline-flex; align-items:center; gap:4px; max-width:100%; color:var(--muted); vertical-align:middle; }
+  .ar .ln .agon .gl { width:12px; height:12px; flex:none; display:inline-block; }
+  .ar .ln .agon .agn { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:11px; color:var(--fg); font-weight:600; }
+  .ar.abandoned .ln .agon .agn, .ar.abd .ln .agon .agn { color:var(--faint); }
+  .ar.dragging { opacity:.45; }
+  .ar.drop-before { box-shadow:inset 0 2px 0 var(--info); } .ar.drop-after { box-shadow:inset 0 -2px 0 var(--info); }
+  .ar.drop-in { background:var(--hover); box-shadow:inset 0 0 0 1px var(--info); }
+  .act-dlg select.act-pick { width:100%; margin:2px 0 6px; font:12px ui-monospace, Menlo, Consolas, monospace; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:2px; }
   .ar .by { flex:none; font-size:10.5px; color:var(--faint); font-style:italic; }
   .ar.sep .nm { color:var(--faint); font-weight:600; font-size:11px; letter-spacing:.02em; }
   .ar.pruned .nm { color:var(--faint); font-style:italic; font-weight:400; }
@@ -1038,7 +1049,7 @@
     function selfActive(s){ return !!(s&&s.current&&!s.finished_at&&s.state!=='gone'); }
     // projects (A→Z) → sessions (A→Z: a live tree must not reshuffle under the pointer) → the NODE TREE of each session (6a):
     // nodes linked by parent_key within their host (a session on several hosts shows each host's nodes); children in
-    // CREATION order (created_at, then — 6b — plan_ix, so a plan keeps its given order; then key). A node whose parent has not
+    // RANK order (#82: plan items, then contexts, then agents, each by rank — derived from creation order unless placed). A node whose parent has not
     // arrived yet sits at the top level. Each tree node: { u, kids, owner, parentHost, open, endedPlan, planNode, fbar? } —
     // owner = the nearest agent above (or the host's session self); parentHost = the parent's host (top level — 6c: the
     // session's HOME host). activeOnly hides finished / gone agents with everything under them — unless that holds part of an
@@ -1055,8 +1066,7 @@
         g.nodes.forEach(function(u){ tn[hk(u.host,u.key)]={u:u,kids:[],owner:null}; });
         var top=[], headHost=g.s.home||(g.s.self?g.s.self.host:null);   // 6c: the HOME host (the bridge's `home`; a one-host session: its host)
         g.nodes.forEach(function(u){ var t=tn[hk(u.host,u.key)], par=u.parent_key?tn[hk(u.host,u.parent_key)]:null; if(par){ par.kids.push(t); t.parentHost=par.u.host; } else { top.push(t); t.parentHost=headHost; } });
-        var pix=function(u){ return u.plan_ix==null?-1:u.plan_ix; };
-        var cmpN=function(a,b){ var x=a.u.created_at||0, y=b.u.created_at||0; if(x!==y) return x-y; if(pix(a.u)!==pix(b.u)) return pix(a.u)-pix(b.u); var p=String(a.u.key), q=String(b.u.key); if(p!==q) return p<q?-1:1; var h1=String(a.u.host).toLowerCase(), h2=String(b.u.host).toLowerCase(); return h1<h2?-1:h1>h2?1:0; };
+        var cmpN=function(a,b){ return cmpRank(a.u,b.u); };   // #82: plan items, then contexts, then agents — each by rank (was: creation order)
         // on the whole tree, before filtering: planNode = holds plan items; endedPlan (6c rule); open = holds part of an OPEN plan
         var mark=function(t){ t.planNode=t.kids.some(function(c){ return !!c.u.plan_item; }); t.endedPlan=t.planNode&&planEnded(t.kids,t.u); var o=t.planNode&&!t.endedPlan;
           t.kids.forEach(function(c){ if(mark(c)) o=true; }); t.open=o; return o; };
@@ -1147,6 +1157,8 @@
         if(st!=='skipped') out.push({id:'skip',label:'Skip',act:'skip'});
         if(st!=='todo') out.push({id:'reopen',label:'Reopen (back to ☐)',act:'reopen'});
         if(st!=='abandoned') out.push({id:'abandon',label:'Abandon item',act:'abandon'}); }
+      // #82: abandon ANY context (with its open contexts / items below — the bridge cascades), asked first
+      if(m.kind==='node'&&m.nkind==='context'&&!m.plan_item&&!m.plan_node&&m.can_plan&&m.own_state!=='abandoned') out.push({id:'abandon-ctx',label:'Abandon…',act:'abandon',confirm:true});
       var ab=false;
       if(m.plan_node){ sep();
         if(!m.plan_end_how){ out.push({id:'complete',label:'Mark plan complete',act:'complete'}); out.push({id:'abandon_plan',label:'Abandon plan…',act:'abandon_plan',confirm:true}); ab=true; }
@@ -1155,6 +1167,10 @@
         if(m.owns_open&&!ab) out.push({id:'abandon_plan',label:'Abandon open plan items…',act:'abandon_plan',confirm:true});
         if(m.quiet&&!m.finished){ out.push({id:'finish-done',label:'Mark finished — done…',act:'finish',args:{state:'done'},confirm:true}); out.push({id:'finish-failed',label:'Mark finished — failed…',act:'finish',args:{state:'failed'},confirm:true}); }
         if((m.quiet||m.finished)&&m.subtree_quiet&&!m.holds_open) out.push({id:'dismiss',label:'Dismiss from the board…',act:'dismiss',confirm:true}); }
+      if(m.kind==='node'&&m.can_plan){ sep();   // #82: ORDER and MOVE (the node's host must run 1.69+)
+        if(m.up) out.push({id:'move-up',label:'Move up',act:'reorder',args:m.up});
+        if(m.down) out.push({id:'move-down',label:'Move down',act:'reorder',args:m.down});
+        out.push({id:'move-to',label:'Move to…',act:'move',pick:true}); }
       sep();
       if(m.kind==='node') out.push({id:'copy-path',label:'Copy path',copy:'path'}); else out.push({id:'copy-session',label:'Copy session name',copy:'session'});
       if(m.has_cmd) out.push({id:'copy-cmd',label:'Copy its aimb-log command',copy:'cmd'});
@@ -1164,13 +1180,51 @@
       out.push(m.hidden?{id:'unhide',label:'Unhide',view:'unhide'}:{id:'hide',label:'Hide',view:'hide'});
       return out;
     }
-    var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed'};
+    // #82 (v1.69.0): ORDER — a node's RANK is the bridge's (lib/activity.js rankOf: a stored fractional rank when it was placed, else
+    // DERIVED from its creation time + plan position, so the default is creation order); siblings show plan items first, then the
+    // other contexts, then agents, each by rank — a state change never moves a row. rankOf here only fills in for a bridge that
+    // sends no rank (a ≤1.68 gateway serving this page).
+    function pad36(n,w){ var s=Math.max(0,Math.floor(Number(n)||0)).toString(36); return s.length>=w?s.slice(-w):new Array(w-s.length+1).join('0')+s; }
+    function rankOf(u){ return (u&&typeof u.rank==='string'&&u.rank)||(pad36(u&&u.created_at,9)+pad36(u&&u.plan_item&&u.plan_ix!=null&&u.plan_ix>=0?u.plan_ix+1:0,2)+'i'); }
+    function rankGroup(u){ return u&&u.plan_item?0:u&&u.nkind==='context'?1:2; }
+    function cmpRank(a,b){ var g=rankGroup(a)-rankGroup(b); if(g) return g; var x=rankOf(a), y=rankOf(b); if(x!==y) return x<y?-1:1; var p=String(a.key), q=String(b.key); if(p!==q) return p<q?-1:1; var h1=lcs(a.host), h2=lcs(b.host); return h1<h2?-1:h1>h2?1:0; }
+    // a sibling as the bridge's before / after expect it: "@\"name\"" for a context, the bare name for an agent
+    function sibRef(u){ return u.nkind==='agent'?String(u.name):'@"'+String(u.name)+'"'; }
+    // Move up / Move down: the neighbours in t's own group (same parent, same host) — { up:{before}, down:{after} } (null at an end)
+    function moveSteps(t,sibs){ var g=rankGroup(t.u), same=(sibs||[]).filter(function(c){ return rankGroup(c.u)===g&&lcs(c.u.host)===lcs(t.u.host); }).sort(function(a,b){ return cmpRank(a.u,b.u); });
+      var i=-1; same.forEach(function(c,j){ if(c.u.id===t.u.id) i=j; });
+      return { up:i>0?{before:sibRef(same[i-1].u)}:null, down:i>=0&&i<same.length-1?{after:sibRef(same[i+1].u)}:null }; }
+    function subtreeHeight(t){ var h=0; (function w(x,d){ if(d>h) h=d; x.kids.forEach(function(c){ w(c,d+1); }); })(t,0); return h; }
+    function inSubtree(t,x){ var k=String(t.u.key), xk=String(x.u.key); return lcs(t.u.host)===lcs(x.u.host)&&(xk===k||xk.indexOf(k+'/')===0); }
+    // can `t` move UNDER `x` (x = a tree node, or the session root {u:{key:'',depth:0,path:'',host}, kids:top})? Same host, not into
+    // itself, not where it already is, the depth limit (6), and no sibling there of the same kind and name (target-exists)
+    function canMoveInto(t,x){ if(!t||!x||lcs(t.u.host)!==lcs(x.u.host)) return false; if(x.u.key&&inSubtree(t,x)) return false;
+      if(String(t.u.parent_key||'')===String(x.u.key||'')) return false;
+      if((x.u.depth||0)+1+subtreeHeight(t)>6) return false;
+      return !x.kids.some(function(c){ return c.u.nkind===t.u.nkind&&lcs(c.u.name)===lcs(t.u.name)&&lcs(c.u.host)===lcs(t.u.host); }); }
+    // the MOVE TO… picker: every node of the session (on t's host) it may go under, in tree order, and the session root first
+    function moveTargets(top,t,sessName){ var out=[], root={u:{key:'',depth:0,path:'',host:t.u.host},kids:(top||[]).filter(function(c){ return lcs(c.u.host)===lcs(t.u.host); })};
+      if(canMoveInto(t,root)) out.push({path:'',label:sessName?sessName+' (the session root)':'(the session root)',depth:0});
+      (function w(l){ l.slice().sort(function(a,b){ return cmpRank(a.u,b.u); }).forEach(function(x){ if(lcs(x.u.host)!==lcs(t.u.host)||inSubtree(t,x)) return; if(canMoveInto(t,x)) out.push({path:x.u.path,label:x.u.path,depth:x.u.depth||0}); w(x.kids); }); })(root.kids);
+      return out; }
+    // DRAG AND DROP: dropping `drag` on `over` at height fraction `frac` — a sibling of its own kind → reorder before (upper half) /
+    // after it; any other node it may move under → move into it (asked first); else null
+    function dropPlan(drag,over,frac){ if(!drag||!over||drag.u.id===over.u.id||lcs(drag.u.host)!==lcs(over.u.host)||inSubtree(drag,over)) return null;
+      if(String(drag.u.parent_key||'')===String(over.u.parent_key||'')&&rankGroup(drag.u)===rankGroup(over.u)) return frac<0.5?{act:'reorder',args:{before:sibRef(over.u)}}:{act:'reorder',args:{after:sibRef(over.u)}};
+      return canMoveInto(drag,over)?{act:'move',args:{to:over.u.path}}:null; }
+    // #82 part 2: the agent WORKING on a plan item — among its agent children, the most recently active one still running (not
+    // finished, not gone), else the most recently active of them; null when it has none
+    function workingAgent(t){ var ags=(t&&t.kids||[]).filter(function(c){ return c.u.nkind==='agent'; }); if(!ags.length) return null;
+      var live=ags.filter(function(c){ return !c.u.finished_at&&c.u.state!=='gone'; }), pool=live.length?live:ags;
+      return pool.slice().sort(function(a,b){ return (b.u.last_activity||0)-(a.u.last_activity||0); })[0]; }
+    var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed',move:'moved',reorder:'moved'};
     return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg, sessGlyph:sessGlyph, sessKind:sessKind,   // #79: sessGlyph
       applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, entryTag:entryTag, subtreeCount:subtreeCount, barOf:barOf,
       fmtDur:fmtDur, fmtClock:fmtClock, pct:pct, planGlyph:planGlyph, isOpenItem:isOpenItem, planEnded:planEnded, hostTagOn:hostTagOn, itemState:itemState, barText:barText,
       planOpenDefault:planOpenDefault, rollKids:rollKids, subtreeLog:subtreeLog, norm3:norm3, force:force, skOf:skOf, skPct:skPct, ownBar:ownBar, progressText:progressText,   // #79
       nodeOpenDefault:nodeOpenDefault, PLAN_OPEN_STEPS:PLAN_OPEN_STEPS, planOpenIndex:planOpenIndex, planOpenValue:planOpenValue, logCmd:logCmd, quietAgent:quietAgent, subtreeAgentsQuiet:subtreeAgentsQuiet,
-      rootQuiet:rootQuiet, ownsOpenPlan:ownsOpenPlan, openItemsOwned:openItemsOwned, countNodes:countNodes, menuFor:menuFor, ACTION_DONE:ACTION_DONE, lcs:lcs };   // 6d
+      rootQuiet:rootQuiet, ownsOpenPlan:ownsOpenPlan, openItemsOwned:openItemsOwned, countNodes:countNodes, menuFor:menuFor, ACTION_DONE:ACTION_DONE, lcs:lcs,   // 6d
+      rankOf:rankOf, rankGroup:rankGroup, cmpRank:cmpRank, sibRef:sibRef, moveSteps:moveSteps, canMoveInto:canMoveInto, moveTargets:moveTargets, dropPlan:dropPlan, workingAgent:workingAgent };   // #82
   })();
   window.AimbAct=AimbAct;
 
@@ -1184,7 +1238,8 @@
   // user), copies, and the view-only Pin / Hide (kept in this browser).
   var ACT={ st:{units:null,seq:0,epoch:null,head:null,error:null}, on:false, skew:0, staleMin:null, planOpenMin:null, activeOnly:false, plansOnly:false, defLevel:'all', levels:{}, open:{},
     logs:{}, ents:{}, ref:0, pending:{}, tips:{}, acts:{}, togs:{}, opened:{}, rowInfo:{}, rowMenu:{}, kmap:{}, kn:0, timer:null,
-    sel:null, selN:null, pins:{}, hidden:{}, showHidden:{}, fb:{}, menu:null, dlg:null, lastCopy:null, fullIdx:{}, fullSess:{}, suppressClick:false };
+    sel:null, selN:null, pins:{}, hidden:{}, showHidden:{}, fb:{}, menu:null, dlg:null, lastCopy:null, fullIdx:{}, fullSess:{}, suppressClick:false,
+    fullPar:{}, rowNode:{}, drag:null };   // #82: each node's parent (full tree); data-k → node id; the row being dragged
   // ACT.open[id]: true / false = the viewer's choice; undefined = the row's default (6c: a plan node — open while its plan is
   // open or ended less than the finished-plan window ago; 6d: also every ANCESTOR of an open plan). ACT.rowInfo[data-k] = the
   // row's identity (also on the row's data-*); ACT.rowMenu[data-k] = its menu model (lazy); ACT.sel = the selected row
@@ -1260,6 +1315,9 @@
   function saveSet(k,o){ try{ localStorage.setItem(k,JSON.stringify(Object.keys(o))); }catch(e){} }
   // ---- 6d: the aimb-log command of a node's HOST (the board head for this host, remote_hosts for the others — paths only)
   function hostCmd(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return h.log_cmd||null; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return (r&&r.log_cmd)||null; }
+  // #82: does the node's host apply move / reorder / abandon-any-context? This gateway (it served this page) does; another host
+  // when the board head says so (remote_hosts[].plan — a ≤1.68 owner would refuse them)
+  function hostPlan(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return true; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return !!(r&&r.plan); }
   // ---- 6d: action FEEDBACK on the row: a spinner while pending (and queued), then ✓ (a few seconds) or the error code
   function fbHtml(id){ var f=ACT.fb[id]; if(!f) return ''; var age=Date.now()-f.at;
     if(f.st==='pending') return '<span class="fb pending"><span class="spin"></span>'+esc(f.label)+'…'+(f.queued?' (queued)':'')+'</span>';
@@ -1278,7 +1336,7 @@
   function actRender(){
     var tree=document.getElementById('acttree'); if(!tree) return;
     var tag=document.getElementById('acttag'), now=anow(), sm=actStaleMin(), rows=[];
-    ACT.tips={ hd:'Host down: its gateway sent a going-down notice or its link dropped — every agent on that host shows as gone until it returns (unlike gone: a session that left)' }; ACT.acts={}; ACT.togs={}; ACT.opened={}; ACT.rowInfo={}; ACT.rowMenu={};
+    ACT.tips={ hd:'Host down: its gateway sent a going-down notice or its link dropped — every agent on that host shows as gone until it returns (unlike gone: a session that left)' }; ACT.acts={}; ACT.togs={}; ACT.opened={}; ACT.rowInfo={}; ACT.rowMenu={}; ACT.rowNode={};
     // 6d HOOK (6c): every row carries its identity as data-* attributes (kind; the node's ORIGIN host + path; session / project /
     // user; an entry's id); ACT.rowInfo[data-k] holds the same object, ACT.rowMenu[data-k] its menu model. ex = { menu, tog, open, sel }
     function row(id,cls,d,html,act,info,ex){ var k=kOf(id); ex=ex||{}; rows.push({k:k,cls:cls,d:d,html:html,info:info||null,open:ex.open,sel:!!ex.sel}); if(act) ACT.acts[k]=act; if(ex.tog) ACT.togs[k]=ex.tog; if(ex.open!=null) ACT.opened[k]=!!ex.open; if(info) ACT.rowInfo[k]=info; if(ex.menu) ACT.rowMenu[k]=ex.menu; }
@@ -1292,8 +1350,8 @@
     // 6d (#70 "Decisions after 6c, for 6d" 9): header and project COUNTS ignore the filters (always the real totals — the
     // unfiltered tree, which the menus also check actions against); rollups still follow the filters (6c)
     var full=AimbAct.buildTree(ACT.st.units,{}), counts={}, nAct=0;
-    ACT.fullIdx={}; ACT.fullSess={};
-    full.forEach(function(p){ counts[p.key]=p; nAct+=p.nActive; p.sessions.forEach(function(x){ ACT.fullSess[x.s.id]=x; (function w(l){ l.forEach(function(t){ ACT.fullIdx[t.u.id]=t; w(t.kids); }); })(x.kids); }); });
+    ACT.fullIdx={}; ACT.fullSess={}; ACT.fullPar={};
+    full.forEach(function(p){ counts[p.key]=p; nAct+=p.nActive; p.sessions.forEach(function(x){ ACT.fullSess[x.s.id]=x; (function w(l,par){ l.forEach(function(t){ ACT.fullIdx[t.u.id]=t; ACT.fullPar[t.u.id]=par; w(t.kids,t); }); })(x.kids,x); }); });   // #82: + each node's parent (the session record for a top-level node: both have .kids)
     if(tag) tag.textContent=full.length+(full.length===1?' project':' projects')+' · '+nAct+' active agent'+(nAct===1?'':'s')+(head.loading?' · loading':'');
     if(ACT.sel&&!selAlive()) actClearSel();   // 6d: the selected node left the board (dismissed, expired, its host's slice dropped)
     // ---- a session row: its own line (the root node); a multi-host session opens into each host's own line. Click = select
@@ -1314,7 +1372,10 @@
       return { kind:'node', nkind:u.nkind, plan_item:!!u.plan_item, item_state:u.plan_item?AimbAct.itemState(u):null, plan_node:!!ft.planNode, plan_end_how:ft.planNode&&ft.endedPlan?(u.plan_end_how||'done'):null,
         agent_ok:ag, owns_open:ag&&AimbAct.ownsOpenPlan(ft), quiet:ag&&AimbAct.quietAgent(ft,n2,sm2), finished:!!u.finished_at, subtree_quiet:ag&&AimbAct.quietAgent(ft,n2,sm2)&&ft.kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }),
         holds_open:!!ft.open, has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,u.path):null, pinned:!!ACT.pins[u.id], hidden:!!ACT.hidden[u.id], id:u.id, fbId:u.id,
-        name:(ag?'agent ':'')+u.path, why:e.gone?'gone':e.stale?'stale':u.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(ft), nNodes:AimbAct.countNodes(ft), host:u.host }; }; }
+        name:(ag?'agent ':'')+u.path, why:e.gone?'gone':e.stale?'stale':u.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(ft), nNodes:AimbAct.countNodes(ft), host:u.host,
+        own_state:(u.current&&u.current.state)||null, can_plan:hostPlan(u.host), sid:s.id, session:s.session, nid:u.id,   // #82: Move up / down / to…, Abandon… (a 1.69+ owner)
+        up:steps(ft).up, down:steps(ft).down }; }; }
+    function steps(ft){ var par=ACT.fullPar[ft.u.id]; return AimbAct.moveSteps(ft,par?par.kids:[]); }   // its siblings: the parent's (or the session's top-level) children
     // … of a SESSION row (one host's root): a multi-host session's row offers only copies + pin / hide; its actions sit on each
     // host's own line (an action names ONE host's nodes)
     function sessMenu(s,host,rowId,hostLine){ return function(){ var fx=ACT.fullSess[s.id], se=selfFor(s,host), n2=anow(), sm2=actStaleMin(), lc=hostCmd(host);
@@ -1333,22 +1394,28 @@
     // select (its log in the panel); the chevron (or a double-click) opens its children, one level deeper. 6b: a PLAN ITEM shows
     // ☐ / the in-progress mark / ☑ / a struck-through skipped row, its name as a checklist entry, and its line only once it says
     // more than its name; a host tag only where the node's host differs from its parent's (AimbAct.hostTagOn)
-    function nodeRows(t,s,d,multi){
+    function nodeRows(t,s,d,multi,inAb){
       var u=t.u, ctx=u.nkind==='context', id=u.id, e=AimbAct.effState(u,t.owner,now,sm), pi=!!u.plan_item, ist=pi?AimbAct.itemState(u):null, can=t.kids.length>0||t.nHidden>0;
       var open=can&&isOpen(id,AimbAct.nodeOpenDefault(t,now,pom)), sel=!!ACT.sel&&ACT.sel.kind==='node'&&ACT.sel.id===id;
       var noLine=ctx?e.noLine:!!u.implicit&&!u.current, bar=('fbar' in t)?t.fbar:AimbAct.barOf(u), own=(u.current&&u.current.state)||'';
+      var ab=ist==='abandoned'||own==='abandoned';   // #82 part 5: an abandoned node greys out everything under it too (abd)
       var nm=pi?'<span class="nm pi" title="'+attr(u.path)+'">'+esc(u.name)+'</span>':ctx?'<span class="nm ctx" title="'+attr(u.path)+'">@'+esc(u.name)+'</span>':'<span class="nm path" title="'+attr(u.path)+'">'+esc(u.name)+'</span>';
-      var line=pi&&u.current&&String(u.current.text)===String(u.name)?'<span class="ln"></span>':u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+'</span>':'<span class="ln none">'+(ctx?'no current line':u.implicit?'not reported yet':'no current line')+'</span>';
+      // #82 part 2: a plan item with AGENT children shows the working agent (its glyph + its current line) beside its box, even closed
+      var wa=pi?AimbAct.workingAgent(ACT.fullIdx[id]||t):null, chip='';
+      if(wa){ var we=AimbAct.effState(wa.u,null,now,sm), wl=wa.u.current?AimbAct.renderText(wa.u.current.text,AimbAct.barOf(wa.u),wa.u.eta_at,now):(wa.u.implicit?'not reported yet':'no current line');
+        chip='<span class="agon" data-tip="'+tipK(id+'w','agent '+wa.u.path+' is on it — '+(we.stale?'stale, was '+we.was:we.state)+'\n'+wl)+'">'+AimbAct.glyphSvg(we,now,null)+'<span class="agn">'+esc(wa.u.name)+'</span>'+esc(wl)+'</span>'; }
+      var line=pi&&u.current&&String(u.current.text)===String(u.name)?'<span class="ln">'+chip+'</span>':u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+(chip?' '+chip:'')+'</span>':'<span class="ln none">'+(ctx?'no current line':u.implicit?'not reported yet':'no current line')+'</span>';
       var glyph=pi?AimbAct.glyphSvg(e,now,'plan'):AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':ctx?'ctx':null);
-      var info={kind:'node',nkind:u.nkind,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',plan_item:pi?'1':'',plan_node:t.planNode?'1':''};
-      row(id,'ar click'+(ctx?' cx':'')+(pi?' pi'+(ist==='skipped'?' skipped':ist==='done'?' pdone':''):'')+(ist==='abandoned'||own==='abandoned'?' abandoned':'')+(e.stale?' stale':'')+(e.gone?' gone':'')+(sel?' sel':'')+(t.hid?' hid':'')+(t.pinned?' pinned':''),d,'<span class="chv">'+(can?(open?'▾':'▸'):'')+'</span>'+
+      var info={kind:'node',nkind:u.nkind,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',plan_item:pi?'1':'',plan_node:t.planNode?'1':'',drag:hostPlan(u.host)?'1':''};   // #82: drag = it can be dragged (reorder / move)
+      ACT.rowNode[kOf(id)]=id;
+      row(id,'ar click'+(ctx?' cx':'')+(pi?' pi'+(ist==='skipped'?' skipped':ist==='done'?' pdone':''):'')+(ab?' abandoned':'')+(inAb&&!ab?' abd':'')+(e.stale?' stale':'')+(e.gone?' gone':'')+(sel?' sel':'')+(t.hid?' hid':'')+(t.pinned?' pinned':''),d,'<span class="chv">'+(can?(open?'▾':'▸'):'')+'</span>'+
         '<span data-tip="'+tipK(id+'g',function(){ return AimbAct.statusTip(u,t.owner,anow(),actStaleMin(),u.host); })+'">'+glyph+'</span>'+
         nm+(t.pinned?'<span class="pin" title="pinned (this browser)">📌</span>':'')+(AimbAct.hostTagOn(t,multi)?hostTags([u.host],u.host_down?[u.host]:[]):'')+pillsHtml(e,noLine,false)+line+fbHtml(id)+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
         (u.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(u.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+'<span class="ic nil"></span>',
         function(){ actSelect({kind:'node',gk:s.key,sid:s.id,id:id,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',nkind:u.nkind}); },info,
         {menu:nodeMenu(t,s),tog:can?function(){ ACT.open[id]=!open; actRender(); }:null,open:can?open:null,sel:sel});
       if(!open) return;
-      t.kids.forEach(function(c){ nodeRows(c,s,d+1,multi); });
+      t.kids.forEach(function(c){ nodeRows(c,s,d+1,multi,inAb||ab); });
       hiddenRow(id,t.nHidden,t.kids.filter(function(c){ return c.hid; }).length,d+1);
     }
     if(!projs.length) rows.push({k:'empty',cls:'act-msg',d:0,html:ACT.plansOnly?'No plans'+(ACT.activeOnly?' open right now':'')+' (untick “plans” to see everything).':ACT.activeOnly?'Nothing active right now (untick “active only” to see finished agents).':'No agent activity on the mesh yet — sessions report with the log tool or tools/aimb-log.mjs.'});
@@ -1373,7 +1440,7 @@
             fbHtml(hid)+barHtml(sb,tipK(hid+'b',AimbAct.barTip(sb)))+'<span class="ic nil"></span><span class="ic nil"></span>',selS(se.host),sInfo(s,{kind:'host-line',host:se.host,path:''}),{menu:sessMenu(s,se.host,hid,true),sel:hsel});
         });
         if(lvl!=='all') return;
-        x.kids.forEach(function(t){ nodeRows(t,s,2,multi); });
+        x.kids.forEach(function(t){ var rs=selfFor(s,t.u.host); nodeRows(t,s,2,multi,!!(rs&&rs.current&&rs.current.state==='abandoned')); });   // #82: an abandoned session root greys its tree
         hiddenRow(s.id,x.nHidden,x.kids.filter(function(t){ return t.hid; }).length,2);
       });
       hiddenRow('proj|'+p.key,p.nHidden,p.sessions.filter(function(x){ return x.hid; }).length,1);
@@ -1439,7 +1506,7 @@
       var el=have[r.k];
       if(!el){ el=document.createElement('div'); el.setAttribute('data-k',r.k); }
       if(el._h!==r.html){ el.innerHTML=r.html; el._h=r.html; }
-      var cls=r.cls+(ACT.menu&&ACT.menu.k===r.k?' mnu':'');   // 6d: the row whose menu is open stays marked
+      var cls=r.cls+(ACT.menu&&ACT.menu.k===r.k?' mnu':'')+(ACT.drag&&ACT.drag.k===r.k?' dragging':'');   // 6d: the row whose menu is open stays marked; #82: the row being dragged
       if(el.className!==cls) el.className=cls;
       var aj=r.info?JSON.stringify(r.info):'';
       if(el._a!==aj){   // 6d hook: data-kind / data-host / data-path / … (only the row's own attributes; data-k stays)
@@ -1449,6 +1516,8 @@
       }
       // 6d: rows are FOCUSABLE (keyboard: arrows, Enter, the Menu key / Shift+F10) — treeitem / listitem roles + their state
       if(r.info){ if(el.getAttribute('tabindex')!=='0') el.setAttribute('tabindex','0'); var role=r.info.kind==='entry'?'listitem':'treeitem'; if(el.getAttribute('role')!==role) el.setAttribute('role',role); }
+      var dg=!!(r.info&&r.info.drag)?'true':null;   // #82: a node row of a 1.69+ host can be dragged (reorder / move)
+      if(el.getAttribute('draggable')!==dg){ if(dg) el.setAttribute('draggable',dg); else el.removeAttribute('draggable'); }
       if(r.open!=null){ if(el.getAttribute('aria-expanded')!==String(!!r.open)) el.setAttribute('aria-expanded',String(!!r.open)); } else if(el.hasAttribute('aria-expanded')) el.removeAttribute('aria-expanded');
       if(r.info&&r.info.kind!=='entry'&&r.info.kind!=='project'){ if(el.getAttribute('aria-selected')!==String(!!r.sel)) el.setAttribute('aria-selected',String(!!r.sel)); }
       var dv=String(r.d||0); if(el.style.getPropertyValue('--d')!==dv) el.style.setProperty('--d',dv);
@@ -1485,7 +1554,31 @@
     if(it.view){ var key=model.id, set=it.view==='pin'||it.view==='unpin'?ACT.pins:ACT.hidden;
       if(it.view==='pin'||it.view==='hide') set[key]=1; else delete set[key];
       saveSet(set===ACT.pins?'aimb.act.pins':'aimb.act.hidden',set); actRender(); return; }
+    if(it.pick){ actPickMove(info,model); return; }   // #82: Move to… — a picker of valid targets, then a confirm
     if(it.act){ if(it.confirm) actConfirm(actConfirmText(it,model),function(){ actDo(info,model,it); }); else actDo(info,model,it); }
+  }
+  // #82: MOVE TO… — pick the new parent (every node of the session on that host it may go under, and the session root), then confirm
+  function actPickMove(info,model){
+    var ft=ACT.fullIdx[model.nid], fx=ACT.fullSess[model.sid];
+    if(!ft||!fx){ actToast('That node has left the board'); return; }
+    var ts=AimbAct.moveTargets(fx.kids,ft,model.session);
+    if(!ts.length){ actToast('Nowhere to move '+info.path+' (a name clash or the depth limit everywhere)'); return; }
+    actDlgClose();
+    var d=document.createElement('div'); d.className='act-dlg';
+    d.innerHTML='<div class="box" role="dialog" aria-modal="true" aria-labelledby="actdlgt"><h3 id="actdlgt">Move '+esc(info.path)+' to…</h3><p>Pick its new parent. It moves with everything under it and goes to the end of its kind there.</p>'+
+      '<select class="act-pick" size="'+Math.min(10,Math.max(3,ts.length))+'" aria-label="the new parent">'+ts.map(function(x,i){ return '<option value="'+i+'"'+(i===0?' selected':'')+'>'+esc(new Array(x.depth+1).join('  ')+x.label)+'</option>'; }).join('')+'</select>'+
+      '<div class="btns"><button type="button" class="act-btn" data-dlg="cancel">Cancel</button> <button type="button" class="act-btn danger" data-dlg="ok">Move…</button></div></div>';
+    ACT.dlg={el:d,cb:null,prev:document.activeElement};
+    d.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-dlg]'):null; if(b){ var go=b.getAttribute('data-dlg')==='ok', sl=d.querySelector('select'), x=ts[Number(sl&&sl.value)||0]; actDlgClose(); if(go&&x) actConfirmMove(info,model,x.path); } else if(ev.target===d) actDlgClose(); });
+    d.addEventListener('keydown',function(ev){ if(ev.key==='Escape'){ ev.preventDefault(); actDlgClose(); } });
+    document.body.appendChild(d);
+    var sl=d.querySelector('select'); if(sl) try{ sl.focus(); }catch(e){}
+  }
+  function actConfirmMove(info,model,to){
+    var h=ACT.st.head||{}, who='by '+(h.user||'dashboard')+' via dashboard ('+(h.host||'?')+')', n=model.nNodes||1;
+    actConfirm({ title:'Move '+info.path+' to '+(to||model.session||'the session root')+'?', ok:'Move',
+      text:'It'+(n>1?' and everything under it ('+n+' nodes)':'')+' moves there, at the end of its kind'+(info.plan_item?' (it stays a plan item)':'')+'. Its history goes with it.',
+      note:'Logged as "moved '+who+' from … to …"; its session is told.' },function(){ actDo(info,model,{act:'move',args:{to:to}}); });
   }
   // the CONFIRMATION text of abandon_plan / finish / dismiss — what happens, and who it is logged as
   function actConfirmText(it,m){
@@ -1493,6 +1586,9 @@
     if(it.act==='abandon_plan') return { title:m.plan_node?'Abandon this plan?':'Abandon the open plan items of '+m.name+'?', ok:'Abandon',
       text:(n?n+' open item'+(n===1?'':'s')+' (to do / in progress / blocked) become abandoned':'Nothing is still open')+', and the plan'+(m.plan_node?'':'s it holds')+' end'+(m.plan_node?'s':'')+'. Done and skipped items stay as they are.'+(m.agent_ok?' The '+(m.kind==='session'?'session':'agent')+' itself keeps running.':''),
       note:'Logged on each item as "abandoned '+who+'".' };
+    if(it.act==='abandon') return { title:'Abandon '+m.name+'?', ok:'Abandon',   // #82: any context, with the cascade
+      text:'It becomes abandoned and greyed with everything under it; every OPEN context or plan item under it (to do / in progress / blocked — not inside an agent) is abandoned too. Agents under it keep running.',
+      note:'Logged as "abandoned '+who+'" (and "abandoned with '+m.name+'" on each one below); its session is told.' };
     if(it.act==='finish') return { title:'Mark '+m.name+' finished ('+it.args.state+')?', ok:'Mark '+it.args.state,
       text:'It is '+(m.why||'quiet')+'. Its line becomes '+it.args.state+' (its text is kept). Any open plan items it holds stay open.', note:'Logged as "marked finished ('+it.args.state+') '+who+'".' };
     return { title:'Dismiss '+m.name+'?', ok:'Dismiss',
@@ -1520,6 +1616,7 @@
     actActReq({host:info.host,session:info.session,project:info.project,user:info.user||'',path:info.path||'',action:it.act,args:args},function(r){
       if(r&&r.ok){ ACT.fb[fid]={st:'ok',label:label,at:Date.now(),warn:r.warnings&&r.warnings.indexOf('plan-ended')>=0?'its plan is still ended — reopen the plan too':''};
         if(r.dismissed) actToast('Dismissed '+(model.name||info.path)+' — '+r.dismissed.nodes+' node'+(r.dismissed.nodes===1?'':'s')+' off the board (history kept)');
+        if(it.act==='move') actToast('Moved '+info.path+' to '+(r.to||info.session||'the session root'));   // #82: the row itself is now under its new parent
         actRefreshSel(); }
       else ACT.fb[fid]={st:'err',code:(r&&r.code)||'error',what:(r&&r.what)||'',at:Date.now()};
       actRender();
@@ -1562,9 +1659,30 @@
     box.addEventListener('touchmove',function(ev){ var t=ev.touches&&ev.touches[0]; if(lp&&t&&(Math.abs(t.clientX-lp.x)>10||Math.abs(t.clientY-lp.y)>10)) cancel(); },{passive:true});
     box.addEventListener('touchend',cancel); box.addEventListener('touchcancel',cancel);
   }
+  // #82: DRAG AND DROP in the tree — drop a node on a sibling of its own kind to put it before (upper half) / after (lower half) it,
+  // or on any other node of its session (same host) to move it under that one (asked first). AimbAct.dropPlan decides; the drop
+  // goes through the same action path as the menu (attributed, notified).
+  function actDropOf(ev){ var el=actRowOf(ev), d=ACT.drag; if(!el||!d) return null; var oid=ACT.rowNode[el.getAttribute('data-k')]; if(!oid) return null;
+    var over=ACT.fullIdx[oid], drag=ACT.fullIdx[d.id]; if(!over||!drag) return null;
+    var r=el.getBoundingClientRect?el.getBoundingClientRect():null, h=r&&r.height||0, fr=h>0?((ev.clientY||0)-r.top)/h:0.25;
+    var p=AimbAct.dropPlan(drag,over,fr); return p?{el:el,plan:p,over:over,drag:drag}:null; }
+  function actDropClear(){ var xs=document.querySelectorAll('#acttree .drop-before, #acttree .drop-after, #acttree .drop-in'); for(var i=0;i<xs.length;i++) xs[i].classList.remove('drop-before','drop-after','drop-in'); }
+  function wireDrag(tree){
+    tree.addEventListener('dragstart',function(ev){ var el=actRowOf(ev); if(!el||el.getAttribute('draggable')!=='true'){ return; } var id=ACT.rowNode[el.getAttribute('data-k')]; if(!id) return;
+      ACT.drag={id:id,k:el.getAttribute('data-k'),info:ACT.rowInfo[el.getAttribute('data-k')]||{}}; el.classList.add('dragging');
+      try{ if(ev.dataTransfer){ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain',ACT.drag.info.path||''); } }catch(e){} });
+    tree.addEventListener('dragover',function(ev){ var x=actDropOf(ev); actDropClear(); if(!x) return; ev.preventDefault(); try{ if(ev.dataTransfer) ev.dataTransfer.dropEffect='move'; }catch(e){}
+      x.el.classList.add(x.plan.act==='move'?'drop-in':x.plan.args.before?'drop-before':'drop-after'); });
+    tree.addEventListener('dragleave',function(ev){ if(ev.target===tree) actDropClear(); });
+    tree.addEventListener('drop',function(ev){ var x=actDropOf(ev); actDropClear(); var d=ACT.drag; ACT.drag=null; if(!x||!d) return; ev.preventDefault();
+      var model={fbId:x.drag.u.id,nid:x.drag.u.id,sid:null,session:d.info.session,nNodes:AimbAct.countNodes(x.drag)}, info=d.info;
+      if(x.plan.act==='reorder') actDo(info,model,{act:'reorder',args:x.plan.args});
+      else actConfirmMove(info,model,x.plan.args.to); });
+    tree.addEventListener('dragend',function(){ actDropClear(); var xs=tree.querySelectorAll('.dragging'); for(var i=0;i<xs.length;i++) xs[i].classList.remove('dragging'); ACT.drag=null; });
+  }
   function wireActivity(){
     var tree=document.getElementById('acttree'), panel=document.getElementById('actpanel'); if(!tree) return;
-    wireRows(tree);
+    wireRows(tree); wireDrag(tree);
     if(panel){ wireRows(panel);
       panel.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-pa],[data-ph]'):null; if(!b) return; ev.preventDefault();
         if(b.getAttribute('data-pa')==='close'){ actClearSel(); actRender(); } else if(b.getAttribute('data-pa')==='refresh') actRefreshSel();
@@ -1608,7 +1726,8 @@
         '<span>'+AimbAct.planGlyph('todo')+AimbAct.planGlyph('running')+AimbAct.planGlyph('done')+AimbAct.planGlyph('skipped')+AimbAct.planGlyph('abandoned')+'plan item: to do · in progress · done · skipped · abandoned (never stale; a plan ends only when every item is done, or when marked complete / abandoned)</span>'+
         '<span>· green = done only, cyan = in progress</span>'+
         '<span>· the ring is the time left before an agent goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of what is below it · green bar = a plan\'s N of M done · <span class="pb plan sk2 lgb"><i style="width:40%"></i><b class="sk" style="width:20%"></b></span> grey hatch = skipped (or abandoned) · a done node\'s bar is full · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'+
-        '<span>· click a row to see its log · right-click (Menu key / Shift+F10; long-press on touch) for its actions · 📌 pinned · “N hidden — show” under a parent (pin / hide stay in this browser)</span>'; }
+        '<span>· click a row to see its log · right-click (Menu key / Shift+F10; long-press on touch) for its actions · 📌 pinned · “N hidden — show” under a parent (pin / hide stay in this browser)</span>'+
+        '<span>· order: plan items first, then contexts, then agents · drag a row onto a sibling to reorder it, onto another node to move it there (or right-click → Move up / down / to…) · a plan item shows the agent working on it · everything under an abandoned node is greyed</span>'; }   // #82
     document.addEventListener('visibilitychange',actSync);
   }
 

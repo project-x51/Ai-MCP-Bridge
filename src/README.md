@@ -61,7 +61,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   - `tools/aimb-log.mjs` — **the activity reporter (#70 step 3)**: a node CLI that reports an agent's or a script's
     status to this host's activity board without registering (one report, or `--stream` NDJSON). It imports
     `lib/activity.js` to validate locally, so it runs from inside the bridge's `src/`. v1.62.0: `--path` (the node
-    tree) and `--batch <file|->`; v1.63.0: `--plan "A" "B" …` and `--done`; v1.64.0: `--token-file <path>` (#75). See "Log / activity" below.
+    tree) and `--batch <file|->`; v1.63.0: `--plan "A" "B" …` and `--done`; v1.64.0: `--token-file <path>` (#75); v1.69.0:
+    `--before` / `--after` / `--first` / `--last` and `--move` / `--to` (#82). See "Log / activity" below.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -158,7 +159,11 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `test_activity_notices_live.mjs` — #80: a dashboard action tells the owning session (`activity_changed`: subject, body,
   entry id), a burst batched into one message, view-only / refused actions and reads send nothing, the doorbell wakes,
   both directions across two hosts (the OWNER sends), a recipient on another host matched case-insensitively, an offline
-  session's notice parked and drained, a script-only session gets nothing, prepare-shutdown flushes the queue (26). Tests run in
+  session's notice parked and drained, a script-only session gets nothing, prepare-shutdown flushes the queue (26);
+  `test_activity_plan82_live.mjs` — #82: insert before / after / first / last (tool + script), reorder, move with its
+  history (memory + the day files under the old path), abandon an ordinary context with the cascade, dashboard Move up /
+  Move to (local and forwarded to the owner) with the #80 notice, gossip of ranks + moves to a second host, and a restart
+  that replays it all (26). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -528,7 +533,7 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
@@ -805,7 +810,7 @@ carry `"id":"activity"`: v1.64.0 lets a config default carry an optional `id` so
 (operation, scope, match) — a ≤1.63 host ignores the id and keeps only the last one, so publish the block once every host
 runs 1.64. The bridge's MCP server instructions now name the `log` / `activity` tools too.
 
-**The abandoned state.** `abandoned` (greyed, a dashed glyph with a slash) is valid only for **plans and plan items**: a
+**The abandoned state.** (v1.69.0, #82: now valid on ANY context, and it cascades — see "The plan workflow" below.) `abandoned` (greyed, a dashed glyph with a slash) is valid only for **plans and plan items**: a
 plan item, or a plan node (a node holding plan items — a context, or an agent / the session, which it then finishes like
 done / failed). Anything else → `not-a-plan`. The tool and the script set it explicitly (`--state abandoned`, 6d adds a
 right-click). In "N of M done" an abandoned item counts as not done and stays in M (`progress.abandoned` counts them;
@@ -1042,6 +1047,77 @@ by each host from its own script, so it can use them:
   <summary>", state:"done". Keep your plan true: add unplanned work as an item first; reopen an item (state:"running")
   when work resumes."
 
+### The plan workflow — order, insert anywhere, move, abandon anything (v1.69.0, #82)
+**Order.** Siblings show **plan items first** (in their plan order), **then the other contexts, then agents**; a state
+change never moves a row. Each node's position is a **fractional rank** — a base-36 string (`0-9a-z`, compared as text,
+never ending in `0`), so there is always room between two ranks and a reorder writes **one** record; nothing is
+renumbered. Most nodes never store a rank: a node without one has its **derived** rank — its creation time (9 base-36
+digits of the ms) + its plan position (2 digits) + `i` — so the default is creation order, exactly as before, and a node
+created later always sorts after the existing ones. A node gets a **stored** rank only when it is placed (inserted at a
+position, reordered, moved), computed between its neighbours' ranks (an open end is bounded by the next millisecond's
+derived rank, so later nodes still go after it). The `activity` board gives every node its `rank` (+ `rank_set` when
+stored); gossip carries stored ranks only; checkpoints and carry-forwards persist them.
+
+**Insert anywhere** (Robin: "an agent should be able to insert steps into a plan at any position"):
+```bash
+aimb-log … --path "@Next release" --item "Review" --before "Docs"   # or --after "Build" / --first / --last (default: the end)
+aimb-log … --path "@Next release" --item "A" --item "B" --after "Spec"   # several keep their order at that spot
+```
+The tool: `log {path:"@Next release", plan:["Review"], before:"Docs"}` (`after`, `position:"first"|"last"`). An anchor is a
+sibling: `"Docs"` / `"@Docs"` = a context, a bare name = an agent of that name first. Re-sending existing names never moves
+them (`position-unused`). Errors: `unknown-anchor`, `bad-anchor` (an anchor of another kind — plan items, contexts and
+agents are placed among their own kind), `bad-position` (two positions, or before itself).
+
+**Reorder** an existing node with the same flags and no text: `--path "@Next release/@~Docs" --after "Ship"` (tool:
+`{path:"@Next release/@~Docs", after:"Ship"}`) — one logged entry "placed after @Ship" carrying the rank; the line is
+untouched. With text / a state it is a normal message that also places the node.
+
+**Move** a node and everything under it to another parent in the same session (each host writes only its own nodes):
+```bash
+aimb-log … --move "@Next release/@Telemetry" --to "@Potential changes" [--first | --before "X" | …]
+```
+The tool: `{move:"@Next release/@Telemetry", to:"@Potential changes"}`. Both paths are relative to `--path` / `path` (a
+leading `/` = from the session root; `--to "/"` = the root). The node keeps its line, state, bar, plan-item marker,
+created_at, log and count; it goes to the **end of its kind** under the new parent unless placed (a plan item at the end of
+the target plan); a new parent path is created (implicit). One logged entry at the NEW path: `moved by <session | user via
+dashboard (host)> from @Next release/@Telemetry to @Potential changes`, with `moved_from` and `rank` on the record. The
+result: `moved:{from, to, parent}`. Errors: `unknown-node`, `no-change` (already there — with a position it is a reorder),
+`target-exists`, `bad-move` (into itself, the root, text / state / plan with a move), `path-too-deep`. **History follows the
+node:** in memory its log moves with it; a restart's replay maps every older record under the old path onto the new one
+(node by node, so an OLD parent keeps the activity those records gave it); the node remembers `moved:[{from, at}]` (carried
+forward past the replay window), so its log pages on into the day files under the old path(s) — shown at its path now —
+and its count includes them. The new parent's merged log shows the moved-in node's newer entries; its older ones (written
+before the new parent began) come with "show earlier runs".
+
+**Abandon anything.** `abandoned` is valid on **any context** (not only plans and plan items); an agent or the session
+keeps its rule (only when it holds plan items — it finishes and its plan ends). Abandoning **cascades**: every open context
+or plan item under it (todo / running / blocked, or a context whose plan is still open — not inside another agent: an
+agent's work is its own) gets an abandoned line too, deepest first, logged `abandoned with <path>` (+ the dashboard's
+attribution); the result lists them in `cascade:[{path, from_state}]`. Done / skipped / idle / failed nodes and agents keep
+theirs. The dashboard greys the abandoned node **and everything under it**.
+
+**Agents on the item they work on.** A plan item with agent children shows the **working agent** (the most recently active
+one still running, else the latest) beside its box — its glyph, its name and its current line — even while the item is
+closed. Ticking stays explicit: an agent finishing doesn't tick the item.
+
+**Dashboard.** Right-click a node → **Move up / Move down** (among its own kind; a reorder), **Move to…** (a picker of every
+node of the session on that host it may go under — not into itself, not its current parent, not past the depth limit,
+no name clash — then a confirm), **Abandon…** on an ordinary context (confirmed; it cascades). **Drag and drop:** drop a row
+on a sibling of its kind to put it before (upper half) / after (lower half) it, or on another node to move it there (asked
+first). They go through the 6d action path (`activity_action` → the owner, forwarded as `ACTIVITY_ACT` for another host's
+node), are attributed and logged like the other actions, and tell the session (#80): `robin moved @Next release/@Y before
+@X`, `robin moved @Next release/@B to @Later` (body `where` / `moved_from` + `to`; a batch "robin moved 1 node and
+reordered 1 in …"). New wire actions: `move` (`args.to`, + `before` / `after` / `position`) and `reorder` (`args.before |
+after | position`).
+
+**Compatibility (1.66 – 1.68 hosts).** The format stays **v5**: `rank` on a gossip node, `rank` / `moved_from` / `moved`
+on records are optional fields a 1.68 host ignores (its board orders by creation; a move reaches it as an ordinary
+removal + new node). A 1.69 hub declares `activity_plan:1` in PEER_HELLO; a 1.69 gateway forwards move / reorder only to an
+owner that declared it (else `owner-unsupported`), and its dashboard offers them only for such hosts (`remote_hosts[].plan`).
+A 1.69 follower refuses (`gateway-unsupported`) a `log` using move / to / before / after / position when its gateway is
+older (it would drop the fields silently), and so does the 1.69 script. Downgrading a host to ≤1.68 after a move is not
+supported: its replay would rebuild the moved node at both paths.
+
 ### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
 Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
 (one-hop, like the roster slices; followers hold no board and forward their reads to the gateway as before, so a
@@ -1167,7 +1243,8 @@ node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agen
 ```
 
 `--session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles]
-[--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …]` — the
+[--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …]
+[--before "Y" | --after "Y" | --first | --last] [--move "<node>" --to "<new parent>"]` — the
 `log` tool's fields as flags (v1.62.0: `--path` addresses any node — `--path "@#70/@step4/spec-70"`, `--path
 "spec-70/@~Tharsis"` — and combines with `--agent` / `--ctx` / a text prefix exactly as the tool's fields do).
 **`--plan "A" "B" …`** (v1.63.0) creates ☐ plan items under the node `--path` / `--agent` names, in that order — every
@@ -1179,7 +1256,10 @@ status text — put text before --plan`. **v1.66.0 (#79, the call signature):** 
 depends on where it sits: `--path "@~#70" --text "the 6b plan" --item Spec --item Build --item Test`. Positional text and
 `--plan "A" "B"` still work (1.65 snippets use them); `--text` plus positional text is refused, and an `--item` that looks
 like status text is `bad-plan` ("pass text with --text"). Programs keep using JSON via `--batch` / `--stream`. **`--done`** = `--state done`, and a tick needs no text: `--path "@#70/@~Build"
---done`. **`--batch <items.json|->`** (v1.62.0) sends a JSON array of items (the tool's item fields + `ref`; ≤64, ≤64 KB) in ONE
+--done`. **v1.69.0 (#82):** `--before "Y"` / `--after "Y"` / `--first` / `--last` place new `--item`s there (else they
+REORDER the `--path` node: `--path "@Plan/@~X" --before "Y"`), and `--move "<node>" --to "<new parent>"` re-parents a
+node with its subtree (relative to `--path`; see "The plan workflow" above). Against a ≤1.68 gateway these flags are
+refused with `gateway-unsupported` (exit 4) — that gateway would ignore them. **`--batch <items.json|->`** (v1.62.0) sends a JSON array of items (the tool's item fields + `ref`; ≤64, ≤64 KB) in ONE
 call — `--agent` / `--path` / `--ctx` / `--no-log` are the defaults (v1.63.0: an item's own path is relative to them; a
 leading `/` = absolute) — and prints ONE line `{ok, results, applied,
 failed}`: exit 0 when every item applied, 4 when the bridge refused the call or any item failed, 64 for a bad file or

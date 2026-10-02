@@ -126,8 +126,8 @@ const orch = tree.find(p => p.key === 'aimb').sessions.find(x => x.s.session ===
 const kidsOf = t => t.kids.map(k => k.u.path)
 const find = (list, path) => { for (const t of list) { if (t.u.path === path) return t; const f = find(t.kids, path); if (f) return f } return null }
 check('tree: projects A→Z with counts (sessions; active, REPORTED agents — implicit ones not counted)', J(tree.map(p => [p.name, p.nSessions, p.nActive])) === J([['AIMB', 2, 5], ['Tools', 1, 0]]), J(tree.map(p => [p.name, p.nSessions, p.nActive])))
-check('tree (6a): the session\'s top level = nodes whose parent is the session, in CREATION order', J(kidsOf(orch)) === J(['research', 'build', 'deploy', 'old', 'longrun', '@#70']), J(kidsOf(orch)))
-check('tree (6a): children nest by parent_key to any depth (agents and contexts alike)', J(kidsOf(find(orch.kids, 'research'))) === J(['research/sub', 'research/@Tharsis']) && J(kidsOf(find(orch.kids, 'research/@Tharsis'))) === J(['research/@Tharsis/@z12', 'research/@Tharsis/@nol'])
+check('tree (6a; #82): the session\'s top level = nodes whose parent is the session — contexts first, then agents, each in creation order (their derived rank)', J(kidsOf(orch)) === J(['@#70', 'research', 'build', 'deploy', 'old', 'longrun']), J(kidsOf(orch)))
+check('tree (6a): children nest by parent_key to any depth (agents and contexts alike)', J(kidsOf(find(orch.kids, 'research'))) === J(['research/@Tharsis', 'research/sub']) && J(kidsOf(find(orch.kids, 'research/@Tharsis'))) === J(['research/@Tharsis/@z12', 'research/@Tharsis/@nol'])
   && !!find(orch.kids, deepPath) && find(orch.kids, deepPath).u.depth === 6)
 check('tree (6a): each node knows its OWNER — the nearest agent above it, else the session\'s self (for its host)', find(orch.kids, 'research/@Tharsis/@z12').owner.path === 'research' && find(orch.kids, 'research/sub').owner.path === 'research'
   && find(orch.kids, '@#70/@step4').owner === orchSelf && find(orch.kids, deepPath).owner.path === '@#70/@step4/spec-70')
@@ -135,7 +135,7 @@ const orphanTree = X.buildTree({ s: { id: 's', kind: 'session', key: 'k', sessio
 check('tree (6a): a node whose parent has not arrived (a truncated slice) sits at the top level until it does', J(kidsOf(orphanTree[0].sessions[0])) === J(['p/@lost']))
 const act = X.buildTree(U, { activeOnly: true })
 check('tree: active only hides finished + gone agents (with their subtrees) and sessions with nothing active (Leaver, Cee)', J(act.map(p => p.name)) === J(['AIMB']) && J(act[0].sessions.map(x => x.s.session)) === J(['Orch'])
-  && J(kidsOf(act[0].sessions[0])) === J(['research', 'old', 'longrun', '@#70']))
+  && J(kidsOf(act[0].sessions[0])) === J(['@#70', 'research', 'old', 'longrun']))
 check('subtreeCount: a subtree\'s local entries; null when any of it lives on another host', X.subtreeCount(find(orch.kids, 'research')) === 10 && X.subtreeCount({ u: { log: { remote: true } }, kids: [] }) === null)
 
 // ================================================================= (2) the rendered view
@@ -526,7 +526,7 @@ const rclick = el => el.dispatchEvent(new win.MouseEvent('contextmenu', { bubble
 const pickMenu = label => { const b = [...(menuEl()?.querySelectorAll('.mi') || [])].find(x => x.textContent === label); if (b) click(b); return !!b }
 const leadRow = inD('lead')
 rclick(leadRow)
-check('6d menu (right-click): a STALE agent holding an open plan (itself a plan node) — Mark plan complete, Abandon plan…, Mark finished done / failed, no Dismiss (open items); then Copy path, Copy its aimb-log command, Pin, Hide', !!menuEl() && J(menuLabels()) === J(['Mark plan complete', 'Abandon plan…', 'Mark finished — done…', 'Mark finished — failed…', 'Copy path', 'Copy its aimb-log command', 'Pin to the top', 'Hide']), J(menuLabels()))
+check('6d menu (right-click): a STALE agent holding an open plan (itself a plan node) — Mark plan complete, Abandon plan…, Mark finished done / failed, no Dismiss (open items); (#82: then Move down + Move to…); then Copy path, Copy its aimb-log command, Pin, Hide', !!menuEl() && J(menuLabels()) === J(['Mark plan complete', 'Abandon plan…', 'Mark finished — done…', 'Mark finished — failed…', 'Move down', 'Move to…', 'Copy path', 'Copy its aimb-log command', 'Pin to the top', 'Hide']), J(menuLabels()))
 check('6d menu: it is a role=menu of menuitems with the first one focused', menuEl().getAttribute('role') === 'menu' && [...menuEl().querySelectorAll('.mi')].every(b => b.getAttribute('role') === 'menuitem') && doc.activeElement === menuEl().querySelector('.mi'))
 pickMenu('Copy its aimb-log command')
 check('6d copy: "Copy its aimb-log command" = the session\'s command for THIS node on ITS host — the token FILE path, never a token; the menu closes', V.lastCopy === X.logCmd(LC, 'Sixd', 'SixD', 'lead') && /--token-file "C:\/Users\/robin\/\.aimb\/realm token\.txt"/.test(V.lastCopy) && !/token=|--token /.test(V.lastCopy) && !menuEl(), V.lastCopy)
@@ -735,6 +735,103 @@ check('#79 Sessions section: each sub-peer / session / page row carries the SAME
 const mapG = doc.querySelectorAll('g.n-glyph svg.sg')
 check('#79 mesh map: session / sub-peer nodes carry the same glyph at their centre (none on the gateway, which keeps its GATEWAY tag)', mapG.length >= 3 && [...mapG].some(g => g.classList.contains('k-code')) && [...mapG].some(g => g.classList.contains('k-cowork')) && !doc.querySelector('g.n-sess.gw g.n-glyph'), J([...mapG].map(g => g.getAttribute('class'))))
 } catch (e) { fail++; console.log('FAIL #79 block crashed:', (e && e.stack) || e) }
+
+try {   // ================================================================= #82 (v1.69.0): ORDER by rank, the agent on its item, greyed abandoned
+  // subtrees, Move up / down / to… (a picker + a confirm), Abandon… on any context, drag and drop
+  const n82 = (p, nk, extra = {}) => node('k-p82', p, nk, extra.host || 'HOST-A', extra)
+  const i82 = (p, rank, st = 'todo', extra = {}) => node('k-p82', p, 'context', 'HOST-A', { plan_item: true, state: st, rank, current: { id: `c-${p}`, ts: NOW - MIN, text: p.split('/').at(-1).replace(/^@/, ''), state: st }, ...extra })
+  const self82 = root('HOST-A', { current: { id: 's82', ts: NOW - MIN, text: 'planning', state: 'running' } })
+  const u82 = [
+    sess('k-p82', 'Plan82', 'P82', { host: 'HOST-A', self: self82 }),
+    n82('@Next', 'context', { plan_node: true, implicit: true }),
+    i82('@Next/@A', '0m5'), i82('@Next/@B', '0m3'), i82('@Next/@C', '0m7'),
+    n82('@Next/@notes', 'context', { created_at: NOW - 3 * 60 * MIN, current: { id: 'nt', ts: NOW - MIN, text: 'some notes', state: 'running' } }),
+    n82('@Next/helper', 'agent', { created_at: NOW - 4 * 60 * MIN, current: { id: 'hp', ts: NOW - MIN, text: 'helping', state: 'running' } }),
+    n82('@Next/@A/builder', 'agent', { last_activity: NOW - MIN, current: { id: 'bd', ts: NOW - MIN, text: 'compiling the docs', state: 'running' } }),
+    n82('@Next/@A/old-agent', 'agent', { last_activity: NOW - 30 * MIN, finished_at: NOW - 20 * MIN, state: 'done', current: { id: 'oa', ts: NOW - 20 * MIN, text: 'earlier pass', state: 'done' } }),
+    n82('@Old', 'context', { current: { id: 'od', ts: NOW - MIN, text: 'dropped', state: 'abandoned' } }),
+    n82('@Old/@k', 'context', { current: { id: 'ok', ts: NOW - MIN, text: 'was underway', state: 'running' } }),
+    n82('@Old/@k/w', 'agent', { current: { id: 'ow', ts: NOW - MIN, text: 'still going', state: 'running' } }),
+    n82('rem82', 'agent', { host: 'HOST-C', current: { id: 'rm2', ts: NOW - MIN, text: 'on C', state: 'running' }, log: { remote: true, total: 1 } }),
+  ]
+  const head82 = { host: 'HOST-A', now: NOW, stale_after_min: 15, finished_plan_open_min: 120, user: 'robin', log_cmd: null, remote_hosts: [{ host: 'HOST-C' }] }
+  recv({ type: 'activity_board', full: true, epoch: 'E82', seq: 1, head: head82, upsert: u82 })
+  const U82 = Object.fromEntries(u82.map(u => [u.id, u]))
+  const tr82 = X.buildTree(U82, {})[0].sessions.find(x => x.s.session === 'Plan82'), f82 = (l, p) => { for (const t of l) { if (t.u.path === p) return t; const r = f82(t.kids, p); if (r) return r } return null }
+  const next = f82(tr82.kids, '@Next')
+  // ---- the pure part
+  check('#82 rankOf: a stored rank wins; else DERIVED from created_at (+ the plan position) — the same string as lib/activity.js derivedRank', X.rankOf({ rank: '0m5', created_at: 5 }) === '0m5' && X.rankOf({ created_at: 1790748000000, plan_item: true, plan_ix: 2 }) === Number(1790748000000).toString(36).padStart(9, '0') + '03i'
+    && X.rankOf({ created_at: 1790748000000 }).endsWith('00i'))
+  check('#82 order: plan items first (by rank: B A C), then the other contexts, then agents — whatever the creation order', J(next.kids.map(t => t.u.name)) === J(['B', 'A', 'C', 'notes', 'helper']), J(next.kids.map(t => t.u.name)))
+  const stA = X.moveSteps(f82(tr82.kids, '@Next/@A'), next.kids), stB = X.moveSteps(f82(tr82.kids, '@Next/@B'), next.kids), stC = X.moveSteps(f82(tr82.kids, '@Next/@C'), next.kids)
+  check('#82 moveSteps: Move up = before the previous of its OWN kind, Move down = after the next; none at the ends (C is the last plan item, notes a context)', J(stA) === J({ up: { before: '@"B"' }, down: { after: '@"C"' } }) && stB.up === null && stC.down === null
+    && J(X.moveSteps(f82(tr82.kids, '@Next/helper'), next.kids)) === J({ up: null, down: null }), J([stA, stB, stC]))
+  const tC = f82(tr82.kids, '@Next/@C'), tOld = f82(tr82.kids, '@Old'), tK = f82(tr82.kids, '@Old/@k')
+  check('#82 canMoveInto: not into itself / below itself, not where it already is, not onto another host, not the depth limit; a name clash (target-exists) refused',
+    X.canMoveInto(tC, tOld) && !X.canMoveInto(tC, next) && !X.canMoveInto(tOld, tK) && !X.canMoveInto(tC, f82(tr82.kids, 'rem82')) && !X.canMoveInto({ u: { ...tC.u, name: 'k', nkind: 'context' }, kids: [] }, tOld)
+    && !X.canMoveInto(tC, { u: { key: 'd', depth: 6, host: 'HOST-A', path: 'd' }, kids: [] }))
+  const tg = X.moveTargets(tr82.kids, tC, 'Plan82')
+  check('#82 moveTargets (the picker): the session root first, then every node of its host it may go under, in tree order — never its own parent, a node on another host, or itself', tg[0].path === '' && /Plan82 \(the session root\)/.test(tg[0].label)
+    && tg.some(t => t.path === '@Old') && tg.some(t => t.path === '@Next/@A') && !tg.some(t => t.path === '@Next' || t.path === 'rem82' || t.path === '@Next/@C'), J(tg.map(t => t.path)))
+  check('#82 dropPlan: on a sibling of its kind → reorder before (upper half) / after (lower half); on another node → move into it; on itself / below itself / another host → nothing',
+    J(X.dropPlan(tC, f82(tr82.kids, '@Next/@B'), 0.2)) === J({ act: 'reorder', args: { before: '@"B"' } }) && J(X.dropPlan(tC, f82(tr82.kids, '@Next/@B'), 0.8)) === J({ act: 'reorder', args: { after: '@"B"' } })
+    && J(X.dropPlan(tC, tOld, 0.5)) === J({ act: 'move', args: { to: '@Old' } }) && X.dropPlan(tC, tC, 0.5) === null && X.dropPlan(tOld, tK, 0.5) === null && X.dropPlan(tC, f82(tr82.kids, 'rem82'), 0.5) === null
+    && J(X.dropPlan(tC, f82(tr82.kids, '@Next/@notes'), 0.2)) === J({ act: 'move', args: { to: '@Next/@notes' } }))
+  check('#82 workingAgent: the most recently active agent child still running (a finished one only when none is)', X.workingAgent(f82(tr82.kids, '@Next/@A')).u.name === 'builder' && X.workingAgent(tC) === null
+    && X.workingAgent({ kids: [{ u: { nkind: 'agent', name: 'x', finished_at: 1, last_activity: 5 } }] }).u.name === 'x')
+  // ---- the rendered tree
+  const in82 = p => { const rs = rowsT(), i = rs.indexOf(nmRow('Plan82')); if (i < 0) return null; for (let j = i + 1; j < rs.length && dOf(rs[j]) > 1; j++) if (rs[j].querySelector('.nm')?.getAttribute('title') === p) return rs[j]; return null }
+  const rA = in82('@Next/@A')
+  check('#82 tree: the rows under @Next in rank order (B A C, then notes, then helper)', (() => { const rs = rowsT(), idx = p => rs.indexOf(in82(p)); return ['@Next/@B', '@Next/@A', '@Next/@C', '@Next/@notes', '@Next/helper'].map(idx).every((v, i, a) => v > 0 && (!i || v > a[i - 1])) })())
+  check('#82 agent on its item: the plan item A (closed) shows the WORKING agent beside its box — its glyph, its name and its current line', !!rA && rA.getAttribute('aria-expanded') !== 'true' && !!rA.querySelector('.ln .agon svg.gl') && rA.querySelector('.agon .agn')?.textContent === 'builder' && /compiling the docs/.test(rA.querySelector('.agon').textContent)
+    && !in82('@Next/@C').querySelector('.agon'), rA?.innerHTML.slice(0, 600))
+  tog(in82('@Old')); tog(in82('@Old/@k'))
+  check('#82 greyed: an abandoned context is greyed AND everything under it (abd) — its open child context and the agent below that too', /\babandoned\b/.test(in82('@Old').className) && /\babd\b/.test(in82('@Old/@k')?.className || '') && /\babd\b/.test(in82('@Old/@k/w')?.className || '')
+    && !/\babd\b/.test(in82('@Next/@A').className) && /\.ar\.abd \.nm/.test([...doc.querySelectorAll('style')].map(s => s.textContent).join('')), J([in82('@Old')?.className, in82('@Old/@k')?.className, in82('@Old/@k/w')?.className]))
+  check('#82 drag: node rows of this host are draggable; another host\'s (it may run ≤1.68) are not', rA.getAttribute('draggable') === 'true' && in82('rem82')?.getAttribute('draggable') !== 'true')
+  // ---- the menu
+  const mEl = () => doc.querySelector('.act-menu'), mLab = () => [...(mEl()?.querySelectorAll('.mi') || [])].map(b => b.textContent)
+  const rc = el => el.dispatchEvent(new win.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))
+  const pick = label => { const b = [...(mEl()?.querySelectorAll('.mi') || [])].find(x => x.textContent === label); if (b) click(b); return !!b }
+  const esc82 = () => doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  rc(rA)
+  check('#82 menu: a plan item in the middle → Move up · Move down · Move to… (after its item actions)', mLab().includes('Move up') && mLab().includes('Move down') && mLab().includes('Move to…') && mLab().indexOf('Move up') > mLab().indexOf('Mark done'), J(mLab()))
+  const nA0 = sentOf('activity_action').length
+  pick('Move up')
+  const mu = sentOf('activity_action').at(-1)
+  check('#82 Move up: sends reorder with args.before = the previous plan item ("@\\"B\\""), no confirmation', sentOf('activity_action').length === nA0 + 1 && mu.action === 'reorder' && mu.path === '@Next/@A' && mu.args.before === '@"B"' && mu.host === 'HOST-A' && !doc.querySelector('.act-dlg'), J(mu))
+  rc(in82('@Next/@B'))
+  check('#82 menu: the first plan item has no Move up', !mLab().includes('Move up') && mLab().includes('Move down'), J(mLab()))
+  esc82()
+  rc(in82('@Next/@notes'))
+  check('#82 menu: an ordinary context → Abandon… (confirmed: it cascades) + Move to…; an agent row of another host → no Move items', mLab().includes('Abandon…') && mLab().includes('Move to…') && (() => { esc82(); rc(in82('rem82')); const l = mLab(); esc82(); return !l.includes('Move to…') && !l.includes('Move up') })(), J(mLab()))
+  rc(in82('@Next/@notes')); pick('Abandon…')
+  check('#82 Abandon…: asks first — the cascade explained, how it is logged — and sends nothing yet', !!doc.querySelector('.act-dlg') && /every OPEN context or plan item under it/.test(doc.querySelector('.act-dlg').textContent) && /abandoned with/.test(doc.querySelector('.act-dlg').textContent) && sentOf('activity_action').length === nA0 + 1)
+  click(doc.querySelector('.act-dlg [data-dlg="ok"]'))
+  check('#82 Abandon… confirmed: sends abandon on the context', sentOf('activity_action').at(-1).action === 'abandon' && sentOf('activity_action').at(-1).path === '@Next/@notes')
+  rc(in82('@Next/@C')); pick('Move to…')
+  const pk = doc.querySelector('.act-dlg select.act-pick')
+  check('#82 Move to…: a PICKER of valid new parents (the session root first; never its own parent) — nothing sent yet', !!pk && pk.options[0].textContent.includes('the session root') && [...pk.options].some(o => /@Old$/.test(o.textContent.trim())) && ![...pk.options].some(o => o.textContent.trim() === '@Next') && sentOf('activity_action').length === nA0 + 2, J([...(pk?.options || [])].map(o => o.textContent)))
+  pk.value = String([...pk.options].findIndex(o => /@Old$/.test(o.textContent.trim())))
+  click(doc.querySelector('.act-dlg [data-dlg="ok"]'))
+  check('#82 Move to… → then a CONFIRM naming both ends; still nothing sent', /Move @Next\/@C to @Old\?/.test(doc.querySelector('.act-dlg h3')?.textContent || '') && /stays a plan item/.test(doc.querySelector('.act-dlg').textContent) && sentOf('activity_action').length === nA0 + 2, doc.querySelector('.act-dlg')?.textContent)
+  click(doc.querySelector('.act-dlg [data-dlg="ok"]'))
+  const mt = sentOf('activity_action').at(-1)
+  check('#82 Move to… confirmed: sends {action:"move", path, args:{to}} for the node\'s host', mt.action === 'move' && mt.path === '@Next/@C' && mt.args.to === '@Old' && mt.host === 'HOST-A' && sentOf('activity_action').length === nA0 + 3, J(mt))
+  // ---- drag and drop
+  const drag = (el, type) => { const ev = new win.MouseEvent(type, { bubbles: true, cancelable: true, clientY: 0 }); Object.defineProperty(ev, 'dataTransfer', { value: { setData() { }, effectAllowed: '', dropEffect: '' } }); el.dispatchEvent(ev); return ev }
+  drag(in82('@Next/@C'), 'dragstart')
+  const ov = drag(in82('@Next/@B'), 'dragover')
+  check('#82 drag over a sibling: the drop is allowed (preventDefault) and marked (drop-before / -after)', ov.defaultPrevented && /drop-(before|after)/.test(in82('@Next/@B').className), in82('@Next/@B').className)
+  drag(in82('@Next/@B'), 'drop')
+  const dd = sentOf('activity_action').at(-1)
+  check('#82 drop on a sibling: a reorder relative to it (no confirmation)', dd.action === 'reorder' && dd.path === '@Next/@C' && (dd.args.before === '@"B"' || dd.args.after === '@"B"') && sentOf('activity_action').length === nA0 + 4, J(dd))
+  drag(in82('@Next/@C'), 'dragstart'); drag(in82('@Old'), 'dragover'); drag(in82('@Old'), 'drop')
+  check('#82 drop on another node: asks first (Move … to @Old?), then moves', /Move @Next\/@C to @Old\?/.test(doc.querySelector('.act-dlg h3')?.textContent || '') && sentOf('activity_action').length === nA0 + 4)
+  click(doc.querySelector('.act-dlg [data-dlg="ok"]'))
+  check('#82 drop on another node, confirmed: sends the move', sentOf('activity_action').at(-1).action === 'move' && sentOf('activity_action').at(-1).args.to === '@Old' && sentOf('activity_action').length === nA0 + 5)
+  check('#82 legend: says how order, drag and drop, the agent on its item and the greyed subtrees work', /plan items first, then contexts, then agents/.test(doc.getElementById('actlegend').textContent) && /drag a row/.test(doc.getElementById('actlegend').textContent))
+} catch (e) { fail++; console.log('FAIL #82 block crashed:', (e && e.stack) || e) }
 
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close()
