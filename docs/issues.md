@@ -113,7 +113,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #75 part 2 (`{doorbell_cmd}` carries --token-file), #74 federation test flakes, #70 agent activity board (steps 1–5, 6a, 6b built; next: 6c `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #77 topic tags + By-topic view (after the #70 deploy), #75 part 2 (`{doorbell_cmd}` carries --token-file), #74 federation test flakes, #70 agent activity board (steps 1–5, 6a, 6b built; next: 6c `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -252,6 +252,31 @@ the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) 
 whenever a send returns `unknown-subpeer`.
 
 ---
+
+## #77 — topics on the activity board: tag work by topic + a "By topic" view  ·  **OPEN (after the #70 deploy)**
+Robin, 2026-10-02.
+- **Background:** sessions stay the BACKBONE of the activity board. Liveness, stale and gone, and "each host writes
+  only its own nodes" all need a concrete actor. But people often think in topics ("what's happening on Maps?"), and
+  topics outlive sessions.
+- **Agreed now:**
+  1. **Topic-tagged messages.**
+     - A `log` message (tool, script `--topic`, batch item) may carry `topic: "Maps"`, meaning this work is done on
+       behalf of that topic.
+     - It is validated like `from_topic` (#54): the session must currently own (or co-own) the topic, else a clear
+       code and nothing is applied.
+     - The tag rides the entry and the node (a node's topic is its most recent tagged message, or inherited from its
+       nearest tagged ancestor; decide).
+     - It is gossiped and shown as the topic's icon and name on the row.
+  2. **A "By topic" view** on the dashboard, beside Projects / Sessions / Nodes:
+     - topic → its owner session(s) from the claims roster → the activity tagged with that topic (falling back to
+       the owner's whole tree when nothing is tagged; decide);
+     - topic icons; "Active only" and "plans" apply.
+     - It is purely dashboard logic over gossiped data, plus the tag.
+- **Later, only if real use shows the need: topic-OWNED plans.**
+  - A plan anchored to a topic (e.g. a "Maps roadmap") would survive the owner changing: the next holder inherits it
+    and can tick items, rather than it being abandoned after 90 days with the old session.
+  - It conflicts with per-host write ownership, since topic owners can move hosts, so it needs a handover step on
+    claim change. Revisit after #77 parts 1–2 have been used for a while.
 
 ## #76 — a parent's merged log can miss a removed child's earlier-run entries  ·  **OPEN (low)**
 Found during #70 6a/6c.
