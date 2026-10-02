@@ -158,6 +158,7 @@
   .ar.le { min-height:22px; font-size:12px; }
   .ar .tm { flex:none; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:11px; color:var(--muted); }
   .ar .dot { flex:none; width:8px; height:8px; border-radius:50%; background:var(--faint); }
+  .ar .edg { flex:none; display:inline-flex; width:12px; height:12px; align-items:center; justify-content:center; } .ar .edg svg { width:12px; height:12px; }   /* a plan item's / question's entry: the tree glyph */
   .ar .ctag { flex:none; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:10.5px; color:var(--info); }
   .ar .ctag.cur { font-weight:700; }
   .ar .tgt { flex:none; width:16px; text-align:center; color:var(--muted); }
@@ -1744,10 +1745,15 @@
       else if(L.runStart) prow(mk,'ar more',0,'<span class="chv"></span><span class="nm">start of this run</span>');
       else if(L.pruned) prow(mk,'ar more pruned',0,'<span class="chv"></span><span class="nm" data-tip="'+tipK(mk,'This run began in a day file that log retention has already deleted — its older entries are gone')+'">earlier history pruned</span>');
       else if(L.loaded&&!L.entries.length) prow(mk,'ar more',0,'<span class="chv"></span><span class="nm">no entries</span>'); }
+    // an entry about a PLAN ITEM (or a question) draws the tree's own glyph (☐ ■ ☑ …), not a state dot (Robin, 2026-10-03)
+    var byPath={}; (function w(t){ if(!t) return; if(t.u&&t.u.path!=null) byPath[t.u.path]=t.u; (t.kids||[]).forEach(w); })(ft||(fx?{kids:fx.top||fx.kids}:null));
+    function entDot(x,ek){ var st=x.state||'running', nu=x.path!=null?byPath[x.path]:null, tip=' data-tip="'+tipK(ek+'s',st+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"';
+      var gl=!x.state||!nu?null:AimbAct.qOf(nu)?AimbAct.glyphSvg({state:st},now,'question'):nu.plan_item?AimbAct.planGlyph(st):null;
+      return gl?'<span class="edg"'+tip+'>'+gl+'</span>':'<span class="dot bg-'+esc(st)+'"'+tip+'></span>'; }
     function entryRow(x){
       var ek=key+'|e|'+x.id, can=!!(x.has_details||x.has_data), eo=can&&!!ACT.open[ek], by=x.by&&typeof x.by==='string'?x.by:null;
       var mg=x.act==='message'?'<span class="msgic" data-tip="'+tipK(ek+'m','A message to the session, from the dashboard — the full text is in its details')+'">💬</span>':x.act==='edit_text'?'<span class="msgic" data-tip="'+tipK(ek+'m','The line was edited from the dashboard')+'">✎</span>':'';   // #84 / #83
-      prow(ek,'ar le'+(can?' click':'')+(x.dismiss||x.act==='dismiss'?' dm':'')+(x.act==='message'?' msg':''),0,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span><span class="dot bg-'+esc(x.state||'running')+'" data-tip="'+tipK(ek+'s',(x.state||'running')+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"></span>'+
+      prow(ek,'ar le'+(can?' click':'')+(x.dismiss||x.act==='dismiss'?' dm':'')+(x.act==='message'?' msg':''),0,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span>'+entDot(x,ek)+
         '<span class="ctag'+(x.current?' cur':'')+'" title="'+attr(x.path!=null?(x.path||'(the session)'):'')+'">'+esc(AimbAct.entryTag(x))+'</span>'+mg+'<span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(by?'<span class="by">by '+esc(by)+'</span>':'')+
         (can?ddMark(x,function(t){ return tipK(ek+'i',t); }):''),   // #86: the same ¶ {} marker as the tree's lines
         can?function(){ ACT.open[ek]=!eo; if(!eo) actLoadEntry(x.id,q.host); actRender(); }:null,
