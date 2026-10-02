@@ -113,7 +113,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #77 topic tags + By-topic view (after the #70 deploy), #75 part 2 (`{doorbell_cmd}` carries --token-file), #74 federation test flakes, #70 agent activity board (steps 1–5, 6a, 6b built; next: 6c `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #75 part 2 (`{doorbell_cmd}` carries --token-file), #74 federation test flakes, #70 agent activity board (steps 1–5, 6a, 6b built; next: 6c `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -252,6 +252,51 @@ the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) 
 whenever a send returns `unknown-subpeer`.
 
 ---
+
+## #78 — making use of latest Claude features  ·  **OPEN (after the #70 deploy)**
+Robin, 2026-10-02. Prompted by: "Is the doorbell still the best way to wake a session? Is the MCP bridge still the
+best approach?"
+
+Research (claude-code-guide, docs at code.claude.com: channels, hooks, tools-reference, cross-session-messaging,
+scheduled-tasks, routines, plugins):
+- **MCP channels** (research preview): an MCP server can PUSH a message into a running Claude Code session, and
+  an IDLE session starts a new turn. This is the real successor to the doorbell, and effectively the `set_wake`
+  feature (T14).
+  - It needs Claude Code ≥ 2.1.224 (Windows ≥ 2.1.234) and a session started with
+    `--channels plugin:<name>@<marketplace>`.
+  - Team/Enterprise need the admin setting `channelsEnabled`.
+  - It works in the CLI and the desktop Code tab, but NOT in Cowork.
+- **Native cross-session messaging** (`ListAgents` / `SendMessage`, Remote Control): plain text between local,
+  cloud and Remote Control sessions, routed via Anthropic, and it wakes an idle receiver. It has no topics,
+  ownership, pub/sub, parked mail, cross-project consent, page leaves or activity board. So it overlaps only the
+  bridge's simplest feature and does not replace the mesh.
+- **Hooks:**
+  - They can inject `additionalContext` per turn, but cannot block on an external event and wake an idle session.
+  - `asyncRewake` is unconfirmed in the docs.
+  - `Monitor` streams events into a LIVE session; it doesn't help an idle one.
+- **Plugins** can bundle an MCP server, hooks, skills and settings for a one-step install (Code tab confirmed; the
+  Cowork component support is unclear).
+- The research claimed a 2h maximum for background tasks, but that contradicts observed behaviour (a background
+  doorbell has run hourly for days). Re-verify during the spike.
+
+**Conclusion:** keep the MCP bridge. Nothing native covers multi-client (Code/Cowork/pages), self-hosted, topics,
+consent, parking and the activity board. Evolve how it wakes sessions and how it is installed.
+
+**Work:**
+1. **Channels spike:**
+   - Make the bridge a channel-capable MCP server, packaged as a channel plugin.
+   - Prove an incoming `send_to_peer` wakes an IDLE Code session (CLI and the desktop Code tab).
+   - Mark sub-peers `channel_capable: true` when it applies.
+   - The connect reminder tells channel-capable sessions to skip the doorbell; the doorbell stays as the fallback
+     for Cowork, older clients and unsupported plans/platforms.
+   - Check how this interacts with shared bridges, followers, and multiple sub-peers per process (which session
+     does the push wake?).
+2. **Plugin packaging:** one install per machine bundling the MCP server config (with `AI_BRIDGE_TOKEN_FILE`, which
+   prevents #75-style setups), hooks and skills (e.g. `/inbox`, `/doorbell`). Check what Cowork supports.
+3. **An unread-count hook:** a `UserPromptSubmit` hook injecting "N unread on the bridge" as `additionalContext`
+   each turn, so busy sessions notice mail without calling the inbox tool. It needs a cheap local query (e.g. a
+   token-gated loopback endpoint).
+4. **Re-check background-task limits and `asyncRewake`** against current docs and real behaviour.
 
 ## #77 — topics on the activity board: tag work by topic + a "By topic" view  ·  **OPEN (after the #70 deploy)**
 Robin, 2026-10-02.
