@@ -6,9 +6,13 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-02, v1.65.0) — read this first after a compact
-**Current version: v1.65.0** (#70 step 6d — the LAST #70 build step: code done, NOT yet deployed (live hosts run v1.54.0); in
-the working tree for review on top of the 6c commit; see the v1.65.0 paragraph and the DEPLOY CHECKLIST below). Previously
+## RESUME STATE (updated 2026-10-03, v1.66.0) — read this first after a compact
+**Current version: v1.66.0** (#79: the `--plan` text footgun + THREE-PART progress done / skipped / total, a done node = 100%;
+plus the live-checklist snippet + orchestrator briefing, cyan = in progress, a session glyph — code done in the working
+tree for review, NOT committed, NOT deployed. **v1.65.0 is deployed live on every host; 1.66 is wire-compatible with 1.65
+(format stays v5), so hosts can upgrade one at a time** — then republish the realm block from config.example.json). Before
+that v1.65.0 (#70 step 6d — the LAST #70 build step; committed `f545450` and since deployed on every host; see the
+v1.65.0 paragraph and the DEPLOY CHECKLIST below). Previously
 v1.64.0 (#70 step 6c + #75 part 2, committed `23db35e`). Before that v1.63.0 (#70 step 6b: TODOS AND PLANS — `todo` / `skipped` context states, plan items, `plan:[…]`
 with a keep-and-append re-plan rule, "N of M done" rollup, 7-day `finished_visible_hours`, open items never expire or get
 evicted, the day-rollover CARRY-FORWARD; plus 6a adjustments: RELATIVE batch paths, the "most recently set" headline, host
@@ -16,6 +20,18 @@ tags only where they differ; record / slice format v3; code done, NOT yet deploy
 (#70 step 6a) is committed (`2d78a21`); v1.63.0 is in the working tree for review. The rebuilt tray (`PrepareShutdown()`
 before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
 Everything below is durable; nothing important is only in chat.
+
+**2026-10-03 (v1.66.0):** Built **#79** (see "#79 as built" and architecture.md §13 "Built (v1.66.0)"). Progress is
+{done, skipped, total} (`skipped` optional on the wire, only when > 0 — a 1.65 reader ignores it, a missing one is 0);
+rollups sum the three parts for a common unit, average the done / skipped fractions for mixed units, and "N of M done"
+counts every item (skipped + abandoned → skipped; failed / open → remaining); a done node is 100% (a full bar), an abandoned
+node's remainder is skipped. Dashboard: a grey-hatched skipped segment, cyan = in progress (`--act-running`), green = done
+only, a session glyph (window; face by client kind) shared by the Activity tree, the Sessions table and the mesh map.
+`aimb-log --plan` refuses status text ("… looks like status text — put text before --plan"). Snippet + realm reminders
+brief orchestrators and keep checklists live (`updated_at` 2026-10-02T12:00Z in config.example.json; the live
+`src/config.json` was NOT touched — Robin republishes). **Deploy:** compatible with 1.65; hosts can upgrade one at a time
+(a 1.65 host shows no skipped segment and keeps the old "skipped left out of M" bar for its own board). Live-checked: a
+1.65 and a 1.66 bridge exchanged activity both ways (full slices + deltas) with no errors. Tests: TESTS79.
 
 **2026-10-02 (v1.65.0):** Built **#70 step 6d** ("Decisions before 6c and 6d" + "Decisions after 6c, for 6d") — **the #70
 build plan is COMPLETE**; next is the deploy (checklist below). The dashboard's first WRITE path: a **right-click menu** on
@@ -157,7 +173,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #81 node:test migration + dashboard test reporter (after #79), #80 dashboard-change notices to the owning session, #79 --plan text footgun + 3-part progress (v1.66.0), #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #82 plan workflow (move + agent-on-item + live item lines), #81 node:test migration + dashboard test reporter (after #79), #80 dashboard-change notices to the owning session, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -297,6 +313,33 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
+## #82 — plan workflow: move nodes between contexts, agents shown on the item they work on, live item lines  ·  **OPEN (next release)**
+Robin, 2026-10-03, from using the live board.
+1. **Move / re-parent.**
+   - A `move` operation re-parents a node and its whole subtree to another path in the SAME session on the SAME
+     host (per-host ownership).
+   - Exposed as `aimb-log --move "<from>" --to "<to>"`, the `log` tool's `move`, and a dashboard right-click
+     **Move to…** (a picker of valid targets, with confirmation).
+   - It is logged as an entry ("moved by … from … to …") and honoured on restart.
+   - **History follows the node:** it keeps a `moved_from` alias so its log, paging and counts include entries
+     written under the old path.
+   - A moved plan item is appended at the end of the target plan and stays a plan item.
+   - The dashboard action is attributed like the other actions, and notifies the owning session once #80 lands.
+   - Use case: `@Next release` ⇄ `@Potential changes`.
+2. **Agents on the item they work on.**
+   - Agents already can and should live UNDER the plan item they serve (`@Next release/@#79 …/fix-79`).
+   - Briefings should give them that path (a briefing fix, not a feature).
+   - **Dashboard:** a plan item with agent children shows a small agent glyph and the working agent's current line
+     beside its box, even when collapsed.
+   - Ticking stays explicit: an agent finishing doesn't tick the item; the orchestrator does after review.
+3. **Live item lines** (briefing wording; do right after #79 lands).
+   - Agents keep the item's CURRENT line telling the story:
+     - on start: `@~<item> <scope>` with `--state running`;
+     - at each sub-step: `@~<item> Writing README…`;
+     - on finish: `@~<item> Finished …` with `--done`.
+   - The line shows what's happening now; the item's log keeps the history.
+   - Applies to `{log_snippet}`, `{log_tool_hint}`, the orchestrator briefing and the README.
+
 ## #81 — move the test suite to Node's built-in test runner (node:test), with live dashboard progress  ·  **OPEN (starts after #79)**
 Robin, 2026-10-03. No runner script and no CI for now: go straight to `node:test`, incrementally.
 
@@ -347,7 +390,7 @@ Robin, 2026-10-03.
     session summarises for its user before acting.
 - **Compatibility:** wire-compatible with 1.65, so no simultaneous redeploy.
 
-## #79 — `--plan` swallows trailing text; three-part progress (done / skipped / total)  ·  **OPEN (fixing now, v1.66.0)**
+## #79 — `--plan` swallows trailing text; three-part progress (done / skipped / total)  ·  **DONE (v1.66.0)**
 Found by Bridget and Robin, 2026-10-02, on the first live use after the v1.65.0 deploy.
 
 1. **`aimb-log --plan` swallows trailing text.**
@@ -371,6 +414,29 @@ Found by Bridget and Robin, 2026-10-02, on the first live use after the v1.65.0 
      - with mixed units, they are averaged as fractions.
    - Pending decisions: how abandoned and failed count. (Proposed: abandoned in the skipped segment; failed as
      remaining.)
+
+**#79 as built (v1.66.0, 2026-10-03):**
+- **`--plan`:** `aimb-log` refuses a plan name that looks like status text — it starts with `@~`, or is "@ctx words"
+  (an `@` plus a space), or has spaces and is longer than 40 chars — with `bad-plan` (exit 64, locally): `"<name>" looks like
+  status text — put text before --plan: "<text>" --plan "A" "B"`. "@Spec" alone stays a valid name. The snippet line reads
+  `- "<text>" --plan "A" "B" creates ☐ plan items under --path, in that order; text goes BEFORE --plan.`; the README and
+  the `log` tool description say the same (for the tool: text goes in `text`, never in `plan`).
+- **Decisions taken (the pending ones):** ABANDONED items count in the skipped part (they won't be done), and an abandoned
+  NODE has its remainder skipped; FAILED counts as remaining (it may be retried), and a failed node keeps its bar.
+- **Model:** `{done, skipped, total, unit}`; `skipped` defaults to 0. `parseProgress` also takes `{skipped}` and a trailing
+  "N skipped" ("3/6 1 skipped"). Common unit: done, skipped and total are summed. Mixed units: each child's done fraction and
+  skipped fraction are averaged, each child weighted 1. "N of M done": M = ALL items, done = done items, skipped = skipped +
+  abandoned items (replaces 6b/6c's "skipped left out of M"; an all-skipped plan now has a bar). Reported progress wins
+  as before, unless the node is done (then 100%). The plan END rule is unchanged (skipped items keep a plan open).
+- **Text:** `{progress}` → "1 of 5 done · 1 skipped" (unchanged when skipped is 0), `{pct}` = the done %, new `{skipped}`.
+- **Wire:** `skipped` rides progress objects (records, cp / cf, gossip units) only when > 0; format NOT bumped (v5).
+- **Same change set (Robin, 2026-10-03):** the snippet keeps the checklist live (start an item with `--state running
+  "<what>"`, tick it with `--done` the moment it is done, keep "@~root …" current); the realm reminders brief an
+  orchestrator (`--path` = each agent's unique name, its checklist up front or `--plan` first, its own `@~root` current,
+  its agents tracked as its own plan) within the 365-char reminder cap; the README gained "Briefing agents"; in-progress is
+  CYAN everywhere (`--act-running`), green = done only; sessions have their own glyph (a window; code ">_", cowork a bubble,
+  page a globe, else plain), one builder for the Activity tree, the legend, the Sessions table and the mesh map, with
+  `client_kind` added to dashboard session units from the mesh roster.
 
 ## #78 — making use of latest Claude features  ·  **OPEN (after the #70 deploy)**
 Robin, 2026-10-02. Prompted by: "Is the doorbell still the best way to wake a session? Is the MCP bridge still the
