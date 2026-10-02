@@ -157,7 +157,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #79 --plan text footgun + 3-part progress (v1.66.0), #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #80 dashboard-change notices to the owning session, #79 --plan text footgun + 3-part progress (v1.66.0), #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -296,6 +296,27 @@ the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) 
 whenever a send returns `unknown-subpeer`.
 
 ---
+
+## #80 — tell the owning session when the dashboard changes its activity  ·  **OPEN (next, after #79)**
+Robin, 2026-10-03.
+- **The gap:** dashboard actions (#70 6d) are only LOGGED on the node ("skipped by robin via dashboard (…)"). The
+  session that owns the plan isn't told, so an orchestrator may keep working on something a human just skipped or
+  abandoned.
+- **Wanted:** the owning host's gateway sends the node's session a system message for every state-changing dashboard
+  action: skip, abandon, abandon_plan, done, complete, reopen, reopen_plan, finish, dismiss. Copy, pin and hide
+  are view-only and send nothing.
+  - **Recipient:** the session's registered sub-peer (realm/project/user/session name). If it is offline, the
+    message is parked like any mail. Script-only sessions (no sub-peer) get the log entry only.
+  - **Message:**
+    - verb `activity_changed`;
+    - subject e.g. "robin skipped @Dashboard test/@Docs" (status paths are realm-visible anyway);
+    - body: `{action, path, host, from_state, to_state, by:{user, host}, entry_id}`.
+  - **Batched:** several actions on one session within a few seconds become ONE message ("robin skipped 2 items and
+    abandoned 1 in @Dashboard test").
+  - **Delivery:** it rides the existing system-message path (no consent bypass beyond what #72's notices use, since
+    it is the session's own project). The doorbell wakes the session, and the receive reminder applies, so the
+    session summarises for its user before acting.
+- **Compatibility:** wire-compatible with 1.65, so no simultaneous redeploy.
 
 ## #79 — `--plan` swallows trailing text; three-part progress (done / skipped / total)  ·  **OPEN (fixing now, v1.66.0)**
 Found by Bridget and Robin, 2026-10-02, on the first live use after the v1.65.0 deploy.
