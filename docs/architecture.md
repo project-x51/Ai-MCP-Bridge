@@ -329,6 +329,13 @@ ignored, which is how mixed versions coexist):
     (paged, rate-limited by the owner; v1.61.0: pages continue into the owner's day files, a rate-limited answer names
     the owner's `rate`, and the requester queues its fetches at that rate); `ACTIVITY_REQ {op:"resync"}` (no rid, no
     reply) asks for a full slice. v1.61.0: a session record's header may carry `bell:true` (a doorbell armed for it).
+  - `ACTIVITY_ACT {rid, q:{session, project, user, path, action, args?}, by:{user}}` → `ACTIVITY_RES {rid, result}` (v1.65.0,
+    #70 6d) — a DASHBOARD ACTION forwarded to the hub that owns the node (each host writes only its own nodes); queued and
+    paced by the requester like an `ACTIVITY_REQ`, rate-limited by the owner's same per-link bucket. The owner attributes
+    it `by:{kind:"dashboard", user, host:<the LINK's host>}` (never a host named in the frame); a `q.host` naming another
+    host → `not-owner`; on a socket that is not an adopted peer hub (no HELLO, or no PEER_HELLO) → `unauthorized`.
+    v1.65.0: a FULL `ACTIVITY_SLICE` also carries `log_cmd:{node, script, token_file}` — the sender's aimb-log paths for
+    the dashboards' "copy command" (a path, never the token).
   - `origin` is informational: ownership is ALWAYS the link's host (the hostname of the peer's `PEER_HELLO` session);
     a frame whose `origin` names another host is dropped.
 
@@ -336,7 +343,11 @@ ignored, which is how mixed versions coexist):
 `dashboard-only`): `{type:"activity_sub", resync?}` → `{type:"activity_board", full:true, epoch, seq:1, head, upsert}`,
 then ≤1/s `{type:"activity_delta", epoch, seq, base, head, upsert, remove}` (units: one per session group, one per agent,
 in the raw board form); `{type:"activity_unsub"}`; `{type:"activity", ref, query}` → (`{type:"activity_queued", ref,
-host, wait_ms, position}` while a remote fetch waits) → `{type:"activity", ref, result}`.
+host, wait_ms, position}` while a remote fetch waits) → `{type:"activity", ref, result}`. v1.65.0 (#70 6d) — the first
+WRITE: `{type:"activity_action", ref, host, session, project, user, path, action, args?}` → (`activity_queued` while a
+forward waits) → `{type:"activity_action", ref, result}`; accepted only from an authenticated `dashboard` socket (a page
+leaf, a logger or a socket without a hello → `unauthorized`); the board `head` carries `log_cmd` (this host's aimb-log
+paths), `user` (who actions are attributed to) and each `remote_hosts[]` entry its own `log_cmd`.
 
 **Deliberately out of scope here.** Cross-*realm* bridging stays in §8 (a translator, because keys
 differ). And cross-machine hub **high-availability**: if a machine's hub dies its local mesh re-elects
@@ -1183,6 +1194,71 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.65.0):** *the agent activity board, step 6d — the dashboard's right-click ACTIONS (its first write path), the
+  log panel, pin / hide; plus the agent-finish rule, abandon_plan on agents and the exact carried-forward entry count (#70).*
+  Decisions of 2026-10-02 ("Decisions before 6c and 6d" + "Decisions after 6c, for 6d"). Nothing of #70 was deployed.
+  **Model (`lib/activity.js`):** `planEndAt` takes an agent's / the session's own line OUT of the plan-end rule — finishing
+  never completes a plan; a CONTEXT plan node's line done / abandoned still ends its plan; an agent / the session ends one
+  only through the new PLAN-END MARKER `node.plan_end = {state: done|abandoned, ts}` (set / cleared by a logged entry with
+  `plan_end: done|abandoned|open`; the tool's `abandoned` line on an agent sets it too — 6c's "finishes it and ends its plan"
+  kept). `plan_end` rides the gossip unit, cp and cf records; the replay resolves it like a line (a ≤v4 abandoned agent line
+  counts as the marker). The board's plan nodes add `plan_end_how` (all-done | done | abandoned). **`applyAction(state, q,
+  now, {by})`** (pure; `ACTIVITY_ACTIONS`): item `done` / `skip` / `reopen` (→ todo) / `abandon` (a keepText `@~` line —
+  the line keeps its text, the LOGGED entry's text is the attribution: `apply` opts `entryText` → the record's `text`, plus
+  `line_text` = the line's own; `act`; `by`); plan `complete` (context → line done; agent / root → marker done),
+  `reopen_plan` (refused `not-ended` / `all-items-done`; context → line running; agent → marker open), `abandon_plan`
+  (`heldPlans`: the node's open plans reached without crossing another agent, deepest first — each OPEN item abandoned, then
+  the plan node: a context by its line, an agent / the session by the marker, so it keeps running; the shared
+  `abandonPlans` now also drives auto-abandon, which therefore no longer finishes agents); agent / session `finish` (args
+  state done|failed; only when QUIET — `quietAgent`: finished, stale or gone at `args.stale_min` (the viewer's slider), or
+  implicit with every reported agent below it quiet) and `dismiss` (quiet or finished, every agent below too, and
+  `openPlanKeys` not holding it → `has-open-items`). Codes: bad-action, bad-args, bad-by, unknown-session, bad-path,
+  unknown-node, not-a-plan-item, no-change, not-a-plan, already-ended, not-ended, all-items-done, no-open-plan,
+  not-an-agent, already-finished, not-stale, has-open-items. `by` (`normBy`) may now be the 6c string or
+  `{kind:"dashboard", user, host}` (bounded, one line); `byText` → "by robin via dashboard (ROBIN-Z790)"; any `by` makes a
+  SYSTEM message (no activity, no un-gone; the replay agrees). **Dismiss** (`dismissNode`): one LOGGED entry
+  `{…, dismiss:true, act, by}` at the node's path, then the subtree leaves memory (the root: the whole session); the entry
+  lands in the PARENT's log with its own `path` (`logView` / `findEntry` honour an entry's `path`). The replay treats it like
+  `evicted`: a path not re-created newer is DEAD (older records at or under it skipped; the session's root → the session
+  is not rebuilt), and the entry is attached to the parent's log at build; a skipped record that began a live ANCESTOR's
+  run still marks that ancestor (`new_from` below the dead point — else a session whose first record was on a dismissed
+  path looked partial). **Counts:** `cf` records carry `log_n` (+ `log_partial`); the replay's count = the entries after the
+  newest cf + its `log_n`, and `node.cpartial` (the COUNT understates) is now separate from `node.partial` (the run began
+  before the window — still drives "earlier history pruned"); gossip `log_partial` / the board's `partial` use `cpartial`.
+  Records + slices are **format v5** (v2–v4 records still read; a v4 slice is refused). **Bridge:** WS `{type:
+  "activity_action", ref, host, session, project, user, path, action, args}` from an authenticated `dashboard` socket only
+  (a page leaf / a logger / a socket without a hello → `unauthorized`; the logger branch answers it explicitly);
+  `activityAction`: host = this host → `actApplyAction` (waits out a replay, `Act.applyAction`, every record persisted in
+  order, `actChanged()` → gossip + dashboard deltas, a log line); else `activityRemote(host, 'action', q, {by:{user}})` —
+  the same per-link queue (`job.by`) → `ACTIVITY_ACT {rid, q, by}`; the owner (`actServeAction`) takes a token from the
+  shared bucket (`actTakeToken`, now also used by `actServe`), refuses a `q.host` naming another host (`not-owner`) and
+  applies it with `by.host` = the link's host. `onActivityFrame` answers an `ACTIVITY_ACT` on an unadopted socket / a
+  forged origin with `unauthorized` and one from a hub of another format with `owner-unsupported`. Attribution user =
+  `PROC_USER` (AI_BRIDGE_USER / the OS login) else "dashboard". Full slices carry `log_cmd` (`actLogCmd`: node, script,
+  token_file PATH or null — never the token); the dashboard head adds `log_cmd`, `user` and each remote host's `log_cmd`.
+  Followers serve no dashboard (the WS ingress is the gateway's), so there is no follower path for actions. The MCP tools
+  get no new actions (the session resolves its own items with states; the dashboard is the manual override); the `log` /
+  `activity` descriptions say so. **Dashboard:** the Log rows are gone — a click SELECTS a session / agent / context row
+  (`ACT.sel`; the chevron or a double-click expands) and the LOG PANEL (`#actpanel`, right of the tree; below it under
+  900 px) shows its merged subtree log (header: path, host, count, a multi-host session's host switch, ↻, ×; entries,
+  details, "load older", the run boundary, pruned; re-reads its first page when the count changes; cleared when the node
+  leaves the board). The right-click MENU (`AimbAct.menuFor(model)`; the model built lazily per row against the
+  UNFILTERED tree: `quietAgent`, `subtreeAgentsQuiet`, `rootQuiet`, `ownsOpenPlan`, `openItemsOwned`): only the actions
+  valid for the row and state, copies (path / session name / entry id / the aimb-log command via `AimbAct.logCmd` from the
+  head's `log_cmd` of the node's host), Pin / Hide; confirmation dialogs for abandon_plan / finish / dismiss; per-row
+  feedback (a spinner — "queued" while a forward waits — then ✓ or the code). Keyboard: focusable rows (treeitem / listitem,
+  aria-expanded / aria-selected), arrows / Home / End / Enter / → / ←, the Menu key and Shift+F10; touch: a 550 ms
+  long-press (the ending tap does not select). Pin / Hide in `localStorage` (`buildTree({pins, hidden, showHidden})`: pinned
+  first among siblings, hidden counted on the parent → "N hidden — show" / "hide N again"; sessions per project too). Also:
+  open plans expand their ANCESTORS by default (`nodeOpenDefault` = `t.open` or 6c's window); header + project counts from
+  the unfiltered tree; the "plans open" slider = an index into `PLAN_OPEN_STEPS` (0 – 10080 min); an `--abandon` colour
+  token (dark: #B8C2D0); `--bad-fg` for the danger button; a viewport meta tag; the ≤720 px phone rules moved after the base
+  rules (6a's block was overridden: its bar / name widths never applied). **Tests:** `test_activity_unit` 630 → **664**;
+  `test_dashboard_activity` 132 → **186**; new `test_activity_actions_live` **43**; `test_log_live`,
+  `test_activity_gossip_live`, `test_activity_carry_live`, `test_activity_6c_live` updated for format v5. Against the 1.64
+  library / page / bridge: `test_activity_unit` 9 FAIL (4 sections crash on the missing `applyAction`, counted once
+  each), `test_dashboard_activity` fails its first 6d check then crashes (no log panel), `test_activity_actions_live` 35 of
+  43. Full suite **2268 passed, 0 failed** (54 files, typecheck clean, first run; standalone reruns: `test_grants_federate_live` 3/3, `test_activity_actions_live` 5/5 incl. the suite, `test_federation_heal_live` 4 of 5 — one run ended without its summary line, the #74 flake).
 - **Built (v1.64.0):** *the agent activity board, step 6c — the agent snippet + the connect reminders, the abandoned state
   and the new plan-end rule, gossiped entry counts, run-boundary history, the finished-plan window, home-host tags, the
   Plans filter (#70) — together with #75 part 2 (the token FILE in the commands the bridge hands out).* Decisions of

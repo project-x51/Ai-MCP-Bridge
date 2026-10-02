@@ -67,7 +67,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
   sessions/pages as nodes, control/page edges, amber pulse on message activity, gateway↔gateway edge
   appears when cross-host gossip lands), plus roster tables + trace feed, and the **Activity** tree of what every
-  agent is doing (#70 step 5 — see "The Activity page"; light / dark follow the OS). **The gateway serves it over
+  agent is doing (#70 step 5 — see "The Activity page"; light / dark follow the OS; v1.65.0: a log panel for the selected
+  row and a right-click menu of actions — see "Step 6d"). **The gateway serves it over
   HTTP on the ws port** — open `http://127.0.0.1:<wsPort>/?token=<token>` (same origin as the WS, so it
   isn't blocked the way a `file://` page is). Opening the file directly still works if you add `?ws=`.
   Click a node to set an **alias**: sessions/pages rename live (a session's own `set_name` wins later);
@@ -131,23 +132,29 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   containment, header filter + server-side inject (#33, 9); and `test_lib_unit.mjs` — the fast pure-`lib/` +
   services units (topics/envelope/refs/consent/reminders/traces, egress incl. server-side auth mint/refresh/
   inject and the secret-resolver, `win-env` reg-parsing, tailscale `hostOf`) (#31/#35/#36, 88); and
-  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 630 — v1.63.0: todos, plans, the
+  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 664 — v1.63.0: todos, plans, the
   rollup variants, lifetime, eviction, carry-forward across rollovers + a restart; v1.64.0: abandoned, the plan-end rule,
-  auto-abandon, entry counts, the home host + s0, the run boundary / pruned paging); `test_activity_gossip_live.mjs`
+  auto-abandon, entry counts, the home host + s0, the run boundary / pruned paging; v1.65.0: the agent-finish rule, the
+  plan-end marker, every dashboard action + its codes, dismiss + its replay, the cf entry count); `test_activity_gossip_live.mjs`
   — four loopback "hosts" + a follower: the mesh board, deltas ≤1/s per link, truncation, remote paging / entries /
   queued fetches, going-down, owner down, forged slices, a legacy hub, dashboards, plans (#70 step 4 / 6b, 51);
   `test_dashboard_activity.mjs` — the dashboard's Activity view in jsdom: client-side stale, the status glyph + ring,
   hover times, placeholders, the delta store, the tree, pills / host down / bell, the project cycle, active only, logs
   (#70 step 5 / 6b — plan items, the plan bar, host tags, per-host headlines; 6c — open by default, the finished-plan
   window + slider, abandoned, home-host tags, the Plans filter, rollups that follow it, the bar column, counts, the run
-  boundary, the 6d row hooks; 132); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
+  boundary, the 6d row hooks; 6d — the right-click menu per row and state, copies (never a token), confirmations,
+  feedback, keyboard + long-press, the log panel + selection, pin / hide, open ancestors, unfiltered counts, the 0 – 7 day
+  slider; 186); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
   board → deltas ≤1/s, seq-gap resync, page leaves refused, paging into the day files (local + remote), queued fetches
   + `busy`, gone vs host down, the doorbell flag, the duplicate-hostname warning, plan units + ticks (#70 step 5 / 6b, 43);
   `test_activity_carry_live.mjs` — the #70 6b carry-forward under the test clock hook: 13 days of seeded files, a real
   day rollover, a restart a week later rebuilt from the rollover's records alone (11); `test_activity_6c_live.mjs` — #70
   6c + #75 part 2: the reminders' --token-file (never the token), the exact {log_snippet} / {log_tool_hint}, aimb-log
   --token-file, the run boundary + pruned history local and remote, gossiped counts, the home host, the board head, and
-  auto-abandon under the clock hook (31). Tests run in
+  auto-abandon under the clock hook (31); `test_activity_actions_live.mjs` — #70 6d: every dashboard action with its codes
+  and attribution, local and forwarded to the owning host (ACTIVITY_ACT) with the effect gossiped back, the agent-finish
+  rule, abandon_plan leaving an agent running, dismiss (open items refused, gossiped, persisting across a restart), page
+  leaves / loggers / hello-less sockets and forged hub frames refused, the exact entry count across restarts (43). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -477,7 +484,7 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
@@ -788,7 +795,8 @@ run spans its children's runs (a child's new run is no boundary for the session)
 **The finished-plan window.** An ENDED plan stays **expanded** on the dashboard for `finished_plan_open_min` (per host,
 default 120, sent with the board in `head`), then collapses out of the default view — it isn't removed (the 7-day window
 still does that). A **"plans open"** slider beside "stale after" changes it live (0–8 h; not persisted, like the stale
-slider). Open plans always render expanded by default (a plan node's own click still wins; Collapse all closes them).
+slider; v1.65.0: 0 – 7 days). Open plans always render expanded by default (a plan node's own click still wins; Collapse all
+closes them).
 
 **Home-host tags.** A top-level node's host tag now compares with the session's **HOME host** — the host it first appeared
 on: the earliest-created root across hosts, ties by host name (the board's `home`; `created_at` rides every gossip header
@@ -805,11 +813,97 @@ session rollup still counted an ended plan Active only hid.)
 up on every row. Every row carries its identity for 6d's right-click menu: `data-kind` (project / session / host-line /
 node / log / entry), the node's ORIGIN `data-host` and `data-path`, `data-session` / `data-project` / `data-user`
 (`data-nkind`, `data-plan-item`, `data-plan-node`, an entry's `data-id`); `window.AimbActView.rowInfo[data-k]` holds the
-same object. No menu yet.
+same object. (v1.65.0: the menu — "Step 6d" above.)
 
 **Formats (v1.64.0).** Records + slices are **v4** (`abandoned`, `by`, `s0` on every record, `log_n` / `log_partial` on
 gossip nodes); v2 and v3 records are still read; hubs declare `activity_gossip:4` (a 1.63 hub would misread `abandoned`,
 so the two don't exchange activity). Deploy = restart every host's gateway on 1.64.0 together.
+
+### Step 6d (v1.65.0) — dashboard actions, the log panel, pin / hide
+**Finishing an agent never completes its plan.** An agent (or the session) whose own line goes `done` or `failed` finishes,
+and the plan it holds stays exactly as it is: its open items stay open (they never expire, the carry-forward keeps them)
+until someone resolves them. A plan ends only when **every item is done**, when a **context** plan node is set `done`
+(complete) or `abandoned`, or — for a plan held by an agent or the session — through its **plan-end marker**, which only
+the dashboard's *Mark plan complete* / *Abandon plan* set (and *Reopen plan* clears). The tool's `abandoned` state on an
+agent keeps 6c's meaning: it finishes the agent **and** ends its plan (it sets the marker). The board's plan nodes now also
+carry `plan_end_how`: `all-done`, `done` (marked complete) or `abandoned`.
+
+**Right-click actions — the dashboard's first write path.** Right-click a row (or focus it and press the **Menu** key /
+**Shift+F10**; on a touch screen, **long-press**) for a menu with only the actions valid for that row in its current state:
+
+| On | Actions (wire name) |
+|---|---|
+| Plan item | Mark done (`done`) · Skip (`skip`) · Reopen, back to ☐ (`reopen`) · Abandon item (`abandon`) |
+| Plan node (open) | Mark plan complete (`complete`) · Abandon plan… (`abandon_plan`) |
+| Plan node (ended by complete / abandon) | Reopen plan (`reopen_plan`) — a plan that ended because every item is done reopens when an item does |
+| Agent / session holding open plan items | Abandon open plan items… (`abandon_plan`: only its OPEN items — todo / running / blocked — of the plans it holds without crossing another agent; those plans end; the agent or session itself **keeps running**) |
+| Agent / session that is stale or gone | Mark finished — done… / — failed… (`finish`, args `state`) |
+| Agent / session that is stale, gone or finished | Dismiss from the board… (`dismiss`) — never when its subtree holds part of an open plan (`has-open-items`) |
+| Any node / session | Copy path (a session: Copy session name) · Copy its aimb-log command · Pin / Unpin · Hide / Unhide |
+| A log entry (in the log panel) | Copy entry id · Copy path |
+
+- *Abandon plan*, *Mark finished* and *Dismiss* ask first (a dialog saying what happens — how many open items, that the
+  agent keeps running, that nothing is deleted — and how it will be logged; Cancel has the focus, Escape cancels).
+- **Who and how:** the dashboard sends `{type:"activity_action", ref, host, session, project, user, path, action, args}`
+  over its realm-token WS connection; only an authenticated **dashboard** socket is accepted (a page leaf, a logger or a
+  socket without a hello gets `unauthorized`). `host` is the node's ORIGIN: that host's gateway applies it — the bridge the
+  dashboard is attached to does it itself, or forwards it over the existing authenticated hub link as `ACTIVITY_ACT`
+  (queued and rate-limited like a remote history fetch: `busy` / `owner-unreachable` / `owner-unsupported`), so each host
+  still writes only its own nodes. The answer comes back as `{type:"activity_action", ref, result}`; the row shows a
+  spinner (with "queued" while a forward waits), then **✓** or the error code inline (the explanation on hover).
+- **Attribution:** every applied action is a logged entry on the node, attributed `by:{kind:"dashboard", user, host}` + `act`
+  (the action), its text "marked done by robin via dashboard (ROBIN-Z790)" — user = the OS user of the bridge the dashboard
+  is attached to (`AI_BRIDGE_USER` wins; else "dashboard"), host = that bridge's host (an owner takes it from the hub link,
+  never from the frame). An item's own line keeps its text (only its state changes). These are SYSTEM entries: they never
+  refresh an agent's activity or un-gone a session. They are persisted, gossiped and shown in the log like any entry.
+- **Stale** for *finish* / *dismiss* means what the viewer's slider says (`args.stale_min`); an implicit agent (it never
+  reported) counts as quiet when every reported agent below it is.
+- **Dismiss is not deletion.** The node and its subtree (or, on a gone session, the whole session) leave the board now
+  instead of after the 7-day window. A logged `dismiss:true` entry — shown in the PARENT's log — records it, and the restart
+  replay honours it like an eviction (older records at or under that path are an ended run), so a dismissal survives a
+  restart; a new report under the same name starts a new run. The day files are append-only: nothing is erased.
+- **Codes:** `not-a-plan-item`, `no-change`, `not-a-plan`, `already-ended`, `not-ended`, `all-items-done`, `no-open-plan`,
+  `not-an-agent`, `already-finished`, `not-stale`, `has-open-items`, `bad-action`, `bad-args`, `unknown-session`,
+  `unknown-node`, `unknown-host`, `not-owner` (a forwarded frame naming another host), `unauthorized`, `busy`,
+  `owner-unreachable`, `owner-unsupported`, `activity-loading`.
+- The MCP tools get no new actions: a session already resolves its own items and plans with states (`@~…/@~B` + `done` /
+  `skipped` / `todo` / `abandoned`; a context plan node `done` / `abandoned`). The dashboard is the manual override.
+- **Copy its aimb-log command** builds the session's `{log_snippet}` command for the node's HOST: its absolute node + script
+  paths, `--session` / `--project`, `--token-file "<path>"` when that bridge reads its token from a file — never a token —
+  and `--path "<the node>"` (the board head now carries `log_cmd` for this host and each remote host, from its full slices).
+
+**The log panel replaces the Log rows.** The tree has no "Log" rows any more. **Click** a session, agent or context row to
+select it (highlighted); the **chevron** (or a double-click) expands it. The selected node's merged subtree log shows in a
+**panel to the right of the tree** (below it on a narrow screen): its path, host and entry count, entries newest first
+(time, a state dot, the `@ctx` / `@~ctx` tag relative to it, the text; details and JSON on click), "load older…", "start of
+this run · show earlier runs…", "earlier history pruned". A multi-host session's panel switches between its hosts; another
+host's log comes through the bridge's queued remote fetch (a spinner while it waits). The selection survives board deltas
+(the panel re-reads its first page when new entries arrive), and clears when the node leaves the board; ↻ refreshes, ×
+closes.
+
+**Pin / Hide (this browser only).** *Pin* sorts a node (or a session) to the top of its parent, marked 📌. *Hide* collapses
+it away; its parent shows "N hidden — show" (shown, a hidden row is greyed and the control says "hide N again"). Both are
+undone from the same menu and kept in `localStorage` (`aimb.act.pins` / `aimb.act.hidden`; a private window just forgets).
+
+**Keyboard and touch.** Rows are focusable (`role="treeitem"`; log entries `listitem`): ↑/↓ move, Home / End jump, Enter
+selects, → / ← expand / collapse, the Menu key or Shift+F10 opens the menu (↑/↓ inside it, Enter runs an item, Escape
+closes and gives the focus back). A long-press (≈0.5 s) opens the menu on a touch screen; the tap that ends it does not
+select.
+
+**Other dashboard changes.** An open plan now expands its **ancestors** by default too (a plan under a collapsed agent or
+context is visible). The header and project counts **ignore the filters** (always the real totals; rolled-up bars still
+follow them). The "plans open" slider spans **0 – 7 days** in steps (minutes → hours → days; the bridge's
+`finished_plan_open_min` range is already 0–10080). The abandoned glyph has its own colour token, clearly visible in dark
+mode. The page has a viewport meta tag, and the phone layout rules now actually apply (the bar and name widths of the
+≤720 px block were overridden before).
+
+**Entry counts stay exact.** The day-rollover carry-forward record now carries the node's own entry count (`log_n`, +
+`log_partial` while it still understates), so a node whose run began before the replay window keeps its exact count after a
+restart — no "N+" from that cause.
+
+**Formats (v1.65.0).** Records + slices are **v5** (the plan-end marker on agents, `dismiss` entries, `line_text`, `act` and
+an object `by`, the cf `log_n`); v2–v4 records are still read; hubs declare `activity_gossip:5`. Deploy = restart every
+host's gateway on 1.65.0 together.
 
 ### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
 Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
@@ -845,7 +939,8 @@ follower's `activity` shows the mesh too):
 
 ### The Activity page (v1.61.0, step 5; the node tree v1.62.0, step 6a)
 The dashboard's **Activity** section is the mesh board as a tree: **project → session → its node tree (agents and
-contexts, to any depth) → log entry**.
+contexts, to any depth) → log entry**. (v1.65.0: logs moved out of the tree into the **log panel**, and rows got a
+right-click menu — see "Step 6d" above; the "Log" rows described below are gone.)
 - **Projects** show their counts (sessions · active agents — reported, unfinished agents). Clicking a project heading
   cycles **sessions + top-level nodes → sessions only → collapsed**; the **Projects / Sessions / Nodes** control sets
   every project at once (v1.62.0: "Nodes" — formerly "Agents" — means *expand down to each session's top-level nodes*).

@@ -39,7 +39,7 @@ check('limits: the locked #70 values (6a: depth 6, 128 agents, 4096 nodes, batch
   && A.ACTIVITY_LIMITS.agentsPerSession === 128 && A.ACTIVITY_LIMITS.nodesPerSession === 4096 && A.ACTIVITY_LIMITS.detailsBytes === 4096
   && A.ACTIVITY_LIMITS.dataBytes === 16384 && A.ACTIVITY_LIMITS.staleAfterMaxMs === 24 * HOUR && A.ACTIVITY_LIMITS.batchItems === 64 && A.ACTIVITY_LIMITS.batchBytes === 65536
   && !('contextsPerAgent' in A.ACTIVITY_LIMITS) && !('pathDepth' in A.ACTIVITY_LIMITS))
-check('format: records + slices are v4 (6c; v3 = 6b)', A.ACTIVITY_FORMAT === 4 && mk().v === 4)
+check('format: records + slices are v5 (6d; v4 = 6c, v3 = 6b)', A.ACTIVITY_FORMAT === 5 && mk().v === 5)
 check('limits + defaults are frozen', Object.isFrozen(A.ACTIVITY_LIMITS) && Object.isFrozen(A.ACTIVITY_DEFAULTS) && Object.isFrozen(A.ACTIVITY_STATES))
 check('defaults: the #70 per-host config (+ step 2 progress_checkpoint_sec; 6b: finished_visible_hours 168 = 7 days; 6c: abandoned_plan_days 90, finished_plan_open_min 120)', J(A.ACTIVITY_DEFAULTS) === J({ log_retention_days: 7, log_entries_per_agent: 200, stale_after_min: 15, finished_visible_hours: 168, memory_budget_mb: 64, progress_checkpoint_sec: 60, abandoned_plan_days: 90, finished_plan_open_min: 120, enabled: true }))
 check('states: running|blocked|failed|done|idle + (6b) todo|skipped + (6c) abandoned', J(A.ACTIVITY_STATES) === J(['running', 'blocked', 'failed', 'done', 'idle', 'todo', 'skipped', 'abandoned']))
@@ -297,7 +297,7 @@ await section(async () => {
     && sess.nodes.has('') && sess.nodes.size === 1 && sess.origin === 'HOST-A' && root(st, S1).kind === 'agent')
   check('apply: a plain message logs to the root without setting the current line', root(st, S1).log.length === 1 && root(st, S1).current === null)
   check('apply: in-memory entry is small (no details/data/path keys; current:false omitted)', J(Object.keys(root(st, S1).log[0])) === J(['id', 'ts', 'text', 'state']))
-  check('apply: the returned entry carries identity + path for the JSONL (v4)', r.entry.v === 4 && r.entry.session === 'Bridget' && r.entry.project === 'AIMB' && r.entry.path === '' && r.entry.origin === 'HOST-A'
+  check('apply: the returned entry carries identity + path for the JSONL (v4)', r.entry.v === A.ACTIVITY_FORMAT && r.entry.session === 'Bridget' && r.entry.project === 'AIMB' && r.entry.path === '' && r.entry.origin === 'HOST-A'
     && r.entry.host === 'HOST-A' && r.entry.user === 'robin' && r.entry.current === false && r.entry.details === null && r.entry.data === null && !('agent' in r.entry) && !('context' in r.entry))
   const r2 = say(st, S1, { text: 'second' }, T0 + 1)
   check('apply: entry ids unique + ordered', r2.id !== r.id && r2.id > r.id)
@@ -660,7 +660,7 @@ await section(async () => {
   say(st, I, { agent: 'w', text: '@~build compiling', progress: '2/4 files', eta: '10m', details: 'SECRET-DETAILS-TEXT', data: { marker: 'SECRET-DATA-VALUE' } }, T0)
   say(st, I, { agent: 'w', text: 'LOG-ONLY-ENTRY-TEXT' }, T0 + 1)
   const snap = A.snapshot(st), js = J(snap)
-  check('snapshot: shape { v:4, origin, sessions:[{ …, nodes:[…] }] }', snap.v === 4 && snap.origin === 'HOST-A' && snap.sessions.length === 1 && Array.isArray(snap.sessions[0].nodes) && !('agents' in snap.sessions[0]) && !('self' in snap.sessions[0]))
+  check('snapshot: shape { v:4, origin, sessions:[{ …, nodes:[…] }] }', snap.v === A.ACTIVITY_FORMAT && snap.origin === 'HOST-A' && snap.sessions.length === 1 && Array.isArray(snap.sessions[0].nodes) && !('agents' in snap.sessions[0]) && !('self' in snap.sessions[0]))
   check('snapshot: NO details / data / log entries', !js.includes('SECRET-DETAILS-TEXT') && !js.includes('SECRET-DATA-VALUE') && !js.includes('LOG-ONLY-ENTRY-TEXT') && !js.includes('"log"') && !js.includes('"details"') && !js.includes('"data"'))
   const c = snap.sessions[0].nodes.find(x => x.path === 'w/@build')
   check('snapshot: a node carries its current line (has_details/has_data flags) + progress + eta', c.current.text === 'compiling' && c.current.has_details === true && c.current.has_data === true
@@ -721,7 +721,7 @@ await section(async () => {
     && A.getSession(here, { session: 'Linux', project: 'X' }, 'HOST-D').origin === 'HOST-D')
   check('merge: bad origin / bad snapshot rejected', A.mergeSnapshot(here, '', snapB).code === 'bad-origin' && A.mergeSnapshot(here, 'HOST-E', null).code === 'bad-snapshot' && A.mergeSnapshot(here, 'HOST-E', { v: 2, sessions: 'x' }).code === 'bad-snapshot' && !here.remote.has('HOST-E'))
   check('merge (6a): a v1 (1.61) snapshot is refused bad-version, nothing held', A.mergeSnapshot(here, 'HOST-E', { v: 1, origin: 'HOST-E', sessions: [{ session: 'Old', project: 'P', self: {}, agents: [{ path: 'a' }] }] }).code === 'bad-version' && !here.remote.has('HOST-E'))
-  const empty = A.mergeSnapshot(here, 'HOST-D', { v: 4, origin: 'HOST-D', sessions: [] })
+  const empty = A.mergeSnapshot(here, 'HOST-D', { v: A.ACTIVITY_FORMAT, origin: 'HOST-D', sessions: [] })
   check('merge: an empty slice clears that origin\'s sessions', empty.changed && A.getSession(here, { session: 'Linux', project: 'X' }, 'HOST-D') === null)
   check('dropOrigin: forgets a host; false when unknown', A.dropOrigin(here, 'HOST-D') === true && !here.remote.has('HOST-D') && A.dropOrigin(here, 'HOST-D') === false && here.remote.has('HOST-C'))
   const lin = root(here, { session: 'Linux', project: 'X' }, 'HOST-C')
@@ -731,7 +731,7 @@ await section(async () => {
   const all = A.allSessions(here)
   check('allSessions: local first, then origins sorted', all.length === 3 && all[0].origin === 'HOST-A' && all[1].origin === 'HOST-B' && all[2].origin === 'HOST-C')
   // defensive normalisation of a hostile/junk slice
-  const junk = { v: 4, origin: 'EVIL', sessions: [
+  const junk = { v: A.ACTIVITY_FORMAT, origin: 'EVIL', sessions: [
     null, 'x', { project: 'no-session-name' },
     { session: 'Big', project: 'P', nodes: Array.from({ length: 200 }, (_, i) => ({ path: `a${i}`, created_at: T0, last_activity: T0, current: { id: 'i', ts: T0, text: rep('t', 500), state: 'weird', details: 'LEAKED-DETAILS', data: { leak: 1 } } })) },
     { session: 'Paths', project: 'P', nodes: [{ path: 'a/b/c/d/e/f/g' }, { path: 'has space' }, { path: 'ok' }, { path: 'OK' }, { path: 'x/@~y' }, { path: 5 }] },
@@ -877,7 +877,7 @@ await section(async () => {
 await section(async () => {
   const st = mk(), I = S1
   const a = say(st, I, { agent: 'w', text: '@~build go' }, T0).entry
-  check('markers: the first record of a session carries new_from 0 (everything on its chain is new); v4', a.new_from === 0 && a.v === 4 && !('new_session' in a))
+  check('markers: the first record of a session carries new_from 0 (everything on its chain is new); v4', a.new_from === 0 && a.v === A.ACTIVITY_FORMAT && !('new_session' in a))
   const b = say(st, I, { agent: 'w', text: '@build more' }, T0 + 1).entry
   check('markers: later records of the same nodes carry none', !('new_from' in b))
   const c2 = say(st, I, { agent: 'w', text: 'agent note' }, T0 + 2).entry
@@ -1003,14 +1003,14 @@ await section(async () => {
   const write = ws => { for (const w of ws) { if (w.rewrite) { check('rep rewrite: the open repeat line IS the file\'s last line', file.length && file.at(-1).rep !== undefined); file[file.length - 1] = w.rec } else file.push(w.rec) } return ws }
   say(st, I, { agent: 'w', context: '@~scan', progress: '1/100', log: false }, T0)
   const w1 = write(tick(T0 + MIN))
-  check('cp: a node changed by log:false -> one full v4 cp line (path) with a per-file key', w1.length === 1 && w1[0].kind === 'cp' && w1[0].rec.kind === 'cp' && w1[0].rec.v === 4 && w1[0].rec.k === 1 && w1[0].rec.progress.done === 1
+  check('cp: a node changed by log:false -> one full v4 cp line (path) with a per-file key', w1.length === 1 && w1[0].kind === 'cp' && w1[0].rec.kind === 'cp' && w1[0].rec.v === A.ACTIVITY_FORMAT && w1[0].rec.k === 1 && w1[0].rec.progress.done === 1
     && w1[0].rec.current.text === '{progress}' && w1[0].rec.path === 'w/@scan' && w1[0].rec.new_from === 0)
   check('cp: nothing live -> nothing written', tick(T0 + 2 * MIN).length === 0)
   for (let i = 0; i < 3; i++) {
     say(st, I, { agent: 'w', context: '@~scan', progress: '1/100', log: false }, T0 + (2 + i) * MIN + 1000)
     write(tick(T0 + (3 + i) * MIN))
   }
-  check('rep: unchanged-but-alive intervals -> ONE v4 repeat line whose n increments (rewritten in place)', file.length === 2 && file[1].v === 4 && J(file[1].rep) === '[1]' && file[1].n === 3 && file[1].since === T0 + 3 * MIN && file[1].last === T0 + 5 * MIN)
+  check('rep: unchanged-but-alive intervals -> ONE v4 repeat line whose n increments (rewritten in place)', file.length === 2 && file[1].v === A.ACTIVITY_FORMAT && J(file[1].rep) === '[1]' && file[1].n === 3 && file[1].since === T0 + 3 * MIN && file[1].last === T0 + 5 * MIN)
   say(st, I, { agent: 'w', context: '@~scan', progress: '50/100', log: false }, T0 + 5 * MIN + 1000)
   say(st, I, { path: 'w/@other/@~root', text: 'x', log: false }, T0 + 5 * MIN + 2000)
   const w2 = write(tick(T0 + 6 * MIN))
@@ -1282,14 +1282,14 @@ await section(async () => {
   for (let i = 1; i <= 5; i++) say(src, ID, { agent: `a${i}`, text: `@~root agent ${i}` }, T0 + i * 1000)
   const send = (opts, seq, base) => { const p = A.planSlice(src, pub, opts); return p.body ? { p, frame: { epoch: 'E1', seq, ...(base != null ? { base } : {}), ...JSON.parse(J(p.body)) } } : { p, frame: null } }
   let { p, frame } = send({ full: true }, 1)
-  check('planSlice full: v4, every node (root + 5), no remove, not truncated', frame.v === 4 && frame.full === true && frame.sessions.length === 1 && frame.sessions[0].nodes.length === 6 && !frame.remove && !frame.truncated && p.entities === 6)
+  check('planSlice full: v4, every node (root + 5), no remove, not truncated', frame.v === A.ACTIVITY_FORMAT && frame.full === true && frame.sessions.length === 1 && frame.sessions[0].nodes.length === 6 && !frame.remove && !frame.truncated && p.entities === 6)
   check('planSlice full: NO details/data/log on the wire', !J(frame).includes('"details"') && !J(frame).includes('"log"'))
   const m1 = A.applySlice(dst, 'HOST-B', frame)
   check('applySlice full: replaces the origin\'s slice, records epoch/seq', m1.ok && m1.full && dst.remote.get('HOST-B').seq === 1 && dst.remote.get('HOST-B').epoch === 'E1' && agentCount(A.getSession(dst, ID, 'HOST-B')) === 5)
   check('planSlice delta: nothing changed -> no frame', send({}, 2, 1).frame === null)
   say(src, ID, { agent: 'a2', text: '@~root agent 2 moved on' }, T0 + 10000)
   ;({ frame } = send({}, 2, 1))
-  check('planSlice delta: carries ONLY the changed node (+ its session header)', frame && !frame.full && frame.v === 4 && frame.sessions.length === 1 && J(frame.sessions[0].nodes.map(x => x.path)) === J(['a2']) && frame.sessions[0].session === 'S')
+  check('planSlice delta: carries ONLY the changed node (+ its session header)', frame && !frame.full && frame.v === A.ACTIVITY_FORMAT && frame.sessions.length === 1 && J(frame.sessions[0].nodes.map(x => x.path)) === J(['a2']) && frame.sessions[0].session === 'S')
   const m2 = A.applySlice(dst, 'HOST-B', frame)
   check('applySlice delta: patches that node only; seq advances', m2.ok && m2.changed && dst.remote.get('HOST-B').seq === 2 && N(dst, ID, 'a2', 'HOST-B').current.text === 'agent 2 moved on' && N(dst, ID, 'a1', 'HOST-B').current.text === 'agent 1')
   // 6a: a nested change — only the nodes that changed travel (the target + the agent whose last_activity moved), never the whole subtree
@@ -1303,8 +1303,8 @@ await section(async () => {
   A.applySlice(dst, 'HOST-B', frame)
   check('applySlice: the receiver rolls up through the nested nodes itself', A.rollup(A.getSession(dst, ID, 'HOST-B'), N(dst, ID, 'a3', 'HOST-B')).done === 2)
   check('applySlice delta: a replayed / skipped delta is refused out-of-sync', A.applySlice(dst, 'HOST-B', frame).code === 'out-of-sync' && A.applySlice(dst, 'HOST-B', { ...frame, base: 7, seq: 8 }).code === 'out-of-sync'
-    && A.applySlice(dst, 'HOST-B', { ...frame, epoch: 'OTHER', base: 4, seq: 5 }).code === 'out-of-sync' && A.applySlice(dst, 'HOST-C', { v: 4, epoch: 'E1', base: 0, seq: 1, sessions: [] }).code === 'out-of-sync')
-  check('applySlice: a sync beat (empty delta, base === seq) is accepted, unchanged', (r => r.ok && r.changed === false)(A.applySlice(dst, 'HOST-B', { v: 4, epoch: 'E1', base: 4, seq: 4, sessions: [] })))
+    && A.applySlice(dst, 'HOST-B', { ...frame, epoch: 'OTHER', base: 4, seq: 5 }).code === 'out-of-sync' && A.applySlice(dst, 'HOST-C', { v: A.ACTIVITY_FORMAT, epoch: 'E1', base: 0, seq: 1, sessions: [] }).code === 'out-of-sync')
+  check('applySlice: a sync beat (empty delta, base === seq) is accepted, unchanged', (r => r.ok && r.changed === false)(A.applySlice(dst, 'HOST-B', { v: A.ACTIVITY_FORMAT, epoch: 'E1', base: 4, seq: 4, sessions: [] })))
   check('applySlice (6a): a v1 (1.61) frame is refused bad-version — full or delta — and nothing changes', A.applySlice(dst, 'HOST-B', { v: 1, full: true, epoch: 'Z', seq: 1, sessions: [] }).code === 'bad-version'
     && A.applySlice(dst, 'HOST-B', { epoch: 'E1', base: 4, seq: 5, sessions: [] }).code === 'bad-version' && dst.remote.get('HOST-B').seq === 4 && agentCount(A.getSession(dst, ID, 'HOST-B')) === 5)
   // removals: a subtree evicted / expired + a whole session gone
@@ -1323,21 +1323,21 @@ await section(async () => {
   const rcv = mk({}, 'HOST-Z'), sp = A.createPub()
   say(src, ID, { path: 'p/@c/@d', text: 'x' }, T0 + 20000)
   A.applySlice(rcv, 'HOST-B', { epoch: 'q', seq: 1, ...JSON.parse(J(A.planSlice(src, sp, { full: true }).body)) })
-  A.applySlice(rcv, 'HOST-B', { v: 4, epoch: 'q', seq: 2, base: 1, sessions: [], remove: [{ session: 'S', project: 'P', user: 'u', path: 'p' }] })
+  A.applySlice(rcv, 'HOST-B', { v: A.ACTIVITY_FORMAT, epoch: 'q', seq: 2, base: 1, sessions: [], remove: [{ session: 'S', project: 'P', user: 'u', path: 'p' }] })
   check('applySlice: a node removal on the receiver removes its subtree', !N(rcv, ID, 'p', 'HOST-B') && !N(rcv, ID, 'p/@c/@d', 'HOST-B') && !!N(rcv, ID, 'a1', 'HOST-B'))
   // a CHILD that arrives before its parent (a truncated frame) is held and linked once the parent arrives
   const r2 = mk({}, 'HOST-Y')
-  A.applySlice(r2, 'HOST-B', { v: 4, full: true, epoch: 'o', seq: 1, sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: '' }, { path: 'kid/@ctx', current: { id: 'k', ts: T0, text: 'orphan for now', state: 'running' } }] }] })
+  A.applySlice(r2, 'HOST-B', { v: A.ACTIVITY_FORMAT, full: true, epoch: 'o', seq: 1, sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: '' }, { path: 'kid/@ctx', current: { id: 'k', ts: T0, text: 'orphan for now', state: 'running' } }] }] })
   const os2 = A.getSession(r2, ID, 'HOST-B')
   check('orphans: a node whose parent has not arrived is held (not linked under the root)', !!os2.nodes.get('kid/@ctx') && J(A.childrenOf(os2, os2.nodes.get('')).map(n => n.path)) === '[]')
-  A.applySlice(r2, 'HOST-B', { v: 4, epoch: 'o', seq: 2, base: 1, sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: 'kid' }] }] })
+  A.applySlice(r2, 'HOST-B', { v: A.ACTIVITY_FORMAT, epoch: 'o', seq: 2, base: 1, sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: 'kid' }] }] })
   check('orphans: ... and linked once the parent arrives', J(A.childrenOf(os2, os2.nodes.get('kid')).map(n => n.path)) === J(['kid/@ctx']) && J(A.childrenOf(os2, os2.nodes.get('')).map(n => n.path)) === J(['kid']))
   const forged = JSON.parse(J(A.planSlice(src, A.createPub(), { full: true }).body)); forged.sessions[0].host = 'HOST-C'; forged.origin = 'HOST-C'
   A.applySlice(dst, 'HOST-D', { ...forged, epoch: 'X', seq: 1 })
   check('applySlice: ownership is the link\'s origin — the frame\'s origin/host fields never decide it', dst.remote.has('HOST-D') && !dst.remote.has('HOST-C') && A.getSession(dst, ID, 'HOST-D').host === 'HOST-D'
-    && A.applySlice(dst, 'host-a', { v: 4, full: true, sessions: [] }).code === 'own-origin' && A.applySlice(dst, 'HOST-E', { v: 4, sessions: 'x' }).code === 'bad-slice')
+    && A.applySlice(dst, 'host-a', { v: A.ACTIVITY_FORMAT, full: true, sessions: [] }).code === 'own-origin' && A.applySlice(dst, 'HOST-E', { v: A.ACTIVITY_FORMAT, sessions: 'x' }).code === 'bad-slice')
   A.markOriginDown(dst, 'HOST-B', T0 + 20000)
-  check('applySlice: a delta for a slice marked down is refused out-of-sync', A.applySlice(dst, 'HOST-B', { v: 4, epoch: 'E1', base: 7, seq: 7, sessions: [] }).code === 'out-of-sync')
+  check('applySlice: a delta for a slice marked down is refused out-of-sync', A.applySlice(dst, 'HOST-B', { v: A.ACTIVITY_FORMAT, epoch: 'E1', base: 7, seq: 7, sessions: [] }).code === 'out-of-sync')
 })
 await section(async () => {
   const src = mk({}, 'HOST-B'), dst = mk({}, 'HOST-A'), pub = A.createPub()
@@ -1403,7 +1403,7 @@ await section(async () => {
   say(here, S1, { agent: 'w1', text: '@~root seeding {progress}', progress: '2/8 tiles', eta: '20m' }, T0)
   say(here, S1, { path: '@#70/@step4/spec-70', text: '@Tharsis/@~z12 deep {progress}', progress: '1/4 tiles' }, T0)
   say(there, { ...S1, session: 'Remote' }, { agent: 'r1', text: '@~root over there' }, T0)
-  A.applySlice(here, 'HOST-B', { v: 4, full: true, epoch: 'e', seq: 1, sessions: A.snapshot(there).sessions })
+  A.applySlice(here, 'HOST-B', { v: A.ACTIVITY_FORMAT, full: true, epoch: 'e', seq: 1, sessions: A.snapshot(there).sessions })
   const raw = A.boardView(here, T0 + 40 * MIN, { raw: true }), g = raw.find(x => x.session === 'Bridget'), w1 = nodeOf(g, 'w1')
   check('raw board: the REPORTED state even past the stale window (the page computes stale), no rendered / stale_at / visible', w1.state === 'running' && !('stale_at' in w1) && !('visible' in w1) && w1.current.text === 'seeding {progress}' && !('rendered' in w1.current)
     && w1.last_activity === T0 && w1.progress.done === 2 && w1.eta_at === T0 + 20 * MIN, J(w1))
@@ -1425,7 +1425,7 @@ await section(async () => {
   A.dropOrigin(here, 'HOST-B')
   const d2 = A.planDashDelta(pub, A.dashUnits(A.boardView(here, T0 + MIN, { raw: true })))
   check('dash delta: a group that left → its session + node ids removed', d2.remove.length === 2 && !d2.upsert.length, J(d2))
-  A.applySlice(here, 'HOST-B', { v: 4, full: true, epoch: 'e2', seq: 1, sessions: A.snapshot(there).sessions })
+  A.applySlice(here, 'HOST-B', { v: A.ACTIVITY_FORMAT, full: true, epoch: 'e2', seq: 1, sessions: A.snapshot(there).sessions })
   A.markSessionGone(here, S1, T0 + 2 * MIN)
   A.markOriginDown(here, 'HOST-B', T0 + 3 * MIN)
   const bd = A.boardView(here, T0 + 3 * MIN, { raw: true }), gL = bd.find(x => x.session === 'Bridget'), gR = bd.find(x => x.session === 'Remote')
@@ -1506,7 +1506,7 @@ await section(async () => {
     && J(['Zeta', 'Alpha', 'Mid'].map(n => N(st, I, `@#70/@${n}`).plan_ix)) === '[0,1,2]', J(kidNames(st, I, '@#70')))
   check('6b plan: result.plan names each item (created, plan_item, state); a plan-only call logs nothing on the target', J(r1.plan.map(p => [p.name, p.path, p.created, p.plan_item, p.state])) === J([['Zeta', '@#70/@Zeta', true, true, 'todo'], ['Alpha', '@#70/@Alpha', true, true, 'todo'], ['Mid', '@#70/@Mid', true, true, 'todo']])
     && r1.entry === null && r1.logged === false && N(st, I, '@#70').log.length === 0 && N(st, I, '@#70').implicit === true, J(r1))
-  check('6b plan: ONE logged record per new item, in order — even with log:false (a plan always reaches the files): plan_item, a ☐ current line named after it', r1.records.length === 3 && r1.records.every((x, i) => x.v === 4 && x.plan_item === true && x.plan_ix === i && x.current === true && x.state === 'todo' && x.text === ['Zeta', 'Alpha', 'Mid'][i])
+  check('6b plan: ONE logged record per new item, in order — even with log:false (a plan always reaches the files): plan_item, a ☐ current line named after it', r1.records.length === 3 && r1.records.every((x, i) => x.v === A.ACTIVITY_FORMAT && x.plan_item === true && x.plan_ix === i && x.current === true && x.state === 'todo' && x.text === ['Zeta', 'Alpha', 'Mid'][i])
     && r1.records[0].new_from === 0 && r1.records[1].new_from === 2 && N(st, I, '@#70/@Zeta').log.length === 1, J(r1.records))
   check('6b plan: the item line is its name; the bar of the plan node = "0 of 3 done"', N(st, I, '@#70/@Alpha').current.text === 'Alpha' && (b => b.done === 0 && b.total === 3 && b.unit === 'done' && b.todos === true && b.rollup === true)(A.rollup(A.getSession(st, I), N(st, I, '@#70'))))
   // ticks
@@ -1678,9 +1678,9 @@ await section(async () => {
   check('6b replay: every plan item comes back as a plan item with its state (☑ / in progress / skipped / ☐), in CREATION order (the given order, re-plans at the end)',
     J(kidNames(B, I, '@#70')) === J(['Zeta', 'Alpha', 'Mid', 'Beta', 'Gamma']) && J(['Zeta', 'Alpha', 'Mid', 'Beta', 'Gamma'].map(n => stOf(B, I, `@#70/@${n}`))) === J(['done', 'running', 'skipped', 'todo', 'todo'])
     && ['Zeta', 'Alpha', 'Mid', 'Beta', 'Gamma'].every(n => N(B, I, `@#70/@${n}`).plan === true) && N(B, I, '@#70/@Alpha/w').plan === false && dump(st) === dump(B), J([kidNames(B, I, '@#70'), stt, firstDiff(dump(st), dump(B))]))
-  check('6b/6c replay: v2 (1.62) and v3 (1.63) JSONL records are still read (each format only adds); v1 and an unknown v5 are skipped', A.recordKind({ v: 2, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'running' }) === 'entry' && A.recordKind({ v: 3, kind: 'cf', ts: T0, session: 'S', path: '' }) === 'cf'
-    && A.recordKind({ v: 3, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'todo' }) === 'entry' && A.recordKind({ v: 4, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'abandoned' }) === 'entry'
-    && A.recordKind({ v: 1, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'running' }) === null && A.recordKind({ v: 5, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'running' }) === null)
+  check('6b/6c replay: v2 (1.62) and v3 (1.63) JSONL records are still read (each format only adds); 6d: v4 too; v1 and an unknown v6 are skipped', A.recordKind({ v: 2, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'running' }) === 'entry' && A.recordKind({ v: 3, kind: 'cf', ts: T0, session: 'S', path: '' }) === 'cf'
+    && A.recordKind({ v: 3, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'todo' }) === 'entry' && A.recordKind({ v: A.ACTIVITY_FORMAT, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'abandoned' }) === 'entry'
+    && A.recordKind({ v: 1, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'running' }) === null && A.recordKind({ v: 6, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'running' }) === null)
 })
 await section(async () => {
   // ---- CARRY-FORWARD across day rollovers + a restart whose files reach back further than the replay window
@@ -1708,7 +1708,7 @@ await section(async () => {
   const days = [...files.keys()].sort()
   check('6b carry-forward: the day files span ~21 days — far more than the 7-day replay window', days.length >= 20 && days[0] === A.localDay(start), J(days.length))
   const cf1 = files.get(A.localDay(new Date(2026, 8, 2, 0, 0, 5).getTime())).filter(r => r.kind === 'cf')
-  check('6b/6c carry-forward: the first rollover checkpoints every item of an OPEN plan (6c: whatever its state) AND its ancestors (session root, lead) — parents first, children in creation order', J(cf1.map(r => r.path)) === J(['', 'lead', 'lead/@Spec', 'lead/@Build', 'lead/@Test', 'lead/@Ship']) && cf1.every(r => r.v === 4 && r.kind === 'cf'), J(cf1.map(r => r.path)))
+  check('6b/6c carry-forward: the first rollover checkpoints every item of an OPEN plan (6c: whatever its state) AND its ancestors (session root, lead) — parents first, children in creation order', J(cf1.map(r => r.path)) === J(['', 'lead', 'lead/@Spec', 'lead/@Build', 'lead/@Test', 'lead/@Ship']) && cf1.every(r => r.v === A.ACTIVITY_FORMAT && r.kind === 'cf'), J(cf1.map(r => r.path)))
   const c = cf1.find(r => r.path === 'lead/@Build')
   check('6b carry-forward: a cf record is a full snapshot — line, state, bar, plan marker + position, created_at, last_activity, implicit', c.current.text === 'compiling' && c.state === 'running' && c.progress.done === 3 && c.plan_item === true && c.plan_ix === 1 && c.created_at === start + MIN
     && c.last_activity === start + 3 * HOUR && c.implicit === false && cf1.find(r => r.path === '').implicit === false, J(c))
@@ -1738,12 +1738,12 @@ await section(async () => {
   const here = mk({}, 'HOST-A'), there = mk({}, 'HOST-B'), I = S1
   sayC(there, I, { path: '@#70', plan: ['A', 'B'] }, T0); sayC(there, I, { path: '@#70/@~A', state: 'done' }, T0)
   const snap = A.snapshot(there), na = snap.sessions[0].nodes.find(n => n.path === '@#70/@A')
-  check('6b gossip: a node carries plan_item + plan_ix and its todo/done line state; format v4', snap.v === 4 && na.plan_item === true && na.plan_ix === 0 && na.current.state === 'done' && snap.sessions[0].nodes.find(n => n.path === '@#70/@B').current.state === 'todo')
+  check('6b gossip: a node carries plan_item + plan_ix and its todo/done line state; format v4', snap.v === A.ACTIVITY_FORMAT && na.plan_item === true && na.plan_ix === 0 && na.current.state === 'done' && snap.sessions[0].nodes.find(n => n.path === '@#70/@B').current.state === 'todo')
   const m = A.mergeSnapshot(here, 'HOST-B', snap), rb = A.getNode(here, I, '@#70/@B', 'HOST-B')
   check('6b gossip: the receiver holds them as plan items (never stale) and rolls up "1 of 2 done"', m.ok && rb.plan === true && rb.plan_ix === 1 && A.stateOf(rb) === 'todo' && A.effectiveState(rb, T0 + 30 * DAY, 15).state === 'todo'
     && (b => b.done === 1 && b.total === 2 && b.todos)(A.rollup(A.getSession(here, I, 'HOST-B'), A.getNode(here, I, '@#70', 'HOST-B'))))
   check('6b gossip: a v2 (1.62) slice is refused bad-version', A.mergeSnapshot(here, 'HOST-C', { ...snap, v: 2 }).code === 'bad-version' && A.applySlice(here, 'HOST-C', { v: 2, full: true, sessions: [] }).code === 'bad-version')
-  const forged = { v: 4, origin: 'HOST-D', sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: '' }, { path: 'ag', current: { id: 'x', ts: T0, text: 'an agent claiming todo', state: 'todo' } }] }] }
+  const forged = { v: A.ACTIVITY_FORMAT, origin: 'HOST-D', sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: '' }, { path: 'ag', current: { id: 'x', ts: T0, text: 'an agent claiming todo', state: 'todo' } }] }] }
   A.mergeSnapshot(here, 'HOST-D', forged)
   check('6b gossip: a wire agent can\'t be todo / skipped (coerced to running)', A.stateOf(A.getNode(here, { session: 'S', project: 'P', user: 'u' }, 'ag', 'HOST-D')) === 'running')
   const pub = new Map()
@@ -1836,7 +1836,7 @@ await section(async () => {
   check('6c auto-abandon: a gone session\'s OPEN items (todo / running / blocked) become abandoned — nested plans first — then each plan node; done / skipped / failed items keep their state',
     J(ab.abandoned.map(a => [a.path, a.item])) === J([['@#70/@C/@c1', true], ['@#70/@C', false], ['@#70/@B', true], ['@#70', false]])
     && ['@#70/@B', '@#70/@C', '@#70/@C/@c1', '@#70'].every(p => stOf(st, G, p) === 'abandoned') && stOf(st, G, '@#70/@A') === 'done' && stOf(st, G, '@#70/@D') === 'skipped' && stOf(st, G, '@#70/@E') === 'failed', J(ab.abandoned))
-  check('6c auto-abandon: each is a LOGGED v4 record attributed to the bridge (by:"bridge", an @~ line, state abandoned) — in the node\'s log too', ab.records.length === 4 && ab.records.every(r => r.v === 4 && r.by === 'bridge' && r.current === true && r.state === 'abandoned' && /gone 1 day/.test(r.text))
+  check('6c auto-abandon: each is a LOGGED v4 record attributed to the bridge (by:"bridge", an @~ line, state abandoned) — in the node\'s log too', ab.records.length === 4 && ab.records.every(r => r.v === A.ACTIVITY_FORMAT && r.by === 'bridge' && r.current === true && r.state === 'abandoned' && /gone 1 day/.test(r.text))
     && N(st, G, '@#70/@B').log.at(-1).by === 'bridge')
   check('6c auto-abandon: a SYSTEM message — the session\'s last_activity and gone_at are untouched (it never looks alive), no agent refreshed', A.getSession(st, G).last_activity === la0 && A.getSession(st, G).gone_at === ga0 && A.getSession(st, G).nodes.get('').last_activity <= la0)
   check('6c auto-abandon: a LIVE session (on the roster) and one quiet for less than the window are left alone', stOf(st, L, '@p/@x') === 'todo' && stOf(st, R, '@q/@y') === 'todo')
@@ -1951,6 +1951,135 @@ await section(async () => {
   const fresh = mk(), fr = sayC(fresh, I, { path: 'tmp', text: 'never persisted' }, T0)
   const pf = await filePageOf(fresh, { session: 'Bridget', path: 'tmp' }, new Map(), T0 + MIN)
   check('6c pruned: a node created here (not partial) whose files hold nothing is NOT reported pruned', fr.ok && !pf.pruned && !pf.run_start && pf.entries.length === 1)
+})
+
+// ================================================================= 6d (v1.65.0): agent finish never completes its plan, the plan-end marker, dashboard ACTIONS
+// (applyAction: every action, its codes, attribution), dismiss (+ the replay honouring it), the cf entry count
+const BY = { kind: 'dashboard', user: 'robin', host: 'DASH-HOST' }
+const ACT = (st, I, path, action, args, now) => A.applyAction(st, { session: I.session, project: I.project, user: I.user, path, action, args }, now, { by: BY })
+const recOf = r => (r.records || []).map(x => JSON.parse(J(x)))
+await section(async () => {
+  const st = mk(), I = S1, end = p => (nodeOf(A.boardView(st, T0 + DAY, { raw: true })[0], p) || {})
+  sayC(st, I, { path: 'lead/@~root', text: 'leading', plan: ['L1', 'L2'] }, T0)
+  sayC(st, I, { path: 'lead/@~L1', state: 'done' }, T0 + MIN)
+  const fin = sayC(st, I, { path: 'lead/@~root', text: 'all done here', state: 'done' }, T0 + 2 * MIN)
+  check('6d agent finish: an agent finishing DONE leaves its plan OPEN (reverses 6c\'s "complete"): finished, items untouched, no plan_end_at', fin.ok && !!N(st, I, 'lead').finished_at && stOf(st, I, 'lead/@L2') === 'todo' && end('lead').plan_node === true && end('lead').plan_end_at === undefined)
+  A.expire(st, T0 + 30 * DAY)
+  check('6d agent finish: … so its open items never expire (the finished agent stays with them)', !!N(st, I, 'lead') && !!N(st, I, 'lead/@L2'))
+  check('6d agent finish: … and the carry-forward keeps the whole open plan', (cf => ['lead', 'lead/@L1', 'lead/@L2'].every(p => cf.includes(p)))(A.planCarryForward(st, T0 + 31 * DAY).map(w => w.rec.path)))
+  const st2 = mk()
+  sayC(st2, I, { path: 'lead/@~root', text: 'x', plan: ['A'] }, T0)
+  const ab = sayC(st2, I, { path: 'lead/@~root', state: 'abandoned' }, T0 + MIN)
+  check('6d tool abandoned on an agent keeps 6c: it finishes it AND ends its plan — now through the plan-end marker (plan_end on the record)', ab.ok && !!N(st2, I, 'lead').finished_at && N(st2, I, 'lead').plan_end?.state === 'abandoned' && ab.records[0].plan_end === 'abandoned'
+    && (n => n.plan_end_at === T0 + MIN && n.plan_end_how === 'abandoned')(nodeOf(A.boardView(st2, T0 + 2 * MIN, { raw: true })[0], 'lead')))
+})
+await section(async () => {
+  // ---- plan ITEM actions
+  const st = mk(), I = S1
+  sayC(st, I, { path: '@#70', plan: ['A', 'B', 'C'] }, T0)
+  sayC(st, I, { path: '@plain/@~x', text: 'an ordinary context' }, T0)
+  const d = ACT(st, I, '@#70/@A', 'done', {}, T0 + MIN)
+  const rec = recOf(d)[0]
+  check('6d item done: ☐ → ☑; ONE logged record attributed by:{kind:"dashboard", user, host}, act:"done", text "marked done by robin via dashboard (DASH-HOST)"; the item\'s LINE keeps its text (line_text)',
+    d.ok && stOf(st, I, '@#70/@A') === 'done' && N(st, I, '@#70/@A').current.text === 'A' && recOf(d).length === 1 && J(rec.by) === J(BY) && rec.act === 'done' && rec.text === 'marked done by robin via dashboard (DASH-HOST)' && rec.line_text === 'A' && rec.current === true && rec.state === 'done', J(rec))
+  check('6d attribution: the entry is in the item\'s log (by + act) and the board shows nothing alive — a SYSTEM message (no activity touched)', (e => e.act === 'done' && e.by.user === 'robin' && e.by.host === 'DASH-HOST')(N(st, I, '@#70/@A').log.at(-1)) && A.getSession(st, I).last_activity === T0)
+  check('6d item skip / abandon / reopen (→ ☐ todo): each state, each attributed', ACT(st, I, '@#70/@B', 'skip', {}, T0 + 2 * MIN).ok && stOf(st, I, '@#70/@B') === 'skipped' && ACT(st, I, '@#70/@C', 'abandon', {}, T0 + 3 * MIN).ok && stOf(st, I, '@#70/@C') === 'abandoned'
+    && ACT(st, I, '@#70/@B', 'reopen', {}, T0 + 4 * MIN).ok && stOf(st, I, '@#70/@B') === 'todo' && N(st, I, '@#70/@B').log.at(-1).text === 'reopened (back to to do) by robin via dashboard (DASH-HOST)')
+  check('6d item codes: not-a-plan-item (an ordinary context, an agent, the session), no-change (already that state), unknown-node, unknown-session, bad-action, bad-path, bad-by',
+    ACT(st, I, '@plain/@x', 'done', {}, T0).code === 'not-a-plan-item' && ACT(st, I, '', 'done', {}, T0).code === 'not-a-plan-item' && ACT(st, I, '@#70/@A', 'done', {}, T0).code === 'no-change'
+    && ACT(st, I, '@#70/@Z', 'done', {}, T0).code === 'unknown-node' && A.applyAction(st, { session: 'Nobody', path: '', action: 'done' }, T0, { by: BY }).code === 'unknown-session'
+    && ACT(st, I, '@#70/@A', 'explode', {}, T0).code === 'bad-action' && ACT(st, I, '@#70/@~A', 'done', {}, T0).code === 'bad-path'
+    && A.applyAction(st, { session: I.session, project: I.project, user: I.user, path: '@#70/@B', action: 'done' }, T0, {}).code === 'bad-by' && A.applyAction(st, { session: I.session, project: I.project, user: I.user, path: '@#70/@B', action: 'done' }, T0, { by: 'bridge' }).code === 'bad-by')
+  // ---- plan NODE actions (a context plan node)
+  check('6d complete: not-a-plan on a node without items; on an open plan → its line done (the plan ENDS, plan_end_how done); again → already-ended', ACT(st, I, '@plain/@x', 'complete', {}, T0).code === 'not-a-plan'
+    && ACT(st, I, '@#70', 'complete', {}, T0 + 5 * MIN).ok && stOf(st, I, '@#70') === 'done' && (n => n.plan_end_at === T0 + 5 * MIN && n.plan_end_how === 'done')(nodeOf(A.boardView(st, T0 + 6 * MIN, { raw: true })[0], '@#70'))
+    && ACT(st, I, '@#70', 'complete', {}, T0 + 6 * MIN).code === 'already-ended')
+  const ro = ACT(st, I, '@#70/@C', 'reopen', {}, T0 + 6 * MIN)
+  check('6d item reopen in an ENDED (completed) plan: applied, with a plan-ended warning (reopen the plan too)', ro.ok && J(ro.warnings) === J(['plan-ended']))
+  check('6d reopen_plan: the plan is open again (its context back to running); on an open plan → not-ended', ACT(st, I, '@#70', 'reopen_plan', {}, T0 + 7 * MIN).ok && stOf(st, I, '@#70') === 'running' && nodeOf(A.boardView(st, T0 + 8 * MIN, { raw: true })[0], '@#70').plan_end_at === undefined
+    && ACT(st, I, '@#70', 'reopen_plan', {}, T0 + 8 * MIN).code === 'not-ended')
+  sayC(st, I, { path: '@all', plan: ['a'] }, T0); sayC(st, I, { path: '@all/@~a', state: 'done' }, T0 + MIN)
+  check('6d reopen_plan on a plan that ended because every item is done → all-items-done (reopen an item instead)', ACT(st, I, '@all', 'reopen_plan', {}, T0 + 9 * MIN).code === 'all-items-done')
+  const ap = ACT(st, I, '@#70', 'abandon_plan', {}, T0 + 10 * MIN)
+  check('6d abandon_plan on a plan node: its OPEN items (todo / running / blocked) abandoned, then the node; done / skipped untouched', ap.ok && stOf(st, I, '@#70/@B') === 'todo' === false && stOf(st, I, '@#70/@B') === 'abandoned' && stOf(st, I, '@#70/@C') === 'abandoned' && stOf(st, I, '@#70/@A') === 'done' && stOf(st, I, '@#70') === 'abandoned'
+    && J(ap.applied.map(x => [x.path, x.item])) === J([['@#70/@B', true], ['@#70/@C', true], ['@#70', false]]) && ap.records.every(r => r.act === 'abandon_plan' && r.by.kind === 'dashboard'), J(ap.applied))
+  check('6d abandon_plan on an ended plan / a node without one → no-open-plan / not-a-plan', ACT(st, I, '@#70', 'abandon_plan', {}, T0 + 11 * MIN).code === 'no-open-plan' && ACT(st, I, '@plain/@x', 'abandon_plan', {}, T0).code === 'not-a-plan')
+})
+await section(async () => {
+  // ---- AGENT / SESSION actions: abandon_plan (it keeps running), complete / reopen_plan via the MARKER, finish, dismiss
+  const st = mk(), I = S1, NOWX = T0 + 2 * HOUR, bv = t => A.boardView(st, t, { raw: true })[0]
+  sayC(st, I, { text: '@~root orchestrating' }, T0 + 90 * MIN)
+  sayC(st, I, { path: 'lead/@~root', text: 'leading', plan: ['L1', 'L2', 'L3'] }, T0)
+  sayC(st, I, { path: 'lead/@~L1', state: 'done' }, T0); sayC(st, I, { path: 'lead/@~L2', text: 'doing L2' }, T0)
+  sayC(st, I, { path: 'lead/@ctx', plan: ['c1'] }, T0)   // a nested context plan held by lead (no agent in between)
+  sayC(st, I, { path: 'lead/sub/@~root', text: 'a sub-agent with its own plan', plan: ['s1'] }, T0 + 115 * MIN)
+  const r = ACT(st, I, 'lead', 'abandon_plan', {}, NOWX)
+  check('6d abandon_plan on an AGENT: only ITS open plans — its own items (L2 running, L3 todo) and a context plan under it (c1) — abandoned; the done item kept; the sub-agent\'s plan untouched',
+    r.ok && stOf(st, I, 'lead/@L2') === 'abandoned' && stOf(st, I, 'lead/@L3') === 'abandoned' && stOf(st, I, 'lead/@ctx/@c1') === 'abandoned' && stOf(st, I, 'lead/@L1') === 'done' && stOf(st, I, 'lead/sub/@s1') === 'todo', J(r.applied))
+  check('6d abandon_plan on an AGENT: the agent KEEPS RUNNING (line and state untouched, not finished) while its plan ends (the marker: plan_end abandoned)', stOf(st, I, 'lead') === 'running' && N(st, I, 'lead').current.text === 'leading' && !N(st, I, 'lead').finished_at
+    && N(st, I, 'lead').plan_end?.state === 'abandoned' && nodeOf(bv(NOWX), 'lead').plan_end_how === 'abandoned' && nodeOf(bv(NOWX), 'lead/@ctx').plan_end_at === NOWX)
+  check('6d the marker record: a logged (non-current) entry on the agent with plan_end "abandoned", act + by', (x => x && x.current === false && x.by.user === 'robin')(r.records.find(x => x.path === 'lead' && x.plan_end === 'abandoned')))
+  check('6d reopen_plan on an AGENT: clears the marker (its plan is open again), the agent untouched; complete then ends it with the marker "done"', ACT(st, I, 'lead', 'reopen_plan', {}, NOWX + 1).ok && N(st, I, 'lead').plan_end === null && nodeOf(bv(NOWX + 2), 'lead').plan_end_at === undefined
+    && ACT(st, I, 'lead', 'complete', {}, NOWX + 2).ok && N(st, I, 'lead').plan_end?.state === 'done' && nodeOf(bv(NOWX + 3), 'lead').plan_end_how === 'done' && stOf(st, I, 'lead') === 'running')
+  check('6d finish: a context → not-an-agent; bad state → bad-args; a FRESH agent → not-stale', ACT(st, I, 'lead/@ctx', 'finish', { state: 'done' }, NOWX).code === 'not-an-agent' && ACT(st, I, 'lead', 'finish', { state: 'nope' }, NOWX).code === 'bad-args'
+    && ACT(st, I, 'lead/sub', 'finish', { state: 'done' }, NOWX).code === 'not-stale')
+  const fz = ACT(st, I, 'lead', 'finish', { state: 'failed' }, NOWX + 3)
+  check('6d finish: a STALE agent (2 h quiet) → its line failed (text kept), finished; attributed "marked finished (failed) by robin via dashboard (DASH-HOST)"; again → already-finished',
+    fz.ok && stOf(st, I, 'lead') === 'failed' && !!N(st, I, 'lead').finished_at && N(st, I, 'lead').current.text === 'leading' && fz.records[0].text === 'marked finished (failed) by robin via dashboard (DASH-HOST)' && ACT(st, I, 'lead', 'finish', { state: 'done' }, NOWX + 4).code === 'already-finished')
+  check('6d stale_min: the dashboard\'s slider decides "stale" (args.stale_min) — 300 min keeps the 4-h-quiet sub-agent fresh, 30 min does not', ACT(st, I, 'lead/sub', 'finish', { state: 'done', stale_min: 300 }, NOWX + 4 * HOUR).code === 'not-stale' && ACT(st, I, 'lead/sub', 'finish', { state: 'done', stale_min: 30 }, NOWX + 4 * HOUR).ok)
+  // dismiss
+  sayC(st, I, { path: 'helper/@~root', text: 'helping' }, T0)
+  check('6d dismiss: a fresh agent → not-stale; one holding part of an OPEN plan (sub: its s1 is still todo) → has-open-items', ACT(st, I, 'helper', 'dismiss', {}, T0 + 5 * MIN).code === 'not-stale' && ACT(st, I, 'lead/sub', 'dismiss', {}, NOWX + 5 * HOUR).code === 'has-open-items')
+  const ds = ACT(st, I, 'helper', 'dismiss', {}, NOWX)
+  check('6d dismiss: a stale agent leaves the board with its subtree; ONE logged record { dismiss:true, act, by } at its path; the entry shows in the PARENT\'s log (its own path)',
+    ds.ok && !N(st, I, 'helper') && ds.records.length === 1 && ds.records[0].dismiss === true && ds.records[0].path === 'helper' && ds.records[0].act === 'dismiss' && ds.dismissed.path === 'helper'
+    && (lv => lv.entries.some(e => e.path === 'helper' && e.rel === 'helper' && e.act === 'dismiss' && /^dismissed from the board by robin via dashboard \(DASH-HOST\)$/.test(e.text)))(A.logView(st, { session: I.session }, NOWX)), J(ds))
+  check('6d dismiss: a context → not-an-agent; unknown afterwards → unknown-node', ACT(st, I, 'lead/@ctx', 'dismiss', {}, NOWX).code === 'not-an-agent' && ACT(st, I, 'helper', 'dismiss', {}, NOWX).code === 'unknown-node')
+})
+await section(async () => {
+  // ---- dismiss survives the REPLAY; a later message starts a new run; a whole session; the cf COUNT stays exact
+  const st = mk(), I = S1, recs = [], push = r => { if (!r.ok) throw new Error(J(r)); recs.push(...recOf(r)); return r }
+  push(sayC(st, I, { path: 'w/@~root', text: 'worker' }, T0)); push(sayC(st, I, { path: 'w/@c', text: 'a ctx note' }, T0 + 1)); push(sayC(st, I, { path: 'keep/@~root', text: 'kept' }, T0 + 2))
+  push(ACT(st, I, 'w', 'dismiss', {}, T0 + HOUR))
+  const B1 = mk(); A.replayNewestFirst(B1, recs.slice().reverse(), T0 + 2 * HOUR)
+  check('6d dismiss + replay: the dismissed agent (and its subtree) stays OFF the board after a restart; the rest is rebuilt; the dismissal entry is in the parent\'s log', !A.getNode(B1, I, 'w') && !A.getNode(B1, I, 'w/@c') && !!A.getNode(B1, I, 'keep')
+    && A.logView(B1, { session: I.session }, T0 + 2 * HOUR).entries.some(e => e.path === 'w' && e.act === 'dismiss'), J([...A.getSession(B1, I).nodes.keys()]))
+  check('6d dismiss + replay: replay == the live state (dump)', dump(st) === dump(B1), firstDiff(dump(st), dump(B1)))
+  push(sayC(st, I, { path: 'w/@~root', text: 'back again' }, T0 + 3 * HOUR))
+  const B2 = mk(); A.replayNewestFirst(B2, recs.slice().reverse(), T0 + 4 * HOUR)
+  check('6d dismiss: the name coming back is a NEW run (new_from) — after a restart only the new run shows (its old context stays dismissed)', A.getNode(B2, I, 'w')?.current.text === 'back again' && !A.getNode(B2, I, 'w/@c') && A.getNode(B2, I, 'w').log.length === 1)
+  // the whole session
+  const s2 = mk(), J2 = { session: 'Gone', project: 'P', user: 'u' }, r2 = []
+  r2.push(...recOf(sayC(s2, J2, { text: '@~root bye' }, T0)))
+  A.markSessionGone(s2, J2, T0 + MIN)
+  const dz = ACT(s2, J2, '', 'dismiss', {}, T0 + 2 * MIN); r2.push(...recOf(dz))
+  const B3 = mk(); A.replayNewestFirst(B3, r2.slice().reverse(), T0 + HOUR)
+  check('6d dismiss the SESSION (gone): it leaves the board; a restart does not bring it back', dz.ok && dz.dismissed.session === true && !A.getSession(s2, J2) && !A.getSession(B3, J2) && B3.local.size === 0)
+  // the cf entry count: exact after a restart whose window no longer holds the run's start
+  const c = mk(), cr = []
+  for (let k = 0; k < 5; k++) cr.push(...recOf(sayC(c, I, { path: 'old', text: `day0 #${k}` }, T0 + k)))
+  for (let d = 1; d <= 9; d++) { cr.push(...A.planCarryForward(c, T0 + d * DAY).map(w => JSON.parse(J(w.rec)))); if (d === 7 || d === 9) cr.push(...recOf(sayC(c, I, { path: 'old', text: `day ${d}` }, T0 + d * DAY + 1))) }
+  const cfOld = cr.filter(x => x.kind === 'cf' && x.path === 'old')
+  const B4 = mk(); A.replayNewestFirst(B4, cr.slice().reverse(), T0 + 9 * DAY + HOUR)
+  const n4 = A.getNode(B4, I, 'old'), sn4 = A.snapshot(B4).sessions[0].nodes.find(x => x.path === 'old')
+  check('6d cf count: the carry-forward record carries the node\'s own entry count (log_n: 5 when the quiet node was carried, day 6)', cfOld.length > 0 && cfOld.every(x => Number.isInteger(x.log_n)) && cfOld[0].log_n === 5, J(cfOld.map(x => [x.ts - T0, x.log_n])))
+  check('6d cf count: after a restart past the window the count is EXACT (5 + the 2 after the cf = 7), not "N+" — log_partial off; the run stays partial (for "earlier history pruned")', n4.log.length + n4.log_dropped === 7 && sn4.log_n === 7 && !sn4.log_partial && n4.partial === true && n4.cpartial === false, J([n4.log.length, n4.log_dropped, sn4]))
+  const B5 = mk(); A.replayNewestFirst(B5, cr.filter(x => x.kind !== 'cf').slice().reverse(), T0 + 9 * DAY + HOUR)
+  check('6d cf count (control): without the carry-forward the same restart counts only the window (2, log_partial = "N+")', (s => s.log_partial === true && s.log_n === 2)(A.snapshot(B5).sessions[0].nodes.find(x => x.path === 'old')))
+})
+await section(async () => {
+  // ---- the marker rides the gossip and the replay
+  const there = mk({}, 'HOST-B'), here = mk({}, 'HOST-A'), I = S1, recs = []
+  recs.push(...recOf(sayC(there, I, { path: 'lead/@~root', text: 'x', plan: ['A'] }, T0)))
+  recs.push(...recOf(ACT(there, I, 'lead', 'complete', {}, T0 + MIN)))
+  const sn = A.snapshot(there).sessions[0].nodes.find(n => n.path === 'lead')
+  A.mergeSnapshot(here, 'HOST-B', A.snapshot(there))
+  check('6d gossip: an agent\'s plan-end marker rides its unit; the receiving board computes plan_end_at / how from it', J(sn.plan_end) === J({ state: 'done', ts: T0 + MIN }) && (n => n.plan_end_at === T0 + MIN && n.plan_end_how === 'done')(nodeOf(A.boardView(here, T0 + 2 * MIN, { raw: true })[0], 'lead')))
+  const B = mk({}, 'HOST-B'); A.replayNewestFirst(B, recs.slice().reverse(), T0 + HOUR)
+  check('6d replay: the marker is rebuilt from the files (and its cp / cf snapshots)', J(A.getNode(B, I, 'lead').plan_end) === J({ state: 'done', ts: T0 + MIN })
+    && (cf => cf && J(cf.plan_end) === J({ state: 'done', ts: T0 + MIN }))(A.planCarryForward(there, T0 + 9 * DAY).map(w => w.rec).find(r => r.path === 'lead')))
+  check('6d normBy / byText: a dashboard author is bounded + one line; a string stays 6c\'s; junk → none', J(A.normBy({ kind: 'dashboard', user: 'r\nx', host: 'H'.repeat(99) })) === J({ kind: 'dashboard', user: 'r x', host: 'H'.repeat(64) }) && A.byText(BY) === 'by robin via dashboard (DASH-HOST)'
+    && A.byText('bridge') === 'by bridge' && A.normBy({ kind: 'evil' }) === null && A.normBy(42) === null)
 })
 
 console.log(`\n${pass} passed, ${fail} failed`)

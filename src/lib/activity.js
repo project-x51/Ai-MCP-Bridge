@@ -108,6 +108,20 @@
 // carries `home` and each plan node's `plan_end_at`; RUN-BOUNDARY history (filePage): a node's day-file paging stops at the
 // record that began its CURRENT run (new_from at or above it) unless asked for earlier runs, and says `pruned` when the run
 // began in a file retention already deleted. Records + slices are FORMAT v4 (v2 / v3 records still read).
+//
+// 6d (v1.65.0, #70 "Decisions after 6c, for 6d"): FINISHING AN AGENT NEVER COMPLETES ITS PLAN — an agent's (or the session's)
+// own line no longer ends the plan it holds; only every item done, or an explicit end does: a CONTEXT plan node's line set done
+// / abandoned (as in 6c), or the PLAN-END MARKER (`node.plan_end` = { state: done|abandoned, ts }) that an agent / the session
+// gets from the dashboard's "complete" / "abandon plan" (or the tool's `abandoned` line on an agent, which still finishes it as
+// in 6c); "reopen plan" clears it. DASHBOARD ACTIONS (applyAction — the first write path from outside the session): on a plan
+// item done / skip / reopen / abandon; on a plan node complete / abandon_plan / reopen_plan; on an agent or the session
+// abandon_plan (only its OPEN plan items — and the open plans it holds then end — the agent keeps running), finish (done |
+// failed; when stale or gone) and dismiss (remove it + its subtree from the board now: a logged `dismiss:true` entry the
+// replay honours like an eviction; never a subtree holding part of an open plan). Each is a SYSTEM message attributed to its
+// author (`by` = { kind:"dashboard", user, host }, `act` = the action; the entry's text says "… by <user> via dashboard
+// (<host>)" while an item's own line keeps its text — `line_text` on the record). The carry-forward `cf` record now carries
+// the node's own entry count (`log_n`, + `log_partial`), so a count stays exact across restarts. Records + slices are
+// FORMAT v5 (+ plan_end, dismiss, line_text, act, cf log_n; v2–v4 records still read).
 import { lc, projKey } from './keys.js'
 
 /** The locked #70 limits (6a: depth/nodes replace "agent path depth 3" + "32 contexts per agent"). text/context in code
@@ -130,9 +144,11 @@ export const ACTIVITY_LIMITS = Object.freeze({
 })
 /** Record / slice format. 6a = v2 (a v1 record of 1.58–1.61 is skipped); 6b = v3 (todo/skipped states, plan items, `cf`
  * carry-forward records); 6c = v4 (the abandoned state, `by`, `s0`, gossiped log counts). A v4 bridge still READS v2 / v3
- * JSONL records (each format only adds) but refuses an older gossip slice (a 1.63 hub would misread `abandoned`). */
-export const ACTIVITY_FORMAT = 4
-const RECORD_FORMATS = new Set([2, 3, 4])
+ * JSONL records (each format only adds) but refuses an older gossip slice (a 1.63 hub would misread `abandoned`). 6d = v5 (the
+ * plan-end marker, dismiss entries, line_text / act / object `by`, the cf entry count) — a 1.64 hub would show an agent's
+ * completed plan as open and a dismissed node again. */
+export const ACTIVITY_FORMAT = 5
+const RECORD_FORMATS = new Set([2, 3, 4, 5])
 /** The reportable states. `stale` and `gone` are derived (effectiveState), never reported. 6b: + todo / skipped (contexts only;
  * skipped only on a plan item). 6c: + abandoned (plans and plan items only — 'not-a-plan' elsewhere). */
 export const ACTIVITY_STATES = Object.freeze(['running', 'blocked', 'failed', 'done', 'idle', 'todo', 'skipped', 'abandoned'])
@@ -195,6 +211,20 @@ const normText = s => s.replace(/\s*[\r\n\t\f\v]+\s*/g, ' ').replace(CONTROL, ''
 /** Drop null/undefined/false fields (compact gossip; a missing flag reads as false). Field order is kept. */
 function compact(o) { const r = {}; for (const k of Object.keys(o)) { const v = o[k]; if (v !== null && v !== undefined && v !== false) r[k] = v } return r }
 const str = (v, max = 200) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null)
+const oneLine = (v, max) => { const s = typeof v === 'string' ? normText(v) : ''; return s ? cpSlice(s, max) : null }
+/**
+ * Who wrote a SYSTEM entry (not the session itself): 6c's string ("bridge"), or 6d's `{ kind:"dashboard", user, host }` (a
+ * dashboard action — user = the dashboard's OS user on its host, else "dashboard"; host = the gateway it is attached to).
+ * Anything else → null (an ordinary message). Bounded, one-line, compact.
+ * @param {any} v @returns {string|{kind:string, user:string, host:string}|null}
+ */
+export function normBy(v) {
+  if (typeof v === 'string') return v.trim() ? v.trim().slice(0, 80) : null
+  if (!v || typeof v !== 'object' || v.kind !== 'dashboard') return null
+  return { kind: 'dashboard', user: oneLine(v.user, 64) || 'dashboard', host: oneLine(v.host, 64) || '?' }
+}
+/** 6d: the attribution phrase — "by robin via dashboard (ROBIN-Z790)" / "by bridge"; '' for none. */
+export function byText(v) { const b = normBy(v); return !b ? '' : typeof b === 'string' ? `by ${b}` : `by ${b.user} via dashboard (${b.host})` }
 
 /**
  * The session key: realm + projKey(project) + lc(user) + lc(session) + lc(host), JSON-encoded so no separator can collide.
@@ -729,7 +759,7 @@ export function splitBatch(input) {
  *   created_at:number, last_activity:number, stale_after_ms:number|null, current:ActivityLine|null,
  *   progress:ActivityProgress|null, eta_at:number|null, finished_at:number|null, gone_at:number|null, implicit:boolean,
  *   log:any[], log_dropped:number, log_floor:number, persisted?:boolean, cp_dirty?:number, plan?:boolean, plan_ix?:number|null,
- *   pt?:{ a:number, l:number, p:number, e:number }, partial?:boolean, log_n?:number }} ActivityNode
+ *   pt?:{ a:number, l:number, p:number, e:number }, partial?:boolean, cpartial?:boolean, log_n?:number, plan_end?:{ state:string, ts:number }|null }} ActivityNode
  * @typedef {{ key:string, origin:string, realm?:string, session:string, project:string, user:string|null,
  *   host:string|null, created_at:number, last_activity:number, gone_at:number|null, nodes:Map<string, ActivityNode>,
  *   kids:Map<string, Set<string>>, nAgents:number, bell?:boolean }} ActivitySession
@@ -757,15 +787,19 @@ export function createActivity({ config, origin = 'local', idPrefix = 'act_' } =
 // for items created in the same millisecond: children keep CREATION order — created_at, then plan_ix, then key).
 // `partial` (6c): the node's current RUN began before the replay window (the replay never saw the record that began it), so
 // its in-memory log count understates and its run start may lie in a day file retention already deleted. `log_n` (6c): a
-// REMOTE node's gossiped own-entry count (a local node counts its log + log_dropped).
+// REMOTE node's gossiped own-entry count (a local node counts its log + log_dropped). `cpartial` (6d): that COUNT understates
+// (the run began before the window AND no carry-forward brought the exact count — a remote node: the owner said so).
+// `plan_end` (6d): the PLAN-END MARKER of an agent / the session holding a plan — { state: 'done'|'abandoned', ts } or null.
 const CP_CUR = 1, CP_PROG = 2, CP_ETA = 4
 /** @returns {ActivityNode} */
 function newNode(path, segs, now) {
   const last = segs.length ? segs[segs.length - 1] : null, key = pathKey(path)
   return { key, path, name: last ? last.name : '', kind: last ? last.kind : 'agent', parent: parentKeyOf(key), depth: segs.length, created_at: now, last_activity: now,
     stale_after_ms: null, current: null, progress: null, eta_at: null, finished_at: null, gone_at: null, implicit: true, log: [], log_dropped: 0, log_floor: 0, persisted: false, cp_dirty: 0,
-    plan: false, plan_ix: null, pt: { a: 0, l: 0, p: 0, e: 0 }, partial: false }
+    plan: false, plan_ix: null, pt: { a: 0, l: 0, p: 0, e: 0 }, partial: false, cpartial: false, plan_end: null }
 }
+/** 6d: a plan-end marker from a record / the wire: { state, ts } (state done | abandoned), else null. */
+const wPlanEnd = v => (v && typeof v === 'object' && PLAN_END.has(v.state) && Number.isFinite(Number(v.ts)) && Number(v.ts) >= 0 ? { state: v.state, ts: Math.floor(Number(v.ts)) } : null)
 /** A new session record with its root node. */
 function newSession(key, origin, f, now) {
   const s = { key, origin, realm: f.realm, session: f.session, project: f.project, user: f.user, host: origin, created_at: now, last_activity: now, gone_at: null,
@@ -841,8 +875,19 @@ function planEndAt(sess, node, p) {
   if (!p) return null
   const ends = []
   if (p.allDoneAt != null) ends.push(p.allDoneAt)
-  if (node.current && PLAN_END.has(node.current.state)) ends.push(node.current.ts || 0)
+  // 6d (#70 "Decisions after 6c, for 6d" 1): only a CONTEXT plan node's own line ends its plan — an agent's (or the session's)
+  // line finishing done no longer completes the plan it holds; that takes the explicit plan-end marker (complete / abandon)
+  if (node.kind === 'context' && node.current && PLAN_END.has(node.current.state)) ends.push(node.current.ts || 0)
+  if (node.plan_end && PLAN_END.has(node.plan_end.state)) ends.push(node.plan_end.ts || 0)
   return ends.length ? Math.min(...ends) : null
+}
+/** 6d: HOW a plan ended — 'all-done' (every item done: only reopening an item reopens it), 'done' (marked complete) or
+ * 'abandoned' — or null while it is open. */
+function planEndHow(sess, node, p) {
+  if (!p || planEndAt(sess, node, p) == null) return null
+  if (p.allDoneAt != null) return 'all-done'
+  if (node.kind === 'context' && node.current && PLAN_END.has(node.current.state)) return node.current.state
+  return node.plan_end ? node.plan_end.state : null
 }
 /**
  * 6b: what removing an ended plan takes — the subtree ROOTS: its items, or the plan node itself (with them) when it is an
@@ -874,7 +919,8 @@ function evictionCandidates(sess, targetKey) {
 function smallOf(e) {
   const s = compact({ id: e.id, ts: e.ts, current: !!e.current, text: e.text, state: e.state,
     progress: e.progress || undefined, eta_at: e.eta_at || undefined, stale_after_ms: e.stale_after_ms || undefined,
-    has_details: e.has_details ? true : undefined, has_data: e.has_data ? true : undefined, by: typeof e.by === 'string' && e.by ? e.by.slice(0, 80) : undefined })   // 6c: by = who wrote it when not the session (the bridge)
+    has_details: e.has_details ? true : undefined, has_data: e.has_data ? true : undefined, by: normBy(e.by) || undefined,   // 6c: by = who wrote it when not the session (the bridge); 6d: or a dashboard { kind, user, host }
+    act: typeof e.act === 'string' && ACTIVITY_ACTIONS.includes(e.act) ? e.act : undefined })   // 6d: the dashboard action that wrote it
   if (e.progress === null) s.progress = null   // an explicit "none" is recorded (the replay must see the clear)
   if (e.eta_at === null) s.eta_at = null
   return s
@@ -935,7 +981,7 @@ const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, d
  * @param {{ session:string, project?:string, user?:string|null, realm?:string, host?:string }} ident  the reporting session
  * @param {ActivityMsg} msg  parseMessage(...).msg
  * @param {number} now
- * @param {{ by?: string }} [opts]
+ * @param {{ by?: any, act?: string, entryText?: string, planEnd?: string }} [opts]  by (6d) may be a dashboard { kind, user, host }; act / entryText (the LOG text; the line keeps its own) / planEnd (done | abandoned | open)
  * @returns {ActivityResult} { ok:true, id, ts, logged, entry, records, current, state, stale_at, path, agent, context,
  *   evicted:string[], warnings:string[], plan? } or { ok:false, code, what } — `records` = every JSONL record this call
  *   wrote, in order (the target's entry first, then each new plan item's)
@@ -960,7 +1006,10 @@ export function apply(state, ident, msg, now, opts = {}) {
   }
   if (!planOnly && msg.state === 'abandoned' && !(tgt0 && (tgt0.plan || childrenOf(sess, tgt0).some(c => c.plan))))   // 6c: plans + plan items only
     return bad('not-a-plan', `"${msg.path || '@root'}" is neither a plan item nor a plan (a node holding plan items) — abandoned is only for plans and their items`)
-  const by = opts && typeof opts.by === 'string' && opts.by.trim() ? opts.by.trim().slice(0, 80) : null   // 6c: a SYSTEM message (the bridge's)
+  const by = normBy(opts && opts.by)   // 6c: a SYSTEM message (the bridge's); 6d: or a dashboard action's { kind, user, host }
+  const act = opts && typeof opts.act === 'string' && ACTIVITY_ACTIONS.includes(opts.act) ? opts.act : null                                       // 6d: which action wrote it
+  const entryText = opts && typeof opts.entryText === 'string' && normText(opts.entryText) ? cpSlice(normText(opts.entryText), L.text) : null   // 6d: the LOG text (the line keeps its own)
+  const planEndOpt = opts && (PLAN_END.has(opts.planEnd) || opts.planEnd === 'open') ? opts.planEnd : null                                       // 6d: set / clear the plan-end marker
   // 6b: the plan's items under the target: new (create), an ordinary context with no line of its own (adopt), an item (keep)
   const items = []
   for (const name of msg.plan || []) {
@@ -1022,7 +1071,7 @@ export function apply(state, ident, msg, now, opts = {}) {
     if (msg.current && msg.state === 'todo' && tgt.kind === 'context' && !tgt.plan) tgt.plan = true   // 6b: a first line of todo makes a plan item (validated above)
     const id = `${state.idPrefix}${now.toString(36)}-${(++state.seq).toString(36)}`
     touch(chain.slice(oi))
-    let lineId = id
+    let lineId = id, planEnd = planEndOpt
     if (msg.current) {
       // a log:false line IDENTICAL to the current one (text, state, details, data) keeps it — "alive, unchanged" (a rep, not a cp)
       const same = !logged && c0 && c0.text === text && c0.state === entryState && (c0.details || null) === (msg.details || null)
@@ -1033,8 +1082,12 @@ export function apply(state, ident, msg, now, opts = {}) {
       if (tgt.kind === 'agent') {
         if (DONE_OR_FAILED.has(entryState)) { if (!tgt.finished_at) tgt.finished_at = now }
         else tgt.finished_at = null
+        // 6d: the tool's `abandoned` on an agent / the session holding a plan keeps 6c's meaning — it finishes it AND ends its plan
+        // (now through the plan-end marker: an agent's line alone no longer ends a plan)
+        if (entryState === 'abandoned' && !planEndOpt) planEnd = 'abandoned'
       }
     }
+    if (planEnd) tgt.plan_end = planEnd === 'open' ? null : { state: planEnd, ts: now }   // 6d: set / clear the plan-end marker
     if ('progress' in msg) tgt.progress = msg.progress ? { ...msg.progress } : null   // ANY message moves the bar
     if ('eta_at' in msg) tgt.eta_at = msg.eta_at || null
     if (DONE_OR_FAILED.has(stateOf(tgt))) tgt.eta_at = null                          // dropped on done/failed, ignored while it is
@@ -1044,9 +1097,9 @@ export function apply(state, ident, msg, now, opts = {}) {
       tgt.cp_dirty = (tgt.cp_dirty || 0) | bits
       state.cpLive.set(cpId(sKey, tKey), [sKey, tKey])
     } else {
-      const small = smallOf({ id, ts: now, current: msg.current, text, state: entryState,
+      const small = smallOf({ id, ts: now, current: msg.current, text: entryText || text, state: entryState,
         progress: 'progress' in msg ? msg.progress : undefined, eta_at: 'eta_at' in msg ? msg.eta_at : undefined, stale_after_ms: msg.stale_after_ms,
-        has_details: !!msg.details, has_data: msg.data != null, by })
+        has_details: !!msg.details, has_data: msg.data != null, by, act })
       logInsert(tgt, small)
       while (tgt.log.length > cap) logDropOldest(tgt)
       // this entry persists what it carries: the line (+ its state, and a done/failed line's dropped ETA), the bar, the ETA
@@ -1055,7 +1108,9 @@ export function apply(state, ident, msg, now, opts = {}) {
       notePersisted(by ? [] : chain.slice(oi), tgt, { line: msg.current, prog: 'progress' in msg, eta: etaW }, now)
       res.entry = { v: ACTIVITY_FORMAT, ...small, current: !!msg.current, path: tgt.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
         details: msg.details || null, data: msg.data != null ? msg.data : null, ...planFields(tgt), ...persistMarks(chain),
-        ...(msg.current && tgt.kind === 'agent' ? { finished_at: tgt.finished_at } : {}) }
+        ...(msg.current && tgt.kind === 'agent' ? { finished_at: tgt.finished_at } : {}),
+        ...(msg.current && entryText && entryText !== text ? { line_text: text } : {}),   // 6d: the LINE kept its text; the entry says what was done (+ by whom)
+        ...(planEnd ? { plan_end: planEnd } : {}) }
       res.records.push(res.entry)
     }
   }
@@ -1139,7 +1194,7 @@ function checkpointOf(state, sess, node, now, k) {
   notePersisted(chain.slice(lastAgentIx(chain)), node, { line: true, prog: true, eta: true }, now)
   return { v: ACTIVITY_FORMAT, kind: 'cp', k, ts: now, path: node.path, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
     current: fullLine(node.current), state: stateOf(node), progress: node.progress ? { ...node.progress } : null, eta_at: node.eta_at || null, created_at: node.created_at,
-    ...planFields(node), ...(node.kind === 'agent' ? { finished_at: node.finished_at } : {}), ...persistMarks(chain) }
+    ...planFields(node), ...(node.kind === 'agent' ? { finished_at: node.finished_at, plan_end: node.plan_end ? { ...node.plan_end } : null } : {}), ...persistMarks(chain) }
 }
 /**
  * 6b CARRY-FORWARD (#70 "Decisions before 6b" 4): the `cf` records the gateway writes into the NEW day's file at each local
@@ -1177,8 +1232,12 @@ function carryOf(state, sess, node, now) {
   return { v: ACTIVITY_FORMAT, kind: 'cf', ts: now, path: node.path, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
     current: fullLine(node.current), state: stateOf(node), progress: node.progress ? { ...node.progress } : null, eta_at: node.eta_at || null,
     created_at: node.created_at, last_activity: node.last_activity, stale_after_ms: node.stale_after_ms || null, implicit: !!node.implicit,
-    ...planFields(node), ...(node.kind === 'agent' ? { finished_at: node.finished_at } : {}), ...persistMarks(chain) }
+    ...planFields(node), ...(node.kind === 'agent' ? { finished_at: node.finished_at, plan_end: node.plan_end ? { ...node.plan_end } : null } : {}),
+    log_n: ownCount(node), ...(node.cpartial ? { log_partial: true } : {}),   // 6d (#70 "Decisions after 6c, for 6d" 8): the node's own entry count, so it stays exact past the window
+    ...persistMarks(chain) }
 }
+/** A LOCAL node's own logged-entry count (memory + dropped; 6d: exact across restarts via the cf's log_n). */
+const ownCount = n => n.log.length + n.log_dropped
 
 /**
  * Mark a LOCAL session as having left the mesh (its unfinished agents then show as `gone`), or pass `now = null` to clear
@@ -1246,23 +1305,188 @@ export function autoAbandon(state, now, opts = {}) {
     if (live(s)) continue
     const since = s.gone_at || s.last_activity
     if (!(now - since >= days * DAY)) continue
-    const ident = { realm: s.realm, project: s.project, user: s.user, session: s.session }
-    const plans = [...s.nodes.values()].filter(n => { const p = planOf(s, n); return p && planEndAt(s, n, p) == null }).sort((a, b) => b.depth - a.depth || cmp(a.key, b.key))
-    const one = (n, item) => {
-      const pm = parseMessage({ path: n.path ? n.path + '/@~root' : '@~root', text, state: 'abandoned' }, { now })
-      const r = pm.ok ? apply(state, ident, pm.msg, now, { by }) : pm
-      if (!r.ok) return
-      out.records.push(...r.records); out.abandoned.push({ session: s.session, project: s.project, path: n.path, item })
-    }
-    for (const n of plans) {
-      if (!s.nodes.has(n.key)) continue
-      const p = planOf(s, n)
-      if (!p || planEndAt(s, n, p) != null) continue
-      for (const it of p.items) if (OPEN_ITEM.has(stateOf(it))) one(it, true)
-      one(n, false)
-    }
+    const plans = [...s.nodes.values()].filter(n => { const p = planOf(s, n); return p && planEndAt(s, n, p) == null })
+    const r = abandonPlans(state, s, plans, now, { by, text })   // 6d: the shared helper (an agent / the session holding a plan: the marker, not its line)
+    out.records.push(...r.records); out.abandoned.push(...r.done.map(d => ({ session: s.session, project: s.project, path: d.path, item: d.item })))
   }
   return out
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 6d (v1.65.0): DASHBOARD ACTIONS — the board's first write path from outside the reporting session (#70 "Decisions before
+// 6c and 6d" + "Decisions after 6c, for 6d"). The owning host's gateway applies them (a dashboard on another host forwards
+// over the hub link); each is LOGGED on the node as a SYSTEM message (apply opts.by: no activity, never un-gones anything)
+// attributed `by` = { kind:"dashboard", user, host } + `act`, its text "<what> by <user> via dashboard (<host>)".
+
+/** The actions (wire names). Plan items: done / skip / reopen (→ todo) / abandon; plan nodes: complete / abandon_plan /
+ * reopen_plan (the table's "Reopen" on a plan); agents and the session: abandon_plan / finish (args.state done|failed) / dismiss. */
+export const ACTIVITY_ACTIONS = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss'])
+const ITEM_ACTIONS = Object.freeze({ done: 'done', skip: 'skipped', reopen: 'todo', abandon: 'abandoned' })
+const ACTION_LABEL = Object.freeze({ done: 'marked done', skip: 'skipped', reopen: 'reopened (back to to do)', abandon: 'abandoned', complete: 'plan marked complete',
+  abandon_plan: 'plan abandoned', reopen_plan: 'plan reopened', finish: 'marked finished', dismiss: 'dismissed from the board' })
+const identOf = s => ({ realm: s.realm, project: s.project, user: s.user, session: s.session })
+const lineAddr = n => (n.path ? n.path + '/@~root' : '@~root')
+const actText = (label, by) => cpSlice(`${label} ${byText(by)}`.trim(), ACTIVITY_LIMITS.text)
+/** An `@~` line with `st` on `node`, keeping the line's text (a tick); the LOGGED entry's text is o.text (attribution). */
+function lineAction(state, sess, node, st, now, o) {
+  const pm = parseMessage({ path: lineAddr(node), state: st }, { now })
+  return pm.ok ? apply(state, identOf(sess), pm.msg, now, { by: o.by, act: o.act, entryText: o.text }) : pm
+}
+/** A logged (non-current) entry on an agent / the session that sets ('done' | 'abandoned') or clears ('open') its plan-end marker. */
+function markerAction(state, sess, node, planEnd, now, o) {
+  const pm = parseMessage({ ...(node.path ? { path: node.path } : {}), text: 'plan' }, { now })
+  if (!pm.ok) return pm
+  pm.msg.text = o.text
+  return apply(state, identOf(sess), pm.msg, now, { by: o.by, act: o.act, planEnd })
+}
+/**
+ * End OPEN plans by abandoning them (auto-abandon; the dashboard's abandon_plan), DEEPEST first: each plan's OPEN items (todo /
+ * running / blocked) get an abandoned line, then the plan node itself — a CONTEXT by its line, an AGENT / the session by the
+ * plan-end marker (it keeps running: #70 "Decisions after 6c, for 6d" 2). o.text = the entry text (default: the action's
+ * attribution). Returns { records, done:[{ path, item }] }.
+ */
+function abandonPlans(state, sess, plans, now, o) {
+  const out = { records: [], done: [] }
+  const one = (n, item) => {
+    const text = o.text || actText(item ? ACTION_LABEL.abandon : ACTION_LABEL.abandon_plan, o.by)
+    const r = !item && n.kind === 'agent' ? markerAction(state, sess, n, 'abandoned', now, { by: o.by, act: o.act, text }) : lineAction(state, sess, n, 'abandoned', now, { by: o.by, act: o.act, text })
+    if (r.ok) { out.records.push(...r.records); out.done.push({ path: n.path, item }) }
+  }
+  for (const n of [...plans].sort((a, b) => b.depth - a.depth || cmp(a.key, b.key))) {
+    if (sess.nodes.get(n.key) !== n) continue
+    const p = planOf(sess, n)
+    if (!p || planEndAt(sess, n, p) != null) continue
+    for (const it of p.items) if (OPEN_ITEM.has(stateOf(it))) one(it, true)
+    one(n, false)
+  }
+  return out
+}
+/** Does the path from x up to (not including) `top` pass through an agent other than `top`? (x itself counts) */
+function crossesAgent(sess, x, top) { for (let y = x; y && y.key !== top.key; y = y.parent != null ? sess.nodes.get(y.parent) : null) if (y.kind === 'agent') return true; return false }
+/** 6d: the OPEN plans `node` holds — itself and every node of its subtree reached without crossing another agent (an agent's
+ * plans, not its sub-agents'). */
+function heldPlans(sess, node) {
+  const out = []
+  for (const k of subtreeKeys(sess, node.key)) {
+    const x = sess.nodes.get(k)
+    if (x.key !== node.key && crossesAgent(sess, x, node)) continue
+    const p = planOf(sess, x)
+    if (p && planEndAt(sess, x, p) == null) out.push(x)
+  }
+  return out
+}
+/** 6d: is this agent (or the session root) QUIET — finished, or (by `sm` minutes) stale or gone; an implicit one (it never
+ * reported) when every reported agent below it is quiet. */
+function quietAgent(sess, n, now, sm) {
+  if (n.finished_at) return true
+  const e = effectiveState(n, now, sm)
+  if (e.gone || e.stale) return true
+  if (!n.implicit) return false
+  return subtreeKeys(sess, n.key).slice(1).map(k => sess.nodes.get(k)).every(x => x.kind !== 'agent' || x.implicit || quietAgent(sess, x, now, sm))
+}
+/**
+ * 6d: ONE dashboard action on a LOCAL node → { ok, action, path, records:[…] (persist in order), applied:[{ path, state }],
+ * dismissed?, warnings? } or { ok:false, code, what }. q = { session, project?, user?, path ('' = the session), action, args? };
+ * opts.by = { kind:'dashboard', user, host } (required — normBy). Codes: bad-action, bad-args, bad-by, unknown-session,
+ * bad-path, unknown-node, not-a-plan-item, no-change, not-a-plan, already-ended, not-ended, all-items-done, no-open-plan,
+ * not-an-agent, already-finished, not-stale, has-open-items. args.stale_min (1..1440; default the host's stale_after_min) =
+ * the dashboard slider, so "stale" means what the viewer saw.
+ * @param {ActivityState} state @param {any} q @param {number} now @param {{ by?: any }} [opts]
+ * @returns {ActivityResult}
+ */
+export function applyAction(state, q, now, opts = {}) {
+  if (!state || !(state.local instanceof Map)) return bad('bad-state-object', 'pass a createActivity() state')
+  if (!state.config.enabled) return bad('activity-disabled', 'the activity board is disabled on this host (activity.enabled)')
+  if (!q || typeof q !== 'object') return bad('bad-action', 'an action is { session, project?, user?, path, action, args? }')
+  const action = typeof q.action === 'string' ? q.action.trim().toLowerCase() : ''
+  if (!ACTIVITY_ACTIONS.includes(action)) return bad('bad-action', `action must be one of ${ACTIVITY_ACTIONS.join('|')}`)
+  const by = normBy(opts && opts.by)
+  if (!by || typeof by === 'string') return bad('bad-by', 'an action needs its author ({ kind:"dashboard", user, host })')
+  const args = q.args && typeof q.args === 'object' && !Array.isArray(q.args) ? q.args : {}
+  const sk = str(q.session) ? lc(q.session) : null
+  if (!sk) return bad('unknown-session', 'an action names its session')
+  const cands = [...state.local.values()].filter(s => lc(s.session) === sk && projKey(s.project) === projKey(q.project) && lc(s.user || '') === lc(q.user || ''))
+  const sess = cands.length > 1 ? cands.find(s => lc(s.realm) === lc(q.realm || 'default')) || cands[0] : cands[0]
+  if (!sess) return bad('unknown-session', `no activity from a session "${String(q.session).slice(0, 80)}" (${String(q.project || '').slice(0, 60)}) on this host`)
+  const pp = parsePath(q.path == null ? '' : String(q.path))
+  if (!pp.ok || pp.current) return bad('bad-path', pp.ok ? 'an action addresses a node (no @~)' : pp.what)
+  const node = sess.nodes.get(pp.key)
+  if (!node) return bad('unknown-node', `session "${sess.session}" has no node "${pp.path}"`)
+  const smArg = Number(args.stale_min), sm = Number.isFinite(smArg) && smArg >= 1 && smArg <= 1440 ? smArg : state.config.stale_after_min
+  const o = { by, act: action, text: actText(ACTION_LABEL[action], by) }
+  const done = (recs, extra = {}) => ({ ok: true, action, path: node.path, records: recs, applied: extra.applied || [{ path: node.path, state: sess.nodes.get(node.key) ? stateOf(node) : null }], ...extra })
+  const isAgent = node.kind === 'agent', plan = planOf(sess, node)
+  switch (action) {
+    case 'done': case 'skip': case 'reopen': case 'abandon': {   // ---- a PLAN ITEM
+      if (!node.plan) return bad('not-a-plan-item', `"${node.path || '@root'}" is not a plan item`)
+      const st = ITEM_ACTIONS[action]
+      if (stateOf(node) === st) return bad('no-change', `"${node.path}" is already ${st}`)
+      const r = lineAction(state, sess, node, st, now, o)
+      if (!r.ok) return r
+      const par = sess.nodes.get(node.parent), pp2 = par ? planOf(sess, par) : null
+      const warn = action === 'reopen' && pp2 && planEndAt(sess, par, pp2) != null ? ['plan-ended'] : []   // its plan was marked complete / abandoned: reopen the plan too
+      return done(r.records, warn.length ? { warnings: warn } : {})
+    }
+    case 'complete': {   // ---- a PLAN NODE: ends its plan (a context: its line done; an agent / the session: the marker)
+      if (!plan) return bad('not-a-plan', `"${node.path || '@root'}" holds no plan items`)
+      if (planEndAt(sess, node, plan) != null) return bad('already-ended', `the plan of "${node.path || '@root'}" has already ended`)
+      const r = isAgent ? markerAction(state, sess, node, 'done', now, o) : lineAction(state, sess, node, 'done', now, o)
+      return r.ok ? done(r.records) : r
+    }
+    case 'reopen_plan': {
+      if (!plan) return bad('not-a-plan', `"${node.path || '@root'}" holds no plan items`)
+      if (planEndAt(sess, node, plan) == null) return bad('not-ended', `the plan of "${node.path || '@root'}" is open`)
+      if (plan.allDoneAt != null) return bad('all-items-done', 'every item of this plan is done — reopen an item instead')
+      const r = isAgent ? markerAction(state, sess, node, 'open', now, o) : lineAction(state, sess, node, 'running', now, o)
+      return r.ok ? done(r.records) : r
+    }
+    case 'abandon_plan': {   // a plan node: its open items, then it; an agent / the session: every open plan it holds (it keeps running)
+      if (!isAgent && !plan) return bad('not-a-plan', `"${node.path}" holds no plan items`)
+      const plans = heldPlans(sess, node)
+      if (!plans.length) return bad('no-open-plan', `"${node.path || '@root'}" holds no open plan`)
+      const r = abandonPlans(state, sess, plans, now, { by, act: action })
+      return done(r.records, { applied: r.done.map(d => ({ path: d.path, state: 'abandoned', item: d.item })) })
+    }
+    case 'finish': {   // ---- an agent / the session that is stale or gone
+      if (!isAgent) return bad('not-an-agent', `"${node.path}" is a context — only an agent or the session finishes`)
+      const st = typeof args.state === 'string' ? args.state.trim().toLowerCase() : ''
+      if (st !== 'done' && st !== 'failed') return bad('bad-args', 'finish takes args.state "done" or "failed"')
+      if (node.finished_at) return bad('already-finished', `"${node.path || '@root'}" has already finished`)
+      if (!quietAgent(sess, node, now, sm)) return bad('not-stale', `"${node.path || '@root'}" is neither stale nor gone — only a quiet agent can be marked finished`)
+      const r = lineAction(state, sess, node, st, now, { ...o, text: actText(`${ACTION_LABEL.finish} (${st})`, by) })
+      return r.ok ? done(r.records) : r
+    }
+    case 'dismiss': {   // ---- remove an agent / the session (with its subtree) from the board now; the files keep everything
+      if (!isAgent) return bad('not-an-agent', `"${node.path}" is a context — dismiss removes an agent or a session`)
+      const sub = subtreeKeys(sess, node.key).map(k => sess.nodes.get(k))
+      if (!sub.every(x => x.kind !== 'agent' || (x.key !== node.key && x.implicit) || quietAgent(sess, x, now, sm)))
+        return bad('not-stale', `"${node.path || '@root'}" (or an agent under it) is still active — only a stale, gone or finished agent can be dismissed`)
+      if (openPlanKeys(sess).has(node.key)) return bad('has-open-items', `"${node.path || '@root'}" holds part of an OPEN plan — complete or abandon it first (open plan items are never removed)`)
+      return { ...dismissNode(state, sess, node, now, o), action }
+    }
+  }
+  return bad('bad-action', action)
+}
+/**
+ * 6d DISMISS: one LOGGED entry `{ …, dismiss:true }` at the node's path (state = its state, by / act), then the node and its
+ * subtree leave memory (the session root: the whole session). The REPLAY honours it like an eviction (`evicted`): older
+ * records at or under that path are an ended instance and are skipped, so the dismissal survives a restart; a later message
+ * starts a NEW run (new_from). The entry itself lands in the PARENT's log (with its own `path`), so the parent's merged log
+ * shows it; nothing in the files is erased.
+ */
+function dismissNode(state, sess, node, now, o) {
+  const id = `${state.idPrefix}${now.toString(36)}-${(++state.seq).toString(36)}`
+  const small = smallOf({ id, ts: now, current: false, text: o.text, state: stateOf(node), by: o.by, act: 'dismiss' })
+  const rec = { v: ACTIVITY_FORMAT, ...small, current: false, path: node.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
+    details: null, data: null, dismiss: true }
+  const removed = node.key ? subtreeKeys(sess, node.key).length : sess.nodes.size
+  if (node.key) {
+    const parent = sess.nodes.get(node.parent)
+    removeSubtree(sess, node.key)
+    if (parent) { logInsert(parent, { ...small, path: node.path }); while (parent.log.length > state.config.log_entries_per_agent) logDropOldest(parent) }
+  } else state.local.delete(sess.key)
+  if (state.cp) state.cp.rep = null   // any other write closes the open repeat line
+  return { ok: true, path: node.path, records: [rec], dismissed: { path: node.path, nodes: removed, session: !node.key }, applied: [{ path: node.path, state: 'dismissed' }] }
 }
 
 /** A session record, local by default or from a remote origin's slice (the key's host is the origin — ident.host is ignored). */
@@ -1439,14 +1663,15 @@ export function createReplay(state, { now }) {
     const last = segs.length ? segs[segs.length - 1] : null
     return { key: pathKey(path), path, segs, name: last ? last.name : '', kind: last ? last.kind : 'agent', created: null, cFeed: 0, last: -Infinity, sa: null, saSet: false,
       current: null, curFound: false, progress: null, progFound: false, eta: null, etaRes: false, pend: null, hasPend: false, finAt: null, finRes: false,
-      implicit: true, seen: false, sealed: false, marker: false, log: [], total: 0, floor: 0, plan: false, planIx: null, tA: 0, tL: 0, tP: 0, tE: 0, tPend: 0 }
+      implicit: true, seen: false, sealed: false, marker: false, log: [], total: 0, floor: 0, plan: false, planIx: null, tA: 0, tL: 0, tP: 0, tE: 0, tPend: 0,
+      pe: null, peRes: false, cnt: null, cntAt: 0, cntPartial: false }   // 6d: the plan-end marker; the exact own-entry count a cf carried (+ when)
   }
   const resolveEta = (c, v, t) => { c.eta = v; c.etaRes = true; c.tE = t || 0 }
   function sealNode(s, n, marker) {
     for (const x of s.nodes.values()) {
       if (x.sealed || !(x.key === n.key || n.key === '' || x.key.startsWith(n.key + '/'))) continue
       if (!x.etaRes) resolveEta(x, x.hasPend ? x.pend : null, x.hasPend ? x.tPend : 0)
-      x.curFound = x.progFound = x.finRes = true; x.sealed = true; if (marker) x.marker = true
+      x.curFound = x.progFound = x.finRes = x.peRes = true; x.sealed = true; if (marker) x.marker = true
     }
   }
   const nodeDone = n => !n.seen || (n.curFound && n.progFound && n.etaRes && (n.kind !== 'agent' || n.finRes))
@@ -1481,15 +1706,30 @@ export function createReplay(state, { now }) {
     const sk = keyOf(state, rec), keys = chainKeys(pp.segs)
     let s = sessions.get(sk)
     if (s) {
-      if (keys.some(k => s.dead.has(k))) { skipped++; return 'skip' }   // an evicted older instance
-      for (const k of keys) { const n = s.nodes.get(k); if (n && n.sealed) { skipped++; return 'skip' } }   // an older instance of a node on the chain
+      const bad = keys.findIndex(k => s.dead.has(k) || !!(s.nodes.get(k) && s.nodes.get(k).sealed))   // an evicted (6d: or dismissed) older instance, or an older instance of a node on the chain
+      if (bad >= 0) {
+        // 6d: the record still BEGAN the run of a live ancestor above that point (new_from) — mark it (else a session whose first
+        // record was on a dismissed / evicted path would look partial after a restart)
+        const nf = rec.new_from, anc = Number.isInteger(nf) && nf >= 0 && nf < bad ? s.nodes.get(keys[nf]) : null
+        if (anc && !anc.sealed) sealNode(s, anc, true)
+        skipped++; return 'skip'
+      }
+    }
+    if (kind === 'entry' && rec.dismiss === true) {   // 6d: a DISMISSAL — what was at / under that path then is an ended instance (like `evicted`)
+      if (!s) { s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: state.origin, created: null, last: -Infinity, nodes: new Map(), dead: new Set(), dms: [], nAgents: 0 }; s.nodes.set('', rNode('', [])); sessions.set(sk, s) }
+      fed++
+      if (!pp.key) { if (!s.nodes.get('').sealed) s.dead.add('') }   // the whole session: no newer run of it (that would have sealed the root)
+      else { if (!s.nodes.has(pp.key)) s.dead.add(pp.key); s.dms.push(rec) }   // the entry belongs to the PARENT's log (attached in build)
+      return 'ok'
+    }
+    if (s) {
       let newN = 0, newA = 0
       for (let i = 1; i < keys.length; i++) if (!s.nodes.has(keys[i])) { newN++; if (pp.segs[i - 1].kind === 'agent') newA++ }
       if (s.nodes.size - 1 + newN > ACTIVITY_LIMITS.nodesPerSession || s.nAgents + newA > ACTIVITY_LIMITS.agentsPerSession) { skipped++; return 'skip' }
     }
     // ---- accepted: create what's new ----
     if (!s) {
-      s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: state.origin, created: null, last: -Infinity, nodes: new Map(), dead: new Set(), nAgents: 0 }
+      s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: state.origin, created: null, last: -Infinity, nodes: new Map(), dead: new Set(), dms: [], nAgents: 0 }
       s.nodes.set('', rNode('', [])); sessions.set(sk, s)
     }
     const chain = [s.nodes.get('')]
@@ -1502,7 +1742,7 @@ export function createReplay(state, { now }) {
     // identity spellings: every record carries the canonical (first-seen) one; the OLDEST record's is kept
     s.session = rec.session.trim(); s.project = str(rec.project) || 'unclassified'; s.user = str(rec.user); s.realm = str(rec.realm) || 'default'
     const tgt = chain[chain.length - 1], oi = ownerIndex(pp.segs), isCf = kind === 'cf'
-    const isSys = kind === 'entry' && typeof rec.by === 'string' && !!rec.by   // 6c: a SYSTEM entry (auto-abandon) is nobody's activity
+    const isSys = kind === 'entry' && !!normBy(rec.by)   // 6c: a SYSTEM entry (auto-abandon; 6d: a dashboard action) is nobody's activity
     // a cf restores its TARGET only (its own implicit flag, created_at, last_activity); any other record marks target + owner reported
     if (isCf) { if (rec.implicit !== true) tgt.implicit = false } else { tgt.implicit = false; if (!isSys) chain[oi].implicit = false }
     if (rec.plan_item === true) { tgt.plan = true; if (tgt.planIx == null && Number.isInteger(rec.plan_ix)) tgt.planIx = rec.plan_ix }
@@ -1522,6 +1762,8 @@ export function createReplay(state, { now }) {
       if (!tgt.etaRes) resolveEta(tgt, tgt.hasPend ? (DONE_OR_FAILED.has(st) ? null : tgt.pend) : (finite(rec.eta_at) ? rec.eta_at : null), tgt.hasPend ? tgt.tPend : rec.ts)
       if (tgt.kind === 'agent' && !tgt.finRes) { tgt.finAt = finite(rec.finished_at) ? rec.finished_at : (DONE_OR_FAILED.has(st) && rec.current ? rec.current.ts : null); tgt.finRes = true }
       if (isCf && !tgt.saSet) { tgt.sa = rec.stale_after_ms > 0 ? rec.stale_after_ms : null; tgt.saSet = true }
+      if (tgt.kind === 'agent' && !tgt.peRes && 'plan_end' in rec) { tgt.pe = wPlanEnd(rec.plan_end); tgt.peRes = true }   // 6d: a snapshot carries the marker
+      if (isCf && tgt.cnt == null && Number.isInteger(rec.log_n) && rec.log_n >= 0) { tgt.cnt = tgt.total + rec.log_n; tgt.cntAt = rec.ts; tgt.cntPartial = rec.log_partial === true }   // 6d: the exact count then + what came after it
     } else {
       entries++
       tgt.total++
@@ -1539,6 +1781,10 @@ export function createReplay(state, { now }) {
         } else if (hasEta && !tgt.hasPend) { tgt.pend = finite(rec.eta_at) ? rec.eta_at : null; tgt.hasPend = true; tgt.tPend = rec.ts }
       }
       if (rec.current && tgt.kind === 'agent' && !tgt.finRes) { tgt.finAt = 'finished_at' in rec ? (finite(rec.finished_at) ? rec.finished_at : null) : (DONE_OR_FAILED.has(rec.state) ? rec.ts : null); tgt.finRes = true }
+      if (tgt.kind === 'agent' && !tgt.peRes) {   // 6d: the plan-end marker — set / cleared by an entry; a ≤v4 abandoned line on an agent ended its plan too
+        const pe = typeof rec.plan_end === 'string' ? rec.plan_end : rec.v < 5 && rec.current && rec.state === 'abandoned' ? 'abandoned' : null
+        if (pe) { tgt.pe = pe === 'open' ? null : wPlanEnd({ state: pe, ts: rec.ts }); tgt.peRes = true }
+      }
       if (Array.isArray(rec.evicted)) for (const p of rec.evicted) { const q = parsePath(String(p)); if (q.ok && q.key && !s.nodes.has(q.key)) s.dead.add(q.key) }   // that subtree's older instance ended here
     }
     if (Number.isInteger(rec.new_from) && rec.new_from >= 0 && rec.new_from < chain.length) sealNode(s, chain[rec.new_from], true)
@@ -1546,7 +1792,7 @@ export function createReplay(state, { now }) {
   }
   function lineOf(r) {
     const data = r.data != null && typeof r.data === 'object' ? r.data : null
-    return { id: String(r.id || ''), ts: finite(r.ts) ? r.ts : 0, text: String(r.text), state: ACTIVITY_STATES.includes(r.state) ? r.state : 'running',
+    return { id: String(r.id || ''), ts: finite(r.ts) ? r.ts : 0, text: typeof r.line_text === 'string' && r.line_text ? r.line_text : String(r.text), state: ACTIVITY_STATES.includes(r.state) ? r.state : 'running',   // 6d: line_text = the line's own text (the entry's says what a dashboard did)
       details: typeof r.details === 'string' && r.details ? r.details : null, data, data_bytes: data != null ? utf8(JSON.stringify(data)) : 0 }
   }
   /** Nodes seen so far whose phase-1 fields are not all resolved yet. */
@@ -1556,6 +1802,13 @@ export function createReplay(state, { now }) {
   function build(withLogs) {
     const out = new Map()
     for (const s of sessions.values()) {
+      if (s.dead.has('') && s.nodes.size === 1) continue   // 6d: a dismissed session with no newer run
+      if (withLogs) for (const dm of s.dms) {   // 6d: a dismissal's entry is in its PARENT's log (when that instance was there then)
+        const r = s.nodes.get(parentKeyOf(pathKey(dm.path)))
+        if (!r || r.sealed && r.created != null && r.created > dm.ts) continue
+        r.log.push({ ...smallOf(dm), path: dm.path }); r.total++
+        if (r.cnt != null && dm.ts > r.cntAt) r.cnt++
+      }
       const created = s.created
       const sess = newSession(s.key, state.origin, { realm: s.realm, session: s.session, project: s.project, user: s.user }, created)
       sess.last_activity = Math.max(created, s.last)
@@ -1581,10 +1834,14 @@ export function createReplay(state, { now }) {
     if (DONE_OR_FAILED.has(stateOf(n))) n.eta_at = null
     if (n.kind === 'agent') n.finished_at = r.key === '' && !r.finRes ? null : r.finAt
     if (r.plan && n.kind === 'context') { n.plan = true; n.plan_ix = r.planIx }
+    if (n.kind === 'agent') n.plan_end = r.pe || null   // 6d: the plan-end marker
     n.partial = !r.marker   // 6c: the replay never saw the record that began this run (it began before the window)
+    n.cpartial = !r.marker && (r.cnt == null || r.cntPartial)   // 6d: …but a carry-forward's count makes its count exact
     n.pt = { a: r.tA, l: r.tL, p: r.tP, e: r.tE }   // what the window holds: the carry-forward re-checkpoints what would fall out of it
     if (withLogs) {
-      n.log = r.log.slice().reverse().sort(ordCmp); n.log_dropped = r.total - n.log.length
+      n.log = r.log.slice().reverse().sort(ordCmp)
+      while (n.log.length > N) n.log.shift()   // 6d: a dismissal's entry attached late may push the log over its cap
+      n.log_dropped = Math.max(0, (r.cnt != null ? r.cnt : r.total) - n.log.length)   // 6d: the cf's count when one was met (exact)
       n.log_floor = r.floor || (r.marker ? 0 : (r.total ? cutoff : 0))   // an instance that began before the window: older entries are only in the files
     }
     return n
@@ -1709,11 +1966,11 @@ export function boardView(state, now, opts = {}) {
     const owner = ownerOf(s, n), eff = effectiveState(n, now, sm, owner), bar = rollup(s, n, memo)
     // 6c: the node's OWN entry count (`total`, the dashboard sums a subtree) — local: memory + dropped; remote: gossiped. partial =
     // its run began before the owner's replay window: the count understates (older entries live only in the day files)
-    const lg = local ? compact({ entries: n.log.length, dropped: n.log_dropped, total: n.log.length + n.log_dropped, partial: !!n.partial }) : compact({ remote: true, total: n.log_n || 0, partial: !!n.partial })
+    const lg = local ? compact({ entries: n.log.length, dropped: n.log_dropped, total: n.log.length + n.log_dropped, partial: !!n.cpartial }) : compact({ remote: true, total: n.log_n || 0, partial: !!n.cpartial })   // 6d: cpartial (a cf's count is exact)
     const isAg = n.kind === 'agent', pl = planOf(s, n)
     const base = { path: n.path, kind: n.kind, name: n.key ? n.name : null, depth: n.depth, parent: n.key ? (s.nodes.get(n.parent) || { path: n.parent }).path : null, host,
       plan_item: n.plan || null, plan_ix: n.plan && Number.isInteger(n.plan_ix) ? n.plan_ix : null,
-      plan_node: pl ? true : null, plan_end_at: pl ? planEndAt(s, n, pl) : null }   // 6c: a node holding plan items; when its plan ended (null = open)
+      plan_node: pl ? true : null, plan_end_at: pl ? planEndAt(s, n, pl) : null, plan_end_how: pl ? planEndHow(s, n, pl) : null }   // 6c: a node holding plan items; when its plan ended (null = open); 6d: how (all-done | done | abandoned)
     if (raw) return compact({ ...base, key: n.key, parent_key: n.parent, state: !isContext(n) && eff.gone ? 'gone' : eff.was, was: !isContext(n) && eff.gone ? eff.was : null, implicit: n.implicit,
       active: isAg ? isActive(n) : null, host_down: down || null, current: rawLine(n.current), progress: n.progress ? { ...n.progress } : null, bar, eta_at: n.eta_at,
       created_at: n.created_at, last_activity: n.last_activity, finished_at: n.finished_at, gone_at: isAg ? n.gone_at : null, stale_after_ms: n.stale_after_ms, log: lg })
@@ -1939,7 +2196,8 @@ export function logView(state, q, now = Date.now(), opts = {}) {
     if (!best) break
     if (entries.length >= lim) { more = true; break }
     const e = best.n.log[best.i]
-    const x = { ...e, path: best.n.path, rel: relPath(best.n.path, node.path), rendered: renderText(e.text, e.progress, e.eta_at, now) }
+    const ep = e.path != null ? e.path : best.n.path   // 6d: a dismissal's entry sits in its parent's log with the dismissed node's path
+    const x = { ...e, path: ep, rel: relPath(ep, node.path), rendered: renderText(e.text, e.progress, e.eta_at, now) }
     const b = utf8(JSON.stringify(x)) + 1
     if (entries.length && bytes + b > maxB) { more = true; break }
     entries.push(x); bytes += b; best.i--
@@ -2052,7 +2310,7 @@ export function findEntry(state, id, now = Date.now()) {
         const r = renderText(l.text, rollup(s, n), n.eta_at, now)
         return { where: 'current', complete: true, entry: { id: l.id, ts: l.ts, ...who, path: n.path, kind: n.kind, current: true, text: l.text, rendered: r, state: l.state, details: l.details || null, data: l.data != null ? l.data : null } }
       }
-      if (!hit) { const x = n.log.find(y => y.id === id); if (x) hit = { where: 'log', complete: !x.has_details && !x.has_data, entry: { ...x, ...who, path: n.path, kind: n.kind, current: !!x.current, rendered: renderText(x.text, x.progress, x.eta_at, now), details: null, data: null } } }
+      if (!hit) { const x = n.log.find(y => y.id === id); if (x) hit = { where: 'log', complete: !x.has_details && !x.has_data, entry: { ...x, ...who, path: x.path != null ? x.path : n.path, kind: n.kind, current: !!x.current, rendered: renderText(x.text, x.progress, x.eta_at, now), details: null, data: null } } }
     }
   }
   return hit
@@ -2070,7 +2328,8 @@ function snapNode(n) {
   return compact({ path: n.path, created_at: n.created_at, last_activity: n.last_activity, finished_at: n.finished_at, gone_at: n.kind === 'agent' ? n.gone_at : null,
     stale_after_ms: n.stale_after_ms, implicit: n.implicit, progress: n.progress ? { done: n.progress.done, total: n.progress.total, unit: n.progress.unit } : null,
     eta_at: n.eta_at, current: snapLine(n.current), plan_item: !!n.plan, plan_ix: n.plan && Number.isInteger(n.plan_ix) ? n.plan_ix : null,
-    log_n: (n.log_n != null ? n.log_n : n.log.length + n.log_dropped) || null, log_partial: !!n.partial })
+    log_n: (n.log_n != null ? n.log_n : n.log.length + n.log_dropped) || null, log_partial: !!n.cpartial,   // 6d: partial = the COUNT understates (a cf's count makes it exact)
+    plan_end: n.kind === 'agent' && n.plan_end ? { state: n.plan_end.state, ts: n.plan_end.ts } : null })   // 6d: the plan-end marker (receivers compute plan_end_at)
 }
 const sortedNodes = s => [...s.nodes.values()].sort((a, b) => cmp(a.key, b.key))
 function snapSession(s) {
@@ -2126,7 +2385,8 @@ function wNode(r) {
     if (n.current && PLAN_STATES.has(n.current.state)) n.current.state = 'running'   // 6b: an agent can't be todo / skipped
   } else if (r.plan_item === true) { n.plan = true; n.plan_ix = Number.isInteger(r.plan_ix) && r.plan_ix >= 0 && r.plan_ix < ACTIVITY_LIMITS.planItems ? r.plan_ix : null }
   n.log_n = Number.isInteger(r.log_n) && r.log_n > 0 ? Math.min(r.log_n, 1e9) : 0   // 6c: the owner's own-entry count
-  n.partial = r.log_partial === true
+  n.partial = n.cpartial = r.log_partial === true
+  if (n.kind === 'agent') n.plan_end = wPlanEnd(r.plan_end)   // 6d
   n.persisted = true
   return n
 }

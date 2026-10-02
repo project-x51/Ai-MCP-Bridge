@@ -26,6 +26,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import * as Act from '../lib/activity.js'
 const SRCDIR = fileURLToPath(new URL('../', import.meta.url))
 const BRIDGE = process.env.AIMB_TEST_BRIDGE || 'bridge.mjs'
 const TOKEN = 'gossiptesttok'
@@ -97,7 +98,7 @@ function logger(host, wsPort, ident) {
 }
 // a raw peer-hub link (HELLO + PEER_HELLO) for the forgery checks
 const frameOf = o => { const b = Buffer.from(J(o)); const h = Buffer.alloc(4); h.writeUInt32BE(b.length); return Buffer.concat([h, b]) }
-function rawPeer(host, port, session, fmt = 4) {   // 6c: the current format (v4)
+function rawPeer(host, port, session, fmt = Act.ACTIVITY_FORMAT) {   // the current format (6d: v5)
   return new Promise(resolve => {
     const s = net.connect(Number(port), host, () => {
       s.write(frameOf({ t: 'HELLO', ver: 1, fromBridge: session, fromSession: session, name: 'fake', auth: TOKEN }))
@@ -224,9 +225,9 @@ check('truncation: ... the rest followed in later frames (≥1 s apart) until al
 
 // ---- 6. forged slices: another origin's name in the frame is refused; host fields inside never decide ownership
 const fake = await rawPeer('127.0.0.1', B_PORT, 'FAKE-HOST/0001')
-fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 4, origin: HA, epoch: 'f', seq: 1, full: true, sessions: [forgedSession('ForgedA', HA)] }))
+fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: Act.ACTIVITY_FORMAT, origin: HA, epoch: 'f', seq: 1, full: true, sessions: [forgedSession('ForgedA', HA)] }))
 await sleep(300)
-fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 4, epoch: 'f', seq: 2, full: true, sessions: [forgedSession('ForgedB', HA)] }))
+fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: Act.ACTIVITY_FORMAT, epoch: 'f', seq: 2, full: true, sessions: [forgedSession('ForgedB', HA)] }))
 const b6 = await until(() => board(F), b => !!group(b, 'ForgedB'), 3000)
 check('forged: a slice naming another origin (A) is dropped — nothing of it on the board', !group(b6, 'ForgedA') && !b6.some(g => (g.nodes || []).concat(g.self || []).some(e => e.current?.text === 'forged ForgedA')), J(b6.map(g => g.session)))
 check('forged: a slice\'s own host fields are ignored — it is tagged with the LINK\'s host, never A', group(b6, 'ForgedB')?.host === 'FAKE-HOST' && group(b6, 'ForgedB')?.self?.host === 'FAKE-HOST', J(group(b6, 'ForgedB')))

@@ -190,7 +190,7 @@ const byB = (lg.log?.entries || []).filter(e => e.by === 'bridge')
 check('auto-abandon: logged as entries attributed to the bridge (by:"bridge"), newest first in the plan\'s log', byB.length === 2 && byB.every(e => e.state === 'abandoned' && /abandoned by the bridge/.test(e.text)) && J(byB.map(e => e.path)) === J(['@#70', '@#70/@B']), J(lg.log?.entries?.map(e => [e.path, e.state, e.by])))
 const dayE = Act.localDay(Date.now() + 2 * DAY + HOUR), fileE = path.join(dirE, 'activity', lslug(os.hostname(), 80), `${dayE}.jsonl`)
 const recE = (() => { try { return fs.readFileSync(fileE, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) } catch { return [] } })()
-check('auto-abandon: … and persisted in the (shifted) day\'s file as v4 records with by:"bridge"', recE.filter(r => r.by === 'bridge' && r.v === 4 && r.state === 'abandoned').length === 2, J(recE.map(r => [r.kind || 'entry', r.path, r.state, r.by])))
+check('auto-abandon: … and persisted in the (shifted) day\'s file as current-format records with by:"bridge"', recE.filter(r => r.by === 'bridge' && r.v === Act.ACTIVITY_FORMAT && r.state === 'abandoned').length === 2, J(recE.map(r => [r.kind || 'entry', r.path, r.state, r.by])))
 await stop(E2)
 
 check('no response, reminder, script output or error EVER contained the realm token', !seen.some(t => t.includes(TOKEN)), seen.filter(t => t.includes(TOKEN)).length)

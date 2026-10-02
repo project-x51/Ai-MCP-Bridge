@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ai MCP Bridge — Dashboard</title>
 <style>
   /* #70 step 5 (v1.61.0): colour TOKENS — light by default, dark under prefers-color-scheme (or ?theme=dark|light). The
@@ -10,13 +11,16 @@
   :root { --bg:#FFFFFF; --fg:#222222; --fg-strong:#0F172A; --muted:#6B7280; --faint:#9CA3AF; --line:#E5E7EB; --line-soft:#F3F4F6;
     --head:#F9FAFB; --head-fg:#374151; --surface:#F8FAFC; --surface-2:#F1F5F9; --hover:#F8FAFC; --det:#FAFAFA; --first:#FEFCE8;
     --ok:#16A34A; --warn:#D97706; --bad:#DC2626; --info:#2563EB; --idle:#64748B; --down:#7C3AED; --down-fg:#FFFFFF; --track:#E5E7EB; --bar:#3B82F6; --bar-roll:#93C5FD;
+    --sel:#EFF6FF; --abandon:#8A94A6; --bad-fg:#FFFFFF;
     color-scheme: light; }
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#111418; --fg:#E2E8F0; --fg-strong:#F8FAFC; --muted:#9CA3AF; --faint:#6B7280;
     --line:#2B323B; --line-soft:#1E242B; --head:#1A2028; --head-fg:#CBD5E1; --surface:#161B22; --surface-2:#1C232C; --hover:#1A2129; --det:#151A20; --first:#2A2714;
-    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C; color-scheme: dark; } }
+    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C;
+    --sel:#172554; --abandon:#B8C2D0; --bad-fg:#2A0A0A; color-scheme: dark; } }
   :root[data-theme="dark"] { --bg:#111418; --fg:#E2E8F0; --fg-strong:#F8FAFC; --muted:#9CA3AF; --faint:#6B7280;
     --line:#2B323B; --line-soft:#1E242B; --head:#1A2028; --head-fg:#CBD5E1; --surface:#161B22; --surface-2:#1C232C; --hover:#1A2129; --det:#151A20; --first:#2A2714;
-    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C; color-scheme: dark; }
+    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C;
+    --sel:#172554; --abandon:#B8C2D0; --bad-fg:#2A0A0A; color-scheme: dark; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1240px; margin: 10px auto; padding: 0 10px; color: var(--fg); background: var(--bg); }
   h1 { font-size: 20px; margin: 8px 0; }
   .pip { display:inline-block; width:10px; height:10px; border-radius:50%; background:#DC2626; margin-right:6px; }
@@ -171,12 +175,53 @@
   .ar.pdone .nm.pi { color:var(--muted); }
   .ar .pb.plan > i { background:var(--ok); }
   /* #70 6c (v1.64.0): abandoned plans / items (greyed, a dashed glyph), an entry written by the bridge, the run-boundary rows */
-  .s-abandoned { color:var(--faint); } .bg-abandoned { background:transparent !important; box-shadow:inset 0 0 0 1.5px var(--faint); border-radius:2px !important; }
+  .s-abandoned { color:var(--abandon); } .bg-abandoned { background:transparent !important; box-shadow:inset 0 0 0 1.5px var(--abandon); border-radius:2px !important; }
   .ar.abandoned .nm, .ar.abandoned .ln, .ar.abandoned .nm.pi, .ar.abandoned .nm.ctx { color:var(--faint); }
   .ar.abandoned .pb { opacity:.45; }
   .ar .by { flex:none; font-size:10.5px; color:var(--faint); font-style:italic; }
   .ar.sep .nm { color:var(--faint); font-weight:600; font-size:11px; letter-spacing:.02em; }
   .ar.pruned .nm { color:var(--faint); font-style:italic; font-weight:400; }
+  /* #70 6d (v1.65.0): the abandoned glyph reads in dark mode too (its own token); selection + the LOG PANEL (beside the tree,
+     below it on a narrow screen); focusable rows; pinned / hidden rows; the right-click MENU, the CONFIRMATION dialog, action
+     FEEDBACK and the copy toast */
+  .s-abandoned { color:var(--abandon); } .bg-abandoned { box-shadow:inset 0 0 0 1.5px var(--abandon) !important; }
+  .act-main { display:flex; align-items:flex-start; gap:12px; }
+  .act-main > .act-tree { flex:1 1 auto; min-width:0; }
+  .act-panel { flex:0 0 40%; max-width:520px; min-width:300px; border:1px solid var(--line); border-radius:8px; background:var(--bg); position:sticky; top:8px; max-height:calc(100vh - 24px); overflow:auto; font-size:12.5px; }
+  .act-main.nosel .act-panel { display:none; }
+  @media (max-width: 900px) { .act-main { flex-direction:column; align-items:stretch; } .act-main > .act-tree { width:100%; } .act-panel { flex-basis:auto; width:100%; max-width:none; min-width:0; position:static; max-height:none; box-sizing:border-box; } }
+  .aph { padding:6px 8px 4px; border-bottom:1px solid var(--line); background:var(--surface); border-radius:8px 8px 0 0; position:sticky; top:0; z-index:1; }
+  .aph-t { display:flex; align-items:center; gap:7px; min-width:0; }
+  .aph-t .aph-k { flex:none; font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .aph-t .nm { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; color:var(--fg-strong); }
+  .aph-t .cnt { flex:none; color:var(--muted); font-size:11.5px; } .aph-t .sp { flex:1 1 auto; }
+  .aph-s { color:var(--muted); font-size:11.5px; margin:2px 0 0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .aph-h { margin:4px 0 0; display:flex; flex-wrap:wrap; gap:4px; } .aph-h .act-btn.on { color:var(--fg-strong); border-color:var(--info); font-weight:600; }
+  .act-btn.ib { padding:0 7px; line-height:18px; }
+  .apb .ar { padding-left:6px; } .apb .ad { padding-left:28px; }
+  .ar.le.dm .ln { color:var(--muted); font-style:italic; }
+  .ar.sel { background:var(--sel); box-shadow:inset 3px 0 0 var(--info); }
+  .ar.mnu { background:var(--hover); box-shadow:inset 3px 0 0 var(--faint); }
+  .ar[tabindex]:focus { outline:2px solid var(--info); outline-offset:-2px; }
+  .ar .pin { flex:none; font-size:10px; line-height:14px; }
+  .ar.hid { opacity:.6; } .ar.hid .nm { font-style:italic; }
+  .ar.hidn .nm { color:var(--muted); font-weight:400; font-size:11.5px; font-style:italic; }
+  .ar .fb { flex:none; font-size:11px; white-space:nowrap; } .ar .fb.ok { color:var(--ok); } .ar .fb.err { color:var(--bad); font-weight:600; } .ar .fb.pending { color:var(--muted); }
+  .act-menu { position:fixed; z-index:50; min-width:210px; padding:4px 0; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.18); font-size:12.5px; }
+  .act-menu .mi { display:block; width:100%; text-align:left; font:inherit; color:inherit; background:transparent; border:0; padding:5px 14px; cursor:pointer; }
+  .act-menu .mi:hover, .act-menu .mi:focus { background:var(--hover); color:var(--fg-strong); outline:none; }
+  .act-menu .mi.act { font-weight:600; }
+  .act-menu .ms { height:1px; background:var(--line); margin:4px 0; }
+  .act-dlg { position:fixed; inset:0; z-index:60; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; }
+  .act-dlg .box { background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:10px; max-width:440px; width:100%; padding:14px 16px 12px; box-shadow:0 12px 32px rgba(0,0,0,.25); }
+  .act-dlg h3 { margin:0 0 8px; font-size:14.5px; color:var(--fg-strong); } .act-dlg p { margin:0 0 8px; font-size:12.5px; line-height:1.45; } .act-dlg p.note { color:var(--muted); font-size:11.5px; }
+  .act-dlg .btns { text-align:right; margin-top:10px; } .act-dlg .act-btn { padding:4px 14px; font-size:12.5px; }
+  .act-btn.danger { color:var(--bad-fg); background:var(--bad); border-color:var(--bad); font-weight:600; } .act-btn.danger:hover { color:var(--bad-fg); filter:brightness(1.08); }
+  .act-toast { position:fixed; z-index:70; left:50%; bottom:18px; transform:translateX(-50%); background:var(--fg-strong); color:var(--bg); padding:6px 14px; border-radius:8px; font-size:12px; box-shadow:0 6px 18px rgba(0,0,0,.2); max-width:90vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* 6d: the PHONE layout, last so it wins over the base rules above (the 6a block near .ar came before .ar .nm / .ar .pb, so
+     its bar + name widths never applied): narrower bars and names, tighter indentation — no sideways scrolling at 420 px */
+  @media (max-width: 720px) { .ar { padding-left:calc(4px + var(--d, 0) * 11px); gap:5px; } .ar .pb { width:56px; } .ar .nm { max-width:150px; } .act-panel .ar { padding-left:4px; } .act-panel .ar.more .nm { max-width:none; }
+    .act-bar { gap:6px 12px; } .act-bar input[type=range] { width:96px; } }
 </style>
 </head>
 <body>
@@ -204,10 +249,13 @@
       <label title="Hide finished and gone agents, ended plans, and sessions with nothing active (rolled-up bars then count only what is shown)"><input type="checkbox" id="actActive" style="vertical-align:middle;margin-right:4px">active only</label>
       <label title="Show only plans, their items and the nodes that hold them, across all sessions (rolled-up bars then count only what is shown)"><input type="checkbox" id="actPlans" style="vertical-align:middle;margin-right:4px">plans</label>
       <label title="A running or blocked item with no message for this long counts as stale (an item's own stale_after wins)">stale after <input type="range" id="actStale" min="5" max="60" step="1" value="15"> <b id="actStaleV" style="color:var(--fg-strong)">15m</b></label>
-      <label title="An ENDED plan (all done, or marked complete / abandoned) stays expanded this long, then collapses (it is not removed — the 7-day window does that); open plans are always expanded">plans open <input type="range" id="actPlanOpen" min="0" max="480" step="10" value="120"> <b id="actPlanOpenV" style="color:var(--fg-strong)">2h</b></label>
+      <label title="An ENDED plan (all done, or marked complete / abandoned) stays expanded this long (0 – 7 days), then collapses (it is not removed — the 7-day window does that); open plans (and what holds them) are always expanded">plans open <input type="range" id="actPlanOpen" min="0" max="22" step="1" value="8"> <b id="actPlanOpenV" style="color:var(--fg-strong)">2h</b></label>
       <span><button class="act-btn" id="actExpand">Expand all</button> <button class="act-btn" id="actCollapse">Collapse all</button></span>
     </div>
-    <div id="acttree" class="act-tree"></div>
+    <div class="act-main nosel" id="actmain">
+      <div id="acttree" class="act-tree" role="tree" aria-label="Activity: projects, sessions and their agents"></div>
+      <aside id="actpanel" class="act-panel" aria-label="The selected node's log"></aside>
+    </div>
     <div class="act-legend" id="actlegend"></div>
   </div>
 </section>
@@ -972,17 +1020,21 @@
         var rootEnded=function(h){ var s=selfOf(h); return !!s&&planEnded(top.filter(function(t){ return lcs(t.u.host)===lcs(h); }),s); };
         var liveLine=function(u){ var s=u.current&&u.current.state; return s==='running'||s==='blocked'; };
         var nActive=0;
-        var walk=function(list,owner,parent){ list.sort(cmpN); var ended=parent?planEnded(list,parent):null, out=[]; list.forEach(function(t){
+        // 6d: PINNED nodes sort to the top of their parent; HIDDEN ones are left out (counted: nHidden) unless their parent's "show" is on
+        var pinned=function(t){ return !!(opts.pins&&opts.pins[t.u.id]); };
+        var walk=function(list,owner,parent,pid){ list.sort(function(a,b){ var x=pinned(a), y=pinned(b); return x!==y?(x?-1:1):cmpN(a,b); }); var ended=parent?planEnded(list,parent):null, out=[], nh=0; list.forEach(function(t){
+          t.pinned=pinned(t); t.hid=false;
+          if(opts.hidden&&opts.hidden[t.u.id]){ if(!(opts.showHidden&&opts.showHidden[pid])){ nh++; return; } t.hid=true; }
           var ow=owner||selfOf(t.u.host), itemEnded=t.u.plan_item&&(parent?ended:rootEnded(t.u.host));
           if(opts.activeOnly&&!t.open&&((t.u.nkind==='agent'&&!isActiveAgent(t.u))||itemEnded)) return;
           if(isActiveAgent(t.u)&&!t.u.implicit) nActive++;
           t.owner=ow;
-          t.kids=walk(t.kids,t.u.nkind==='agent'?t.u:ow,t.u);
+          t.kids=walk(t.kids,t.u.nkind==='agent'?t.u:ow,t.u,t.u.id); t.nHidden=t.kids.nHidden||0;
           if(opts.activeOnly&&!t.open&&t.endedPlan&&t.u.nkind==='context'&&!t.u.plan_item&&!t.kids.length&&!liveLine(t.u)) return;   // an ended plan's own (plain) node, left empty
           // 6c: PLANS — only plan items, plan nodes and their ancestors (an ended plan's node that Active only emptied goes too)
           if(opts.plansOnly&&!t.u.plan_item&&!t.kids.length&&!(t.planNode&&!(opts.activeOnly&&t.endedPlan))) return;
-          out.push(t); }); return out; };
-        var kids=walk(top,null,null);
+          out.push(t); }); out.nHidden=nh; return out; };
+        var kids=walk(top,null,null,g.s.id);
         if(opts.activeOnly&&!kids.length&&!(g.s.selves||[g.s.self]).some(selfActive)) return;
         if(opts.plansOnly&&!kids.length) return;
         var fbars=null;
@@ -993,10 +1045,13 @@
         var nAll=0; (function cnt(l){ l.forEach(function(t){ if(isActiveAgent(t.u)&&!t.u.implicit) nAll++; cnt(t.kids); }); })(kids);
         var pk=String(g.s.project||'').toLowerCase();
         if(!projs[pk]){ projs[pk]={key:pk,name:g.s.project,sessions:[],nSessions:0,nActive:0}; order.push(pk); }
-        projs[pk].sessions.push({s:g.s,kids:kids,nActive:nAll,fbars:fbars}); projs[pk].nSessions++; projs[pk].nActive+=nAll;
+        projs[pk].sessions.push({s:g.s,kids:kids,nActive:nAll,fbars:fbars,nHidden:kids.nHidden||0,top:top}); projs[pk].nSessions++; projs[pk].nActive+=nAll;
       });
       order.sort(function(a,b){ return a<b?-1:a>b?1:0; });
-      return order.map(function(k){ var p=projs[k]; p.sessions.sort(function(x,y){ var a=String(x.s.session).toLowerCase(), b=String(y.s.session).toLowerCase(); return a<b?-1:a>b?1:0; }); return p; });
+      var spin=function(x){ return !!(opts.pins&&opts.pins[x.s.id]); };
+      return order.map(function(k){ var p=projs[k]; p.sessions.sort(function(x,y){ var px=spin(x), py=spin(y); if(px!==py) return px?-1:1; var a=String(x.s.session).toLowerCase(), b=String(y.s.session).toLowerCase(); return a<b?-1:a>b?1:0; });
+        var vis=[], nh=0; p.sessions.forEach(function(x){ x.pinned=spin(x); x.hid=false; if(opts.hidden&&opts.hidden[x.s.id]){ if(!(opts.showHidden&&opts.showHidden['proj|'+p.key])){ nh++; return; } x.hid=true; } vis.push(x); });   // 6d: hidden sessions, per project
+        p.sessions=vis; p.nHidden=nh; return p; });
     }
     // a log entry's tag, relative to the node whose Log is open: '@~root' / '@root' for the node itself, else its relative
     // path with '@~' on a current line's last context segment ('@Tharsis/@~z12'; an agent's own line: 'research/@~root')
@@ -1010,22 +1065,88 @@
     // a run that began before its owner's replay window — older entries live only in the day files)
     function subtreeLog(t){ var n=0, unknown=false, partial=false; (function w(x){ var lg=x.u.log||{}; if(lg.total!=null) n+=lg.total; else if(lg.remote) unknown=true; else n+=lg.entries||0; if(lg.partial) partial=true; x.kids.forEach(w); })(t); return {n:unknown?null:n, partial:partial}; }
     function subtreeCount(t){ return subtreeLog(t).n; }
+    // 6d (#70 "Decisions after 6c, for 6d" 6): an OPEN plan expands its ANCESTORS by default too (t.open = this node holds part of
+    // an open plan, at any depth), so a plan under a collapsed agent is visible; an ended plan's node keeps 6c's window
+    function nodeOpenDefault(t,now,winMin){ return !!t&&(!!t.open||planOpenDefault(t,now,winMin)); }
+    // 6d: the "plans open" slider spans 0 – 7 days in sensible steps (minutes → hours → days); its value is an INDEX into these
+    var PLAN_OPEN_STEPS=[0,5,10,15,30,45,60,90,120,180,240,360,480,720,960,1440,2160,2880,4320,5760,7200,8640,10080];
+    function planOpenIndex(min){ var m=Number(min)||0, best=0; for(var i=0;i<PLAN_OPEN_STEPS.length;i++) if(Math.abs(PLAN_OPEN_STEPS[i]-m)<Math.abs(PLAN_OPEN_STEPS[best]-m)) best=i; return best; }
+    function planOpenValue(i){ i=Math.max(0,Math.min(PLAN_OPEN_STEPS.length-1,Math.round(Number(i)||0))); return PLAN_OPEN_STEPS[i]; }
+    // 6d: "Copy its aimb-log command" — the session's {log_snippet} command (lib/log-snippet.js logCmd: the HOST's absolute node +
+    // script paths, --session / --project, #75's --token-file PATH when that bridge read its token from a file — NEVER a token)
+    // + --path for a node + the text placeholder. lc = { node, script, token_file } from the board head (this host) / remote_hosts.
+    function dq(v){ return '"'+String(v).replace(/"/g,'\\"')+'"'; }
+    function logCmd(lc,session,project,path){ if(!lc||!lc.node||!lc.script) return null;
+      return dq(lc.node)+' '+dq(lc.script)+' --session '+dq(session)+' --project '+dq(project||'unclassified')+(lc.token_file?' --token-file '+dq(lc.token_file):'')+(path?' --path '+dq(path):'')+' "<text>"'; }
+    // 6d: QUIET (lib/activity.js quietAgent): an agent that finished, or is stale / gone by the viewer's slider — an implicit one
+    // (it never reported) when every reported agent below it is; finish needs it, dismiss needs its whole subtree quiet
+    function quietAgent(t,now,sm){ var u=t&&t.u; if(!u) return false; if(u.finished_at) return true; var e=effState(u,null,now,sm); if(e.gone||e.stale) return true;
+      if(!u.implicit) return false; return t.kids.every(function(c){ return subtreeAgentsQuiet(c,now,sm); }); }
+    function subtreeAgentsQuiet(t,now,sm){ if(t.u.nkind==='agent'&&!t.u.implicit&&!quietAgent(t,now,sm)) return false; return t.kids.every(function(c){ return subtreeAgentsQuiet(c,now,sm); }); }
+    // the session's root on one host: `se` = that host's self, `kids` = its top-level tree nodes
+    function rootQuiet(se,kids,now,sm){ return quietAgent({u:se,kids:kids||[]},now,sm); }
+    // 6d: does this node hold an OPEN plan of its OWN (itself, or a plan reached without crossing another agent — abandon_plan's scope)?
+    function ownsOpenPlan(t){ if(t.planNode&&!t.endedPlan) return true; return t.kids.some(function(c){ return c.u.nkind!=='agent'&&ownsOpenPlan(c); }); }
+    function openItemsOwned(t){ var n=0; (function w(x){ if(x.planNode&&!x.endedPlan) x.kids.forEach(function(c){ if(isOpenItem(c.u)) n++; }); x.kids.forEach(function(c){ if(c.u.nkind!=='agent') w(c); }); })(t); return n; }
+    function countNodes(t){ var n=1; t.kids.forEach(function(c){ n+=countNodes(c); }); return n; }
+    // 6d: the RIGHT-CLICK MENU of a row — only the actions valid for that row and state (#70 "Decisions before 6c and 6d" table).
+    // m = { kind: node|session|entry, nkind, plan_item, item_state, plan_node, plan_end_how (null = open | all-done | done |
+    // abandoned), agent_ok (an agent / one host's session root: the action target exists), owns_open, quiet, finished,
+    // subtree_quiet, holds_open, has_cmd, has_path, pinned, hidden, id }. Items: { id, label, act?, args?, confirm?, copy?, view? }
+    // or { sep:true }. act = the wire action; confirm = abandon_plan / finish / dismiss ask first.
+    function menuFor(m){
+      m=m||{}; var out=[], sep=function(){ if(out.length&&!out[out.length-1].sep) out.push({sep:true}); };
+      if(m.kind==='entry'){ out.push({id:'copy-id',label:'Copy entry id',copy:'id'}); if(m.has_path) out.push({id:'copy-path',label:'Copy path',copy:'path'}); return out; }
+      if(m.kind!=='node'&&m.kind!=='session') return out;
+      if(m.plan_item){ var st=m.item_state||'todo';
+        if(st!=='done') out.push({id:'done',label:'Mark done',act:'done'});
+        if(st!=='skipped') out.push({id:'skip',label:'Skip',act:'skip'});
+        if(st!=='todo') out.push({id:'reopen',label:'Reopen (back to ☐)',act:'reopen'});
+        if(st!=='abandoned') out.push({id:'abandon',label:'Abandon item',act:'abandon'}); }
+      var ab=false;
+      if(m.plan_node){ sep();
+        if(!m.plan_end_how){ out.push({id:'complete',label:'Mark plan complete',act:'complete'}); out.push({id:'abandon_plan',label:'Abandon plan…',act:'abandon_plan',confirm:true}); ab=true; }
+        else if(m.plan_end_how!=='all-done') out.push({id:'reopen_plan',label:'Reopen plan',act:'reopen_plan'}); }
+      if(m.agent_ok){ sep();
+        if(m.owns_open&&!ab) out.push({id:'abandon_plan',label:'Abandon open plan items…',act:'abandon_plan',confirm:true});
+        if(m.quiet&&!m.finished){ out.push({id:'finish-done',label:'Mark finished — done…',act:'finish',args:{state:'done'},confirm:true}); out.push({id:'finish-failed',label:'Mark finished — failed…',act:'finish',args:{state:'failed'},confirm:true}); }
+        if((m.quiet||m.finished)&&m.subtree_quiet&&!m.holds_open) out.push({id:'dismiss',label:'Dismiss from the board…',act:'dismiss',confirm:true}); }
+      sep();
+      if(m.kind==='node') out.push({id:'copy-path',label:'Copy path',copy:'path'}); else out.push({id:'copy-session',label:'Copy session name',copy:'session'});
+      if(m.has_cmd) out.push({id:'copy-cmd',label:'Copy its aimb-log command',copy:'cmd'});
+      if(m.no_view) return out;
+      sep();
+      out.push(m.pinned?{id:'unpin',label:'Unpin',view:'unpin'}:{id:'pin',label:'Pin to the top',view:'pin'});
+      out.push(m.hidden?{id:'unhide',label:'Unhide',view:'unhide'}:{id:'hide',label:'Hide',view:'hide'});
+      return out;
+    }
+    var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed'};
     return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg,
       applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, entryTag:entryTag, subtreeCount:subtreeCount, barOf:barOf,
       fmtDur:fmtDur, fmtClock:fmtClock, pct:pct, planGlyph:planGlyph, isOpenItem:isOpenItem, planEnded:planEnded, hostTagOn:hostTagOn, itemState:itemState, barText:barText,
-      planOpenDefault:planOpenDefault, rollKids:rollKids, subtreeLog:subtreeLog };
+      planOpenDefault:planOpenDefault, rollKids:rollKids, subtreeLog:subtreeLog,
+      nodeOpenDefault:nodeOpenDefault, PLAN_OPEN_STEPS:PLAN_OPEN_STEPS, planOpenIndex:planOpenIndex, planOpenValue:planOpenValue, logCmd:logCmd, quietAgent:quietAgent, subtreeAgentsQuiet:subtreeAgentsQuiet,
+      rootQuiet:rootQuiet, ownsOpenPlan:ownsOpenPlan, openItemsOwned:openItemsOwned, countNodes:countNodes, menuFor:menuFor, ACTION_DONE:ACTION_DONE, lcs:lcs };   // 6d
   })();
   window.AimbAct=AimbAct;
 
   // The VIEW. Subscribes ({type:"activity_sub"}) only while the Activity section is open and the tab visible, and
   // unsubscribes on leave — a dashboard that never opens it costs the bridge nothing. Rows are diffed by key, so a
   // re-render (every second: rings, stale) only replaces rows whose content changed and hover tooltips survive.
+  // 6d (v1.65.0): clicking a session / agent / context row SELECTS it (the chevron or a double-click expands it) and the LOG
+  // PANEL beside the tree (below it on a narrow screen) shows its subtree's merged log — the tree has no Log rows any more. A
+  // right-click (the Menu key / Shift+F10 on a focused row; a long-press on touch) opens the row's menu: the actions valid for
+  // it (sent as {type:"activity_action"} — the bridge applies them on the node's owning host, attributed to this dashboard's
+  // user), copies, and the view-only Pin / Hide (kept in this browser).
   var ACT={ st:{units:null,seq:0,epoch:null,head:null,error:null}, on:false, skew:0, staleMin:null, planOpenMin:null, activeOnly:false, plansOnly:false, defLevel:'all', levels:{}, open:{},
-    logs:{}, ents:{}, ref:0, pending:{}, tips:{}, acts:{}, rowInfo:{}, kmap:{}, kn:0, timer:null };
+    logs:{}, ents:{}, ref:0, pending:{}, tips:{}, acts:{}, togs:{}, opened:{}, rowInfo:{}, rowMenu:{}, kmap:{}, kn:0, timer:null,
+    sel:null, selN:null, pins:{}, hidden:{}, showHidden:{}, fb:{}, menu:null, dlg:null, lastCopy:null, fullIdx:{}, fullSess:{}, suppressClick:false };
   // ACT.open[id]: true / false = the viewer's choice; undefined = the row's default (6c: a plan node — open while its plan is
-  // open or ended less than the finished-plan window ago). ACT.rowInfo[data-k] = the row's 6d hook (also on the row's data-*)
+  // open or ended less than the finished-plan window ago; 6d: also every ANCESTOR of an open plan). ACT.rowInfo[data-k] = the
+  // row's identity (also on the row's data-*); ACT.rowMenu[data-k] = its menu model (lazy); ACT.sel = the selected row
   window.AimbActView=ACT;   // tests + debugging
   function anow(){ return Date.now()+ACT.skew; }
+  function lcs(v){ return AimbAct.lcs(v); }
   function actStaleMin(){ return ACT.staleMin!=null?ACT.staleMin:((ACT.st.head&&ACT.st.head.stale_after_min)||15); }
   function actPlanOpenMin(){ var h=ACT.st.head&&ACT.st.head.finished_plan_open_min; return ACT.planOpenMin!=null?ACT.planOpenMin:(h!=null?h:120); }   // 6c: the bridge's finished_plan_open_min until the slider moves
   function isOpen(id,def){ var v=ACT.open[id]; return v===undefined?!!def:!!v; }
@@ -1044,17 +1165,20 @@
       if(r==='resync'){ actSend({type:'activity_sub',resync:true}); return; }   // a lost delta: start again from a full board
       if(ACT.st.head&&ACT.st.head.now) ACT.skew=ACT.st.head.now-Date.now();
       if(r==='full'){ var sl=document.getElementById('actStale'); if(sl&&ACT.staleMin==null){ sl.value=String(Math.max(5,Math.min(60,actStaleMin()))); actStaleLabel(); }
-        var po=document.getElementById('actPlanOpen'); if(po&&ACT.planOpenMin==null){ var pm=actPlanOpenMin(); if(pm>Number(po.max)) po.max=String(pm); po.value=String(pm); actPlanOpenLabel(); } }
+        var po=document.getElementById('actPlanOpen'); if(po&&ACT.planOpenMin==null){ po.value=String(AimbAct.planOpenIndex(actPlanOpenMin())); actPlanOpenLabel(); } }   // 6d: the slider's value is an index into 0 – 7 days
       actRender();
-    } else if(m.type==='activity'){ var p=ACT.pending[m.ref]; if(p){ delete ACT.pending[m.ref]; p.cb(m.result); } }
+    } else if(m.type==='activity'||m.type==='activity_action'){ var p=ACT.pending[m.ref]; if(p){ delete ACT.pending[m.ref]; p.cb(m.result); } }
     else if(m.type==='activity_queued'){ var q=ACT.pending[m.ref]; if(q&&q.onq) q.onq(m); }
   }
   function actReq(query,cb,onq){ var ref='a'+(++ACT.ref); ACT.pending[ref]={cb:cb,onq:onq}; if(!actSend({type:'activity',ref:ref,query:query})){ delete ACT.pending[ref]; cb({ok:false,code:'disconnected',what:'not connected to the bridge'}); } }
+  // 6d: one ACTION → {type:"activity_action", ref, host, session, project, user, path, action, args} (the bridge forwards it to the owner)
+  function actActReq(msg,cb,onq){ var ref='x'+(++ACT.ref); ACT.pending[ref]={cb:cb,onq:onq}; var o={type:'activity_action',ref:ref}; for(var k in msg) o[k]=msg[k];
+    if(!actSend(o)){ delete ACT.pending[ref]; cb({ok:false,code:'disconnected',what:'not connected to the bridge'}); } }
   function kOf(id){ return ACT.kmap[id]||(ACT.kmap[id]='k'+(++ACT.kn)); }   // a short DOM key per stable id (ids hold quotes)
   function actLoadLog(key,q,more){
-    var L=ACT.logs[key]||(ACT.logs[key]={entries:[],next:null,loading:false,loaded:false,err:null,queued:null,auto:0});
+    var L=ACT.logs[key]||(ACT.logs[key]={entries:[],next:null,loading:false,loaded:false,err:null,queued:null,auto:0,more:false,at:0});
     if(L.loading) return;
-    L.loading=true; L.err=null; L.queued=null;
+    L.loading=true; L.err=null; L.queued=null; L.at=Date.now(); if(more) L.more=true;
     var lq={}; for(var k in q) if(q[k]!=null) lq[k]=q[k]; lq.limit=50; if(more&&L.next) lq.cursor=L.next; if(L.earlierMode) lq.earlier=true;
     actReq({log:lq},function(r){
       L.loading=false; L.queued=null;
@@ -1085,120 +1209,181 @@
     if(e.hostDown||hostDown) h+='<span class="pill hostdown" data-tip="hd">host down</span>';
     return '<span class="pills">'+h+'</span>';
   }
+  function attr(s){ return esc(s).replace(/"/g,'&quot;'); }
+  // ---- 6d: view-only PIN / HIDE, kept in this browser (try/catch: private windows and blocked storage just forget)
+  function loadSet(k){ try{ var a=JSON.parse(localStorage.getItem(k)||'[]'), o={}; (Array.isArray(a)?a:[]).forEach(function(x){ if(typeof x==='string') o[x]=1; }); return o; }catch(e){ return {}; } }
+  function saveSet(k,o){ try{ localStorage.setItem(k,JSON.stringify(Object.keys(o))); }catch(e){} }
+  // ---- 6d: the aimb-log command of a node's HOST (the board head for this host, remote_hosts for the others — paths only)
+  function hostCmd(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return h.log_cmd||null; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return (r&&r.log_cmd)||null; }
+  // ---- 6d: action FEEDBACK on the row: a spinner while pending (and queued), then ✓ (a few seconds) or the error code
+  function fbHtml(id){ var f=ACT.fb[id]; if(!f) return ''; var age=Date.now()-f.at;
+    if(f.st==='pending') return '<span class="fb pending"><span class="spin"></span>'+esc(f.label)+'…'+(f.queued?' (queued)':'')+'</span>';
+    if(f.st==='ok'){ if(age>5000){ delete ACT.fb[id]; return ''; } return '<span class="fb ok">✓ '+esc(f.label)+(f.warn?' · '+esc(f.warn):'')+'</span>'; }
+    if(age>15000){ delete ACT.fb[id]; return ''; } return '<span class="fb err" title="'+attr(f.what||'')+'">✗ '+esc(f.code)+'</span>'; }
+  function actToast(text){ var t=document.createElement('div'); t.className='act-toast'; t.setAttribute('role','status'); t.textContent=text; document.body.appendChild(t); setTimeout(function(){ if(t.parentNode) t.parentNode.removeChild(t); },2600); }
+  // ---- 6d: SELECTION → the log panel
+  function selKey(sel){ return 'sel|'+sel.gk+'|'+lcs(sel.host)+'|'+(sel.path||''); }
+  function selQuery(sel){ var q={session:sel.session,project:sel.project,user:sel.user||null,host:sel.host}; if(sel.path) q.path=sel.path; return q; }
+  function actSelect(sel){ var same=ACT.sel&&selKey(ACT.sel)===selKey(sel); ACT.sel=sel; if(!same){ ACT.selN=null; var key=selKey(sel); delete ACT.logs[key]; actLoadLog(key,selQuery(sel),false); } actRender(); }
+  function actClearSel(){ ACT.sel=null; ACT.selN=null; }
+  function actRefreshSel(){ if(!ACT.sel) return; var key=selKey(ACT.sel); delete ACT.logs[key]; ACT.selN=null; actLoadLog(key,selQuery(ACT.sel),false); }
+  function selAlive(){ var s=ACT.sel, U=ACT.st.units||{}; if(!s) return false; if(s.kind==='node') return !!U[s.id];
+    var g=U[s.sid]; if(!g) return false; var hs=g.hosts||[g.host||(g.self&&g.self.host)]; return hs.some(function(h){ return lcs(h)===lcs(s.host); }); }
+  function selfFor(s,host){ var ss=s.selves||[s.self]; for(var i=0;i<ss.length;i++) if(ss[i]&&lcs(ss[i].host)===lcs(host)) return ss[i]; return s.self||{}; }
   function actRender(){
     var tree=document.getElementById('acttree'); if(!tree) return;
     var tag=document.getElementById('acttag'), now=anow(), sm=actStaleMin(), rows=[];
-    ACT.tips={ hd:'Host down: its gateway sent a going-down notice or its link dropped — every agent on that host shows as gone until it returns (unlike gone: a session that left)' }; ACT.acts={}; ACT.rowInfo={};
-    // 6d HOOK: every row carries its identity as data-* attributes (kind; the node's ORIGIN host + path; session / project /
-    // user; an entry's id) — a context menu attaches to [data-kind] rows later; ACT.rowInfo[data-k] holds the same object
-    function row(id,cls,d,html,act,info){ var k=kOf(id); rows.push({k:k,cls:cls,d:d,html:html,info:info||null}); if(act) ACT.acts[k]=act; if(info) ACT.rowInfo[k]=info; }
+    ACT.tips={ hd:'Host down: its gateway sent a going-down notice or its link dropped — every agent on that host shows as gone until it returns (unlike gone: a session that left)' }; ACT.acts={}; ACT.togs={}; ACT.opened={}; ACT.rowInfo={}; ACT.rowMenu={};
+    // 6d HOOK (6c): every row carries its identity as data-* attributes (kind; the node's ORIGIN host + path; session / project /
+    // user; an entry's id); ACT.rowInfo[data-k] holds the same object, ACT.rowMenu[data-k] its menu model. ex = { menu, tog, open, sel }
+    function row(id,cls,d,html,act,info,ex){ var k=kOf(id); ex=ex||{}; rows.push({k:k,cls:cls,d:d,html:html,info:info||null,open:ex.open,sel:!!ex.sel}); if(act) ACT.acts[k]=act; if(ex.tog) ACT.togs[k]=ex.tog; if(ex.open!=null) ACT.opened[k]=!!ex.open; if(info) ACT.rowInfo[k]=info; if(ex.menu) ACT.rowMenu[k]=ex.menu; }
     function sInfo(s,extra){ var o={kind:'session',session:s.session,project:s.project,user:s.user||''}; for(var x in extra) o[x]=extra[x]; return o; }
     function tipK(id,f){ var k='t'+kOf(id); ACT.tips[k]=f; return k; }
     var head=ACT.st.head||{};
-    if(!ACT.on&&!ACT.st.units){ tree.innerHTML='<div class="act-msg">'+(sock&&sock.readyState===1?'Open this section to watch the activity board.':'Not connected to the bridge.')+'</div>'; if(tag) tag.textContent=''; return; }
-    if(ACT.st.error){ tree.innerHTML='<div class="act-msg">'+esc(ACT.st.error.what||ACT.st.error.code)+'</div>'; if(tag) tag.textContent='off'; return; }
+    if(!ACT.on&&!ACT.st.units){ tree.innerHTML='<div class="act-msg">'+(sock&&sock.readyState===1?'Open this section to watch the activity board.':'Not connected to the bridge.')+'</div>'; if(tag) tag.textContent=''; actRenderPanel(); return; }
+    if(ACT.st.error){ tree.innerHTML='<div class="act-msg">'+esc(ACT.st.error.what||ACT.st.error.code)+'</div>'; if(tag) tag.textContent='off'; actRenderPanel(); return; }
     if(!ACT.st.units){ tree.innerHTML='<div class="act-msg"><span class="spin"></span>loading the activity board…</div>'; return; }
-    var projs=AimbAct.buildTree(ACT.st.units,{activeOnly:ACT.activeOnly,plansOnly:ACT.plansOnly}), nAct=0, pom=actPlanOpenMin();
-    projs.forEach(function(p){ nAct+=p.nActive; });
-    if(tag) tag.textContent=projs.length+(projs.length===1?' project':' projects')+' · '+nAct+' active agent'+(nAct===1?'':'s')+(head.loading?' · loading':'');
-    // ---- a node's Log row: the MERGED log of its subtree (6a), newest first; each entry tagged with its path relative to it
-    function logRows(key,q,d,label,lbTip,info){
-      var open=!!ACT.open[key], L=ACT.logs[key];
-      row(key,'ar click lg',d,'<span class="chv">'+(open?'▾':'▸')+'</span><span class="tgt">≡</span><span class="nm">Log</span><span class="ln" data-tip="'+tipK(key,lbTip)+'">'+esc(label)+'</span>',
-        function(){ ACT.open[key]=!open; if(!open){ delete ACT.logs[key]; actLoadLog(key,q,false); } actRender(); },info);   // each open fetches a fresh first page
-      if(!open) return;
-      if(L) L.entries.forEach(function(x,i){
-        if(L.sepAt===i) row(key+'|sep','ar more sep',d+1,'<span class="chv"></span><span class="nm">— earlier runs —</span>');   // 6c: past the current run's start
-        var ek=key+'|e|'+x.id, can=!!(x.has_details||x.has_data), eo=can&&!!ACT.open[ek];
-        row(ek,'ar le'+(can?' click':''),d+1,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span><span class="dot bg-'+esc(x.state||'running')+'" data-tip="'+tipK(ek+'s',(x.state||'running')+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"></span>'+
-          '<span class="ctag'+(x.current?' cur':'')+'" title="'+esc(x.path!=null?(x.path||'(the session)'):'').replace(/"/g,'&quot;')+'">'+esc(AimbAct.entryTag(x))+'</span><span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(x.by?'<span class="by">by '+esc(x.by)+'</span>':'')+(can?'<span class="ic" data-tip="'+tipK(ek+'i','has '+(x.has_details?'details':'')+(x.has_details&&x.has_data?' + ':'')+(x.has_data?'data':''))+'">⋯</span>':''),
-          can?function(){ ACT.open[ek]=!eo; if(!eo) actLoadEntry(x.id,q.host); actRender(); }:null,
-          {kind:'entry',id:x.id,host:q.host||'',path:x.path!=null?x.path:'',session:q.session,project:q.project||'',user:q.user||''});
-        if(eo){ var E=ACT.ents[x.id]||{}, inner='';
-          if(E.entry){ if(E.entry.details) inner+='<div class="k">details</div><pre>'+esc(E.entry.details)+'</pre>'; if(E.entry.data!=null) inner+='<div class="k">data</div><pre>'+esc(JSON.stringify(E.entry.data,null,2))+'</pre>'; if(!inner) inner='<span class="empty">no details or data</span>'; if(E.entry.note) inner+='<div class="k">'+esc(E.entry.note)+'</div>'; }
-          else if(E.err) inner='<span class="empty">'+esc(E.err.what||E.err.code)+'</span>';
-          else inner='<span class="spin"></span>'+(E.queued?'queued — about '+AimbAct.fmtDur(E.queued.wait_ms):'loading…');
-          rows.push({k:kOf(ek+'|d'),cls:'ad',d:d+1,html:inner}); }
-      });
-      var mk=key+'|more';
-      if(L&&L.loading) row(mk,'ar more',d+1,'<span class="chv"></span><span class="nm"><span class="spin"></span>'+(L.queued?'queued — about '+esc(AimbAct.fmtDur(L.queued.wait_ms))+(L.queued.host?' (host '+esc(L.queued.host)+' serves a few fetches a second)':''):'loading…')+'</span>');
-      else if(L&&L.err) row(mk,'ar more click',d+1,'<span class="chv"></span><span class="nm">'+esc((L.err.code==='busy'?'busy: ':'')+(L.err.what||L.err.code))+' — click to retry</span>',function(){ actLoadLog(key,q,L.loaded); });
-      else if(L&&L.next) row(mk,'ar more click',d+1,'<span class="chv"></span><span class="nm">load older…</span>',function(){ actLoadLog(key,q,true); });
-      else if(L&&L.runStart&&L.earlierCursor) row(mk,'ar more click',d+1,'<span class="chv"></span><span class="nm" data-tip="'+tipK(mk,'The log above is this node\'s CURRENT run (since it last started). Older entries under the same name belong to earlier runs.')+'">start of this run · show earlier runs…</span>',function(){ actLoadEarlier(key,q); });
-      else if(L&&L.runStart) row(mk,'ar more',d+1,'<span class="chv"></span><span class="nm">start of this run</span>');
-      else if(L&&L.pruned) row(mk,'ar more pruned',d+1,'<span class="chv"></span><span class="nm" data-tip="'+tipK(mk,'This run began in a day file that log retention has already deleted — its older entries are gone')+'">earlier history pruned</span>');
-      else if(L&&L.loaded&&!L.entries.length) row(mk,'ar more',d+1,'<span class="chv"></span><span class="nm">no entries</span>');
-    }
-    // 6c: "N entries" — the subtree's own counts summed (remote nodes too: gossiped); "N+" when a count understates
-    function logLabel(c,host,hostLbl,what){ var n=c&&c.n!=null?c.n:null; return (n!=null?n+(c.partial?'+':'')+' entr'+(n===1&&!c.partial?'y':'ies')+', '+what:what)+(hostLbl?' · '+host:''); }
-    function logTip(c,host,remote){ return (c&&c.n!=null?(remote?'counted on '+host+' (gossiped); the entries are fetched from it on demand':'in memory on '+host+'; older entries page in from the day files'):('history lives on '+host+' — fetched on demand'))+(c&&c.partial?' · "+": part of this run began before '+host+'\'s replay window, so older entries live only in its day files':''); }
-    // ---- a session row: its own line (the root node); open → its Log (the whole session's merged log, per host)
-    function sessionRow(id,cls,d,ent,nameHtml,tagsHtml,parentDown,bell,fbar,info){
+    var projs=AimbAct.buildTree(ACT.st.units,{activeOnly:ACT.activeOnly,plansOnly:ACT.plansOnly,pins:ACT.pins,hidden:ACT.hidden,showHidden:ACT.showHidden}), pom=actPlanOpenMin();
+    // 6d (#70 "Decisions after 6c, for 6d" 9): header and project COUNTS ignore the filters (always the real totals — the
+    // unfiltered tree, which the menus also check actions against); rollups still follow the filters (6c)
+    var full=AimbAct.buildTree(ACT.st.units,{}), counts={}, nAct=0;
+    ACT.fullIdx={}; ACT.fullSess={};
+    full.forEach(function(p){ counts[p.key]=p; nAct+=p.nActive; p.sessions.forEach(function(x){ ACT.fullSess[x.s.id]=x; (function w(l){ l.forEach(function(t){ ACT.fullIdx[t.u.id]=t; w(t.kids); }); })(x.kids); }); });
+    if(tag) tag.textContent=full.length+(full.length===1?' project':' projects')+' · '+nAct+' active agent'+(nAct===1?'':'s')+(head.loading?' · loading':'');
+    if(ACT.sel&&!selAlive()) actClearSel();   // 6d: the selected node left the board (dismissed, expired, its host's slice dropped)
+    // ---- a session row: its own line (the root node); a multi-host session opens into each host's own line. Click = select
+    function sessionRow(id,cls,d,ent,nameHtml,tagsHtml,parentDown,bell,fbar,info,ex){
       var e=AimbAct.effState(ent,null,now,sm), noLine=!ent.current, bar=fbar!==undefined?fbar:AimbAct.barOf(ent);
       var line=ent.current?'<span class="ln">'+esc(AimbAct.renderText(ent.current.text,bar,ent.eta_at,now))+'</span>':'<span class="ln none">no status line of its own</span>';
-      var open=!!ACT.open[id], st=(ent.current&&ent.current.state)||'';
-      row(id,cls+(e.stale&&!noLine?' stale':'')+(e.gone?' gone':'')+(st==='abandoned'?' abandoned':''),d,'<span class="chv">'+(open?'▾':'▸')+'</span>'+
+      var open=!!ACT.open[id], st=(ent.current&&ent.current.state)||'', can=!!ex.multi;
+      row(id,cls+(e.stale&&!noLine?' stale':'')+(e.gone?' gone':'')+(st==='abandoned'?' abandoned':'')+(ex.sel?' sel':'')+(ex.hid?' hid':'')+(ex.pinned?' pinned':''),d,'<span class="chv">'+(can?(open?'▾':'▸'):'')+'</span>'+
         '<span data-tip="'+tipK(id+'g',function(){ return noLine&&!e.gone?'No status line of its own (report @~root to set one)':AimbAct.statusTip(ent,null,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':null)+'</span>'+
-        nameHtml+tagsHtml+pillsHtml(e,noLine,parentDown)+line+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
+        nameHtml+(ex.pinned?'<span class="pin" title="pinned (this browser)">📌</span>':'')+tagsHtml+pillsHtml(e,noLine,parentDown)+line+fbHtml(id)+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
         (ent.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(ent.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+
         (bell?'<span class="ic" data-tip="'+tipK(id+'d','Doorbell armed')+'">🔔</span>':'<span class="ic nil"></span>'),
-        function(){ ACT.open[id]=!open; actRender(); },info);
-      return open;
+        ex.select,info,{menu:ex.menu,tog:can?function(){ ACT.open[id]=!open; actRender(); }:null,open:can?open:null,sel:ex.sel});
+      return open&&can;
     }
-    // ---- a NODE row (6a, any depth): an agent keeps the status ring; a context shows its state mark, line, bar, ETA. Open →
-    // its Log (the subtree merged) then its children, one level deeper. 6b: a PLAN ITEM shows ☐ / the in-progress mark / ☑ /
-    // a struck-through skipped row, its name as a checklist entry, and its line only once it says more than its name; a host
-    // tag only where the node's host differs from its parent's (AimbAct.hostTagOn)
+    // 6d: the menu model of a NODE row — checked against the UNFILTERED tree (a filter never hides what an action affects)
+    function nodeMenu(t,s){ return function(){ var ft=ACT.fullIdx[t.u.id]||t, u=ft.u, n2=anow(), sm2=actStaleMin(), ag=u.nkind==='agent', lc=hostCmd(u.host), e=AimbAct.effState(u,ft.owner,n2,sm2);
+      return { kind:'node', nkind:u.nkind, plan_item:!!u.plan_item, item_state:u.plan_item?AimbAct.itemState(u):null, plan_node:!!ft.planNode, plan_end_how:ft.planNode&&ft.endedPlan?(u.plan_end_how||'done'):null,
+        agent_ok:ag, owns_open:ag&&AimbAct.ownsOpenPlan(ft), quiet:ag&&AimbAct.quietAgent(ft,n2,sm2), finished:!!u.finished_at, subtree_quiet:ag&&AimbAct.quietAgent(ft,n2,sm2)&&ft.kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }),
+        holds_open:!!ft.open, has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,u.path):null, pinned:!!ACT.pins[u.id], hidden:!!ACT.hidden[u.id], id:u.id, fbId:u.id,
+        name:(ag?'agent ':'')+u.path, why:e.gone?'gone':e.stale?'stale':u.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(ft), nNodes:AimbAct.countNodes(ft), host:u.host }; }; }
+    // … of a SESSION row (one host's root): a multi-host session's row offers only copies + pin / hide; its actions sit on each
+    // host's own line (an action names ONE host's nodes)
+    function sessMenu(s,host,rowId,hostLine){ return function(){ var fx=ACT.fullSess[s.id], se=selfFor(s,host), n2=anow(), sm2=actStaleMin(), lc=hostCmd(host);
+      var kids=(fx?fx.top||fx.kids:[]).filter(function(t){ return lcs(t.u.host)===lcs(host); }), multi=!!s.multi_host, tgt=!multi||hostLine;
+      var pn=kids.some(function(c){ return !!c.u.plan_item; }), root={u:se,kids:kids,planNode:pn,endedPlan:pn&&AimbAct.planEnded(kids,se)}; root.open=(pn&&!root.endedPlan)||kids.some(function(c){ return !!c.open; });
+      var e=AimbAct.effState(se,null,n2,sm2), quiet=AimbAct.rootQuiet(se,kids,n2,sm2);
+      return { kind:'session', plan_node:tgt&&pn, plan_end_how:pn&&root.endedPlan?(se.plan_end_how||'done'):null, agent_ok:tgt, owns_open:AimbAct.ownsOpenPlan(root), quiet:quiet, finished:!!se.finished_at,
+        subtree_quiet:quiet&&kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }), holds_open:root.open, has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,null):null,
+        pinned:!!ACT.pins[s.id], hidden:!!ACT.hidden[s.id], no_view:!!hostLine, id:s.id, fbId:rowId, name:'session '+s.session+(multi?' on '+host:''), why:e.gone?'gone':e.stale?'stale':se.finished_at?'finished':'',
+        nOpen:AimbAct.openItemsOwned(root), nNodes:AimbAct.countNodes(root), host:host }; }; }
+    function hiddenRow(pid,nHidden,nShown,d){
+      if(nHidden>0) row(pid+'|hid','ar more click hidn',d,'<span class="chv"></span><span class="nm">'+nHidden+' hidden — show</span>',function(){ ACT.showHidden[pid]=true; actRender(); },null);
+      else if(ACT.showHidden[pid]&&nShown>0) row(pid+'|hid','ar more click hidn',d,'<span class="chv"></span><span class="nm">hide '+nShown+' again</span>',function(){ delete ACT.showHidden[pid]; actRender(); },null);
+    }
+    // ---- a NODE row (6a, any depth): an agent keeps the status ring; a context shows its state mark, line, bar, ETA. Click =
+    // select (its log in the panel); the chevron (or a double-click) opens its children, one level deeper. 6b: a PLAN ITEM shows
+    // ☐ / the in-progress mark / ☑ / a struck-through skipped row, its name as a checklist entry, and its line only once it says
+    // more than its name; a host tag only where the node's host differs from its parent's (AimbAct.hostTagOn)
     function nodeRows(t,s,d,multi){
-      var u=t.u, ctx=u.nkind==='context', id=u.id, e=AimbAct.effState(u,t.owner,now,sm), open=isOpen(id,AimbAct.planOpenDefault(t,now,pom)), pi=!!u.plan_item, ist=pi?AimbAct.itemState(u):null;
+      var u=t.u, ctx=u.nkind==='context', id=u.id, e=AimbAct.effState(u,t.owner,now,sm), pi=!!u.plan_item, ist=pi?AimbAct.itemState(u):null, can=t.kids.length>0||t.nHidden>0;
+      var open=can&&isOpen(id,AimbAct.nodeOpenDefault(t,now,pom)), sel=!!ACT.sel&&ACT.sel.kind==='node'&&ACT.sel.id===id;
       var noLine=ctx?e.noLine:!!u.implicit&&!u.current, bar=('fbar' in t)?t.fbar:AimbAct.barOf(u), own=(u.current&&u.current.state)||'';
-      var nm=pi?'<span class="nm pi" title="'+esc(u.path).replace(/"/g,'&quot;')+'">'+esc(u.name)+'</span>':ctx?'<span class="nm ctx" title="'+esc(u.path).replace(/"/g,'&quot;')+'">@'+esc(u.name)+'</span>':'<span class="nm path" title="'+esc(u.path).replace(/"/g,'&quot;')+'">'+esc(u.name)+'</span>';
+      var nm=pi?'<span class="nm pi" title="'+attr(u.path)+'">'+esc(u.name)+'</span>':ctx?'<span class="nm ctx" title="'+attr(u.path)+'">@'+esc(u.name)+'</span>':'<span class="nm path" title="'+attr(u.path)+'">'+esc(u.name)+'</span>';
       var line=pi&&u.current&&String(u.current.text)===String(u.name)?'<span class="ln"></span>':u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+'</span>':'<span class="ln none">'+(ctx?'no current line':u.implicit?'not reported yet':'no current line')+'</span>';
       var glyph=pi?AimbAct.glyphSvg(e,now,'plan'):AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':ctx?'ctx':null);
       var info={kind:'node',nkind:u.nkind,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',plan_item:pi?'1':'',plan_node:t.planNode?'1':''};
-      row(id,'ar click'+(ctx?' cx':'')+(pi?' pi'+(ist==='skipped'?' skipped':ist==='done'?' pdone':''):'')+(ist==='abandoned'||own==='abandoned'?' abandoned':'')+(e.stale?' stale':'')+(e.gone?' gone':''),d,'<span class="chv">'+(open?'▾':'▸')+'</span>'+
+      row(id,'ar click'+(ctx?' cx':'')+(pi?' pi'+(ist==='skipped'?' skipped':ist==='done'?' pdone':''):'')+(ist==='abandoned'||own==='abandoned'?' abandoned':'')+(e.stale?' stale':'')+(e.gone?' gone':'')+(sel?' sel':'')+(t.hid?' hid':'')+(t.pinned?' pinned':''),d,'<span class="chv">'+(can?(open?'▾':'▸'):'')+'</span>'+
         '<span data-tip="'+tipK(id+'g',function(){ return AimbAct.statusTip(u,t.owner,anow(),actStaleMin(),u.host); })+'">'+glyph+'</span>'+
-        nm+(AimbAct.hostTagOn(t,multi)?hostTags([u.host],u.host_down?[u.host]:[]):'')+pillsHtml(e,noLine,false)+line+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
+        nm+(t.pinned?'<span class="pin" title="pinned (this browser)">📌</span>':'')+(AimbAct.hostTagOn(t,multi)?hostTags([u.host],u.host_down?[u.host]:[]):'')+pillsHtml(e,noLine,false)+line+fbHtml(id)+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
         (u.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(u.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+'<span class="ic nil"></span>',
-        function(){ ACT.open[id]=!open; actRender(); },info);
+        function(){ actSelect({kind:'node',gk:s.key,sid:s.id,id:id,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',nkind:u.nkind}); },info,
+        {menu:nodeMenu(t,s),tog:can?function(){ ACT.open[id]=!open; actRender(); }:null,open:can?open:null,sel:sel});
       if(!open) return;
-      var n=AimbAct.subtreeLog(t), remote=String(u.host).toLowerCase()!==String(head.host||'').toLowerCase();
-      logRows('log|'+id,{session:s.session,project:s.project,user:s.user||null,host:u.host,path:u.path},d+1,logLabel(n,u.host,false,t.kids.length?'this node and below':'this node'),logTip(n,u.host,remote),{kind:'log',host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||''});
       t.kids.forEach(function(c){ nodeRows(c,s,d+1,multi); });
+      hiddenRow(id,t.nHidden,t.kids.filter(function(c){ return c.hid; }).length,d+1);
     }
     if(!projs.length) rows.push({k:'empty',cls:'act-msg',d:0,html:ACT.plansOnly?'No plans'+(ACT.activeOnly?' open right now':'')+' (untick “plans” to see everything).':ACT.activeOnly?'Nothing active right now (untick “active only” to see finished agents).':'No agent activity on the mesh yet — sessions report with the log tool or tools/aimb-log.mjs.'});
     projs.forEach(function(p){
-      var pk='proj|'+p.key, lvl=ACT.levels[p.key]||ACT.defLevel;
+      var pk='proj|'+p.key, lvl=ACT.levels[p.key]||ACT.defLevel, c=counts[p.key]||p;
       row(pk,'ar click proj',0,'<span class="chv">'+(lvl==='all'?'▾':lvl==='sessions'?'▿':'▸')+'</span><span class="nm" data-tip="'+tipK(pk,'Click: sessions + their top-level nodes → sessions only → collapsed (now: '+(lvl==='all'?'top-level nodes':lvl==='sessions'?'sessions only':'collapsed')+')')+'">📁 '+esc(pj(p.name)||'(no project)')+'</span>'+
-        '<span class="cnt">'+p.nSessions+' session'+(p.nSessions===1?'':'s')+' · '+p.nActive+' active agent'+(p.nActive===1?'':'s')+'</span>',
+        '<span class="cnt">'+c.nSessions+' session'+(c.nSessions===1?'':'s')+' · '+c.nActive+' active agent'+(c.nActive===1?'':'s')+'</span>',
         function(){ ACT.levels[p.key]=AimbAct.nextLevel(lvl); actRender(); },{kind:'project',project:p.name});
       if(lvl==='collapsed') return;
       p.sessions.forEach(function(x){
         var s=x.s, sid='sess|'+s.key, hosts=s.hosts||(s.host?[s.host]:[]);
-        var self=s.self||{}, fb=x.fbars?(x.fbars[String(self.host).toLowerCase()]||null):undefined;
+        var self=s.self||{}, fb=x.fbars?(x.fbars[lcs(self.host)]||null):undefined, multi=!!s.multi_host;
+        var ssel=!!ACT.sel&&ACT.sel.kind==='session'&&ACT.sel.sid===s.id&&(!multi||lcs(ACT.sel.host)===lcs(self.host));
+        var selS=function(h){ return function(){ actSelect({kind:'session',gk:s.key,sid:s.id,host:h,path:'',session:s.session,project:s.project,user:s.user||''}); }; };
         var sOpen=sessionRow(sid,'ar click',1,self,'<span class="nm">'+esc(nm(s.session))+'</span>',hostTags(hosts,s.hosts_down),!!(s.hosts_down&&s.hosts_down.length),!!s.bell,fb,
-          sInfo(s,{host:self.host||'',home:s.home||self.host||'',hosts:hosts.join(','),path:''}));
-        if(sOpen) (s.selves||[self]).forEach(function(se){
-          if(s.multi_host){   // 6b (#70 "Decisions before 6b" 6): each host's OWN line; the session row shows the host that most recently set one
-            var hid='hself|'+s.key+'|'+se.host, he=AimbAct.effState(se,null,now,sm), hNo=!se.current, head=String(se.host).toLowerCase()===String(self.host).toLowerCase();
-            var sb=x.fbars?(x.fbars[String(se.host).toLowerCase()]||null):AimbAct.barOf(se), isHome=s.home&&String(se.host).toLowerCase()===String(s.home).toLowerCase();
-            row(hid,'ar'+(he.stale&&!hNo?' stale':'')+(he.gone?' gone':''),2,'<span class="chv"></span><span data-tip="'+tipK(hid+'g',function(){ return hNo&&!he.gone?'No headline from '+se.host:AimbAct.statusTip(se,null,anow(),actStaleMin(),se.host); })+'">'+AimbAct.glyphSvg(he,now,hNo&&!he.gone?'none':null)+'</span>'+
-              hostTags([se.host],se.host_down?[se.host]:[])+pillsHtml(he,hNo,false)+(se.current?'<span class="ln" data-tip="'+tipK(hid+'l',(head?'the headline: this host set it most recently':'this host\'s own line (another host set a headline more recently)')+(isHome?' · the session\'s HOME host (where it first appeared): top-level rows from it carry no host tag':''))+'">'+esc(AimbAct.renderText(se.current.text,sb,se.eta_at,now))+'</span>':'<span class="ln none">no headline from this host</span>')+
-              barHtml(sb,tipK(hid+'b',AimbAct.barTip(sb)))+'<span class="ic nil"></span><span class="ic nil"></span>',null,sInfo(s,{kind:'host-line',host:se.host,path:''}));
-          }
-          var lk='log|self|'+s.key+'|'+se.host;
-          // 6c: the whole session's count = its root's own + every top-level subtree of that host (remote ones gossip theirs)
-          var c=AimbAct.subtreeLog({u:se,kids:x.kids.filter(function(t){ return String(t.u.host).toLowerCase()===String(se.host).toLowerCase(); })}), remote=!!(se.log&&se.log.remote);
-          logRows(lk,{session:s.session,project:s.project,user:s.user||null,host:se.host},2,logLabel(c,se.host,!!s.multi_host,'the whole session'),logTip(c,se.host,remote),sInfo(s,{kind:'log',host:se.host,path:''}));
+          sInfo(s,{host:self.host||'',home:s.home||self.host||'',hosts:hosts.join(','),path:''}),{multi:multi,sel:ssel,hid:x.hid,pinned:x.pinned,select:selS(self.host),menu:sessMenu(s,self.host,sid,false)});
+        if(sOpen) (s.selves||[self]).forEach(function(se){   // 6b (#70 "Decisions before 6b" 6): each host's OWN line; the session row shows the host that most recently set one
+          var hid='hself|'+s.key+'|'+se.host, he=AimbAct.effState(se,null,now,sm), hNo=!se.current, hd=lcs(se.host)===lcs(self.host);
+          var sb=x.fbars?(x.fbars[lcs(se.host)]||null):AimbAct.barOf(se), isHome=s.home&&lcs(se.host)===lcs(s.home), hsel=!!ACT.sel&&ACT.sel.kind==='session'&&ACT.sel.sid===s.id&&lcs(ACT.sel.host)===lcs(se.host);
+          row(hid,'ar click'+(he.stale&&!hNo?' stale':'')+(he.gone?' gone':'')+(hsel?' sel':''),2,'<span class="chv"></span><span data-tip="'+tipK(hid+'g',function(){ return hNo&&!he.gone?'No headline from '+se.host:AimbAct.statusTip(se,null,anow(),actStaleMin(),se.host); })+'">'+AimbAct.glyphSvg(he,now,hNo&&!he.gone?'none':null)+'</span>'+
+            hostTags([se.host],se.host_down?[se.host]:[])+pillsHtml(he,hNo,false)+(se.current?'<span class="ln" data-tip="'+tipK(hid+'l',(hd?'the headline: this host set it most recently':'this host\'s own line (another host set a headline more recently)')+(isHome?' · the session\'s HOME host (where it first appeared): top-level rows from it carry no host tag':''))+'">'+esc(AimbAct.renderText(se.current.text,sb,se.eta_at,now))+'</span>':'<span class="ln none">no headline from this host</span>')+
+            fbHtml(hid)+barHtml(sb,tipK(hid+'b',AimbAct.barTip(sb)))+'<span class="ic nil"></span><span class="ic nil"></span>',selS(se.host),sInfo(s,{kind:'host-line',host:se.host,path:''}),{menu:sessMenu(s,se.host,hid,true),sel:hsel});
         });
         if(lvl!=='all') return;
-        x.kids.forEach(function(t){ nodeRows(t,s,2,!!s.multi_host); });
+        x.kids.forEach(function(t){ nodeRows(t,s,2,multi); });
+        hiddenRow(s.id,x.nHidden,x.kids.filter(function(t){ return t.hid; }).length,2);
       });
+      hiddenRow('proj|'+p.key,p.nHidden,p.sessions.filter(function(x){ return x.hid; }).length,1);
     });
     actReconcile(tree,rows);
     actRings(tree,now);
     var segs=document.querySelectorAll('#actDepth button'), keys=projs.map(function(p){ return ACT.levels[p.key]||ACT.defLevel; });
     for(var i=0;i<segs.length;i++){ var l=segs[i].getAttribute('data-l'); segs[i].className=(keys.length?keys.every(function(v){ return v===l; }):ACT.defLevel===l)?'on':''; }
+    actRenderPanel();
+  }
+  // ---- 6d (#70 "Decisions after 6c, for 6d" 7): the LOG PANEL — the selected session / agent / context's subtree log, newest
+  // first: time, state dot, the entry's path relative to it (@ctx / @~ctx), its text; details + JSON on click; "load older",
+  // "show earlier runs", "earlier history pruned"; a remote node's pages come through the bridge's queued remote fetch
+  function actRenderPanel(){
+    var main=document.getElementById('actmain'), panel=document.getElementById('actpanel'); if(!panel||!main) return;
+    if(!ACT.sel){ if(!main.classList.contains('nosel')) main.classList.add('nosel'); if(panel._h!==''){ panel.innerHTML=''; panel._h=''; } return; }
+    main.classList.remove('nosel');
+    if(panel._h!=='x'){ panel.innerHTML='<div class="aph" id="actph"></div><div class="apb" id="actpb" role="list" aria-label="log entries"></div>'; panel._h='x'; }
+    var sel=ACT.sel, key=selKey(sel), q=selQuery(sel), L=ACT.logs[key], now=anow(), U=ACT.st.units||{}, g=U[sel.sid]||{};
+    var ft=sel.kind==='node'?ACT.fullIdx[sel.id]:null, fx=ACT.fullSess[sel.sid];
+    var c=ft?AimbAct.subtreeLog(ft):fx?AimbAct.subtreeLog({u:selfFor(g,sel.host),kids:(fx.top||fx.kids).filter(function(t){ return lcs(t.u.host)===lcs(sel.host); })}):{n:null};
+    if(L&&!L.loading&&!L.more&&!L.err&&ACT.selN!=null&&c.n!=null&&c.n!==ACT.selN&&Date.now()-L.at>1500){ ACT.selN=c.n; actRefreshSel(); return; }   // new entries arrived: re-read the first page
+    ACT.selN=c.n;
+    var hosts=g.hosts||[], title=sel.kind==='node'?sel.path:nm(sel.session);
+    var hd='<div class="aph-t"><span class="aph-k">Log</span><span class="nm mono" title="'+attr(sel.kind==='node'?sel.path:'the whole session')+'">'+esc(title)+'</span>'+hostTags([sel.host])+
+      '<span class="cnt">'+(c.n!=null?c.n+(c.partial?'+':'')+' entr'+(c.n===1&&!c.partial?'y':'ies'):'')+'</span><span class="sp"></span>'+
+      '<button class="act-btn ib" data-pa="refresh" title="Refresh the log" aria-label="Refresh the log">↻</button><button class="act-btn ib" data-pa="close" title="Close the log (clear the selection)" aria-label="Close the log panel">×</button></div>'+
+      '<div class="aph-s">'+(sel.kind==='node'?esc(nm(sel.session))+' · ':'the whole session · ')+esc(pj(sel.project))+(sel.kind==='node'&&ft&&ft.kids.length?' · this node and below':'')+'</div>'+
+      (sel.kind==='session'&&hosts.length>1?'<div class="aph-h">'+hosts.map(function(h){ return '<button class="act-btn'+(lcs(h)===lcs(sel.host)?' on':'')+'" data-ph="'+attr(h)+'">'+esc(h)+'</button>'; }).join(' ')+'</div>':'');
+    var ph=document.getElementById('actph'); if(ph&&ph._h!==hd){ ph.innerHTML=hd; ph._h=hd; }
+    var prows=[];
+    function prow(id,cls,d,html,act,info,ex){ var k=kOf(id); ex=ex||{}; prows.push({k:k,cls:cls,d:d,html:html,info:info||null}); if(act) ACT.acts[k]=act; if(info) ACT.rowInfo[k]=info; if(ex.menu) ACT.rowMenu[k]=ex.menu; }
+    function tipK(id,f){ var k='t'+kOf(id); ACT.tips[k]=f; return k; }
+    if(L) L.entries.forEach(function(x,i){
+      if(L.sepAt===i) prow(key+'|sep','ar more sep',0,'<span class="chv"></span><span class="nm">— earlier runs —</span>');   // 6c: past the current run's start
+      var ek=key+'|e|'+x.id, can=!!(x.has_details||x.has_data), eo=can&&!!ACT.open[ek], by=x.by&&typeof x.by==='string'?x.by:null;
+      prow(ek,'ar le'+(can?' click':'')+(x.dismiss||x.act==='dismiss'?' dm':''),0,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span><span class="dot bg-'+esc(x.state||'running')+'" data-tip="'+tipK(ek+'s',(x.state||'running')+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"></span>'+
+        '<span class="ctag'+(x.current?' cur':'')+'" title="'+attr(x.path!=null?(x.path||'(the session)'):'')+'">'+esc(AimbAct.entryTag(x))+'</span><span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(by?'<span class="by">by '+esc(by)+'</span>':'')+(can?'<span class="ic" data-tip="'+tipK(ek+'i','has '+(x.has_details?'details':'')+(x.has_details&&x.has_data?' + ':'')+(x.has_data?'data':''))+'">⋯</span>':''),
+        can?function(){ ACT.open[ek]=!eo; if(!eo) actLoadEntry(x.id,q.host); actRender(); }:null,
+        {kind:'entry',id:x.id,host:q.host||'',path:x.path!=null?x.path:'',session:q.session,project:q.project||'',user:q.user||''},{menu:{kind:'entry',has_path:true}});
+      if(eo){ var E=ACT.ents[x.id]||{}, inner='';
+        if(E.entry){ if(E.entry.details) inner+='<div class="k">details</div><pre>'+esc(E.entry.details)+'</pre>'; if(E.entry.data!=null) inner+='<div class="k">data</div><pre>'+esc(JSON.stringify(E.entry.data,null,2))+'</pre>'; if(!inner) inner='<span class="empty">no details or data</span>'; if(E.entry.note) inner+='<div class="k">'+esc(E.entry.note)+'</div>'; }
+        else if(E.err) inner='<span class="empty">'+esc(E.err.what||E.err.code)+'</span>';
+        else inner='<span class="spin"></span>'+(E.queued?'queued — about '+AimbAct.fmtDur(E.queued.wait_ms):'loading…');
+        prows.push({k:kOf(ek+'|d'),cls:'ad',d:0,html:inner}); }
+    });
+    var mk=key+'|more';
+    if(!L||L.loading) prow(mk,'ar more',0,'<span class="chv"></span><span class="nm"><span class="spin"></span>'+(L&&L.queued?'queued — about '+esc(AimbAct.fmtDur(L.queued.wait_ms))+(L.queued.host?' (host '+esc(L.queued.host)+' serves a few fetches a second)':''):'loading…')+'</span>');
+    else if(L.err) prow(mk,'ar more click',0,'<span class="chv"></span><span class="nm">'+esc((L.err.code==='busy'?'busy: ':'')+(L.err.what||L.err.code))+' — click to retry</span>',function(){ actLoadLog(key,q,L.loaded); });
+    else if(L.next) prow(mk,'ar more click',0,'<span class="chv"></span><span class="nm">load older…</span>',function(){ actLoadLog(key,q,true); });
+    else if(L.runStart&&L.earlierCursor) prow(mk,'ar more click',0,'<span class="chv"></span><span class="nm" data-tip="'+tipK(mk,'The log above is this node\'s CURRENT run (since it last started). Older entries under the same name belong to earlier runs.')+'">start of this run · show earlier runs…</span>',function(){ actLoadEarlier(key,q); });
+    else if(L.runStart) prow(mk,'ar more',0,'<span class="chv"></span><span class="nm">start of this run</span>');
+    else if(L.pruned) prow(mk,'ar more pruned',0,'<span class="chv"></span><span class="nm" data-tip="'+tipK(mk,'This run began in a day file that log retention has already deleted — its older entries are gone')+'">earlier history pruned</span>');
+    else if(L.loaded&&!L.entries.length) prow(mk,'ar more',0,'<span class="chv"></span><span class="nm">no entries</span>');
+    var pb=document.getElementById('actpb'); if(pb) actReconcile(pb,prows);
   }
   function actReconcile(tree,rows){
     var have={}, kids=tree.children;
@@ -1209,13 +1394,18 @@
       var el=have[r.k];
       if(!el){ el=document.createElement('div'); el.setAttribute('data-k',r.k); }
       if(el._h!==r.html){ el.innerHTML=r.html; el._h=r.html; }
-      if(el.className!==r.cls) el.className=r.cls;
+      var cls=r.cls+(ACT.menu&&ACT.menu.k===r.k?' mnu':'');   // 6d: the row whose menu is open stays marked
+      if(el.className!==cls) el.className=cls;
       var aj=r.info?JSON.stringify(r.info):'';
       if(el._a!==aj){   // 6d hook: data-kind / data-host / data-path / … (only the row's own attributes; data-k stays)
         var old=el._a?JSON.parse(el._a):{}; for(var ok in old) el.removeAttribute('data-'+ok.replace(/_/g,'-'));
         if(r.info) for(var ik in r.info){ var iv=r.info[ik]; if(iv!=null&&iv!=='') el.setAttribute('data-'+ik.replace(/_/g,'-'),String(iv)); }
         el._a=aj;
       }
+      // 6d: rows are FOCUSABLE (keyboard: arrows, Enter, the Menu key / Shift+F10) — treeitem / listitem roles + their state
+      if(r.info){ if(el.getAttribute('tabindex')!=='0') el.setAttribute('tabindex','0'); var role=r.info.kind==='entry'?'listitem':'treeitem'; if(el.getAttribute('role')!==role) el.setAttribute('role',role); }
+      if(r.open!=null){ if(el.getAttribute('aria-expanded')!==String(!!r.open)) el.setAttribute('aria-expanded',String(!!r.open)); } else if(el.hasAttribute('aria-expanded')) el.removeAttribute('aria-expanded');
+      if(r.info&&r.info.kind!=='entry'&&r.info.kind!=='project'){ if(el.getAttribute('aria-selected')!==String(!!r.sel)) el.setAttribute('aria-selected',String(!!r.sel)); }
       var dv=String(r.d||0); if(el.style.getPropertyValue('--d')!==dv) el.style.setProperty('--d',dv);
       if(tree.children[i]!==el) tree.insertBefore(el,tree.children[i]||null);
     });
@@ -1226,13 +1416,125 @@
     for(var i=0;i<rs.length;i++){ var sa=Number(rs[i].getAttribute('data-sa')), win=Number(rs[i].getAttribute('data-win')), f=win>0?Math.max(0,Math.min(1,(sa-now)/win)):0;
       rs[i].setAttribute('stroke-dasharray',(C*f).toFixed(2)+' '+C.toFixed(2)); }
   }
+  // ---- 6d: the CONTEXT MENU (right-click; the Menu key / Shift+F10 on a focused row; a long-press on touch)
+  function actMenuClose(refocus){ var m=ACT.menu; if(!m) return; ACT.menu=null; if(m.el.parentNode) m.el.parentNode.removeChild(m.el); if(m.row) m.row.classList.remove('mnu'); if(refocus&&m.row&&m.row.focus) try{ m.row.focus(); }catch(e){} }
+  function actMenuOpen(rowEl,x,y){
+    var k=rowEl&&rowEl.getAttribute('data-k'), mf=k?ACT.rowMenu[k]:null; if(!mf) return false;
+    var model=typeof mf==='function'?mf():mf, items=AimbAct.menuFor(model); if(!items.length) return false;
+    actMenuClose(false);
+    var el=document.createElement('div'); el.className='act-menu'; el.setAttribute('role','menu'); el.setAttribute('aria-label','actions');
+    items.forEach(function(it,i){ if(it.sep){ var s=document.createElement('div'); s.className='ms'; s.setAttribute('role','separator'); el.appendChild(s); return; }
+      var b=document.createElement('button'); b.className='mi'+(it.act?' act':''); b.type='button'; b.setAttribute('role','menuitem'); b.setAttribute('data-mi',String(i)); b.textContent=it.label; el.appendChild(b); });
+    document.body.appendChild(el);
+    var vw=window.innerWidth||1024, vh=window.innerHeight||768, w=el.offsetWidth||220, h=el.offsetHeight||(items.length*26);
+    el.style.left=Math.max(4,Math.min(x,vw-w-4))+'px'; el.style.top=Math.max(4,Math.min(y,vh-h-4))+'px';
+    ACT.menu={el:el,row:rowEl,items:items,info:ACT.rowInfo[k]||{},model:model,k:k}; rowEl.classList.add('mnu');
+    var first=el.querySelector('.mi'); if(first) try{ first.focus(); }catch(e){}
+    return true;
+  }
+  function actMenuRun(i){
+    var m=ACT.menu; if(!m) return; var it=m.items[i]; if(!it||it.sep) return;
+    actMenuClose(true);
+    var info=m.info, model=m.model;
+    if(it.copy){ var txt=it.copy==='id'?info.id:it.copy==='path'?(info.path||''):it.copy==='session'?info.session:it.copy==='cmd'?model.cmd:''; actCopy(txt||'',it.copy==='cmd'?'the aimb-log command':it.copy==='id'?'the entry id':it.copy==='session'?'the session name':'the path'); return; }
+    if(it.view){ var key=model.id, set=it.view==='pin'||it.view==='unpin'?ACT.pins:ACT.hidden;
+      if(it.view==='pin'||it.view==='hide') set[key]=1; else delete set[key];
+      saveSet(set===ACT.pins?'aimb.act.pins':'aimb.act.hidden',set); actRender(); return; }
+    if(it.act){ if(it.confirm) actConfirm(actConfirmText(it,model),function(){ actDo(info,model,it); }); else actDo(info,model,it); }
+  }
+  // the CONFIRMATION text of abandon_plan / finish / dismiss — what happens, and who it is logged as
+  function actConfirmText(it,m){
+    var h=ACT.st.head||{}, who='by '+(h.user||'dashboard')+' via dashboard ('+(h.host||'?')+')', n=m.nOpen||0;
+    if(it.act==='abandon_plan') return { title:m.plan_node?'Abandon this plan?':'Abandon the open plan items of '+m.name+'?', ok:'Abandon',
+      text:(n?n+' open item'+(n===1?'':'s')+' (to do / in progress / blocked) become abandoned':'Nothing is still open')+', and the plan'+(m.plan_node?'':'s it holds')+' end'+(m.plan_node?'s':'')+'. Done and skipped items stay as they are.'+(m.agent_ok?' The '+(m.kind==='session'?'session':'agent')+' itself keeps running.':''),
+      note:'Logged on each item as "abandoned '+who+'".' };
+    if(it.act==='finish') return { title:'Mark '+m.name+' finished ('+it.args.state+')?', ok:'Mark '+it.args.state,
+      text:'It is '+(m.why||'quiet')+'. Its line becomes '+it.args.state+' (its text is kept). Any open plan items it holds stay open.', note:'Logged as "marked finished ('+it.args.state+') '+who+'".' };
+    return { title:'Dismiss '+m.name+'?', ok:'Dismiss',
+      text:'It'+(m.nNodes>1?' and everything under it ('+m.nNodes+' nodes)':'')+' leave'+(m.nNodes>1?'':'s')+' the board now, instead of after the 7-day window. Nothing is deleted: its history stays in '+(m.host||'its host')+'\'s day files, and a new report under the same name starts a new run.',
+      note:'Logged as "dismissed from the board '+who+'".' };
+  }
+  function actDlgClose(){ var d=ACT.dlg; if(!d) return; ACT.dlg=null; if(d.el.parentNode) d.el.parentNode.removeChild(d.el); if(d.prev&&d.prev.focus) try{ d.prev.focus(); }catch(e){} }
+  function actConfirm(o,cb){
+    actDlgClose();
+    var d=document.createElement('div'); d.className='act-dlg';
+    d.innerHTML='<div class="box" role="dialog" aria-modal="true" aria-labelledby="actdlgt"><h3 id="actdlgt">'+esc(o.title)+'</h3><p>'+esc(o.text)+'</p>'+(o.note?'<p class="note">'+esc(o.note)+'</p>':'')+
+      '<div class="btns"><button type="button" class="act-btn" data-dlg="cancel">Cancel</button> <button type="button" class="act-btn danger" data-dlg="ok">'+esc(o.ok||'OK')+'</button></div></div>';
+    ACT.dlg={el:d,cb:cb,prev:document.activeElement};
+    d.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-dlg]'):null; if(b){ var go=b.getAttribute('data-dlg')==='ok', f=ACT.dlg&&ACT.dlg.cb; actDlgClose(); if(go&&f) f(); } else if(ev.target===d) actDlgClose(); });
+    d.addEventListener('keydown',function(ev){ if(ev.key==='Escape'){ ev.preventDefault(); actDlgClose(); }
+      else if(ev.key==='Tab'){ var bs=d.querySelectorAll('button'), a=document.activeElement; if(ev.shiftKey&&a===bs[0]){ ev.preventDefault(); bs[bs.length-1].focus(); } else if(!ev.shiftKey&&a===bs[bs.length-1]){ ev.preventDefault(); bs[0].focus(); } } });   // focus stays in the dialog
+    document.body.appendChild(d);
+    var cb2=d.querySelector('[data-dlg="cancel"]'); if(cb2) try{ cb2.focus(); }catch(e){}   // a destructive action: Cancel has the focus
+  }
+  // one ACTION: pending (a spinner on the row) → ✓ / the error code; the selected log re-reads after a success
+  function actDo(info,model,it){
+    var fid=model.fbId, label=AimbAct.ACTION_DONE[it.act]||it.act;
+    ACT.fb[fid]={st:'pending',label:it.act==='dismiss'?'dismissing':it.act==='finish'?'finishing':'working',at:Date.now()}; actRender();
+    var args={stale_min:actStaleMin()}; for(var a in (it.args||{})) args[a]=it.args[a];   // stale_min: "stale" is what this viewer's slider says
+    actActReq({host:info.host,session:info.session,project:info.project,user:info.user||'',path:info.path||'',action:it.act,args:args},function(r){
+      if(r&&r.ok){ ACT.fb[fid]={st:'ok',label:label,at:Date.now(),warn:r.warnings&&r.warnings.indexOf('plan-ended')>=0?'its plan is still ended — reopen the plan too':''};
+        if(r.dismissed) actToast('Dismissed '+(model.name||info.path)+' — '+r.dismissed.nodes+' node'+(r.dismissed.nodes===1?'':'s')+' off the board (history kept)');
+        actRefreshSel(); }
+      else ACT.fb[fid]={st:'err',code:(r&&r.code)||'error',what:(r&&r.what)||'',at:Date.now()};
+      actRender();
+    },function(q){ if(ACT.fb[fid]) ACT.fb[fid].queued=q; actRender(); });
+  }
+  function actCopy(text,what){
+    ACT.lastCopy=text;
+    var done=function(){ actToast('Copied '+what); };
+    var fallback=function(){ try{ var ta=document.createElement('textarea'); ta.value=text; ta.setAttribute('readonly',''); ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); if(document.execCommand) document.execCommand('copy'); document.body.removeChild(ta); done(); }catch(e){ actToast('Copy failed: '+text); } };
+    try{ if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(done,fallback); return; } }catch(e){}
+    fallback();
+  }
   function actStaleLabel(){ var v=document.getElementById('actStaleV'); if(v) v.textContent=actStaleMin()+'m'+(ACT.staleMin==null?' (bridge default)':''); }
   function actPlanOpenLabel(){ var v=document.getElementById('actPlanOpenV'), m=actPlanOpenMin(); if(v) v.textContent=(m?AimbAct.fmtDur(m*60000):'0m')+(ACT.planOpenMin==null?' (bridge default)':''); }
   function allNodeIds(projs){ var out=[]; projs.forEach(function(p){ p.sessions.forEach(function(x){ (function w(l){ l.forEach(function(t){ out.push(t.u.id); w(t.kids); }); })(x.kids); }); }); return out; }
+  // row interaction, shared by the tree and the log panel: click = the row's action (select / expand a detail), the chevron or
+  // a double-click = expand; keyboard + right-click + long-press = the menu
+  function actRowOf(ev){ return ev.target&&ev.target.closest?ev.target.closest('[data-k]'):null; }
+  function wireRows(box){
+    box.addEventListener('click',function(ev){
+      if(ACT.suppressClick){ ACT.suppressClick=false; ev.preventDefault(); return; }   // the click that ends a long-press
+      var el=actRowOf(ev); if(!el) return; var k=el.getAttribute('data-k');
+      if(ev.target.closest('.chv')&&ACT.togs[k]){ ev.preventDefault(); ACT.togs[k](); return; }
+      var f=ACT.acts[k]; if(f){ ev.preventDefault(); f(); }
+    });
+    box.addEventListener('dblclick',function(ev){ var el=actRowOf(ev), f=el&&ACT.togs[el.getAttribute('data-k')]; if(f){ ev.preventDefault(); f(); } });
+    box.addEventListener('mouseover',function(ev){ var el=ev.target&&ev.target.closest?ev.target.closest('[data-tip]'):null; if(!el) return; var t=ACT.tips[el.getAttribute('data-tip')]; if(t!=null){ var s=typeof t==='function'?t():t; if(s&&el.getAttribute('title')!==s) el.setAttribute('title',s); } });
+    box.addEventListener('contextmenu',function(ev){ var el=actRowOf(ev); if(el&&actMenuOpen(el,ev.clientX,ev.clientY)) ev.preventDefault(); });
+    box.addEventListener('keydown',function(ev){
+      var el=actRowOf(ev); if(!el||el!==ev.target) return; var k=el.getAttribute('data-k');
+      if(ev.key==='ContextMenu'||(ev.key==='F10'&&ev.shiftKey)){ ev.preventDefault(); var r=el.getBoundingClientRect(); actMenuOpen(el,(r.left||0)+28,(r.top||0)+(r.height||22)); return; }
+      if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); var f=ACT.acts[k]; if(f) f(); return; }
+      if((ev.key==='ArrowRight'&&ACT.opened[k]===false)||(ev.key==='ArrowLeft'&&ACT.opened[k]===true)){ ev.preventDefault(); ACT.togs[k](); return; }
+      if(ev.key==='ArrowDown'||ev.key==='ArrowUp'||ev.key==='Home'||ev.key==='End'){ ev.preventDefault(); var all=[].slice.call(box.querySelectorAll('[data-k][tabindex="0"]')), i=all.indexOf(el);
+        var j=ev.key==='Home'?0:ev.key==='End'?all.length-1:i+(ev.key==='ArrowDown'?1:-1); if(all[j]) all[j].focus(); }
+    });
+    var lp=null, cancel=function(){ if(lp){ clearTimeout(lp.timer); lp=null; } };
+    box.addEventListener('touchstart',function(ev){ var el=actRowOf(ev); cancel(); if(!el) return; var t=ev.touches&&ev.touches[0], x=t?t.clientX:0, y=t?t.clientY:0;
+      lp={x:x,y:y,timer:setTimeout(function(){ lp=null; if(actMenuOpen(el,x,y)){ ACT.suppressClick=true; setTimeout(function(){ ACT.suppressClick=false; },800); } },550)}; },{passive:true});   // a LONG-PRESS opens the menu
+    box.addEventListener('touchmove',function(ev){ var t=ev.touches&&ev.touches[0]; if(lp&&t&&(Math.abs(t.clientX-lp.x)>10||Math.abs(t.clientY-lp.y)>10)) cancel(); },{passive:true});
+    box.addEventListener('touchend',cancel); box.addEventListener('touchcancel',cancel);
+  }
   function wireActivity(){
-    var tree=document.getElementById('acttree'); if(!tree) return;
-    tree.addEventListener('click',function(ev){ var el=ev.target&&ev.target.closest?ev.target.closest('[data-k]'):null; var f=el&&ACT.acts[el.getAttribute('data-k')]; if(f){ ev.preventDefault(); f(); } });
-    tree.addEventListener('mouseover',function(ev){ var el=ev.target&&ev.target.closest?ev.target.closest('[data-tip]'):null; if(!el) return; var t=ACT.tips[el.getAttribute('data-tip')]; if(t!=null){ var s=typeof t==='function'?t():t; if(s&&el.getAttribute('title')!==s) el.setAttribute('title',s); } });
+    var tree=document.getElementById('acttree'), panel=document.getElementById('actpanel'); if(!tree) return;
+    wireRows(tree);
+    if(panel){ wireRows(panel);
+      panel.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-pa],[data-ph]'):null; if(!b) return; ev.preventDefault();
+        if(b.getAttribute('data-pa')==='close'){ actClearSel(); actRender(); } else if(b.getAttribute('data-pa')==='refresh') actRefreshSel();
+        else if(b.getAttribute('data-ph')&&ACT.sel){ var s2={}; for(var x in ACT.sel) s2[x]=ACT.sel[x]; s2.host=b.getAttribute('data-ph'); actSelect(s2); } }); }
+    document.addEventListener('mousedown',function(ev){ if(ACT.menu&&!(ev.target&&ev.target.closest&&ev.target.closest('.act-menu'))) actMenuClose(false); });
+    document.addEventListener('keydown',function(ev){ if(ev.key==='Escape'&&ACT.menu){ ev.preventDefault(); actMenuClose(true); } });
+    document.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('.act-menu .mi'):null; if(b){ ev.preventDefault(); actMenuRun(Number(b.getAttribute('data-mi'))); } });
+    document.addEventListener('keydown',function(ev){ if(!ACT.menu||!(ev.target&&ev.target.closest&&ev.target.closest('.act-menu'))) return;
+      var mis=[].slice.call(ACT.menu.el.querySelectorAll('.mi')), i=mis.indexOf(document.activeElement);
+      if(ev.key==='ArrowDown'||ev.key==='ArrowUp'){ ev.preventDefault(); var j=(i+(ev.key==='ArrowDown'?1:-1)+mis.length)%mis.length; mis[j].focus(); }
+      else if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); if(i>=0) actMenuRun(Number(mis[i].getAttribute('data-mi'))); }
+      else if(ev.key==='Tab'){ actMenuClose(false); } });
+    window.addEventListener('resize',function(){ actMenuClose(false); }); window.addEventListener('blur',function(){ actMenuClose(false); });
+    document.addEventListener('scroll',function(){ actMenuClose(false); },true);
+    ACT.pins=loadSet('aimb.act.pins'); ACT.hidden=loadSet('aimb.act.hidden');   // 6d: view-only, per browser
     var ao=document.getElementById('actActive');
     try{ ACT.activeOnly=localStorage.getItem('aimb.act.active')==='1'; }catch(e){}
     if(ao){ ao.checked=ACT.activeOnly; ao.addEventListener('change',function(){ ACT.activeOnly=ao.checked; try{ localStorage.setItem('aimb.act.active',ao.checked?'1':'0'); }catch(e){} actRender(); }); }
@@ -1242,22 +1544,24 @@
     var sl=document.getElementById('actStale');
     if(sl) sl.addEventListener('input',function(){ ACT.staleMin=Number(sl.value)||15; actStaleLabel(); actRender(); });
     actStaleLabel();
-    var po=document.getElementById('actPlanOpen');   // 6c: the finished-plan open window, live (NOT persisted, like the stale slider)
-    if(po) po.addEventListener('input',function(){ var v=Number(po.value); ACT.planOpenMin=isFinite(v)&&v>=0?v:120; actPlanOpenLabel(); actRender(); });
+    var po=document.getElementById('actPlanOpen');   // 6c: the finished-plan open window, live (NOT persisted, like the stale slider); 6d: 0 – 7 days in steps
+    if(po){ po.min='0'; po.max=String(AimbAct.PLAN_OPEN_STEPS.length-1); po.step='1'; po.value=String(AimbAct.planOpenIndex(120));
+      po.addEventListener('input',function(){ ACT.planOpenMin=AimbAct.planOpenValue(po.value); actPlanOpenLabel(); actRender(); }); }
     actPlanOpenLabel();
     var segs=document.querySelectorAll('#actDepth button');
     for(var i=0;i<segs.length;i++) segs[i].addEventListener('click',function(ev){ var l=ev.currentTarget.getAttribute('data-l'); ACT.defLevel=l; Object.keys(ACT.levels).forEach(function(k){ ACT.levels[k]=l; });
       AimbAct.buildTree(ACT.st.units||{},{}).forEach(function(p){ ACT.levels[p.key]=l; }); actRender(); });
     var ex=document.getElementById('actExpand'), co=document.getElementById('actCollapse');
     if(ex) ex.addEventListener('click',function(){ var projs=AimbAct.buildTree(ACT.st.units||{},{activeOnly:ACT.activeOnly,plansOnly:ACT.plansOnly}); projs.forEach(function(p){ ACT.levels[p.key]='all'; p.sessions.forEach(function(x){ ACT.open['sess|'+x.s.key]=true; }); });
-      allNodeIds(projs).forEach(function(id){ ACT.open[id]=true; }); ACT.defLevel='all'; actRender(); });   // every session and every node, at any depth (logs stay closed)
+      allNodeIds(projs).forEach(function(id){ ACT.open[id]=true; }); ACT.defLevel='all'; actRender(); });   // every session and every node, at any depth
     if(co) co.addEventListener('click',function(){ ACT.open={}; allNodeIds(AimbAct.buildTree(ACT.st.units||{},{})).forEach(function(id){ ACT.open[id]=false; }); actRender(); });   // 6c: closed for good (plan nodes too — not back to their default)
     var lg=document.getElementById('actlegend');
     if(lg){ var t=Date.now(), mk=function(st,label){ var e=st==='running'||st==='blocked'?{state:st,live:true,staleAt:t+6*60000,win:10*60000}:{state:st,live:false,gone:st==='gone'}; return '<span>'+AimbAct.glyphSvg(e,t)+label+'</span>'; };
       lg.innerHTML=mk('running','running')+mk('blocked','blocked')+mk('idle','idle')+mk('done','done')+mk('failed','failed')+mk('stale','stale')+mk('gone','gone')+
         '<span>'+AimbAct.glyphSvg({state:'running'},t,'ctx')+'context (no ring: it follows its agent\'s staleness)</span>'+
         '<span>'+AimbAct.planGlyph('todo')+AimbAct.planGlyph('running')+AimbAct.planGlyph('done')+AimbAct.planGlyph('skipped')+AimbAct.planGlyph('abandoned')+'plan item: to do · in progress · done · skipped · abandoned (never stale; a plan ends only when every item is done, or when marked complete / abandoned)</span>'+
-        '<span>· the ring is the time left before an agent goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of what is below it · green bar = a plan\'s N of M done · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'; }
+        '<span>· the ring is the time left before an agent goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of what is below it · green bar = a plan\'s N of M done · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'+
+        '<span>· click a row to see its log · right-click (Menu key / Shift+F10; long-press on touch) for its actions · 📌 pinned · “N hidden — show” under a parent (pin / hide stay in this browser)</span>'; }
     document.addEventListener('visibilitychange',actSync);
   }
 
@@ -1269,7 +1573,7 @@
     ws.onmessage=function(ev){ var m; try{ m=JSON.parse(ev.data);}catch(e){return;}
       if(m.project_names) PN=m.project_names;   // #71: the canonical project spellings ride welcome + every roster push
       if(m.type==='welcome'){ pip.classList.add('on'); backoff=1000; gw.textContent='gateway: '+m.gateway; renderProf(m); last=m; setComputers(m); setTables(m); drawMap(m); ACT.on=false; actSync(); }   // #70 step 5: re-subscribe on a new socket
-      else if(m.type==='activity_board'||m.type==='activity_delta'||m.type==='activity'||m.type==='activity_queued'){ actOnMsg(m); }
+      else if(m.type==='activity_board'||m.type==='activity_delta'||m.type==='activity'||m.type==='activity_queued'||m.type==='activity_action'){ actOnMsg(m); }   // 6d: + an action's answer
       else if(m.type==='roster'){ last.sessions=m.sessions; last.pages=m.pages; last.hosts=m.hosts||last.hosts; last.gateway=m.gateway||last.gateway; setComputers(last); setTables(last); drawMap(last); }
       else if(m.type==='persistence'){ setPersistence(m.snapshot); }
       else if(m.type==='trace'){ addTrace(m.trace); }

@@ -114,7 +114,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.64.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.65.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1148,6 +1148,63 @@ async function activityRead(q, ctx = {}) {
   }
   return { ...head, sessions: Act.boardView(activity, now, { project: q.project, session: q.session, agent: q.agent, path: q.path, host: q.host, active_only: !!q.active_only }).map(actShow) }
 }
+// v1.65.0 (#70 6d): DASHBOARD ACTIONS — the dashboard's first WRITE path ("Decisions before 6c and 6d" + "Decisions after 6c,
+// for 6d" 11). An authenticated DASHBOARD socket (realm token + kind "dashboard"; never a page leaf, a logger or a socket
+// without a hello) sends {type:"activity_action", ref, host, session, project, user, path, action, args} → {type:
+// "activity_action", ref, result} (a forward waiting in the queue first gets {type:"activity_queued", ref, …}). `host` = the
+// node's ORIGIN: this host → applied here (lib/activity.js applyAction; every record persisted in order, then gossiped +
+// pushed to dashboards like any change); another host → forwarded over the existing authenticated hub link as ACTIVITY_ACT
+// {rid, q, by:{user}} — the same per-link queue and the owner's fetch bucket as ACTIVITY_REQ — applied by the OWNER (each host
+// writes only its own nodes) and answered with ACTIVITY_RES {rid, result}. Attribution `by` = { kind:"dashboard", user: this
+// gateway's process user (AI_BRIDGE_USER / the OS login; else "dashboard"), host: the dashboard's host } — the owner takes the
+// host from the LINK the frame came on, never from the frame. Followers serve no dashboard (the WS ingress is the
+// gateway's), so there is no follower path to forward.
+const ACT_DASH_USER = PROC_USER || 'dashboard'
+/** The action fields a dashboard / a hub frame may carry (bounded strings; args = { state, stale_min } only). */
+function actActionQuery(m) {
+  const q = {}, src = m && typeof m === 'object' ? m : {}
+  for (const k of ['session', 'project', 'user', 'path', 'action']) if (src[k] != null && typeof src[k] !== 'object') q[k] = String(src[k]).slice(0, 512)
+  const a = src.args && typeof src.args === 'object' && !Array.isArray(src.args) ? src.args : null
+  if (a) { q.args = {}; if (typeof a.state === 'string') q.args.state = a.state.slice(0, 16); if (Number.isFinite(Number(a.stale_min))) q.args.stale_min = Number(a.stale_min) }
+  return q
+}
+async function activityAction(m, ctx = {}) {   // on the gateway a dashboard is attached to
+  if (!ACT_CFG.enabled) return actDisabled()
+  if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  const q = actActionQuery(m)
+  if (!q.action || !Act.ACTIVITY_ACTIONS.includes(q.action)) return { ok: false, code: 'bad-action', what: `action must be one of ${Act.ACTIVITY_ACTIONS.join('|')}` }
+  if (!q.session) return { ok: false, code: 'unknown-session', what: 'an action names its session' }
+  const host = typeof m.host === 'string' && m.host.trim() ? m.host.trim() : HOSTNAME
+  if (lc(host) === lc(HOSTNAME)) return actApplyAction(q, { kind: 'dashboard', user: ACT_DASH_USER, host: HOSTNAME })
+  const remote = actKnownHost(host)
+  if (!remote) return { ok: false, code: 'unknown-host', host, what: `no activity from a host "${host.slice(0, 80)}" is held here` }
+  return activityRemote(remote, 'action', q, { ...ctx, by: { user: ACT_DASH_USER } })   // queued like a fetch; owner-unreachable / owner-unsupported / busy
+}
+/** The OWNER applies one action to its own node, persists its records in order and publishes the change. */
+async function actApplyAction(q, by) {
+  if (!ACT_CFG.enabled) return { ...actDisabled(), host: HOSTNAME }
+  if (actReplay && actReplay.phase !== 'done') {   // like a `log` call: nothing is applied before the restart replay ends
+    const ready = await Promise.race([actReplay.promise.then(() => true), new Promise(res => { setTimeout(() => res(false), ACT_LOAD_WAIT_MS).unref() })])
+    if (!ready) return { ok: false, code: 'activity-loading', host: HOSTNAME, what: 'the activity board is still loading this host\'s log after a restart — retry in a moment' }
+  }
+  const r = Act.applyAction(activity, { ...q, realm: REALM }, actNow(), { by })
+  if (!r.ok) return { ...r, host: HOSTNAME }
+  let persisted = null
+  if (PERSIST && r.records.length) { persisted = true; for (const rec of r.records) if (!(await persistActivity(rec))) persisted = false }
+  actChanged()   // gossip (≤1/s per link) + the dashboards' deltas
+  log(`activity: ${r.action} on ${q.session}/${r.path || '@root'} (${projName(q.project || 'unclassified')}) ${Act.byText(by)}${r.dismissed ? ` — ${r.dismissed.nodes} node(s) off the board` : ''}`)
+  return { ok: true, host: HOSTNAME, action: r.action, path: r.path, applied: r.applied, ...(r.dismissed ? { dismissed: r.dismissed } : {}), ...(r.warnings && r.warnings.length ? { warnings: r.warnings } : {}),
+    ...(persisted === false ? { persisted: false } : {}) }
+}
+/** v1.65.0 (#70 6d): this host's aimb-log paths for the dashboard's "Copy its aimb-log command" (paths only — NEVER a token:
+ * token_file is the PATH the bridge read its token from, as {log_snippet} hands out). Rides the board head + full slices. */
+const actLogCmd = () => ({ node: NODE_PATH, script: LOGGER_PATH, token_file: TOKEN_FILE_PATH || null })
+const actHostCmd = new Map()   // remote host -> its log_cmd (from its full slices)
+function wLogCmd(v) {
+  const ok = x => typeof x === 'string' && x.length > 0 && x.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(x)
+  if (!v || typeof v !== 'object' || !ok(v.node) || !ok(v.script)) return null
+  return { node: v.node, script: v.script, token_file: ok(v.token_file) ? v.token_file : null }
+}
 // #70 step 5 (v1.61.0): HISTORY PAGING INTO THE DAY FILES. logView pages the in-memory log; once it runs out (or the
 // cursor is a file cursor `f1.<day>.<offset>`) the page continues in this host's daily JSONL, read BACKWARDS in chunks
 // (step 2's reader — async I/O per chunk, so it yields to the event loop) through log_retention_days: the entity's
@@ -1315,7 +1372,7 @@ function actSendTo(p) {
   const full = a.needFull
   const plan = Act.planSlice(activity, a.pub, { full, maxBytes: ACT_SLICE_MAX_BYTES, units: actUnitsNow() })
   let frame = null
-  if (plan.body) frame = { t: 'ACTIVITY_SLICE', origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq + 1, ...(full ? {} : { base: a.seq }), ...plan.body }   // the body carries v:2 (#70 step 6a)
+  if (plan.body) frame = { t: 'ACTIVITY_SLICE', origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq + 1, ...(full ? { log_cmd: actLogCmd() } : { base: a.seq }), ...plan.body }   // the body carries v (#70 step 6a); v1.65.0 (6d): a full one our aimb-log paths
   else if (a.beat) frame = { t: 'ACTIVITY_SLICE', v: Act.ACTIVITY_FORMAT, origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq, base: a.seq, sessions: [], beat: true }   // the #63 heartbeat: lets the receiver check it is in sync
   a.beat = false
   if (!frame) return
@@ -1337,16 +1394,17 @@ function actAskResync(p, host) {   // our copy of `host` is out of step: ask the
 function onActivityFrame(sock, f) {
   if (actLegacy()) return                         // test-only: a ≤1.59 hub ignores these frames
   const [gw, p] = peerEntryOf(sock)
-  if (!gw || !p) return                           // only an ADOPTED peer-hub link (HELLO token + PEER_HELLO) speaks activity
+  const refuse = (code, what) => { if (f.t === 'ACTIVITY_ACT' && f.rid != null) { try { sendFrame(sock, { t: 'ACTIVITY_RES', rid: f.rid, result: { ok: false, code, host: HOSTNAME, what } }) } catch { } } }   // v1.65.0 (#70 6d): a refused action hears why
+  if (!gw || !p) { refuse('unauthorized', 'activity actions are accepted only on an authenticated peer-hub link'); if (f.t === 'ACTIVITY_ACT') log('activity: refused an ACTIVITY_ACT on a link that is not an adopted peer hub'); return }   // only an ADOPTED peer-hub link (HELLO token + PEER_HELLO) speaks activity
   const host = hostOfGw(gw)
   p.seen = Date.now()
   if (!p.act || !p.act.cap) {   // v1.62.0 (#70 step 6a): a peer that didn't declare THIS activity format (a 1.60/1.61 hub: v1) — its frames are skipped, never misread
     if (p.act && !p.act.skipNoted) { p.act.skipNoted = true; log(`activity: ${host} speaks another activity format (${f.v != null ? 'v' + f.v : 'none'}) — its ${f.t} frames are ignored`) }
-    tapRec('recv', { peer: host, kind: 'skipped-format', t: f.t, v: f.v }); return
+    tapRec('recv', { peer: host, kind: 'skipped-format', t: f.t, v: f.v }); refuse('owner-unsupported', `this host speaks activity format v${Act.ACTIVITY_FORMAT} and your hub declared another`); return
   }
   if (f.origin != null && lc(String(f.origin)) !== lc(host)) {   // a frame claiming another host's slice: ownership is the link's
     log(`activity: dropped a ${f.t} from ${gw} claiming origin "${String(f.origin).slice(0, 80)}"`)
-    tapRec('recv', { peer: host, kind: 'forged', t: f.t }); return
+    tapRec('recv', { peer: host, kind: 'forged', t: f.t }); refuse('unauthorized', 'a frame may speak only for its own link host'); return
   }
   if (f.t === 'ACTIVITY_SLICE') {
     if (!activity || lc(host) === lc(HOSTNAME)) return   // never let a peer write our own host's entities
@@ -1354,16 +1412,25 @@ function onActivityFrame(sock, f) {
     const r = Act.applySlice(activity, host, f)
     if (ACT_TAP) tapRec('recv', { peer: host, ...tapSlice(f), ok: r.ok, code: r.code })
     if (!r.ok) { if (r.code === 'out-of-sync') actAskResync(p, host); else if (r.code !== 'bad-version' || !p.act || !p.act.badVer) { if (r.code === 'bad-version' && p.act) p.act.badVer = true; log(`activity: slice from ${host} refused: ${r.code}`) } ; return }   // v1.62.0: an old-format (v1) slice is skipped, logged once per link
-    if (f.full) actOwner.set(host, gw)
-    if (r.changed) actDashKick()
+    if (f.full) { actOwner.set(host, gw); const lc2 = wLogCmd(f.log_cmd); if (lc2) actHostCmd.set(host, lc2); else actHostCmd.delete(host) }   // v1.65.0 (#70 6d): its aimb-log paths (the dashboard's "copy command")
+    if (r.changed || f.full) actDashKick()
   } else if (f.t === 'ACTIVITY_DOWN') {
     tapRec('recv', { peer: host, kind: 'down' })
     if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, actNow())) { log(`activity: ${host} is going down (${String(f.reason || 'notice').slice(0, 40)}) — its agents show as gone`); actDashKick() }
   } else if (f.t === 'ACTIVITY_REQ') actServe(sock, p, host, f)
+  else if (f.t === 'ACTIVITY_ACT') actServeAction(sock, p, host, f)   // v1.65.0 (#70 6d)
   else if (f.t === 'ACTIVITY_RES') {
     const q = actRemotePending.get(f.rid)
     if (q && q.sock === sock) { clearTimeout(q.timer); actRemotePending.delete(f.rid); q.resolve(f.result && typeof f.result === 'object' ? f.result : { ok: false, code: 'bad-response', what: 'the owning host sent no result' }) }
   }
+}
+// the owner's per-link token bucket (fetches + v1.65.0 actions): null = go ahead (a token taken), else the rate-limited answer
+function actTakeToken(a) {
+  const now = Date.now()
+  a.bucket = Math.min(ACT_FETCH_RATE, a.bucket + ((now - a.bucketAt) * ACT_FETCH_RATE) / 1000); a.bucketAt = now
+  if (a.bucket < 1) return { ok: false, code: 'rate-limited', host: HOSTNAME, rate: ACT_FETCH_RATE, retry_after_ms: Math.ceil(((1 - a.bucket) * 1000) / ACT_FETCH_RATE), what: `host ${HOSTNAME} serves at most ${ACT_FETCH_RATE} history fetches / actions per second per link — retry shortly` }   // v1.61.0: + rate (a requester paces its queue to it)
+  a.bucket -= 1
+  return null
 }
 // the OWNER side of a remote fetch: rate-limited per link (token bucket), paged (ACT_PAGE_ENTRIES / ACT_PAGE_BYTES), and
 // only ever about this host's own entities. logView is an in-memory slice of ≤ a page; an entry's details/data are read
@@ -1374,10 +1441,8 @@ function actServe(sock, p, host, f) {
   if (f.op === 'resync') { if (p.act && p.act.cap) { p.act.needFull = true; actKick(p) } return }   // no reply: the full slice is the answer
   if (role !== 'gateway' || !activity) return reply({ ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })
   if (!ACT_CFG.enabled) return reply({ ...actDisabled(), host: HOSTNAME })
-  const a = p.act, now = Date.now()
-  a.bucket = Math.min(ACT_FETCH_RATE, a.bucket + ((now - a.bucketAt) * ACT_FETCH_RATE) / 1000); a.bucketAt = now
-  if (a.bucket < 1) return reply({ ok: false, code: 'rate-limited', host: HOSTNAME, rate: ACT_FETCH_RATE, retry_after_ms: Math.ceil(((1 - a.bucket) * 1000) / ACT_FETCH_RATE), what: `host ${HOSTNAME} serves at most ${ACT_FETCH_RATE} history fetches per second per link — retry shortly` })   // v1.61.0: + rate (a requester paces its queue to it)
-  a.bucket -= 1
+  const limited = actTakeToken(p.act)   // v1.65.0: shared with the actions (actServeAction)
+  if (limited) return reply(limited)
   const q = f.q && typeof f.q === 'object' ? f.q : {}
   if (f.op === 'log') {   // v1.61.0: a page continues into this host's day files once memory runs out (actLogPage)
     actLogPage(q, actNow(), { maxEntries: ACT_PAGE_ENTRIES, maxBytes: ACT_PAGE_BYTES }).then(lv => {
@@ -1393,6 +1458,21 @@ function actServe(sock, p, host, f) {
     return
   }
   reply({ ok: false, code: 'bad-op', what: `unknown activity request ${String(f.op).slice(0, 40)}` })
+}
+// v1.65.0 (#70 6d): the OWNER side of a forwarded dashboard ACTION — the same per-link bucket as a fetch; applied only to THIS
+// host's own nodes (q.host naming another host → not-owner); `by.host` = the LINK's host (a frame can't claim another), by.user
+// as the requesting gateway says (bounded). Unauthenticated / unadopted links were refused in onActivityFrame.
+function actServeAction(sock, p, host, f) {
+  const reply = result => { try { sendFrame(sock, { t: 'ACTIVITY_RES', rid: f.rid, result }) } catch { } ; tapRec('sent', { peer: host, kind: 'res', op: 'action', ok: !!(result && result.ok), code: result && result.code }) }
+  const q = f.q && typeof f.q === 'object' ? f.q : {}
+  tapRec('recv', { peer: host, kind: 'act', op: q.action })
+  if (role !== 'gateway' || !activity) return reply({ ok: false, code: 'not-gateway', host: HOSTNAME, what: 'this bridge does not hold the activity board' })
+  if (!ACT_CFG.enabled) return reply({ ...actDisabled(), host: HOSTNAME })
+  const limited = actTakeToken(p.act)
+  if (limited) return reply(limited)
+  if (q.host != null && lc(String(q.host)) !== lc(HOSTNAME)) return reply({ ok: false, code: 'not-owner', host: HOSTNAME, what: `host ${HOSTNAME} writes only its own nodes (this action names ${String(q.host).slice(0, 80)})` })
+  const by = { kind: 'dashboard', user: f.by && typeof f.by.user === 'string' && f.by.user.trim() ? f.by.user : 'dashboard', host }
+  actApplyAction(actActionQuery(q), by).then(reply, e => reply({ ok: false, code: 'owner-error', host: HOSTNAME, what: String((e && e.message) || e) }))
 }
 /**
  * The requester side: one remote fetch over the owning host's link → its result, or owner-unreachable /
@@ -1416,7 +1496,7 @@ const actWaitMs = (o, pos) => Math.max(0, o.hold - Date.now(), Math.ceil(((pos -
 function activityRemote(host, op, q, ctx = {}) {
   const gw = actOwner.get(host), p = gw ? peerGw.get(gw) : null
   if (!p || !p.sock || p.sock.destroyed) return Promise.resolve({ ok: false, code: 'owner-unreachable', host, what: `host ${host} is down or unreachable right now — its history can't be fetched (its last-known lines show as gone)` })
-  if (!p.act || !p.act.cap) return Promise.resolve({ ok: false, code: 'owner-unsupported', host, what: `host ${host} runs a bridge without this activity format (needs 1.63.0+ — format v3)` })
+  if (!p.act || !p.act.cap) return Promise.resolve({ ok: false, code: 'owner-unsupported', host, what: `host ${host} runs a bridge without this activity format (format v${Act.ACTIVITY_FORMAT}: 1.65.0+)` })
   const o = actOut(p.act), ws = ctx && ctx.ws, wait = actWaitMs(o, o.q.length + 1)
   const busy = (why, after) => Promise.resolve({ ok: false, code: 'busy', host, retry_after_ms: Math.max(100, after), what: `too many history fetches are waiting (${why}) — retry in a moment` })
   if (ws && (ws.actFetches || 0) >= ACT_QUEUE_DASH) return busy(`${ACT_QUEUE_DASH} for this dashboard`, actWaitMs(o, o.q.length))
@@ -1424,7 +1504,7 @@ function activityRemote(host, op, q, ctx = {}) {
   if (ctx && Number.isFinite(ctx.maxWaitMs) && wait > ctx.maxWaitMs) return busy(`a ${wait}ms wait for host ${host}`, wait)
   if (ws) ws.actFetches = (ws.actFetches || 0) + 1
   return new Promise(resolve => {
-    o.q.push({ host, op, q, resolve, t0: Date.now(), tries: 0 })
+    o.q.push({ host, op, q, by: ctx && ctx.by, resolve, t0: Date.now(), tries: 0 })   // v1.65.0 (#70 6d): an action job carries its author
     if (wait > 0 && ctx && typeof ctx.onQueued === 'function') { try { ctx.onQueued({ host, wait_ms: wait, position: o.q.length }) } catch { } }
     actPump(p)
   }).finally(() => { if (ws) ws.actFetches = Math.max(0, (ws.actFetches || 1) - 1) })
@@ -1463,8 +1543,9 @@ function actDispatch(p, job) {
   const timer = setTimeout(() => { actRemotePending.delete(rid); done({ ok: false, code: 'owner-unreachable', host, what: `host ${host} did not answer within ${ACT_REMOTE_MS}ms — retry` }) }, ACT_REMOTE_MS)
   timer.unref()
   actRemotePending.set(rid, { resolve: done, timer, sock: p.sock })
-  sendFrame(p.sock, { t: 'ACTIVITY_REQ', rid, op: job.op, q: job.q })
-  tapRec('sent', { peer: host, kind: 'req', op: job.op })
+  if (job.op === 'action') sendFrame(p.sock, { t: 'ACTIVITY_ACT', rid, q: job.q, by: { user: String((job.by && job.by.user) || 'dashboard').slice(0, 64) } })   // v1.65.0 (#70 6d): a dashboard action for the OWNER
+  else sendFrame(p.sock, { t: 'ACTIVITY_REQ', rid, op: job.op, q: job.q })
+  tapRec('sent', { peer: host, kind: job.op === 'action' ? 'act' : 'req', op: job.op === 'action' ? job.q.action : job.op })
 }
 /** A host name as held (case-insensitive), or null. */
 function actKnownHost(h) {
@@ -1474,7 +1555,7 @@ function actKnownHost(h) {
   return null
 }
 function actRemoteInfo() {
-  return Act.remoteInfo(activity).map(x => { const p = peerGw.get(actOwner.get(x.host)); return { ...x, linked: !!(p && p.sock && !p.sock.destroyed) } })
+  return Act.remoteInfo(activity).map(x => { const p = peerGw.get(actOwner.get(x.host)); return { ...x, linked: !!(p && p.sock && !p.sock.destroyed), ...(actHostCmd.has(x.host) ? { log_cmd: actHostCmd.get(x.host) } : {}) } })   // v1.65.0: + that host's aimb-log paths
 }
 // a peer link went away (dropPeer: closed, retired, expired): its in-flight fetches fail, and if it owned a host's slice
 // that slice's agents show as GONE until the host returns
@@ -1516,7 +1597,7 @@ function actAnnounceDown(reason) {
 const actDashSubs = () => [...leaves].filter(ws => ws.kind === 'dashboard' && ws.actSub && ws.readyState === 1)
 function actDashHead() {
   return { host: HOSTNAME, now: actNow(), stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
-    remote_hosts: activity && activity.remote.size ? actRemoteInfo() : [] }
+    remote_hosts: activity && activity.remote.size ? actRemoteInfo() : [], log_cmd: actLogCmd(), user: ACT_DASH_USER }   // v1.65.0 (#70 6d): our aimb-log paths (never a token) + who actions are attributed to
 }
 const actDashUnits = () => Act.dashUnits(Act.boardView(activity, actNow(), { raw: true }).map(actShow))
 function actDashSubscribe(ws) {   // a full board now (not throttled): the page's view starts from it
@@ -2296,7 +2377,7 @@ function connectToPeer(host, port) {
       sendGossip(peerGw.get(f.session), gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted (#66c: + the retained set)
     }
     else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained, f.project_names)
-    else if (f.t === 'ACTIVITY_SLICE' || f.t === 'ACTIVITY_DOWN' || f.t === 'ACTIVITY_REQ' || f.t === 'ACTIVITY_RES') onActivityFrame(sock, f)   // #70 step 4
+    else if (f.t === 'ACTIVITY_SLICE' || f.t === 'ACTIVITY_DOWN' || f.t === 'ACTIVITY_REQ' || f.t === 'ACTIVITY_RES' || f.t === 'ACTIVITY_ACT') onActivityFrame(sock, f)   // #70 step 4; v1.65.0: + ACTIVITY_ACT (6d)
     else if (f.t === 'PING') { if (!TEST_GOSSIP) sendFrame(sock, { t: 'PONG', seq: f.seq }) }   // #63: the accepting hub probes us too (<=1.43 dialers ignore PING — 'legacy' mimics that)
     else if (f.t === 'PONG') touchPeer(sock)
     else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
@@ -2485,7 +2566,7 @@ function onControlConn(sock) {
         sock.on('close', () => { if (peerGw.get(f.session)?.sock === sock) dropPeer(f.session) })
       } else if (f.t === 'PEER_ROSTER') {
         mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained, f.project_names)
-      } else if (f.t === 'ACTIVITY_SLICE' || f.t === 'ACTIVITY_DOWN' || f.t === 'ACTIVITY_REQ' || f.t === 'ACTIVITY_RES') {   // #70 step 4: only from an adopted peer-hub link
+      } else if (f.t === 'ACTIVITY_SLICE' || f.t === 'ACTIVITY_DOWN' || f.t === 'ACTIVITY_REQ' || f.t === 'ACTIVITY_RES' || f.t === 'ACTIVITY_ACT') {   // #70 step 4: only from an adopted peer-hub link (v1.65.0: + ACTIVITY_ACT, refused elsewhere)
         onActivityFrame(sock, f)
       } else if (f.t === 'PONG') {
         touchPeer(sock)
@@ -2603,6 +2684,7 @@ function onWsConnection(ws) {
           try { result = await loggerLog(ws.ident, m.input) } catch (e) { result = { ok: false, code: 'gateway-error', what: String((e && e.message) || e) } }
           try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result })) } catch {}
         } else if (ws.kind === 'logger') {
+          if (m.type === 'activity_action') { try { ws.send(JSON.stringify({ type: 'activity_action', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'unauthorized', what: 'activity actions are for dashboards only (a logger only reports)' } })) } catch {} ; return }   // v1.65.0 (#70 6d)
           try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'bad-op', what: `a logger sends only {type:"log"} (got ${JSON.stringify(String(m.type)).slice(0, 40)})` } })) } catch {}
         } else if ((m.type === 'activity' || m.type === 'activity_sub' || m.type === 'activity_unsub') && ws.kind !== 'dashboard') {   // #70 step 5: dashboards only — never a page leaf
           const deny = { ok: false, code: 'dashboard-only', what: 'the activity board is for dashboards and registered sessions (the activity tool), not page leaves' }
@@ -2613,6 +2695,15 @@ function onWsConnection(ws) {
           actDashSubscribe(ws)
         } else if (m.type === 'activity_unsub') {
           ws.actSub = null
+        } else if (m.type === 'activity_action') {   // v1.65.0 (#70 6d): a dashboard's WRITE — only an authenticated dashboard socket (never a page leaf, a logger or a socket without a hello)
+          const ref = m.ref != null ? m.ref : null
+          let result
+          if (ws.kind !== 'dashboard') result = { ok: false, code: 'unauthorized', what: 'activity actions are accepted only from an authenticated dashboard' }
+          else {
+            const onQueued = info => { try { ws.send(JSON.stringify({ type: 'activity_queued', ref, ...info })) } catch {} }   // a queued forward to the owner: the page shows its spinner
+            try { result = await activityAction(m, { ws, onQueued }) } catch (e) { result = { ok: false, code: 'gateway-error', what: String((e && e.message) || e) } }
+          }
+          try { ws.send(JSON.stringify({ type: 'activity_action', ref, result })) } catch {}
         } else if (m.type === 'activity') {   // #70 step 4: the mesh board / a log page / an entry (the `activity` tool's query)
           const q = {}, ref = m.ref != null ? m.ref : null
           for (const k of BOARD_FIELDS) if (m.query && typeof m.query === 'object' && m.query[k] !== undefined) q[k] = m.query[k]

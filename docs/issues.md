@@ -6,15 +6,59 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-02, v1.64.0) — read this first after a compact
-**Current version: v1.64.0** (#70 step 6c + #75 part 2 — code done, NOT yet deployed (live hosts run v1.54.0); in the working
-tree for review on top of the 6b commit; see the v1.64.0 paragraph below). Previously v1.63.0 (#70 step 6b: TODOS AND PLANS — `todo` / `skipped` context states, plan items, `plan:[…]`
+## RESUME STATE (updated 2026-10-02, v1.65.0) — read this first after a compact
+**Current version: v1.65.0** (#70 step 6d — the LAST #70 build step: code done, NOT yet deployed (live hosts run v1.54.0); in
+the working tree for review on top of the 6c commit; see the v1.65.0 paragraph and the DEPLOY CHECKLIST below). Previously
+v1.64.0 (#70 step 6c + #75 part 2, committed `23db35e`). Before that v1.63.0 (#70 step 6b: TODOS AND PLANS — `todo` / `skipped` context states, plan items, `plan:[…]`
 with a keep-and-append re-plan rule, "N of M done" rollup, 7-day `finished_visible_hours`, open items never expire or get
 evicted, the day-rollover CARRY-FORWARD; plus 6a adjustments: RELATIVE batch paths, the "most recently set" headline, host
 tags only where they differ; record / slice format v3; code done, NOT yet deployed — live hosts run v1.54.0). v1.62.0
 (#70 step 6a) is committed (`2d78a21`); v1.63.0 is in the working tree for review. The rebuilt tray (`PrepareShutdown()`
 before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
 Everything below is durable; nothing important is only in chat.
+
+**2026-10-02 (v1.65.0):** Built **#70 step 6d** ("Decisions before 6c and 6d" + "Decisions after 6c, for 6d") — **the #70
+build plan is COMPLETE**; next is the deploy (checklist below). The dashboard's first WRITE path: a **right-click menu** on
+every row (Menu key / Shift+F10; long-press on touch) with only the actions valid for it — plan item done / skip / reopen /
+abandon; plan complete / abandon plan / reopen plan; agent or session abandon open plan items (it keeps running) / mark
+finished (when stale or gone) / dismiss (stale, gone or finished; never with open plan items) — plus copy path / its
+aimb-log command (never a token) / entry id and the view-only **Pin / Hide** (per browser). Abandon plan, finish and dismiss
+ask first; the row shows a spinner, then ✓ or the error code. The dashboard sends `{type:"activity_action"}` (dashboard
+sockets only); the node's OWNER applies it — another host's over the hub link as the new `ACTIVITY_ACT` frame (queued and
+rate-limited like a remote fetch) — and logs it "… by <user> via dashboard (<host>)" (`by` + `act`). **Finishing an agent
+never completes its plan** (an agent's own line left the plan-end rule; agents / the session end a plan through a new
+plan-end MARKER that complete / abandon plan set); dismissal is a logged `dismiss:true` entry the replay honours (it survives
+a restart; nothing is erased); the carry-forward record carries each node's entry count (exact across restarts). **The log
+panel replaces the Log rows**: click a row to select it, its subtree log shows beside the tree (below on a narrow screen).
+Open plans expand their ancestors; header counts ignore the filters; the "plans open" slider spans 0 – 7 days; the
+abandoned glyph is visible in dark mode; a viewport tag (and the phone CSS that never applied now does). Records + slices
+are format **v5** (`activity_gossip:5`). Tests: `test_activity_unit` 664, `test_dashboard_activity` 186, new
+`test_activity_actions_live` 43; full suite 2268 passed, 0 failed (54 files, typecheck clean, first run). See architecture.md §13 "Built (v1.65.0)" and #70 "6d as built" /
+"Questions after 6d". The working tree is for review on top of the 6c commit (not committed).
+
+**DEPLOY CHECKLIST — v1.55.0 → v1.65.0 (every live host still runs v1.54.0):**
+1. **Update the code on every host** (ROBIN-Z790 + LITTLE-001 share the Dropbox tree; Robins-Mac and phub-lnx-01 get the
+   same `src/` — tools/ included: the doorbell, `aimb-log.mjs` and its `--token-file`). No `config.json` edit is needed
+   for the code itself.
+2. **Rebuild the tray** (`tray/windows/build.cmd` on ROBIN-Z790; it calls `POST /admin/prepare-shutdown` before it kills
+   the bridges, v1.59.0) — Dropbox carries the exe to LITTLE.
+3. **Restart every host's GATEWAY on 1.65.0 TOGETHER** (and every follower bridge with it — restart the Claude app / the
+   tray's "Restart Bridges…"; the Mac and phub-lnx-01 restart their bridges). Activity formats changed at 1.62 / 1.63 / 1.64 /
+   1.65: hubs of different formats skip each other's activity frames (each host's own board still works), and a 1.64 owner
+   answers a 1.65 dashboard's action `owner-unsupported` — so the board is whole only once every gateway runs 1.65.0.
+4. **LITTLE-001's tray** is not running: start the NEW tray exe on its interactive desktop (RDP via the dyndns name, port
+   3390 — SSH can't show it), then use its Restart Bridges… once.
+5. **Token-file hosts:** a host whose MCP config passes the token as an env VALUE (`AI_BRIDGE_TOKEN`) gets no
+   `--token-file` in its reminders / snippet / copied commands — switch it to `AI_BRIDGE_TOKEN_FILE=<path>` (the Mac already
+   does; check ROBIN-Z790, LITTLE-001 and phub-lnx-01). A token in `config.json` needs nothing (the scripts read it).
+6. **Then publish the realm block:** copy `config.example.json`'s `behaviors.realm` (the doorbell reminder + the
+   `client:code` / `client:cowork` activity reminders, both `"id":"activity"`) into ONE config — the shared Dropbox
+   `config.json` — with a fresh `updated_at`. Only after EVERY host runs ≥ 1.64 (the `id` field: a ≤1.63 host keeps only
+   the last of the two code reminders). A host's own `connect`/`client`/`code` default would override it — remove any.
+7. **Verify:** `list_sessions` shows 1.65.0 everywhere; on each host's dashboard (`http://127.0.0.1:12318/?token=…`) the
+   Activity section shows every host's sessions; a session's `register_self` returns the doorbell + activity reminders with
+   `--token-file` where expected; one test plan on one host, ticked by right-click from ANOTHER host's dashboard (the entry
+   says "… via dashboard (<that host>)"); the tray's Restart Bridges… logs "prepare-shutdown — flushed …".
 
 **2026-10-02 (v1.64.0):** Built **#70 step 6c** ("Decisions before 6c and 6d") and **#75 part 2** — `{log_snippet}` (the
 paste-ready aimb-log command: absolute node + script paths, --session / --project, --token-file when the bridge read its
@@ -113,7 +157,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #75 part 2 (`{doorbell_cmd}` carries --token-file), #74 federation test flakes, #70 agent activity board (steps 1–5, 6a, 6b built; next: 6c `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -368,6 +412,8 @@ Reported by Architect (Marz, Robins-Mac, 2026-10-02).
 - `test_grants_federate_live` failed once in the #70 step 2 full run, with "MCP error -32000: Connection closed" at
   its after-restart `send_to_peer`.
 - `test_federation_heal_live` lost a connection once in the step 4 full run.
+- v1.65.0 (#70 6d): the full suite passed first time (2268 / 54 files); of 5 standalone `test_federation_heal_live` runs one
+  ended without its summary line (output not kept), the other 4 passed 19/19; `test_grants_federate_live` 3/3.
 - Both pass reliably when run alone (7/7 each), and neither touches the code that changed.
 
 **Suspicion:** a timing race around bridge restart/re-link under CPU load, or a test-harness port/timeout
@@ -453,7 +499,7 @@ accepted); `allow_project` let a caller declared `UNCLASSIFIED` grant (compared 
   it in grants, `access`, the roster, `list_sessions` and the dashboard, while matching stays case-insensitive.
   Verify that no path really treats different cases as different projects (topics, consent, parked mail).
 
-## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–5 built, v1.61.0; step 6a — the node tree + batch logging — built, v1.62.0; step 6b — todos + plans — built, v1.63.0; step 6c — the snippet + reminders, plan rules, counts, run-boundary history, dashboard polish — built, v1.64.0; next: 6d right-click actions — Robin + Bridget)**
+## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–5 built, v1.61.0; step 6a — the node tree + batch logging — built, v1.62.0; step 6b — todos + plans — built, v1.63.0; step 6c — the snippet + reminders, plan rules, counts, run-boundary history, dashboard polish — built, v1.64.0; step 6d — right-click actions, the log panel, pin / hide — built, v1.65.0: the build plan is COMPLETE; next: the deploy (RESUME STATE checklist) — Robin)**
 **Why:** sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows what those
 agents are doing right now. **What:** a new dashboard page showing, across the whole mesh, sessions grouped by project,
 each session's agents under it, and each agent's progress. Agents report it themselves with a doorbell-style script (or
@@ -774,6 +820,9 @@ Any node may contain either kind, so agents can be grouped under the task they s
 - **6c:** `{log_snippet}` plus the connect reminder (`client:code` with the script; Cowork with the tool), the
   default-open section, gossiped entry counts, and the run-boundary history view — plus "Decisions before 6c and 6d".
   **BUILT (v1.64.0, 2026-10-02)** — see "6c as built" below and architecture.md §13 "Built (v1.64.0)".
+- **6d:** the dashboard's right-click actions ("Decisions before 6c and 6d" table) plus "Decisions after 6c, for 6d" (the
+  agent-finish rule, abandon_plan on agents, the log panel, open ancestors, the cf entry count, unfiltered counts, the 0–7 d
+  slider). **BUILT (v1.65.0, 2026-10-02)** — see "6d as built" below and architecture.md §13 "Built (v1.65.0)".
 
 **6a as built (v1.62.0, 2026-10-02):**
 - **Model** (`lib/activity.js`): `sess.nodes` (flat, keyed by `lc(canonical path)`) + `sess.kids`; the session is the
@@ -998,7 +1047,7 @@ Any node may contain either kind, so agents can be grouped under the task they s
   `data-project`, `data-user` (+ `data-nkind`, `data-plan-item`, `data-plan-node`, `data-home`, `data-hosts`, `data-id`) and
   `AimbActView.rowInfo`.
 
-### Questions before 6d (raised by the 6c build, 2026-10-02 — not decided)
+### Questions before 6d (raised by the 6c build, 2026-10-02 — ANSWERED in "Decisions after 6c, for 6d"; built in v1.65.0)
 - **An agent that finishes `done` "completes" its plan.** The rule "the plan node set done ends it" makes an agent holding
   a plan (e.g. `lead` with plan items) end its plan when its own line goes done — even with open items, which then expire a
   window later. A `failed` agent keeps its plan open (until auto-abandon). Intended, or should only an explicit "Mark
@@ -1057,6 +1106,85 @@ Any node may contain either kind, so agents can be grouped under the task they s
     - They use the dashboard's realm-token connection.
 
     Also fix: the abandoned glyph is too faint in dark mode.
+
+### 6d as built (v1.65.0, 2026-10-02)
+- **The agent-finish rule** (decision 1): `planEndAt` ignores an agent's (or the session's) own line — finishing done or
+  failed leaves its plan exactly as it is (open items never expire, are never evicted, are carried forward). A plan ends
+  when every item is done, when a CONTEXT plan node's line is set done / abandoned (as in 6c), or when an agent / the session
+  gets the new **plan-end marker** (`node.plan_end`, set by a logged entry `plan_end: done|abandoned`, cleared by `open`).
+  Only the dashboard's complete / abandon plan set it — and the tool's `abandoned` line on an agent, which keeps 6c's
+  meaning (it finishes the agent AND ends its plan; no conflict: that is explicit, not "silent"). The marker rides gossip,
+  cp and cf; the board adds `plan_end_how` (all-done | done | abandoned). Auto-abandon now uses the same helper, so it ends
+  an agent's plan through the marker instead of finishing the agent.
+- **abandon_plan on an agent / the session** (decision 2), defined precisely: the OPEN plans it HOLDS — its own plan items
+  and every plan under it reached WITHOUT crossing another agent (a sub-agent's plans are its own) — deepest first: each
+  OPEN item (todo / running / blocked) gets an abandoned line, then each such plan ends (a context plan node by its line, the
+  agent / session by the marker). Done / skipped / failed / idle items keep their state; the agent or session itself is not
+  touched (its line, state and activity unchanged — it keeps running). `no-open-plan` when it holds none. On a plan node
+  (a context) it is the same over that node's scope.
+- **The actions** (`lib/activity.js` `applyAction`; wire names): plan item `done` / `skip` / `reopen` (→ todo) / `abandon`
+  (`not-a-plan-item`, `no-change`; reopening an item of a plan marked complete / abandoned applies with a `plan-ended`
+  warning — reopen the plan too); plan node `complete` (`not-a-plan`, `already-ended`), `abandon_plan` (`no-open-plan`),
+  `reopen_plan` — the table's "Reopen" (`not-ended`; `all-items-done` when it ended because every item is done: reopen an
+  item instead); agent / session `finish` (args `state` done|failed — `bad-args`; `already-finished`; `not-stale` unless it
+  is QUIET: finished, stale or gone at the viewer's slider (`args.stale_min`), or never reported with every reported agent
+  below it quiet) and `dismiss` (quiet or finished, every agent below it too — else `not-stale`; `has-open-items` when its
+  subtree holds part of an open plan). Plus `bad-action`, `unknown-session`, `unknown-node`, `bad-path`, `not-an-agent`
+  (finish / dismiss on a context). Dismiss allows a FINISHED agent too ("ahead of the 7-day window" — see the questions).
+- **Attribution:** each applied action is a logged SYSTEM entry on the node (no activity, never un-gones) with `by:
+  {kind:"dashboard", user, host}` + `act`; its text "marked done by robin via dashboard (ROBIN-Z790)" (finish: "marked
+  finished (failed) by …", dismiss: "dismissed from the board by …"). A line-changing action keeps the line's TEXT (only the
+  state changes; the record's `line_text`), so a ☑ item still reads "Build". user = the attached bridge's process user
+  (`AI_BRIDGE_USER` / the OS login), else "dashboard"; host = that bridge's host — an owner takes it from the hub LINK.
+- **Dismiss persistence:** a logged entry `{…, dismiss:true}` at the dismissed path (shown in the PARENT's merged log, with
+  its own path). The replay treats it like an eviction (`evicted`): unless that path was re-created after it (a new run —
+  sealed by its `new_from`), older records at or under it are skipped; a dismissed session root means the session is not
+  rebuilt. A new report under the name starts a new run. The files stay append-only.
+- **Protocol:** WS `{type:"activity_action", ref, host, session, project, user, path, action, args}` → `{type:
+  "activity_action", ref, result}` (+ `activity_queued`), dashboard sockets only (`unauthorized` for a page leaf, a logger, a
+  socket without a hello). host = this host → applied; another → hub frame `ACTIVITY_ACT {rid, q, by:{user}}` →
+  `ACTIVITY_RES` on the existing link, sharing the fetch queue (`busy`) and the owner's per-link bucket; refused
+  `unauthorized` on an unadopted socket or a forged origin, `not-owner` when `q.host` names another host,
+  `owner-unreachable` / `owner-unsupported` as for fetches; `unknown-host` for a host the board doesn't hold. Followers serve
+  no dashboard (the WS ingress is the gateway's), so they have nothing to forward. The MCP tools get no new actions.
+- **The log panel** (decision 7): no Log rows; a click selects (highlight; `aria-selected`), the chevron / a double-click
+  expands; the panel (right of the tree, below it under 900 px) shows the selection's merged subtree log with its path,
+  host, count, the multi-host switch, entries + details / JSON, "load older", "show earlier runs", "earlier history
+  pruned", ↻ / ×; a remote node's pages come through the queued remote fetch (spinner); the selection survives deltas,
+  re-reads its first page when new entries arrive, and clears when the node leaves the board. Entries get the menu (copy
+  entry id / path).
+- **Pin / Hide** (per browser, `localStorage` with try/catch): pinned first among its siblings (📌); hidden ones collapse
+  into "N hidden — show" on the parent ("hide N again" while shown); sessions per project too; undone from the menu.
+- **Keyboard / touch:** focusable rows (`treeitem` / `listitem`), ↑ ↓ Home End, Enter = select, → ← = expand / collapse,
+  the Menu key / Shift+F10 = the menu (↑ ↓ Enter Escape inside; focus returns to the row); a 550 ms long-press = the menu
+  (the tap that ends it doesn't select).
+- **The rest:** open plans expand their ancestors (decision 6); header + project counts from the unfiltered tree (decision
+  9); the "plans open" slider = 0 – 7 days in 23 steps (decision 10; the config clamp 0–10080 already matched); the
+  abandoned glyph's own colour token (#B8C2D0 in dark mode); a viewport meta tag; the phone rules (≤720 px) moved after the
+  base rules — 6a's block came first and its bar / name widths never applied. The cf carries `log_n` (decision 8): a node
+  whose run began before the window keeps its exact count (`cpartial`, the count understates, is now separate from
+  `partial`, the run began before the window — still "earlier history pruned").
+- **Format v5** records + slices (`activity_gossip:5`; v2–v4 records still read).
+
+### Questions after 6d (raised by the 6d build, 2026-10-02 — not decided)
+- **Who may act.** Any holder of the realm token whose WS hello says `kind:"dashboard"` can now WRITE (finish / dismiss
+  another session's agents, resolve its items), and the entry names the attached bridge's OS user, not the person at the
+  browser. Fine for one trusted realm (as step-6 answer 1 said for reads), or now a dashboard credential / a per-person
+  identity?
+- **Dismiss on a FINISHED agent.** Built as allowed (the "ahead of the 7-day window" wording), though the table said "stale
+  or gone". Keep?
+- **Reopening an item of a plan marked complete** leaves the plan ended (a `plan-ended` warning on the row). Reopen the plan
+  automatically instead?
+- **The tool's `abandoned` on an agent** sets the marker; a later running line on that agent revives it but does NOT reopen
+  its plan (only the dashboard's Reopen plan clears the marker). OK, or should a revival clear a marker the agent set itself?
+- **The tool and the actions.** The `log` tool keeps states only (a session resolves its own items and context plans; an
+  agent-held plan can't be "completed" without finishing the agent except from the dashboard). Add `plan_end` to the tool,
+  or an `activity {action}` for registered sessions (then followers would forward it like reads)?
+- **Session-level actions on a multi-host session** sit on each host's own line (an action names one host's nodes); the
+  session row offers only copies and pin / hide. OK?
+- **Auto-refresh of the panel** re-reads the first page when the subtree's count changes (≥ 1.5 s apart, not after "load
+  older"). Enough, or stream new entries in?
+- **Hidden nodes** still count in the header / project totals (view-only). OK?
 
 ### Build plan
 Each step is its own version.
@@ -1125,7 +1253,11 @@ Each step is its own version.
    plan-end rule + auto-abandon, gossiped counts, run-boundary history, the finished-plan window, home-host tags, the Plans
    filter, the 6b rough edges, 6d hooks; `test_activity_unit` 630, `test_dashboard_activity` 132, new
    `test_activity_6c_live` 31 (+ updated `test_log_live`, `test_activity_gossip_live`, `test_activity_dashboard_live`,
-   `test_activity_carry_live` for format v4 and the new rules). Next: 6d (right-click actions).
+   `test_activity_carry_live` for format v4 and the new rules). **6d BUILT (v1.65.0, 2026-10-02)** — the right-click actions
+   (local, and forwarded to the owner as `ACTIVITY_ACT`), the agent-finish rule + the plan-end marker, abandon_plan on agents,
+   dismiss (persisted, honoured by the replay), the cf entry count, the log panel, pin / hide, keyboard / touch, open
+   ancestors, unfiltered counts, the 0–7 d slider, format v5; `test_activity_unit` 664, `test_dashboard_activity` 186, new
+   `test_activity_actions_live` 43 (+ the format-v5 updates). **The #70 build plan is complete** — next: the deploy.
 
 ### Questions before step 6 (raised by the step-5 build, 2026-10-02 — not decided)
 - **Who sees the board.** The WS rule is "dashboards only", but a dashboard is just a token holder that says
