@@ -805,6 +805,45 @@ Any node may contain either kind, so agents can be grouped under the task they s
   Fine for now?
 - **A "Plans" filter** for the dashboard was not built (kept small). Wanted?
 
+### Decisions before 6c and 6d (Robin, 2026-10-02)
+1. **`{log_snippet}` teaches `--plan` and `--done`,** one line each.
+2. **`aimb-log.mjs` gets `--token-file`** (#75 part 2), like the doorbell.
+3. **The Cowork connect reminder mentions plans,** via the `log` tool's `plan` field.
+4. **Finished plans:**
+   - They stay EXPANDED for `finished_plan_open_min` (per-host config, default **120**), then collapse out of the
+     default view. They are not deleted; the 7-day window still applies.
+   - A dashboard slider adjusts this live. It is NOT persisted, like the stale slider.
+5. **Gossiped entry counts are per node;** the dashboard sums a subtree itself.
+6. **History** shows "earlier history pruned" when a run began in a file that retention has deleted.
+7. **Plan rules:**
+   - **Abandoned is a NEW state** for plans and plan items (shown greyed). Open plan items of a gone session are
+     **abandoned automatically after 90 days** (`abandoned_plan_days`, per-host config). They can also be abandoned
+     by hand (6d).
+   - **A plan does NOT end** while any item is anything but done. Skipped, failed and idle items keep it open;
+     only all-done ends it. Otherwise it ends only when marked complete or abandoned (6d right-click).
+     **This supersedes 6b's "done or skipped ends a plan".**
+   - On a mixed node, ordinary children's bars win over "N of M".
+   - **Top-level host tags compare with the session's HOME host** (the host it first registered on), not the
+     headline host, so tags don't flip.
+8. Replay reading up to 7 days of files at startup is accepted.
+9. **A "Plans" filter** beside "Active only" shows only plans and their items, across all sessions.
+
+**6d: dashboard right-click actions (the dashboard's first WRITE path):**
+
+| On | Actions |
+|---|---|
+| Plan item | Mark done · Skip · Reopen (back to ☐) · Abandon |
+| Plan | Mark complete · Abandon plan · Reopen |
+| Agent or session that is stale or gone | Mark finished (done or failed) · Dismiss (remove it from the board now) |
+| Any node | Copy path · Copy its `aimb-log` command · Copy entry id |
+| Any node (view only, kept in the browser) | Pin · Hide |
+
+- An action on another host's node is forwarded to that host's gateway, so each host still writes only its own nodes.
+- Every action is logged as an entry ("… by <user> via dashboard (<host>)").
+- Abandon plan, Dismiss and Mark finished ask for confirmation.
+- Editing someone else's text and deleting history are NOT offered; the files stay append-only.
+- Considered for later: messaging a node's session, and "nudging" a stale agent's orchestrator.
+
 ### Build plan
 Each step is its own version.
 1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible. **BUILT (2026-09-30)** — `src/lib/activity.js`
