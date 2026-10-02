@@ -667,6 +667,28 @@ Any node may contain either kind, so agents can be grouped under the task they s
   todos under the target context" — it will want the opposite (each title nested under the target). Keep the rule and
   let `--plan` build its own paths?
 
+### Decisions before 6b (Robin, 2026-10-02)
+1. **A todo is a context with a todo status.**
+   - Contexts gain the states `todo` (☐) and `skipped` (struck through).
+   - A context created with status `todo` is automatically remembered as a plan item. Once ticked it stays a plan
+     item: it shows ☑ (not ✓) and keeps the plan lifetime rules. No caller-visible flag is needed.
+2. **Ticking:** left as is. Any report naming the path may tick a todo.
+3. **Finishing only changes status.**
+   - The "Active only" filter is how finished work is hidden.
+   - `finished_visible_hours` defaults to **168 (7 days)**, matching log retention; still per-host configurable.
+   - Removal under the hard limits (the 128-agent / 4096-node caps, the memory budget) stays as a last-resort
+     safety valve, and **never removes a subtree that still has open todos**. Plans count toward the node budget.
+4. **Carry-forward:** the day-rollover checkpoint restores each plan with its current state (every todo's ☐/☑/skipped).
+   Older history stays in the files and can be paged.
+5. **Children** keep creation order everywhere.
+6. **Multi-host headline:** whichever machine most recently set a headline. Each host's own line stays visible when
+   the row is expanded.
+7. **Batch paths are RELATIVE** to the batch's default path, as with folders. A leading `/` makes an item's path
+   absolute from the session root. So `--path @#70 --plan "A" "B"` simply creates `@#70/@A` and `@#70/@B`. This
+   changes 6a's "item path replaces the default" rule.
+8. **Host tags:** shown only where a node's host differs from its parent's (6a showed one on every row of a
+   multi-host session).
+
 ### Build plan
 Each step is its own version.
 1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible. **BUILT (2026-09-30)** — `src/lib/activity.js`
