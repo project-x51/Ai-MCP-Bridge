@@ -236,16 +236,20 @@ oldRecs.splice(2, 0, J({ v: 1, id: `act_v1_${(old.getTime() + 2500).toString(36)
 const oldDir = path.join(dirs.B, 'activity', 'dash-b')
 fs.mkdirSync(oldDir, { recursive: true }); fs.writeFileSync(path.join(oldDir, `${day}.jsonl`), oldRecs.join('\n') + '\n')
 const pagesB = []
-let cur = null
-for (let k = 0; k < 8; k++) {
-  const r = await d1.req({ log: { session: 'PagerB', agent: 'deep', limit: 12, ...(cur ? { cursor: cur } : {}) } })
+let cur = null, earlier = false, boundaryAt = null
+for (let k = 0; k < 10; k++) {
+  const r = await d1.req({ log: { session: 'PagerB', agent: 'deep', limit: 12, ...(cur ? { cursor: cur } : {}), ...(earlier ? { earlier: true } : {}) } })
   pagesB.push(r); cur = r.log?.next_cursor
+  // v1.64.0 (#70 6c): the pages stop at the start of the CURRENT run (this session was new when the live entries began — the
+  // seeded day file is an EARLIER run): run_start + earlier_cursor, then "show earlier runs" = that cursor with earlier:true
+  if (!cur && !earlier && r.log?.run_start && r.log?.earlier_cursor) { boundaryAt = pagesB.length; cur = r.log.earlier_cursor; earlier = true }
   if (!cur || r.ok === false) break
 }
 const gotB = pagesB.flatMap(p => (p.log?.entries || []).map(e => e.id))
 const wantB = [...idsB].reverse().concat([...oldIds].reverse())
-check(`local paging: ${pagesB.length} pages (≥3) chained by next_cursor, newest first, through the files to an older day`, pagesB.length >= 3 && pagesB.every(p => p.ok) && J(gotB) === J(wantB) && pagesB[pagesB.length - 1]?.log?.next_cursor === null,
-  J(pagesB.map(p => [p.ok, p.code, p.log?.entries?.length, p.log?.from_files, p.log?.next_cursor])))
+check(`local paging: ${pagesB.length} pages (≥3) chained by next_cursor, newest first, through the files to the CURRENT run's start (6c: run_start + earlier_cursor at page ${boundaryAt}), then — earlier:true — on into an older day (an earlier run)`, pagesB.length >= 3 && pagesB.every(p => p.ok) && J(gotB) === J(wantB) && pagesB[pagesB.length - 1]?.log?.next_cursor === null
+  && boundaryAt !== null && J(pagesB.slice(0, boundaryAt).flatMap(p => (p.log?.entries || []).map(e => e.id))) === J([...idsB].reverse()),
+  J(pagesB.map(p => [p.ok, p.code, p.log?.entries?.length, p.log?.from_files, p.log?.next_cursor, p.log?.run_start, p.log?.earlier_cursor])))
 check('local paging: page 1 = the 10 kept in memory (a page never exceeds log_entries_per_agent); page 2 continues in the files with a file cursor', pagesB[0]?.log?.entries?.length === 10 && !pagesB[0]?.log?.from_files
   && pagesB[1]?.log?.from_files === 10 && /^f1\./.test(pagesB[1]?.log?.next_cursor || ''), J(pagesB.slice(0, 2).map(p => [p.log?.entries?.length, p.log?.from_files, p.log?.next_cursor])))
 check('local paging: file entries keep the in-memory shape (rendered, path + rel, state; no details/data)', (pagesB[1]?.log?.entries || []).length > 0 && pagesB[1].log.entries.every(e => e.rendered && e.path === 'deep/@step' && e.rel === '@step' && e.state === 'running' && !('details' in e)), J(pagesB[1]?.log?.entries?.[0]))

@@ -34,6 +34,7 @@ import { createProjectNames } from './lib/project-names.js'
 import { createRetainedSet, envBytes, RETAIN_REPLICATE_MAX_BYTES, RETAIN_GOSSIP_MAX_BYTES } from './lib/retained.js'
 import { createTraces } from './lib/traces.js'
 import * as Act from './lib/activity.js'
+import { logSnippet, logToolHint } from './lib/log-snippet.js'
 import { create as createEgress } from './services/egress.js'
 
 // ---------------------------------------------------------------- config / identity
@@ -66,9 +67,12 @@ function readTokenFile(p) {
     return (m ? m[1] : raw).trim()
   } catch { return '' }
 }
-const TOKEN = process.env.AI_BRIDGE_TOKEN
-  || (process.env.AI_BRIDGE_TOKEN_FILE ? readTokenFile(process.env.AI_BRIDGE_TOKEN_FILE) : '')
-  || CFG.token || ''
+// #75 part 2 (v1.64.0): remember whether the token came from a FILE (and which) — the doorbell / aimb-log commands this bridge
+// hands out then carry `--token-file "<that path>"` (a session's shell doesn't inherit the MCP server's env). Only the PATH
+// is ever handed out, never the token. An env VALUE (AI_BRIDGE_TOKEN) can't be passed on safely, so nothing is added then.
+const TOKEN_FROM_FILE = !process.env.AI_BRIDGE_TOKEN && process.env.AI_BRIDGE_TOKEN_FILE ? readTokenFile(process.env.AI_BRIDGE_TOKEN_FILE) : ''
+const TOKEN = process.env.AI_BRIDGE_TOKEN || TOKEN_FROM_FILE || CFG.token || ''
+const TOKEN_FILE_PATH = TOKEN_FROM_FILE ? path.resolve(process.env.AI_BRIDGE_TOKEN_FILE.startsWith('~') ? path.join(os.homedir(), process.env.AI_BRIDGE_TOKEN_FILE.slice(1)) : process.env.AI_BRIDGE_TOKEN_FILE).replace(/\\/g, '/') : null
 const HOST = '127.0.0.1'                                                  // loopback: same-machine pair-dial + local-gateway connect
 const BIND = process.env.AI_BRIDGE_BIND || CFG.bind || HOST               // interface to LISTEN on (0.0.0.0 / tailnet IP enables cross-host, §7)
 let ADVERTISE = process.env.AI_BRIDGE_ADVERTISE_HOST || CFG.advertiseHost || (BIND && BIND !== '0.0.0.0' ? BIND : HOST)   // address peers DIAL me at (auto-derived from the discovery facet if left as loopback — §7)
@@ -110,7 +114,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.63.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.64.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -349,14 +353,21 @@ function opReminders(holderId, operation, subject) {
 // included) and double-quoted paths (they contain spaces). Unknown {tokens} are left untouched; the STORED reminder
 // is never modified.
 const DOORBELL_PATH = path.join(HERE, 'tools', 'aimb-doorbell.mjs').replace(/\\/g, '/')
+const LOGGER_PATH = path.join(HERE, 'tools', 'aimb-log.mjs').replace(/\\/g, '/')   // v1.64.0 (#70 6c): {log_snippet}
 const NODE_PATH = process.execPath.replace(/\\/g, '/')
 const dq = v => `"${String(v).replace(/"/g, '\\"')}"`
+// #75 part 2: + --token-file "<path>" when this bridge read its token from a file (the path only — never the token)
+const tokenFileArg = () => (TOKEN_FILE_PATH ? ` --token-file ${dq(TOKEN_FILE_PATH)}` : '')
 function doorbellCmd(name, project) {
-  return `${dq(NODE_PATH)} ${dq(DOORBELL_PATH)} --name ${dq(name)}` + (project ? ` --project ${dq(project)}` : '')
+  return `${dq(NODE_PATH)} ${dq(DOORBELL_PATH)} --name ${dq(name)}` + (project ? ` --project ${dq(project)}` : '') + tokenFileArg()
 }
+// v1.64.0 (#70 6c): + {log_snippet} (the paste-ready aimb-log block an orchestrator puts in each agent's prompt; #75's
+// --token-file included) and {log_tool_hint} (the same guidance for the `log` tool, for a session without a shell) —
+// lib/log-snippet.js, built per session only when the text names them
 function expandPlaceholders(text, name, project) {
+  const lazy = { log_snippet: () => logSnippet({ node: NODE_PATH, script: LOGGER_PATH, session: name, project, tokenFile: TOKEN_FILE_PATH }), log_tool_hint: () => logToolHint({ session: name }) }
   const vars = { doorbell_cmd: doorbellCmd(name, project), doorbell_path: DOORBELL_PATH, node: NODE_PATH, name, project: project || '' }
-  return String(text).replace(/\{(\w+)\}/g, (m, k) => Object.prototype.hasOwnProperty.call(vars, k) ? vars[k] : m)
+  return String(text).replace(/\{(\w+)\}/g, (m, k) => Object.prototype.hasOwnProperty.call(vars, k) ? vars[k] : Object.prototype.hasOwnProperty.call(lazy, k) ? lazy[k]() : m)
 }
 // register_self's connect_reminders (#64), placeholder-expanded for the registering session (#67).
 function connectReminders(sp) {
@@ -1026,7 +1037,15 @@ function actBudget() {
 setInterval(() => {   // expiry (finished/gone agents past finished_visible_hours leave the board) + the memory budget
   if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
   const now = actNow()
-  let changed = Act.expire(activity, now).length > 0
+  // v1.64.0 (#70 6c): AUTO-ABANDON — the open plans of a session gone (not on this host's roster, no message) for
+  // abandoned_plan_days become abandoned: entries attributed to the bridge, persisted in order (they end those plans, which
+  // then expire a window later like any ended plan)
+  const ab = Act.autoAbandon(activity, now, { live: s => actPresent.has(s.key) })
+  if (ab.records.length) {
+    log(`activity: abandoned ${ab.abandoned.length} plan node(s)/item(s) of session(s) gone ${ACT_CFG.abandoned_plan_days}+ days: ${[...new Set(ab.abandoned.map(a => a.session))].join(', ')}`)
+    if (PERSIST) (async () => { for (const rec of ab.records) await persistActivity(rec) })().catch(e => log(`activity: auto-abandon append failed: ${(e && e.message) || e}`))
+  }
+  let changed = Act.expire(activity, now).length > 0 || ab.records.length > 0
   for (const k of [...actPresent]) if (!activity.local.has(k)) actPresent.delete(k)
   for (const o of Act.expireRemote(activity, now)) { actOwner.delete(o); changed = true }   // #70 step 4: a host down past the window leaves the board
   if (actBudget()) changed = true
@@ -1098,7 +1117,7 @@ async function activityRead(q, ctx = {}) {
   if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   q = q && typeof q === 'object' ? q : {}
   const now = actNow()
-  const head = { ok: true, host: HOSTNAME, now, stale_after_min: ACT_CFG.stale_after_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
+  const head = { ok: true, host: HOSTNAME, now, stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
     ...(activity.remote.size ? { remote_hosts: actRemoteInfo() } : {}), ...(ACT_TAP && q.tap ? { tap: { ...actTap, carry_forward: actCfLast, cf_day: actCfDay, replay: actReplay && actReplay.stats } } : {}) }
   if (q.entry != null) {   // v1.60.0: a REMOTE entity's entry is fetched from its owner (entry:{id, host}; a remote CURRENT line is found by id)
     const e = q.entry && typeof q.entry === 'object' ? q.entry : { id: q.entry }
@@ -1136,29 +1155,19 @@ async function activityRead(q, ctx = {}) {
 // owner's page, the 32 KB cap for a local one). A page reads at most ACT_SCAN_BYTES of file — a sparse agent in a
 // busy file gets a short (maybe empty) page with a cursor to go on. next_cursor = the file position before the last
 // record taken (or scanned); null once the window is exhausted.
+// v1.64.0 (#70 6c): the file half is lib/activity.js filePage — it STOPS at the node's RUN BOUNDARY (the record that began its
+// current run: run_start + earlier_cursor, "show earlier runs" = cursor:earlier_cursor + earlier:true) and says pruned when the
+// run began in a day file retention already deleted. A first file page starts in the day file of the oldest entry memory
+// served (newer days hold nothing older than it — nor the run's start), not at the newest file's end.
 const ACT_SCAN_BYTES = Number(process.env.AI_BRIDGE_ACTIVITY_SCAN_BYTES) || 8 * 1048576
 async function actLogPage(q, now, opts = {}) {
   const lv = Act.logView(activity, q, now, { ...opts, files: !!PERSIST })
   if (!lv.ok || !lv.files) return lv
   const f = lv.files; delete lv.files
-  const maxB = Math.min(f.maxBytes, ACT_PAGE_BYTES), out = lv.entries
   const fromDay = Act.localDay(now - ACT_CFG.log_retention_days * 86400000)
-  let bytes = f.bytes, scanned = 0, last = null, lastHit = null, stop = null, n = 0
-  for await (const r of persistence.activity.readBackwards(HOSTNAME, { fromDay, before: f.from })) {
-    scanned += r.length + 1; last = r
-    const rec = r.rec
-    if (rec && Act.fileEntryMatches(rec, f.target) && !(f.before && (rec.ts > f.before.ts || f.before.ids.has(rec.id)))) {
-      const x = Act.fileEntryView(rec, now, lv.path), b = Buffer.byteLength(JSON.stringify(x)) + 1
-      if (n >= f.need || (out.length && bytes + b > maxB)) { stop = 'full'; break }
-      out.push(x); bytes += b; n++; lastHit = r
-    }
-    if (scanned >= ACT_SCAN_BYTES) { stop = 'scan'; break }
-  }
-  lv.from_files = n
-  if (stop === 'full') lv.next_cursor = lastHit ? Act.fileCursor(lastHit.day, lastHit.offset) : (out.length ? out[out.length - 1].id : null)
-  else if (stop === 'scan') lv.next_cursor = Act.fileCursor(last.day, last.offset)
-  else lv.next_cursor = null
-  return lv
+  const before = f.from || (f.before ? { day: Act.localDay(f.before.ts), offset: null } : null)
+  return Act.filePage(lv, f, persistence.activity.readBackwards(HOSTNAME, { fromDay, before }),
+    { now, maxBytes: Math.min(f.maxBytes, ACT_PAGE_BYTES), scanBytes: ACT_SCAN_BYTES, earlier: !!(q && q.earlier) })
 }
 // one entry in full: memory first (a current line holds its details/data), else this host's JSONL — by the id index,
 // else a scan of the day file the id's timestamp names (± a day). Checkpoint / repeat lines never match.
@@ -1506,7 +1515,7 @@ function actAnnounceDown(reason) {
 // "Decisions before step 5" 7: registered sessions read with the `activity` tool).
 const actDashSubs = () => [...leaves].filter(ws => ws.kind === 'dashboard' && ws.actSub && ws.readyState === 1)
 function actDashHead() {
-  return { host: HOSTNAME, now: actNow(), stale_after_min: ACT_CFG.stale_after_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
+  return { host: HOSTNAME, now: actNow(), stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
     remote_hosts: activity && activity.remote.size ? actRemoteInfo() : [] }
 }
 const actDashUnits = () => Act.dashUnits(Act.boardView(activity, actNow(), { raw: true }).map(actShow))
@@ -2742,6 +2751,8 @@ const mcp = new Server(
       'as a registered sub-peer (as/secret) carries an `inbox` hint { unread, next_cursor, queue_epoch }: ' +
       'if unread > 0, poll the inbox tool (with for/secret, cursor = next_cursor) to collect new mail — so ' +
       'you rarely need to poll blindly. (queue_epoch change ⇒ reset cursor to 0.) Use list_sessions for the roster. ' +
+      'ACTIVITY BOARD (#70): report what you and your agents are doing with the log tool (text "@~root <status>" sets your ' +
+      'headline; plan:["A","B"] makes a checklist; at milestones only, never secrets); the activity tool reads the mesh-wide board. ' +
       'IMPORTANT for Cowork/Desktop conversations and for subagents: this bridge process may be SHARED — ' +
       'call register_self with a name, a self-invented secret, and your project + user (the project the ' +
       'conversation is for, and the human supervising it) to get your own peer id and private inbox ' +
@@ -3207,7 +3218,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         what: fallback ? 'Not implemented, but you can use the doorbell service as a fallback'
                        : 'Not implemented for your session with no fallback supported',
         fallback: fallback ? 'doorbell' : null,
-        ...(fallback ? { hint: `run this backgrounded: ${cmd} — it blocks on a socket at ~zero cost and wakes you when mail is waiting, or at the top of each hour by default (a chime: display the time to the user, then re-arm; the 00/06/12/18:00 chimes add inbox_check:true — call your inbox tool first even if nothing is waiting, which keeps the bridge loaded); token/port default from the bridge's config.json`, command: cmd } : {}) })
+        ...(fallback ? { hint: `run this backgrounded: ${cmd} — it blocks on a socket at ~zero cost and wakes you when mail is waiting, or at the top of each hour by default (a chime: display the time to the user, then re-arm; the 00/06/12/18:00 chimes add inbox_check:true — call your inbox tool first even if nothing is waiting, which keeps the bridge loaded); ${TOKEN_FILE_PATH ? 'the token comes from --token-file (the file this bridge reads its token from), the port' : 'token/port default'} from the bridge's config.json`, command: cmd } : {}) })
     }
     case 'send_to_peer': {
       if (!String(a.subject || '').trim()) return ok({ ok: false, code: 'subject-required' })   // T7: no lazy callers

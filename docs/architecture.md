@@ -1183,6 +1183,62 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.64.0):** *the agent activity board, step 6c — the agent snippet + the connect reminders, the abandoned state
+  and the new plan-end rule, gossiped entry counts, run-boundary history, the finished-plan window, home-host tags, the
+  Plans filter (#70) — together with #75 part 2 (the token FILE in the commands the bridge hands out).* Decisions of
+  2026-10-02 ("Decisions before 6c and 6d"). Nothing of #70 was deployed. **#75 part 2:** `TOKEN_FILE_PATH` is set only when
+  the token really came from `AI_BRIDGE_TOKEN_FILE` (no `AI_BRIDGE_TOKEN` value): `doorbellCmd` (so `{doorbell_cmd}` and
+  `set_wake`'s `command`) and `{log_snippet}` end with `--token-file "<resolved path, forward slashes>"`; the `set_wake`
+  hint says the token comes from it. A config.json token adds nothing (the scripts read config.json), and neither does an
+  env VALUE (it can't be handed on safely). `tools/aimb-log.mjs` gained `--token-file` with the doorbell's semantics
+  (explicit = authoritative; unreadable / empty → exit 64 `no-token` naming the file + `token_file`). **The snippet**
+  (new pure `lib/log-snippet.js`, expanded lazily at emit time by `expandPlaceholders`): `{log_snippet}` = "Report your
+  status with: `"<node>" "<…/tools/aimb-log.mjs>" --session "<name>" --project "<project>" [--token-file "<path>"] --path
+  <agent-path> "<text>"`" + six lines (@ctx vs @~ctx; milestones + --no-log; --stale-after 60m; --plan "A" "B"; --done;
+  finish @~root --state done / failed + never secrets); `{log_tool_hint}` = the same for the `log` tool (Cowork). The
+  realm block in `config.example.json` keeps the doorbell reminder and adds `client:code` / `client:cowork` activity
+  reminders; since both code reminders share (connect, client, code), a CONFIG default may now carry an optional `id`
+  (`reminders.js` `defKey`; `realm-defaults.js` canonicalises it) — a session's own reminder still overrides every default
+  of its (operation, scope, match); a ≤1.63 host ignores the id. The MCP server instructions name the `log` / `activity`
+  tools. **abandoned:** `ACTIVITY_STATES` + `abandoned` (and `DONE_OR_FAILED` includes it: it finishes an agent, drops an
+  ETA, never shows gone); `apply` allows it only on a plan item or a node holding plan items (else `not-a-plan`). **The
+  plan-END rule (supersedes 6b):** `planOf` → `allDoneAt`; `planEndAt` = when every item became done, or the plan node's
+  own line went done (complete) / abandoned (`PLAN_END`) — skipped / failed / idle / open items and the owner finishing no
+  longer end it. `openPlanKeys` = every item of a NOT-ended plan + its ancestors (whatever the item's state), used by
+  `expire`, `evictionCandidates` (+ `enforceBudget`), `activeHidden` and `planCarryForward`. Rollup: abandoned items stay
+  in M as not done (`abandoned` count); skipped stay out. **Auto-abandon** (`autoAbandon(state, now, {live})`, from the
+  gateway's GC sweep with live = on this host's roster; `abandoned_plan_days` 90, 1–3650, env
+  `AI_BRIDGE_ACTIVITY_ABANDONED_PLAN_DAYS`): a session not live and gone / quiet that long has its open plans abandoned,
+  deepest first — each todo / running / blocked item, then the plan node — through `apply(…, {by:'bridge'})`, a SYSTEM
+  message: `by` on the small entry and the record, no activity touched (last_activity, stale_after, gone, the owner's
+  implicit), and the replay skips activity for `by` records too; the records are persisted in order. **Entry counts:**
+  gossip nodes carry `log_n` (own entries: log + dropped; a remote node re-gossips its count) and `log_partial` (the new
+  `node.partial`: the replay never saw the record that began the run); `boardView`'s `log` = `{entries, dropped, total,
+  partial?}` / `{remote, total, partial?}`. **Run boundary:** the day-file half of a log page moved into the library
+  (`filePage(lv, files, records, {now, maxBytes, scanBytes, earlier})`; the bridge's `actLogPage` passes the facet's
+  `readBackwards`, starting at the day file of the oldest entry memory served): it stops at the record that began the
+  node's CURRENT run (`fileRunStart`: a record of the session at or under the node with `new_from ≤ depth`) → `run_start`
+  + (when a bounded peek finds an older entry of the node) `earlier_cursor`; `earlier:true` (the `log` query field) pages
+  past boundaries; files exhausted without the start for a partial node → `pruned`. Local and remote (the owner pages).
+  **Home host:** every entry / cp / cf record carries `s0` = the session's created_at (the replay takes the min, so it
+  survives the window); `boardView` gives a multi-host group `home` = the earliest-created root, ties by lower-cased host
+  name. **Board:** plan nodes carry `plan_node` + `plan_end_at`; heads (dashboards, the tool) carry
+  `finished_plan_open_min` (120, 0–10080, `AI_BRIDGE_ACTIVITY_FINISHED_PLAN_OPEN_MIN`). **Formats:** v4 records + slices
+  (v2 / v3 records still read; hubs declare `activity_gossip:4`; a v3 slice is refused `bad-version`). **Dashboard:** the
+  Activity section opens by default; `ACT.open` is tri-state (undefined = `planOpenDefault`: an open plan, or one ended less
+  than the window ago, renders expanded; Collapse all closes for good); a "plans open" slider (live, not persisted); a "plans"
+  filter (`buildTree({plansOnly})`: plan items, plan nodes, their ancestors; persisted); ROLLUPS FOLLOW THE FILTERS (`rollKids`
+  ports the library's strategies; `t.fbar` / per-host `fbars` for the session row — 6b's session rollup counted an ended
+  plan Active only hid); top-level host tags vs `home`; pills right after the name so the bar column aligns; abandoned
+  styling + glyphs (agent, context, item) + legend; "N entries" / "N+" from `subtreeLog`; the run-boundary rows ("start of
+  this run · show earlier runs…", "— earlier runs —", "earlier history pruned"); `by` on entries; 6d hooks — every row
+  carries `data-kind` / `data-host` / `data-path` / `data-session` / `data-project` / `data-user` (+ nkind, plan flags,
+  home, hosts, an entry's id) and `AimbActView.rowInfo`. **Tests:** `test_activity_unit` 588 → **630**;
+  `test_dashboard_activity` 105 → **132**; new `test_activity_6c_live` **31**; `test_log_live` 75, `test_activity_gossip_live`
+  51, `test_activity_dashboard_live` 43, `test_activity_carry_live` 11 updated for format v4 and the new rules (6b fixtures
+  that relied on "skipped ends a plan" / "a finished owner ends it" now use all-done plans / failed agents). Against the 1.63
+  library / page / bridge: `test_activity_unit` 50 FAIL (crashed sections count once), `test_dashboard_activity` 10 (the 6c
+  block crashes: no `planOpenDefault`), `test_activity_6c_live` 27 of 31. Full suite **2137 passed, 0 failed** (53 files, typecheck clean, first run; no #74 flakes).
 - **Built (v1.63.0):** *the agent activity board, step 6b — TODOS AND PLANS, their lifetime and the day-rollover
   carry-forward, plus three agreed 6a adjustments (#70).* Decisions of 2026-10-02 ("Decisions before 6b"). Nothing of #70
   was deployed. **States:** `ACTIVITY_STATES` gains `todo` (☐) and `skipped` (struck through) — context states only

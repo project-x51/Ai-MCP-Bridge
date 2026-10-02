@@ -42,9 +42,14 @@
 //   NOT resent, so a logged entry is never duplicated), and a line that waits longer than AIMB_LOG_LINE_WAIT_MS (default
 //   10000) for a link is reported failed (no-bridge). A fatal hello error (bad token, bad ident, an old gateway) exits 4.
 //
+// v1.64.0 (#70 6c / #75 part 2): --token-file <path> — the realm token from a FILE (a bare token or a KEY=VALUE env file, `~`
+// expanded), exactly as the doorbell: an explicit --token-file is AUTHORITATIVE (an unreadable or empty one is exit 64 naming
+// the file — never a silent fallback to another source). The connect reminder's {log_snippet} adds it when the bridge itself
+// read its token from a file.
+//
 // Identity: --session and --project are required; --user defaults to AI_BRIDGE_USER, else the OS login user
 // (os.userInfo().username); the realm is AI_BRIDGE_REALM, else config.json `realm`, else "default" (as the bridge).
-// Token / port: AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE, as the bridge #46) else config.json's `token`; --ws-port /
+// Token / port: --token-file (#75), else AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE, as the bridge #46) else config.json's `token`; --ws-port /
 // --url / AI_BRIDGE_WS_PORT else config.json's `wsPort` (12318). config.json is found relative to THIS SCRIPT (../config.json),
 // or AI_BRIDGE_CONFIG names it (tests). `--token` is REFUSED (exit 64): argv is world-readable in the process list and
 // the realm token is also the body-encryption key — use the env var or the config file. The token is never printed.
@@ -64,12 +69,12 @@ import WebSocket from 'ws'
 import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS } from '../lib/activity.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] ["<text>"] [--plan "A" "B" …]\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
+const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] ["<text>"] [--plan "A" "B" …]\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
 const LOG_FIELDS = MESSAGE_FIELDS   // v1.62.0: + path
-const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url'])
+const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url', 'token-file'])   // v1.64.0: + token-file (#75)
 const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done'])   // v1.63.0: + done (= --state done)
-const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'stream', 'ws-port', 'url'])
-const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'batch', 'ws-port', 'url'])
+const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'stream', 'ws-port', 'url', 'token-file'])
+const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'batch', 'ws-port', 'url', 'token-file'])
 const num = (v, d) => (Number(v) > 0 ? Number(v) : d)
 const TIMEOUT_MS = num(process.env.AIMB_LOG_TIMEOUT_MS, 8000)          // one-shot: connect + hello + reply; stream: hello + each reply
 const LINE_WAIT_MS = num(process.env.AIMB_LOG_LINE_WAIT_MS, 10000)     // stream: how long a line may wait for a (re)connected link
@@ -96,7 +101,7 @@ const flags = {}, words = []
     if (!a.startsWith('--') || a.length === 2) { words.push(a); continue }
     const eq = a.indexOf('=')
     const name = (eq > 0 ? a.slice(2, eq) : a.slice(2)).toLowerCase()
-    if (name === 'token') { err = ['token-in-argv', '--token is refused: a token on the command line is visible in the process list. Set AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE), or run beside the bridge\'s config.json'] ; break }
+    if (name === 'token') { err = ['token-in-argv', '--token is refused: a token on the command line is visible in the process list. Pass --token-file <path>, set AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE), or let it read the bridge\'s config.json'] ; break }
     if (name === 'plan') {   // v1.63.0 (#70 6b): every following argument up to the next --flag (or `--`) is a plan name
       const names = eq > 0 ? [a.slice(eq + 1)] : []
       if (eq < 0) while (i + 1 < argv.length && !argv[i + 1].startsWith('--')) names.push(argv[++i])
@@ -126,7 +131,10 @@ const CONFIG_FILE = process.env.AI_BRIDGE_CONFIG
   : path.join(HERE, '..', 'config.json')
 let CFG = {}
 try { CFG = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) || {} } catch { }
-const TOKEN = process.env.AI_BRIDGE_TOKEN || (process.env.AI_BRIDGE_TOKEN_FILE ? readTokenFile(process.env.AI_BRIDGE_TOKEN_FILE) : '') || CFG.token || ''
+// v1.64.0 (#75): an EXPLICIT --token-file is the only source when given (unreadable / empty → exit 64 naming the file)
+const TOKEN_FILE_ARG = typeof flags['token-file'] === 'string' ? flags['token-file'] : null
+const TOKEN = TOKEN_FILE_ARG != null ? readTokenFile(TOKEN_FILE_ARG)
+  : (process.env.AI_BRIDGE_TOKEN || (process.env.AI_BRIDGE_TOKEN_FILE ? readTokenFile(process.env.AI_BRIDGE_TOKEN_FILE) : '') || CFG.token || '')
 const WSPORT = flags['ws-port'] || process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 12318
 const URL_ = flags.url || `ws://127.0.0.1:${WSPORT}`
 const REALM = process.env.AI_BRIDGE_REALM || CFG.realm || 'default'
@@ -152,7 +160,8 @@ if (!exiting) {
   if (!ident.session) usage('usage', '--session <name> is required')
   else if (!ident.project) usage('usage', '--project <P> is required')
   else if (!ident.user) usage('usage', 'no user: pass --user (the OS login user could not be read)')
-  else if (!TOKEN) usage('no-token', 'no realm token: set AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE), or run the script from the bridge\'s src/tools (it reads ../config.json)')
+  else if (!TOKEN && TOKEN_FILE_ARG != null) usage('no-token', `no realm token: --token-file ${TOKEN_FILE_ARG} could not be read (or is empty)`, { token_file: TOKEN_FILE_ARG })
+  else if (!TOKEN) usage('no-token', `no realm token: pass --token-file <path> (the file the bridge reads with AI_BRIDGE_TOKEN_FILE), set AI_BRIDGE_TOKEN_FILE / AI_BRIDGE_TOKEN, or put it in ${CONFIG_FILE} (read relative to this script, not the working directory)`)
   else if (STREAM && BATCH) usage('usage', '--stream and --batch are exclusive (a stream line may itself be an array)')
   else if (BATCH) {
     const extra = Object.keys(flags).filter(k => !BATCH_FLAGS.has(k))

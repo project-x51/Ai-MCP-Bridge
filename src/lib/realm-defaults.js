@@ -27,7 +27,7 @@ function toMs(v) {
 function canonList(d) {
   const arr = typeof d === 'string' ? [{ operation: 'receive', scope: 'all', match: null, behavior: d }] : d
   return normDefaults(arr).slice(0, MAX_ENTRIES)
-    .map(x => ({ operation: x.operation, scope: x.scope, match: x.match, behavior: x.behavior }))
+    .map(x => ({ operation: x.operation, scope: x.scope, match: x.match, ...(x.id ? { id: x.id } : {}), behavior: x.behavior }))   // v1.64.0: + the optional id (#70 6c)
     .sort((a, b) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); return ja < jb ? -1 : ja > jb ? 1 : 0 })
 }
 

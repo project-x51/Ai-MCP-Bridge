@@ -134,7 +134,7 @@ check('log:false: NOT in the in-memory log; the logged entry renders against ITS
 check('log:false: NOT written to the JSONL as an entry', records().filter(r => r.id).length === nEntries)
 
 // ---- checkpoints: unchanged-but-alive → ONE cp + ONE rep line whose n grows; a change → a new cp + a fresh rep line
-const tilesCps = rs => rs.filter(r => r.kind === 'cp' && r.session === 'Ferret' && r.path === 'worker/@tiles' && r.v === 3)
+const tilesCps = rs => rs.filter(r => r.kind === 'cp' && r.session === 'Ferret' && r.path === 'worker/@tiles' && r.v === 4)
 const reps = rs => rs.filter(r => Array.isArray(r.rep))
 const repsBefore = reps(records()).length
 for (const t0 = Date.now(); Date.now() - t0 < 3200;) { await call(F, 'log', { as: 'Ferret', secret: 'fe', agent: 'worker', context: '@tiles', progress: '40/100 tiles', log: false }); await sleep(120) }
@@ -314,8 +314,8 @@ check('6b board: plan items (plan_item, plan_ix, their own states) + the "N of M
   && nodeOf(pb, 'Bridget', '@#71/@Docs')?.plan_ix === 1 && (b => b && b.todos && b.done === 1 && b.total === 4 && b.skipped === 1)(nodeOf(pb, 'Bridget', '@#71')?.progress) && nodeOf(pb, 'Bridget', '@#72/@a')?.state === 'done', J(nodeOf(pb, 'Bridget', '@#71')))
 check('6b stale: a plan item never goes stale (quiet past its stale_after: still running)', nodeOf(pb, 'Bridget', '@#73/@slow')?.state === 'running' && !nodeOf(pb, 'Bridget', '@#73/@slow')?.stale_at, J(nodeOf(pb, 'Bridget', '@#73/@slow')))
 const prec = records().filter(r => r.session === 'Bridget' && String(r.path).startsWith('@#71/'))
-check('6b JSONL: v3 entries — one ☐ creation record per item (plan_item, plan_ix) and each tick, in order', prec.filter(r => r.state === 'todo' && r.plan_item).map(r => r.path).join() === '@#71/@Spec,@#71/@Build,@#71/@Test,@#71/@Ship,@#71/@Docs'
-  && prec.find(r => r.id === pt1.id)?.plan_item === true && prec.find(r => r.id === pt1.id)?.text === 'Spec' && prec.every(r => r.v === 3), J(prec.map(r => [r.path, r.state, r.plan_ix])))
+check('6b JSONL: v4 entries — one ☐ creation record per item (plan_item, plan_ix) and each tick, in order', prec.filter(r => r.state === 'todo' && r.plan_item).map(r => r.path).join() === '@#71/@Spec,@#71/@Build,@#71/@Test,@#71/@Ship,@#71/@Docs'
+  && prec.find(r => r.id === pt1.id)?.plan_item === true && prec.find(r => r.id === pt1.id)?.text === 'Spec' && prec.every(r => r.v === 4), J(prec.map(r => [r.path, r.state, r.plan_ix])))
 const beforePlanKill = { b: J(['Spec', 'Build', 'Test', 'Ship', 'Docs'].map(n => [nodeOf(pb, 'Bridget', `@#71/@${n}`)?.state, nodeOf(pb, 'Bridget', `@#71/@${n}`)?.created_at, nodeOf(pb, 'Bridget', `@#71/@${n}`)?.plan_ix])) }
 
 // ---- restart replay #1: kill the GATEWAY → the follower takes over and replays the host's files

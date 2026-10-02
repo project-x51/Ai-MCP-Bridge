@@ -95,6 +95,19 @@
 // of every long-lived node (open plan items + their ancestors, and every node whose state would otherwise fall out of the
 // replay window) into the new day's file, so a weeks-old open plan is rebuilt from the window alone. Records + slices are
 // FORMAT v3 (v2 JSONL records are still read — v3 only adds; a v2 slice is refused: a 1.62 hub would misread todo states).
+//
+// 6c (v1.64.0, #70 "Decisions before 6c and 6d"): an `abandoned` state for PLANS and PLAN ITEMS only (a node holding plan
+// items, or an item — else 'not-a-plan'); a plan now ENDS only when every item is done, or when its node is set done
+// (complete) or abandoned — skipped / failed / idle / todo / running / blocked items all keep it open (supersedes 6b's "done
+// or skipped ends a plan" and "its owner finishing ends it"); every node of an OPEN plan (its items + their ancestors) never
+// expires and is never evicted. AUTO-ABANDON (autoAbandon): the open items of a session that has been gone (not live, no
+// message) for abandoned_plan_days, then the plan node itself, become `abandoned` — entries attributed to the bridge
+// (`by:"bridge"`, a SYSTEM message: no activity, no un-gone). Each node's own log COUNT rides the gossip (`log_n`, + the
+// `log_partial` flag when its run began before the replay window, so the count understates); every record carries `s0` (the
+// session's created_at) so the HOME host (the earliest-created root across hosts, ties by host name) is stable; the board
+// carries `home` and each plan node's `plan_end_at`; RUN-BOUNDARY history (filePage): a node's day-file paging stops at the
+// record that began its CURRENT run (new_from at or above it) unless asked for earlier runs, and says `pruned` when the run
+// began in a file retention already deleted. Records + slices are FORMAT v4 (v2 / v3 records still read).
 import { lc, projKey } from './keys.js'
 
 /** The locked #70 limits (6a: depth/nodes replace "agent path depth 3" + "32 contexts per agent"). text/context in code
@@ -116,12 +129,13 @@ export const ACTIVITY_LIMITS = Object.freeze({
   planItems: 64,                    // names in one plan:[…] (6b; this module's choice — a plan also counts toward nodesPerSession)
 })
 /** Record / slice format. 6a = v2 (a v1 record of 1.58–1.61 is skipped); 6b = v3 (todo/skipped states, plan items, `cf`
- * carry-forward records). A v3 bridge still READS v2 JSONL records (v3 only adds) but refuses a v2 gossip slice. */
-export const ACTIVITY_FORMAT = 3
-const RECORD_FORMATS = new Set([2, 3])
+ * carry-forward records); 6c = v4 (the abandoned state, `by`, `s0`, gossiped log counts). A v4 bridge still READS v2 / v3
+ * JSONL records (each format only adds) but refuses an older gossip slice (a 1.63 hub would misread `abandoned`). */
+export const ACTIVITY_FORMAT = 4
+const RECORD_FORMATS = new Set([2, 3, 4])
 /** The reportable states. `stale` and `gone` are derived (effectiveState), never reported. 6b: + todo / skipped (contexts only;
- * skipped only on a plan item). */
-export const ACTIVITY_STATES = Object.freeze(['running', 'blocked', 'failed', 'done', 'idle', 'todo', 'skipped'])
+ * skipped only on a plan item). 6c: + abandoned (plans and plan items only — 'not-a-plan' elsewhere). */
+export const ACTIVITY_STATES = Object.freeze(['running', 'blocked', 'failed', 'done', 'idle', 'todo', 'skipped', 'abandoned'])
 /** The per-host defaults (`activity` config block). */
 export const ACTIVITY_DEFAULTS = Object.freeze({
   log_retention_days: 7,            // daily JSONL retention
@@ -130,10 +144,12 @@ export const ACTIVITY_DEFAULTS = Object.freeze({
   finished_visible_hours: 168,      // a finished (or gone) agent stays visible/gossiped this long; also the replay window (6b: 7 days, was 24)
   memory_budget_mb: 64,             // enforceBudget's default budget
   progress_checkpoint_sec: 60,      // cp/rep cadence for log:false activity (0 = off; else 10..3600)
+  abandoned_plan_days: 90,          // 6c: a gone session's open plans are abandoned (by the bridge) after this long (1..3650)
+  finished_plan_open_min: 120,      // 6c: an ENDED plan stays expanded on dashboards this long (0..10080; sent with the board)
   enabled: true,
 })
 /** @typedef {Readonly<{ log_retention_days:number, log_entries_per_agent:number, stale_after_min:number, finished_visible_hours:number,
- *   memory_budget_mb:number, progress_checkpoint_sec:number, enabled:boolean }>} ActivityConfig */
+ *   memory_budget_mb:number, progress_checkpoint_sec:number, abandoned_plan_days:number, finished_plan_open_min:number, enabled:boolean }>} ActivityConfig */
 /** config key -> env override name (AI_BRIDGE_ACTIVITY_<KEY>). */
 export const ACTIVITY_ENV = Object.freeze(Object.fromEntries(Object.keys(ACTIVITY_DEFAULTS).map(k => [k, 'AI_BRIDGE_ACTIVITY_' + k.toUpperCase()])))
 /** The message fields of a `log` call / batch item (6a: + path; 6b: + plan). */
@@ -148,14 +164,18 @@ const CONFIG_RANGES = {
   finished_visible_hours: [0, 720],
   memory_budget_mb: [8, 4096],
   progress_checkpoint_sec: [10, 3600],   // plus 0 = off (resolveConfig special-cases it)
+  abandoned_plan_days: [1, 3650],        // 6c
+  finished_plan_open_min: [0, 10080],    // 6c: 0 = an ended plan collapses at once; ≤ 7 days
 }
-const MIN = 60000, HOUR = 3600000, MB = 1024 * 1024
+const MIN = 60000, HOUR = 3600000, DAY = 86400000, MB = 1024 * 1024
 const MAX_SESSIONS_PER_ORIGIN = 1024   // bounds a junk/huge gossiped slice (a sane host never gets near it)
-const DONE_OR_FAILED = new Set(['done', 'failed'])
+// 6c: the FINAL states — an agent's line in one of them finishes it, an ETA is dropped, gone is never shown (was done/failed;
+// + abandoned, valid only on plans and plan items)
+const DONE_OR_FAILED = new Set(['done', 'failed', 'abandoned'])
 const LIVE = new Set(['running', 'blocked'])   // the only states that can go stale
 const PLAN_STATES = new Set(['todo', 'skipped'])            // 6b: contexts only (skipped: plan items only)
-const OPEN_ITEM = new Set(['todo', 'running', 'blocked'])   // 6b: an OPEN plan item — never expires, never evicted
-const RESOLVED_ITEM = new Set(['done', 'skipped'])          // 6b: what closes a plan (failed / idle items don't — the owner finishing does)
+const OPEN_ITEM = new Set(['todo', 'running', 'blocked'])   // 6b: an OPEN plan item (6c: what auto-abandon abandons)
+const PLAN_END = new Set(['done', 'abandoned'])             // 6c: a plan NODE set to one of these ends its plan (complete / abandoned)
 
 // ---------------------------------------------------------------------------------------------------------------
 // small helpers
@@ -709,7 +729,7 @@ export function splitBatch(input) {
  *   created_at:number, last_activity:number, stale_after_ms:number|null, current:ActivityLine|null,
  *   progress:ActivityProgress|null, eta_at:number|null, finished_at:number|null, gone_at:number|null, implicit:boolean,
  *   log:any[], log_dropped:number, log_floor:number, persisted?:boolean, cp_dirty?:number, plan?:boolean, plan_ix?:number|null,
- *   pt?:{ a:number, l:number, p:number, e:number } }} ActivityNode
+ *   pt?:{ a:number, l:number, p:number, e:number }, partial?:boolean, log_n?:number }} ActivityNode
  * @typedef {{ key:string, origin:string, realm?:string, session:string, project:string, user:string|null,
  *   host:string|null, created_at:number, last_activity:number, gone_at:number|null, nodes:Map<string, ActivityNode>,
  *   kids:Map<string, Set<string>>, nAgents:number, bell?:boolean }} ActivitySession
@@ -735,13 +755,16 @@ export function createActivity({ config, origin = 'local', idPrefix = 'act_' } =
 // `pt` (6b): when a record last PERSISTED the node's activity / line / bar / ETA (0 = never) — the carry-forward's test.
 // `plan` / `plan_ix` (6b): a plan item (remembered for good) and its position in the plan call that made it (a tie-break
 // for items created in the same millisecond: children keep CREATION order — created_at, then plan_ix, then key).
+// `partial` (6c): the node's current RUN began before the replay window (the replay never saw the record that began it), so
+// its in-memory log count understates and its run start may lie in a day file retention already deleted. `log_n` (6c): a
+// REMOTE node's gossiped own-entry count (a local node counts its log + log_dropped).
 const CP_CUR = 1, CP_PROG = 2, CP_ETA = 4
 /** @returns {ActivityNode} */
 function newNode(path, segs, now) {
   const last = segs.length ? segs[segs.length - 1] : null, key = pathKey(path)
   return { key, path, name: last ? last.name : '', kind: last ? last.kind : 'agent', parent: parentKeyOf(key), depth: segs.length, created_at: now, last_activity: now,
     stale_after_ms: null, current: null, progress: null, eta_at: null, finished_at: null, gone_at: null, implicit: true, log: [], log_dropped: 0, log_floor: 0, persisted: false, cp_dirty: 0,
-    plan: false, plan_ix: null, pt: { a: 0, l: 0, p: 0, e: 0 } }
+    plan: false, plan_ix: null, pt: { a: 0, l: 0, p: 0, e: 0 }, partial: false }
 }
 /** A new session record with its root node. */
 function newSession(key, origin, f, now) {
@@ -779,38 +802,46 @@ function ownerOf(sess, node) {
   while (n && n.kind !== 'agent') n = sess.nodes.get(n.parent)
   return n || sess.nodes.get('')
 }
-/** 6b: an OPEN plan item (todo / running / blocked) — never expires, never evicted. */
-const isOpenItem = n => !!n && !!n.plan && OPEN_ITEM.has(stateOf(n))
-/** 6b: every key that is, or is an ancestor of, an OPEN plan item — a subtree rooted at k holds one iff k is in the set. */
+/**
+ * 6c (#70 "Decisions before 6c and 6d" 7): every key that is an item of an OPEN plan (planEndAt null), or an ancestor of
+ * one — a subtree rooted at k holds part of an open plan iff k is in the set. Such nodes never expire and are never evicted
+ * (6b protected only todo / running / blocked items; now every item of a plan that has not ended, whatever its state).
+ */
 function openPlanKeys(sess) {
   const out = new Set()
-  for (const n of sess.nodes.values()) if (isOpenItem(n)) for (let k = n.key; k != null && !out.has(k); k = parentKeyOf(k)) out.add(k)
+  for (const n of sess.nodes.values()) {
+    const p = planOf(sess, n)
+    if (!p || planEndAt(sess, n, p) != null) continue
+    for (const it of p.items) for (let k = it.key; k != null && !out.has(k); k = parentKeyOf(k)) out.add(k)
+  }
   return out
 }
 /**
- * 6b: a node's PLAN = its plan-item children (null when it has none): { items, open, resolvedAt } — resolvedAt = when the
- * last item became done / skipped, once EVERY item is done or skipped (else null).
+ * A node's PLAN = its plan-item children (null when it has none): { items, open, allDoneAt } — open = how many are todo /
+ * running / blocked; allDoneAt (6c) = when the last item became done, once EVERY item is done (else null).
  */
 function planOf(sess, node) {
   const items = childrenOf(sess, node).filter(c => c.plan)
   if (!items.length) return null
-  let open = 0, resolvedAt = 0, all = true
+  let open = 0, doneAt = 0, all = true
   for (const it of items) {
     const s = stateOf(it)
     if (OPEN_ITEM.has(s)) open++
-    if (RESOLVED_ITEM.has(s)) resolvedAt = Math.max(resolvedAt, it.current ? it.current.ts : 0); else all = false
+    if (s === 'done') doneAt = Math.max(doneAt, it.current ? it.current.ts : 0); else all = false
   }
-  return { items, open, resolvedAt: all ? resolvedAt : null }
+  return { items, open, allDoneAt: all ? doneAt : null }
 }
 /**
- * 6b: when a plan ENDED (it expires finished_visible_hours later): its last item became done / skipped, or its owner agent
- * (the plan node itself when it is an agent, else its nearest agent / the session) finished — whichever came first. null
- * while any item is OPEN: an open plan never ends.
+ * 6c: when a plan ENDED (it expires finished_visible_hours later), or null while it is OPEN. A plan ends only when EVERY item
+ * is done (the last one's time), or when its node is set done (complete) or abandoned (that line's time) — whichever came
+ * first. Skipped, failed, idle, todo, running and blocked items all keep it open, and its owner finishing no longer ends it
+ * (this supersedes 6b's "done or skipped ends a plan").
  */
 function planEndAt(sess, node, p) {
-  if (!p || p.open) return null
-  const owner = node.kind === 'agent' ? node : ownerOf(sess, node), fin = owner && owner.finished_at ? owner.finished_at : null
-  const ends = [p.resolvedAt, fin].filter(x => x != null)
+  if (!p) return null
+  const ends = []
+  if (p.allDoneAt != null) ends.push(p.allDoneAt)
+  if (node.current && PLAN_END.has(node.current.state)) ends.push(node.current.ts || 0)
   return ends.length ? Math.min(...ends) : null
 }
 /**
@@ -822,19 +853,19 @@ function planRemoval(sess, node, p) {
   return p.items.map(i => i.key)
 }
 /**
- * The subtrees that may be EVICTED for a message to `targetKey` (the hard limits), oldest first: finished agents (6a) and —
- * 6b — ENDED plans whose every item is done / skipped (planRemoval). Never one holding an OPEN plan item (#70 "Decisions
- * before 6b" 3), never one the target is at or under (nor a plan whose node the target is at or under, except the
- * session's own). Each: { at, key, roots:[subtree root keys] }.
+ * The subtrees that may be EVICTED for a message to `targetKey` (the hard limits), oldest first: finished agents (6a) and
+ * ENDED plans (6c: planEndAt — all done, or the node marked complete / abandoned; planRemoval). Never one holding part of an
+ * OPEN plan (#70 "Decisions before 6b" 3), never one the target is at or under (nor a plan whose node the target is at or
+ * under, except the session's own). Each: { at, key, roots:[subtree root keys] }.
  */
 function evictionCandidates(sess, targetKey) {
   const open = openPlanKeys(sess), out = []
   for (const n of sess.nodes.values()) {
     if (n.key && n.kind === 'agent' && n.finished_at && !under(targetKey, n.key) && !open.has(n.key)) out.push({ at: n.finished_at, key: n.key, roots: [n.key] })
-    const p = planOf(sess, n)
-    if (p && p.resolvedAt != null && !p.items.some(i => open.has(i.key)) && !(n.key && under(targetKey, n.key))) {
+    const p = planOf(sess, n), end = p ? planEndAt(sess, n, p) : null
+    if (end != null && !p.items.some(i => open.has(i.key)) && !(n.key && under(targetKey, n.key))) {
       const roots = planRemoval(sess, n, p)
-      if (!roots.some(r => under(targetKey, r))) out.push({ at: p.resolvedAt, key: n.key, roots })
+      if (!roots.some(r => under(targetKey, r))) out.push({ at: end, key: n.key, roots })
     }
   }
   return out.sort((a, b) => a.at - b.at || cmp(a.key, b.key))
@@ -843,7 +874,7 @@ function evictionCandidates(sess, targetKey) {
 function smallOf(e) {
   const s = compact({ id: e.id, ts: e.ts, current: !!e.current, text: e.text, state: e.state,
     progress: e.progress || undefined, eta_at: e.eta_at || undefined, stale_after_ms: e.stale_after_ms || undefined,
-    has_details: e.has_details ? true : undefined, has_data: e.has_data ? true : undefined })
+    has_details: e.has_details ? true : undefined, has_data: e.has_data ? true : undefined, by: typeof e.by === 'string' && e.by ? e.by.slice(0, 80) : undefined })   // 6c: by = who wrote it when not the session (the bridge)
   if (e.progress === null) s.progress = null   // an explicit "none" is recorded (the replay must see the clear)
   if (e.eta_at === null) s.eta_at = null
   return s
@@ -895,15 +926,21 @@ const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, d
  *   `plan` then creates its items under the target, in order, each with its own LOGGED entry (a ☐ line whose text is its
  *   name), whatever `log` says — so a plan always reaches the files. Re-plan: an existing item is kept untouched; an
  *   existing ordinary context with no line of its own is ADOPTED as an item; one with a line is left alone (plan_item:false).
+ * - 6c: `abandoned` only on a plan item or a plan NODE (one holding plan items — an agent or the session too, which it then
+ *   finishes like done / failed); anything else → 'not-a-plan'. opts.by (e.g. "bridge") makes it a SYSTEM message: it is
+ *   attributed (`by` on the entry and the record) and touches NO activity — no last_activity, stale_after, gone or implicit
+ *   change beyond its target — so an auto-abandon never makes a gone session look alive.
+ * Every record carries `s0` = the session's created_at (6c: the replay keeps it exact, so the HOME host is stable).
  * @param {ActivityState} state
  * @param {{ session:string, project?:string, user?:string|null, realm?:string, host?:string }} ident  the reporting session
  * @param {ActivityMsg} msg  parseMessage(...).msg
  * @param {number} now
+ * @param {{ by?: string }} [opts]
  * @returns {ActivityResult} { ok:true, id, ts, logged, entry, records, current, state, stale_at, path, agent, context,
  *   evicted:string[], warnings:string[], plan? } or { ok:false, code, what } — `records` = every JSONL record this call
  *   wrote, in order (the target's entry first, then each new plan item's)
  */
-export function apply(state, ident, msg, now) {
+export function apply(state, ident, msg, now, opts = {}) {
   if (!state || !(state.local instanceof Map)) return bad('bad-state-object', 'pass a createActivity() state')
   if (!state.config.enabled) return bad('activity-disabled', 'the activity board is disabled on this host (activity.enabled)')
   if (!Number.isFinite(now)) return bad('bad-now', 'now must be a ms epoch')
@@ -921,6 +958,9 @@ export function apply(state, ident, msg, now) {
     if (!(tgt0 && tgt0.plan) && (msg.state === 'skipped' || !msg.current || (tgt0 && tgt0.current)))
       return bad('not-a-plan-item', `"${msg.path}" is ${tgt0 && tgt0.current ? 'an ordinary context (it already has a line of its own)' : 'not a plan item'} — ${msg.state} is for plan items: create them with plan:[…] (or a FIRST @~ line with state todo)`)
   }
+  if (!planOnly && msg.state === 'abandoned' && !(tgt0 && (tgt0.plan || childrenOf(sess, tgt0).some(c => c.plan))))   // 6c: plans + plan items only
+    return bad('not-a-plan', `"${msg.path || '@root'}" is neither a plan item nor a plan (a node holding plan items) — abandoned is only for plans and their items`)
+  const by = opts && typeof opts.by === 'string' && opts.by.trim() ? opts.by.trim().slice(0, 80) : null   // 6c: a SYSTEM message (the bridge's)
   // 6b: the plan's items under the target: new (create), an ordinary context with no line of its own (adopt), an item (keep)
   const items = []
   for (const name of msg.plan || []) {
@@ -965,6 +1005,7 @@ export function apply(state, ident, msg, now) {
   const tgt = chain[chain.length - 1], oi = ownerIndex(segs), owner = chain[oi]
   const cap = state.config.log_entries_per_agent
   const touch = span => {   // a message's activity: target..owner (and the session header); stale_after until each node's next message
+    if (by) return           // 6c: a system message (auto-abandon) is nobody's activity
     sess.last_activity = Math.max(sess.last_activity, now)   // max(): a report timed earlier than one already applied never moves activity back
     for (const n of span) { n.last_activity = Math.max(n.last_activity, now); n.stale_after_ms = msg.stale_after_ms || null }
     sess.gone_at = null; owner.gone_at = null
@@ -972,7 +1013,7 @@ export function apply(state, ident, msg, now) {
   const res = { ok: true, id: null, ts: now, logged: false, entry: null, records: [], current: false, state: stateOf(tgt), stale_at: null, path: tgt.path,
     agent: oi ? owner.path : null, context: tgt.kind === 'context' ? tgt.name : 'root', evicted, warnings: msg.warnings || [] }
   if (!planOnly) {   // ---- the message to the target itself
-    tgt.implicit = false; owner.implicit = false
+    tgt.implicit = false; if (!by) owner.implicit = false
     const before = { cur: tgt.current, prog: JSON.stringify(tgt.progress), eta: tgt.eta_at }
     const c0 = tgt.current
     let entryState = msg.state || (c0 ? c0.state : null) || 'running'
@@ -1005,14 +1046,14 @@ export function apply(state, ident, msg, now) {
     } else {
       const small = smallOf({ id, ts: now, current: msg.current, text, state: entryState,
         progress: 'progress' in msg ? msg.progress : undefined, eta_at: 'eta_at' in msg ? msg.eta_at : undefined, stale_after_ms: msg.stale_after_ms,
-        has_details: !!msg.details, has_data: msg.data != null })
+        has_details: !!msg.details, has_data: msg.data != null, by })
       logInsert(tgt, small)
       while (tgt.log.length > cap) logDropOldest(tgt)
       // this entry persists what it carries: the line (+ its state, and a done/failed line's dropped ETA), the bar, the ETA
       const etaW = 'eta_at' in msg || (msg.current && DONE_OR_FAILED.has(entryState))
       if (tgt.cp_dirty) tgt.cp_dirty &= ~((msg.current ? CP_CUR : 0) | (etaW ? CP_ETA : 0) | ('progress' in msg ? CP_PROG : 0))
-      notePersisted(chain.slice(oi), tgt, { line: msg.current, prog: 'progress' in msg, eta: etaW }, now)
-      res.entry = { v: ACTIVITY_FORMAT, ...small, current: !!msg.current, path: tgt.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host,
+      notePersisted(by ? [] : chain.slice(oi), tgt, { line: msg.current, prog: 'progress' in msg, eta: etaW }, now)
+      res.entry = { v: ACTIVITY_FORMAT, ...small, current: !!msg.current, path: tgt.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
         details: msg.details || null, data: msg.data != null ? msg.data : null, ...planFields(tgt), ...persistMarks(chain),
         ...(msg.current && tgt.kind === 'agent' ? { finished_at: tgt.finished_at } : {}) }
       res.records.push(res.entry)
@@ -1033,7 +1074,7 @@ export function apply(state, ident, msg, now) {
         logInsert(n, small)
         while (n.log.length > cap) logDropOldest(n)
         notePersisted(ichain.slice(oi), n, { line: true }, now)
-        res.records.push({ v: ACTIVITY_FORMAT, ...small, current: true, path: n.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host,
+        res.records.push({ v: ACTIVITY_FORMAT, ...small, current: true, path: n.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
           details: null, data: null, ...planFields(n), ...persistMarks(ichain) })
       }
       out.push({ ...compact({ name: n ? n.name : it.name, path: n ? n.path : childPath(tgt, it.seg), created: it.act === 'create', adopted: it.act === 'adopt' }), plan_item: !!(n && n.plan), state: n ? stateOf(n) : null })
@@ -1096,7 +1137,7 @@ const lastAgentIx = chain => { let k = 0; chain.forEach((n, i) => { if (n.kind =
 function checkpointOf(state, sess, node, now, k) {
   const chain = chainOf(sess, node)
   notePersisted(chain.slice(lastAgentIx(chain)), node, { line: true, prog: true, eta: true }, now)
-  return { v: ACTIVITY_FORMAT, kind: 'cp', k, ts: now, path: node.path, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host,
+  return { v: ACTIVITY_FORMAT, kind: 'cp', k, ts: now, path: node.path, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
     current: fullLine(node.current), state: stateOf(node), progress: node.progress ? { ...node.progress } : null, eta_at: node.eta_at || null, created_at: node.created_at,
     ...planFields(node), ...(node.kind === 'agent' ? { finished_at: node.finished_at } : {}), ...persistMarks(chain) }
 }
@@ -1133,7 +1174,7 @@ function carryDue(n, thr) {
 function carryOf(state, sess, node, now) {
   const chain = chainOf(sess, node)
   notePersisted([node], node, { line: true, prog: true, eta: true }, now)
-  return { v: ACTIVITY_FORMAT, kind: 'cf', ts: now, path: node.path, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host,
+  return { v: ACTIVITY_FORMAT, kind: 'cf', ts: now, path: node.path, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
     current: fullLine(node.current), state: stateOf(node), progress: node.progress ? { ...node.progress } : null, eta_at: node.eta_at || null,
     created_at: node.created_at, last_activity: node.last_activity, stale_after_ms: node.stale_after_ms || null, implicit: !!node.implicit,
     ...planFields(node), ...(node.kind === 'agent' ? { finished_at: node.finished_at } : {}), ...persistMarks(chain) }
@@ -1159,9 +1200,10 @@ export function markSessionGone(state, ident, now) {
 /**
  * Remove LOCAL agents that finished (or went gone) more than `finished_visible_hours` ago — each WITH ITS SUBTREE — and
  * gone sessions past the same window. Their history stays in the daily JSONL. Remote slices are expired by their origin.
- * 6b: nothing holding an OPEN plan item expires (an agent or a gone session that holds one stays — open items never expire
- * while their session exists); an ENDED plan (planEndAt: its last item done / skipped, or its owner finished) expires the
- * same window after it ended — its items go (planRemoval: with the plan node when that is a plain context left empty).
+ * 6b / 6c: nothing holding part of an OPEN plan expires (an agent or a gone session that holds one stays — open plans never
+ * expire while their session exists; a gone session's are ABANDONED after abandoned_plan_days, see autoAbandon); an ENDED plan
+ * (planEndAt — 6c: every item done, or its node set done / abandoned) expires the same window after it ended — its items go
+ * (planRemoval: with the plan node when that is a plain context left empty).
  * @param {ActivityState} state
  * @param {number} now
  * @returns {{ session:string, project:string, agent:string|null, plan?:boolean }[]} what was removed (agent = the node path; null = the whole session)
@@ -1178,6 +1220,46 @@ export function expire(state, now) {
       if (end == null || now - end < win || p.items.some(i => open.has(i.key))) continue
       for (const r of planRemoval(s, n, p)) { const x = s.nodes.get(r); if (x) { removeSubtree(s, r); out.push({ session: s.session, project: s.project, agent: x.path, plan: true }) } }
       open = openPlanKeys(s)
+    }
+  }
+  return out
+}
+
+/**
+ * 6c AUTO-ABANDON (#70 "Decisions before 6c and 6d" 7): every OPEN plan of a LOCAL session that has been GONE for
+ * `abandoned_plan_days` — not live (opts.live(sess) false: the gateway passes "on this host's roster") and quiet that long
+ * (its gone_at, else its last activity: a script-only session is never marked gone, and gone_at doesn't survive a restart)
+ * — is abandoned: each OPEN item (todo / running / blocked) gets an `@~` line with state abandoned, then the plan node
+ * itself (a plan ends only when complete or abandoned), deepest plans first. Each is a SYSTEM message attributed to the
+ * bridge (apply opts.by): logged + persisted like any entry (`by:"bridge"`), but it touches no activity and never makes
+ * the session look alive. Returns { records:[…] (to persist, in order), abandoned:[{ session, project, path, item }] }.
+ * @param {ActivityState} state @param {number} now
+ * @param {{ live?: (sess: ActivitySession) => boolean, by?: string }} [opts]
+ */
+export function autoAbandon(state, now, opts = {}) {
+  const days = Number(state.config.abandoned_plan_days) > 0 ? Number(state.config.abandoned_plan_days) : ACTIVITY_DEFAULTS.abandoned_plan_days
+  const live = opts && typeof opts.live === 'function' ? opts.live : () => false, by = (opts && opts.by) || 'bridge'
+  const out = { records: [], abandoned: [] }
+  if (!state.config.enabled || !Number.isFinite(now)) return out
+  const text = `abandoned by the bridge — the session has been gone ${days} day${days === 1 ? '' : 's'}`
+  for (const s of [...state.local.values()].sort((a, b) => cmp(a.key, b.key))) {
+    if (live(s)) continue
+    const since = s.gone_at || s.last_activity
+    if (!(now - since >= days * DAY)) continue
+    const ident = { realm: s.realm, project: s.project, user: s.user, session: s.session }
+    const plans = [...s.nodes.values()].filter(n => { const p = planOf(s, n); return p && planEndAt(s, n, p) == null }).sort((a, b) => b.depth - a.depth || cmp(a.key, b.key))
+    const one = (n, item) => {
+      const pm = parseMessage({ path: n.path ? n.path + '/@~root' : '@~root', text, state: 'abandoned' }, { now })
+      const r = pm.ok ? apply(state, ident, pm.msg, now, { by }) : pm
+      if (!r.ok) return
+      out.records.push(...r.records); out.abandoned.push({ session: s.session, project: s.project, path: n.path, item })
+    }
+    for (const n of plans) {
+      if (!s.nodes.has(n.key)) continue
+      const p = planOf(s, n)
+      if (!p || planEndAt(s, n, p) != null) continue
+      for (const it of p.items) if (OPEN_ITEM.has(stateOf(it))) one(it, true)
+      one(n, false)
     }
   }
   return out
@@ -1261,12 +1343,12 @@ const rollupStrategies = [
     return { done, total, unit: bars[0].unit, pct: progressPct({ done, total }), rollup: true, n: bars.length, ...(bars.every(p => p.todos) ? { todos: true } : {}) }
   },
   (bars) => { if (!bars.length) return null; const mean = Math.round((bars.reduce((s, p) => s + progressPct(p), 0) / bars.length) * 10) / 10; return { done: mean, total: 100, unit: '%', pct: mean, rollup: true, n: bars.length } },
-  (bars, items) => {   // 6b: "N of M done" over the plan items — skipped ones are left out of M (none left → no bar); failed / idle count as not done
+  (bars, items) => {   // 6b: "N of M done" over the plan items — skipped ones are left out of M (none left → no bar); failed / idle — and (6c) abandoned — count as not done
     if (!items.length) return null
-    let done = 0, skipped = 0
-    for (const it of items) { const s = stateOf(it); if (s === 'done') done++; else if (s === 'skipped') skipped++ }
+    let done = 0, skipped = 0, abandoned = 0
+    for (const it of items) { const s = stateOf(it); if (s === 'done') done++; else if (s === 'skipped') skipped++; else if (s === 'abandoned') abandoned++ }
     const total = items.length - skipped
-    return total > 0 ? { done, total, unit: 'done', pct: progressPct({ done, total }), rollup: true, todos: true, skipped, n: items.length } : null
+    return total > 0 ? { done, total, unit: 'done', pct: progressPct({ done, total }), rollup: true, todos: true, skipped, n: items.length, ...(abandoned ? { abandoned } : {}) } : null
   },
 ]
 /**
@@ -1275,7 +1357,7 @@ const rollupStrategies = [
  * over its plan items (`todos:true`, unit "done", `skipped` = how many were left out). null when nothing applies.
  * `memo` (a Map) caches per call when walking a whole board.
  * @param {ActivitySession} sess @param {ActivityNode} node @param {Map<string, any>} [memo]
- * @returns {null | { done:number, total:number, unit:string, pct:number, rollup:boolean, n:number, todos?:boolean, skipped?:number }}
+ * @returns {null | { done:number, total:number, unit:string, pct:number, rollup:boolean, n:number, todos?:boolean, skipped?:number, abandoned?:number }}
  */
 export function rollup(sess, node, memo) {
   if (!sess || !node) return null
@@ -1420,16 +1502,18 @@ export function createReplay(state, { now }) {
     // identity spellings: every record carries the canonical (first-seen) one; the OLDEST record's is kept
     s.session = rec.session.trim(); s.project = str(rec.project) || 'unclassified'; s.user = str(rec.user); s.realm = str(rec.realm) || 'default'
     const tgt = chain[chain.length - 1], oi = ownerIndex(pp.segs), isCf = kind === 'cf'
+    const isSys = kind === 'entry' && typeof rec.by === 'string' && !!rec.by   // 6c: a SYSTEM entry (auto-abandon) is nobody's activity
     // a cf restores its TARGET only (its own implicit flag, created_at, last_activity); any other record marks target + owner reported
-    if (isCf) { if (rec.implicit !== true) tgt.implicit = false } else { tgt.implicit = false; chain[oi].implicit = false }
+    if (isCf) { if (rec.implicit !== true) tgt.implicit = false } else { tgt.implicit = false; if (!isSys) chain[oi].implicit = false }
     if (rec.plan_item === true) { tgt.plan = true; if (tgt.planIx == null && Number.isInteger(rec.plan_ix)) tgt.planIx = rec.plan_ix }
     const act = isCf ? (finite(rec.last_activity) ? Math.min(rec.last_activity, rec.ts) : rec.ts) : Math.max(rec.ts, repL)
     const cAt = isCf && finite(rec.created_at) ? Math.min(rec.created_at, rec.ts) : rec.ts
-    s.last = Math.max(s.last, act)
+    if (!isSys) s.last = Math.max(s.last, act)
     for (const n of chain) if (n.created == null || cAt < n.created || (cAt === n.created && feedNo > n.cFeed)) { n.created = cAt; n.cFeed = feedNo }   // the oldest known; on a tie, the earlier-written record
     s.created = s.created == null ? cAt : Math.min(s.created, cAt)
+    if (finite(rec.s0) && rec.s0 > 0 && rec.s0 < s.created) s.created = rec.s0   // 6c: every record carries the session's created_at — exact even past the window (the HOME host)
     const lo = isCf ? chain.length - 1 : oi
-    for (let i = lo; i < chain.length; i++) { chain[i].seen = true; chain[i].last = Math.max(chain[i].last, act); chain[i].tA = Math.max(chain[i].tA, rec.ts) }   // phase 1 waits only for nodes a record TOUCHED (target..owner), not bare ancestors
+    for (let i = lo; i < chain.length; i++) { chain[i].seen = true; if (!isSys) { chain[i].last = Math.max(chain[i].last, act); chain[i].tA = Math.max(chain[i].tA, rec.ts) } }   // phase 1 waits only for nodes a record TOUCHED (target..owner), not bare ancestors
     if (kind === 'cp' || isCf) {
       if (kind === 'cp') cps++; else { cfs++; if (d === today) cfToday = true }
       const st = rec.current && ACTIVITY_STATES.includes(rec.current.state) ? rec.current.state : 'running'
@@ -1443,7 +1527,7 @@ export function createReplay(state, { now }) {
       tgt.total++
       if (tgt.log.length < N) tgt.log.push(smallOf(rec))
       else if (!tgt.floor) tgt.floor = rec.ts   // the newest entry that doesn't fit = the newest one only in the files
-      for (let i = oi; i < chain.length; i++) if (!chain[i].saSet) { chain[i].sa = rec.stale_after_ms > 0 ? rec.stale_after_ms : null; chain[i].saSet = true }
+      if (!isSys) for (let i = oi; i < chain.length; i++) if (!chain[i].saSet) { chain[i].sa = rec.stale_after_ms > 0 ? rec.stale_after_ms : null; chain[i].saSet = true }
       if (!tgt.progFound && 'progress' in rec) { const p = wProgress(rec.progress); if (p !== undefined) { tgt.progress = p; tgt.progFound = true; tgt.tP = rec.ts } }
       if (rec.current && !tgt.curFound) { tgt.current = lineOf(rec); tgt.curFound = true; tgt.tL = rec.ts }
       if (!tgt.etaRes) {   // the newest ETA-bearing record wins, unless the state when it arrived was done/failed
@@ -1497,6 +1581,7 @@ export function createReplay(state, { now }) {
     if (DONE_OR_FAILED.has(stateOf(n))) n.eta_at = null
     if (n.kind === 'agent') n.finished_at = r.key === '' && !r.finRes ? null : r.finAt
     if (r.plan && n.kind === 'context') { n.plan = true; n.plan_ix = r.planIx }
+    n.partial = !r.marker   // 6c: the replay never saw the record that began this run (it began before the window)
     n.pt = { a: r.tA, l: r.tL, p: r.tP, e: r.tE }   // what the window holds: the carry-forward re-checkpoints what would fall out of it
     if (withLogs) {
       n.log = r.log.slice().reverse().sort(ordCmp); n.log_dropped = r.total - n.log.length
@@ -1604,10 +1689,12 @@ const under = (key, k) => !k || key === k || key.startsWith(k + '/')
  * @param {ActivityState} state @param {number} now
  * @param {{ project?:string, session?:string, agent?:string, path?:string, host?:string, active_only?:boolean, staleMin?:number, raw?:boolean }} [opts]
  *   path (or the old `agent`) keeps the nodes at that path and under it; host keeps only that host's; active_only drops
- *   finished/gone agents with their subtrees (6b: unless the subtree holds an OPEN plan item) and ENDED plans (every item
- *   done / skipped: the items, and the plan node when it is a plain context with nothing else shown and no live line); raw =
- *   the dashboard form (reported states, raw templates + times, own `progress` + the rolled-up `bar`). 6b: a plan item
- *   carries `plan_item:true` (+ `plan_ix`) and never shows stale or gone.
+ *   finished/gone agents with their subtrees (6b: unless the subtree holds part of an OPEN plan) and ENDED plans (6c: every
+ *   item done, or the node marked complete / abandoned: the items, and the plan node when it is a plain context with nothing
+ *   else shown and no live line); raw = the dashboard form (reported states, raw templates + times, own `progress` + the
+ *   rolled-up `bar`). 6b: a plan item carries `plan_item:true` (+ `plan_ix`) and never shows stale or gone. 6c: a plan
+ *   node carries `plan_node:true` + `plan_end_at` (absent while open); `log` carries the node's own count (`total`,
+ *   `partial` when it understates); a multi-host group carries `home` (the host it first appeared on).
  */
 export function boardView(state, now, opts = {}) {
   const sm = Number(opts.staleMin) > 0 ? Number(opts.staleMin) : state.config.stale_after_min
@@ -1620,10 +1707,13 @@ export function boardView(state, now, opts = {}) {
   // a remote node's log lives on its owner (fetched on demand): its view says so. host_down = its HOST went away
   const nodeView = (s, n, host, local, down, memo) => {
     const owner = ownerOf(s, n), eff = effectiveState(n, now, sm, owner), bar = rollup(s, n, memo)
-    const lg = local ? { entries: n.log.length, dropped: n.log_dropped } : { remote: true }
-    const isAg = n.kind === 'agent'
+    // 6c: the node's OWN entry count (`total`, the dashboard sums a subtree) — local: memory + dropped; remote: gossiped. partial =
+    // its run began before the owner's replay window: the count understates (older entries live only in the day files)
+    const lg = local ? compact({ entries: n.log.length, dropped: n.log_dropped, total: n.log.length + n.log_dropped, partial: !!n.partial }) : compact({ remote: true, total: n.log_n || 0, partial: !!n.partial })
+    const isAg = n.kind === 'agent', pl = planOf(s, n)
     const base = { path: n.path, kind: n.kind, name: n.key ? n.name : null, depth: n.depth, parent: n.key ? (s.nodes.get(n.parent) || { path: n.parent }).path : null, host,
-      plan_item: n.plan || null, plan_ix: n.plan && Number.isInteger(n.plan_ix) ? n.plan_ix : null }
+      plan_item: n.plan || null, plan_ix: n.plan && Number.isInteger(n.plan_ix) ? n.plan_ix : null,
+      plan_node: pl ? true : null, plan_end_at: pl ? planEndAt(s, n, pl) : null }   // 6c: a node holding plan items; when its plan ended (null = open)
     if (raw) return compact({ ...base, key: n.key, parent_key: n.parent, state: !isContext(n) && eff.gone ? 'gone' : eff.was, was: !isContext(n) && eff.gone ? eff.was : null, implicit: n.implicit,
       active: isAg ? isActive(n) : null, host_down: down || null, current: rawLine(n.current), progress: n.progress ? { ...n.progress } : null, bar, eta_at: n.eta_at,
       created_at: n.created_at, last_activity: n.last_activity, finished_at: n.finished_at, gone_at: isAg ? n.gone_at : null, stale_after_ms: n.stale_after_ms, log: lg })
@@ -1668,7 +1758,11 @@ export function boardView(state, now, opts = {}) {
     const goneAll = parts.every(p => p.s.gone_at)
     const down = parts.filter(p => p.down).map(p => p.host)
     const selfOf = p => nodeView(p.s, p.s.nodes.get(''), p.host, p.local, p.down, p.memo)
-    out.push(compact({ session: lead.session, project: lead.project, user: lead.user, realm: lead.realm, host: multi ? null : hosts[0], hosts: multi ? hosts : null, multi_host: multi,
+    // 6c (#70 "Decisions before 6c and 6d" 7): the HOME host = the host the session first appeared on — the earliest-created
+    // root across hosts (created_at rides every gossip header and, since v4, every record as s0), ties by host name; top-level
+    // host tags compare with it, so they never flip with the headline
+    const home = multi ? parts.reduce((b, p) => (p.s.created_at < b.s.created_at || (p.s.created_at === b.s.created_at && cmp(lc(p.host), lc(b.host)) < 0) ? p : b), parts[0]).host : null
+    out.push(compact({ session: lead.session, project: lead.project, user: lead.user, realm: lead.realm, host: multi ? null : hosts[0], hosts: multi ? hosts : null, multi_host: multi, home,
       created_at: Math.min(...parts.map(p => p.s.created_at)), last_activity: Math.max(...parts.map(p => p.s.last_activity)),
       gone_at: goneAll ? Math.max(...parts.map(p => p.s.gone_at)) : null,
       bell: parts.some(p => p.s.bell), hosts_down: down.length ? down : null,
@@ -1679,13 +1773,13 @@ export function boardView(state, now, opts = {}) {
 }
 /**
  * 6b: the node keys `active_only` hides in one session (list = its non-root nodes, parents before children): a finished /
- * gone agent with its subtree — unless that subtree holds an OPEN plan item (kept, with its ancestors) — and every ENDED
- * plan's items (all done / skipped; the plan node too when it is a plain context with nothing else left shown and no live
- * line of its own).
+ * gone agent with its subtree — unless that subtree holds part of an OPEN plan (kept, with its ancestors) — and every ENDED
+ * plan's items (6c: planEndAt — all done, or its node marked complete / abandoned; the plan node too when it is a plain
+ * context with nothing else left shown and no live line of its own).
  */
 function activeHidden(sess, list) {
   const open = openPlanKeys(sess), hide = new Set(), ended = new Set()
-  for (const n of [sess.nodes.get(''), ...list]) { const p = n && planOf(sess, n); if (p && p.resolvedAt != null) ended.add(n.key) }
+  for (const n of [sess.nodes.get(''), ...list]) { const p = n && planOf(sess, n); if (p && planEndAt(sess, n, p) != null) ended.add(n.key) }
   for (const n of list) {
     if (open.has(n.key)) continue
     if (hide.has(n.parent) || (n.kind === 'agent' && !isActive(n)) || (n.plan && ended.has(n.parent))) hide.add(n.key)
@@ -1811,7 +1905,7 @@ export function logView(state, q, now = Date.now(), opts = {}) {
   let total = 0, dropped = 0
   for (const n of scope) { total += n.log.length; dropped += n.log_dropped }
   const head = { ok: true, session: s.session, project: s.project, user: s.user, path: node.path, kind: node.kind, own }
-  const target = { realm: s.realm, project: s.project, user: s.user, session: s.session, key: node.key, own }
+  const target = { realm: s.realm, project: s.project, user: s.user, session: s.session, key: node.key, own, depth: node.depth, partial: !!node.partial }   // 6c: depth + partial for the run boundary (filePage)
   const fc = parseFileCursor(q.cursor)
   if (fc) {
     if (!(opts && opts.files)) return bad('bad-cursor', 'that cursor pages the day files, which this reader does not serve')
@@ -1886,6 +1980,62 @@ export function fileEntryMatches(rec, target) {
 /** A day-file entry in logView's entry shape (the small in-memory form + path, rel and `rendered` as recorded). */
 export const fileEntryView = (rec, now, basePath = '') => ({ ...smallOf(rec), path: rec.path, rel: relPath(rec.path, basePath), rendered: renderText(rec.text, rec.progress, rec.eta_at, now) })
 /**
+ * 6c: did this day-file record BEGIN the current run of `target` (logView's files.target)? It is the first persisted record of
+ * that node's instance: a record of the same session at or under the node whose `new_from` (the first new index on its chain
+ * root..target) is at or above the node's depth — any kind (an entry, a cp, a cf). Read newest first, the first such record
+ * met is the CURRENT run's start; everything older under the node belongs to earlier runs.
+ */
+export function fileRunStart(rec, target) {
+  const k = recordKind(rec)
+  if (!k || k === 'rep' || !target || !Number.isInteger(rec.new_from) || rec.new_from < 0) return false
+  if (lc(rec.session) !== lc(target.session) || projKey(rec.project) !== projKey(target.project) || lc(rec.user) !== lc(target.user)) return false
+  if ((lc(rec.realm) || 'default') !== (lc(target.realm) || 'default')) return false
+  return under(pathKey(rec.path), target.key || '') && rec.new_from <= (Number(target.depth) || 0)
+}
+/**
+ * 6c: the DAY-FILE half of a log page (the I/O-free part of the bridge's actLogPage; `records` is the facet's readBackwards
+ * from `files.from` — any (async) iterable of { rec, day, offset, length }, NEWEST FIRST). Continues `lv` (logView's result:
+ * its entries, path) with the target's matching entries, up to files.need entries / opts.maxBytes of JSON, reading at most
+ * opts.scanBytes of file. RUN BOUNDARY (#70 step-6 answer 5): it STOPS at the record that began the node's CURRENT run
+ * (fileRunStart) — `run_start:true`, next_cursor null, and `earlier_cursor` (a file cursor: pass it as cursor with
+ * earlier:true — "show earlier runs") when an older entry of the node exists before it (a bounded peek; one that runs out of
+ * scan budget offers it anyway). With opts.earlier the boundary is ignored. When the files run out WITHOUT meeting the run's
+ * start and the node's run began before the replay window (target.partial), the start lay in a file retention has already
+ * deleted: `pruned:true` ("earlier history pruned", never a silent gap). Returns lv (mutated): entries, next_cursor,
+ * from_files (+ run_start, earlier_cursor, pruned).
+ * @param {any} lv @param {any} files @param {AsyncIterable<any>|Iterable<any>} records
+ * @param {{ now?: number, maxBytes?: number, scanBytes?: number, earlier?: boolean }} [opts]
+ */
+export async function filePage(lv, files, records, opts = {}) {
+  const f = files, out = lv.entries, now = Number.isFinite(opts.now) ? opts.now : Date.now()
+  const maxB = Number(opts.maxBytes) > 0 ? Number(opts.maxBytes) : Infinity, scanMax = Number(opts.scanBytes) > 0 ? Number(opts.scanBytes) : Infinity
+  let bytes = f.bytes || 0, scanned = 0, last = null, lastHit = null, stop = null, n = 0, boundary = null, peek = false
+  for await (const r of records) {
+    scanned += (r.length || 0) + 1; last = r
+    const rec = r.rec
+    if (boundary) {   // past the run's start: only look whether an EARLIER run left an entry of this node
+      if (rec && fileEntryMatches(rec, f.target)) { peek = true; break }
+      if (scanned >= scanMax) { peek = true; break }   // unknown within the budget: offer it anyway
+      continue
+    }
+    if (rec && fileEntryMatches(rec, f.target) && !(f.before && (rec.ts > f.before.ts || f.before.ids.has(rec.id)))) {
+      const x = fileEntryView(rec, now, lv.path), b = utf8(JSON.stringify(x)) + 1
+      if (n >= f.need || (out.length && bytes + b > maxB)) { stop = 'full'; break }
+      out.push(x); bytes += b; n++; lastHit = r
+    }
+    if (!opts.earlier && rec && fileRunStart(rec, f.target)) { boundary = r; continue }   // its own entry (taken above) is part of the run
+    if (scanned >= scanMax) { stop = 'scan'; break }
+  }
+  lv.from_files = n
+  if (boundary) {
+    lv.next_cursor = null; lv.run_start = true
+    if (peek) lv.earlier_cursor = fileCursor(boundary.day, boundary.offset)
+  } else if (stop === 'full') lv.next_cursor = lastHit ? fileCursor(lastHit.day, lastHit.offset) : (out.length ? out[out.length - 1].id : null)
+  else if (stop === 'scan') lv.next_cursor = fileCursor(last.day, last.offset)
+  else { lv.next_cursor = null; if (!opts.earlier && f.target && f.target.partial) lv.pruned = true }
+  return lv
+}
+/**
  * An entry by id from MEMORY: a current line (with its details/data; `rendered` against the live bar) or a log entry
  * (flags only — the caller reads details/data back from the JSONL; `rendered` as recorded). null when not held.
  * @param {ActivityState} state @param {string} id @param {number} [now]
@@ -1914,11 +2064,13 @@ export function findEntry(state, id, now = Date.now()) {
 function snapLine(l) {
   return l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null
 }
-/** A node's replicated form: its OWN fields (never children, rollup, log, details/data). 6b: + plan_item / plan_ix. */
+/** A node's replicated form: its OWN fields (never children, rollup, log, details/data). 6b: + plan_item / plan_ix. 6c: + log_n
+ * (its OWN entry count: memory + dropped; a remote node re-gossips what it was told) and log_partial (the count understates). */
 function snapNode(n) {
   return compact({ path: n.path, created_at: n.created_at, last_activity: n.last_activity, finished_at: n.finished_at, gone_at: n.kind === 'agent' ? n.gone_at : null,
     stale_after_ms: n.stale_after_ms, implicit: n.implicit, progress: n.progress ? { done: n.progress.done, total: n.progress.total, unit: n.progress.unit } : null,
-    eta_at: n.eta_at, current: snapLine(n.current), plan_item: !!n.plan, plan_ix: n.plan && Number.isInteger(n.plan_ix) ? n.plan_ix : null })
+    eta_at: n.eta_at, current: snapLine(n.current), plan_item: !!n.plan, plan_ix: n.plan && Number.isInteger(n.plan_ix) ? n.plan_ix : null,
+    log_n: (n.log_n != null ? n.log_n : n.log.length + n.log_dropped) || null, log_partial: !!n.partial })
 }
 const sortedNodes = s => [...s.nodes.values()].sort((a, b) => cmp(a.key, b.key))
 function snapSession(s) {
@@ -1973,6 +2125,8 @@ function wNode(r) {
     n.finished_at = wPos(r.finished_at); n.gone_at = wPos(r.gone_at)
     if (n.current && PLAN_STATES.has(n.current.state)) n.current.state = 'running'   // 6b: an agent can't be todo / skipped
   } else if (r.plan_item === true) { n.plan = true; n.plan_ix = Number.isInteger(r.plan_ix) && r.plan_ix >= 0 && r.plan_ix < ACTIVITY_LIMITS.planItems ? r.plan_ix : null }
+  n.log_n = Number.isInteger(r.log_n) && r.log_n > 0 ? Math.min(r.log_n, 1e9) : 0   // 6c: the owner's own-entry count
+  n.partial = r.log_partial === true
   n.persisted = true
   return n
 }

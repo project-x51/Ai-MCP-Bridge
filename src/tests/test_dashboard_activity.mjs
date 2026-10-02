@@ -141,9 +141,11 @@ check('subtreeCount: a subtree\'s local entries; null when any of it lives on an
 ws.readyState = 1; ws.onopen && ws.onopen()
 recv({ type: 'welcome', gateway: 'HOST-A/aaa', sessions: [], pages: [], hosts: {}, bridge_version: '1.62.0', profile: {}, capabilities: {} })
 const sec = doc.querySelector('section.sec[data-sec="activity"]')
-check('view: the Activity section exists, collapsed by default, and a closed one does NOT subscribe', !!sec && sec.classList.contains('collapsed') && sentOf('activity_sub').length === 0)
+check('view (6c): the Activity section exists and is OPEN by default — it subscribes as soon as the bridge welcomes the page', !!sec && !sec.classList.contains('collapsed') && sentOf('activity_sub').length === 1 && !sentOf('activity_sub')[0].resync)
 sec.querySelector('.sech').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-check('view: opening it subscribes (activity_sub)', !sec.classList.contains('collapsed') && sentOf('activity_sub').length === 1 && !sentOf('activity_sub')[0].resync)
+check('view: closing it unsubscribes (a closed one does not subscribe)', sec.classList.contains('collapsed') && sentOf('activity_unsub').length === 1 && sentOf('activity_sub').length === 1)
+sec.querySelector('.sech').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+check('view: opening it again subscribes (activity_sub)', !sec.classList.contains('collapsed') && sentOf('activity_sub').length === 2 && !sentOf('activity_sub')[1].resync)
 recv({ type: 'activity_board', full: true, epoch: 'E1', seq: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15, remote_hosts: [] }, upsert: units })
 const T = doc.getElementById('acttree')
 const rowsT = () => [...T.querySelectorAll('.ar')]
@@ -264,7 +266,7 @@ check('a busy answer offers a retry', /busy: too many history fetches are waitin
 recv({ type: 'activity_delta', epoch: 'E1', seq: 2, base: 1, head: { host: 'HOST-A', now: Date.now(), stale_after_min: 15 }, upsert: [{ ...units[1], current: { id: 'r9', ts: NOW, text: 'writing up', state: 'running' } }, node('k-orch', 'research/@new', 'context', 'HOST-A', { current: { id: 'nw', ts: NOW, text: 'a context that just appeared', state: 'running' } })], remove: [units[7].id] })
 check('a delta updates a row in place, adds a nested node under its (open) parent, and removes another', pathRow('research').querySelector('.ln').textContent === 'writing up' && !pathRow('deploy') && !!pathRow('research/@new') && dOf(pathRow('research/@new')) === 3)
 recv({ type: 'activity_delta', epoch: 'E1', seq: 9, base: 8, upsert: [], remove: [] })
-check('a delta that doesn\'t follow (lost frames) → the page asks for a resync', sentOf('activity_sub').length === 2 && sentOf('activity_sub')[1].resync === true)
+check('a delta that doesn\'t follow (lost frames) → the page asks for a resync', sentOf('activity_sub').length === 3 && sentOf('activity_sub')[2].resync === true)
 recv({ type: 'activity_board', full: true, epoch: 'E1', seq: 1, head: { host: 'HOST-A', now: Date.now(), stale_after_min: 15 }, upsert: units })
 check('... and the full board restores the view', !!pathRow('deploy') && /coordinating/.test(nmRow('Orch').textContent))
 doc.getElementById('actCollapse').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
@@ -273,9 +275,9 @@ const nReq = sentOf('activity').length
 doc.getElementById('actExpand').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
 check('Expand all opens every session and every node down to depth 6 (Log rows appear; no log is fetched by it)', logRows().length >= 10 && !!pathRow(deepPath) && sentOf('activity').length === nReq, `${logRows().length} ${sentOf('activity').length - nReq}`)
 sec.querySelector('.sech').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-check('leaving (collapsing the section) unsubscribes', sentOf('activity_unsub').length === 1)
+check('leaving (collapsing the section) unsubscribes', sentOf('activity_unsub').length === 2)
 const legend = doc.getElementById('actlegend')
-check('legend: the 7 agent glyphs + the context mark + (6b) the 4 plan-item marks + the ring / hover hint', legend.querySelectorAll('svg').length === 12 && /plan item: to do · in progress · done · skipped/.test(legend.textContent) && /ring is the time left before an agent goes stale/.test(legend.textContent) && /hover the icons/.test(legend.textContent) && /context \(no ring/.test(legend.textContent))
+check('legend: the 7 agent glyphs + the context mark + (6b) the 4 plan-item marks + (6c) abandoned + the ring / hover hint', legend.querySelectorAll('svg').length === 13 && /skipped · abandoned/.test(legend.textContent) && /plan item: to do · in progress · done · skipped/.test(legend.textContent) && /ring is the time left before an agent goes stale/.test(legend.textContent) && /hover the icons/.test(legend.textContent) && /context \(no ring/.test(legend.textContent))
 
 try {   // a crash (an older dashboard without the 6b helpers) counts as one failure
 // ================================================================= 6b (v1.63.0): plan items, the plan bar, active only, host tags, per-host headlines
@@ -298,9 +300,9 @@ const plan = [
   pi('k-plan', '@#70/@Test', 'HOST-A', 'blocked', { ...at7, plan_ix: 2 }), pi('k-plan', '@#70/@Docs', 'HOST-A', 'skipped', { ...at7, plan_ix: 3 }), pi('k-plan', '@#70/@Review', 'HOST-A', 'done', { ...at7, plan_ix: 4, current: { id: 'rv', ts: NOW - MIN, text: 'approved by Robin', state: 'done' } }),
   node('k-plan', '@#70/@Build/builder', 'agent', 'HOST-A', { current: { id: 'bd', ts: NOW - 40 * MIN, text: 'compiling', state: 'running' }, last_activity: NOW - 40 * MIN }),
   pi('k-plan', '@#70/@Build/@unit', 'HOST-A', 'done', { ...at7, plan_ix: 0 }), pi('k-plan', '@#70/@Build/@e2e', 'HOST-A', 'todo', { ...at7, plan_ix: 1 }),
-  node('k-plan', 'retired', 'agent', 'HOST-A', { state: 'done', active: false, finished_at: NOW - 5 * MIN, current: { id: 'rt', ts: NOW - 5 * MIN, text: 'stopped', state: 'done' } }),
+  node('k-plan', 'retired', 'agent', 'HOST-A', { state: 'failed', active: false, finished_at: NOW - 5 * MIN, current: { id: 'rt', ts: NOW - 5 * MIN, text: 'stopped', state: 'failed' } }),   // 6c: failed (done would mark its plan complete)
   pi('k-plan', 'retired/@leftover', 'HOST-A', 'todo', at7),
-  node('k-plan', '@shipped', 'context', 'HOST-A', { implicit: true }), pi('k-plan', '@shipped/@a', 'HOST-A', 'done', at7), pi('k-plan', '@shipped/@b', 'HOST-A', 'skipped', at7),
+  node('k-plan', '@shipped', 'context', 'HOST-A', { implicit: true }), pi('k-plan', '@shipped/@a', 'HOST-A', 'done', at7), pi('k-plan', '@shipped/@b', 'HOST-A', 'done', at7),   // 6c: all done = ended (skipped would keep it open)
   node('k-plan', 'helper', 'agent', 'HOST-B', { current: { id: 'hp', ts: NOW - MIN, text: 'on B', state: 'running' } }),
   node('k-plan', 'helper/@ctx', 'context', 'HOST-B', { current: { id: 'hc', ts: NOW - MIN, text: 'B context', state: 'running' } }),
 ]
@@ -308,8 +310,10 @@ const PU = Object.fromEntries(plan.map(u => [u.id, u]))
 const pt = X.buildTree(PU, {}).find(p => p.key === 'aimb').sessions.find(x => x.s.session === 'Planner')
 check('6b tree: plan items in CREATION order — the same created_at → plan_ix (the given order), never A→Z', J(kidsOf(find(pt.kids, '@#70'))) === J(['@#70/@Spec', '@#70/@Build', '@#70/@Test', '@#70/@Docs', '@#70/@Review', '@#70/@Ship']), J(kidsOf(find(pt.kids, '@#70'))))
 check('6b tree: the nested plan + the agent under an item nest under it', J(kidsOf(find(pt.kids, '@#70/@Build'))) === J(['@#70/@Build/builder', '@#70/@Build/@unit', '@#70/@Build/@e2e']) || J(kidsOf(find(pt.kids, '@#70/@Build'))) === J(['@#70/@Build/@unit', '@#70/@Build/@e2e', '@#70/@Build/builder']), J(kidsOf(find(pt.kids, '@#70/@Build'))))
-check('6b open / ended: isOpenItem (todo / running / blocked); planEnded = every item done or skipped', X.isOpenItem(pi('k', 'a', 'H', 'todo')) && X.isOpenItem(pi('k', 'a', 'H', 'blocked')) && !X.isOpenItem(pi('k', 'a', 'H', 'done')) && !X.isOpenItem(node('k', 'a', 'context', 'H', { state: 'running' }))
-  && X.planEnded([pi('k', 'a', 'H', 'done'), pi('k', 'b', 'H', 'skipped')]) && !X.planEnded([pi('k', 'a', 'H', 'done'), pi('k', 'b', 'H', 'todo')]) && !X.planEnded([node('k', 'a', 'context', 'H', {})]))
+check('6b/6c open / ended: isOpenItem (todo / running / blocked); 6c planEnded = EVERY item done, or the plan node marked done / abandoned (skipped keeps it open)', X.isOpenItem(pi('k', 'a', 'H', 'todo')) && X.isOpenItem(pi('k', 'a', 'H', 'blocked')) && !X.isOpenItem(pi('k', 'a', 'H', 'done')) && !X.isOpenItem(node('k', 'a', 'context', 'H', { state: 'running' }))
+  && X.planEnded([pi('k', 'a', 'H', 'done'), pi('k', 'b', 'H', 'done')]) && !X.planEnded([pi('k', 'a', 'H', 'done'), pi('k', 'b', 'H', 'skipped')]) && !X.planEnded([pi('k', 'a', 'H', 'done'), pi('k', 'b', 'H', 'todo')]) && !X.planEnded([node('k', 'a', 'context', 'H', {})])
+  && X.planEnded([pi('k', 'a', 'H', 'todo')], { current: { state: 'abandoned' } }) && X.planEnded([pi('k', 'a', 'H', 'failed')], { current: { state: 'done' } }) && !X.planEnded([pi('k', 'a', 'H', 'todo')], { current: { state: 'failed' } })
+  && X.planEnded([pi('k', 'a', 'H', 'todo')], { plan_node: true, plan_end_at: NOW }) && !X.planEnded([pi('k', 'a', 'H', 'done')], { plan_node: true }))
 const pa = X.buildTree(PU, { activeOnly: true }).find(p => p.key === 'aimb').sessions.find(x => x.s.session === 'Planner')
 check('6b active only: a finished agent holding an OPEN item stays (with it); an ENDED plan disappears (its items and its plain node); an open plan keeps its done / skipped items', !!find(pa.kids, 'retired') && !!find(pa.kids, 'retired/@leftover') && !find(pa.kids, '@shipped') && !find(pa.kids, '@shipped/@a')
   && J(kidsOf(find(pa.kids, '@#70'))) === J(['@#70/@Spec', '@#70/@Build', '@#70/@Test', '@#70/@Docs', '@#70/@Review', '@#70/@Ship']), J(pa.kids.map(t => t.u.path)))
@@ -344,6 +348,119 @@ check('6b view (active only): the open item under a finished agent stays visible
 ao.checked = false; ao.dispatchEvent(new win.Event('change'))
 recv({ type: 'activity_delta', epoch: 'E2', seq: 2, base: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15 }, upsert: [pi('k-plan', '@#70/@Ship', 'HOST-A', 'done', { ...at7, plan_ix: 5 }), { ...plan[1], bar: { ...plan[1].bar, done: 3 } }], remove: [] })
 check('6b view: a delta ticks an item in place (☐ → ☑) and moves the plan bar', !!inPlanner('@#70/@Ship')?.querySelector('svg.s-done') && inPlanner('@#70/@Ship').classList.contains('pdone') && inPlanner('@#70').querySelector('.pb.plan > i')?.style.width === '60%', J([inPlanner('@#70/@Ship')?.outerHTML, inPlanner('@#70')?.querySelector('.pb')?.outerHTML]))
+try {   // a crash (an older dashboard without the 6c helpers) counts as one failure
+const HOUR = 60 * MIN
+// ================================================================= 6c (v1.64.0): open plans expanded, the finished-plan window + slider, abandoned, home-host tags,
+// the Plans filter, rollups that follow the filters, the aligned bar column, gossiped counts, the run boundary, the 6d row hooks
+const pi6 = (key, path, host, st, extra = {}) => node(key, path, 'context', host, { plan_item: true, state: st, current: { id: `c6-${path}`, ts: NOW - 4 * HOUR, text: path.split('/').at(-1).replace(/^@/, ''), state: st }, ...extra })
+const selfA6 = root('HOST-A', { current: { id: 's6a', ts: NOW - MIN, text: 'headline from A (newer)', state: 'running' } }), selfB6 = root('HOST-B', { current: { id: 's6b', ts: NOW - 30 * MIN, text: 'B was here first', state: 'running' }, created_at: NOW - 3 * 60 * MIN, log: { remote: true, total: 4 } })
+const rootR = root('HOST-A', { current: { id: 'rr', ts: NOW - MIN, text: 'rolling {progress}', state: 'running' }, bar: { done: 8, total: 12, unit: 'files', pct: 66.7, rollup: true, n: 2 } })
+const six = [
+  sess('k-six', 'Sixc', 'SixC', { hosts: ['HOST-A', 'HOST-B'], multi_host: true, home: 'HOST-B', self: selfA6, selves: [selfA6, selfB6] }),
+  node('k-six', '@open', 'context', 'HOST-A', { implicit: true, plan_node: true, bar: { done: 1, total: 2, unit: 'done', pct: 50, rollup: true, todos: true, skipped: 1, n: 3, abandoned: 1 } }),
+  pi6('k-six', '@open/@a', 'HOST-A', 'done', { plan_ix: 0 }), pi6('k-six', '@open/@b', 'HOST-A', 'skipped', { plan_ix: 1 }), pi6('k-six', '@open/@c', 'HOST-A', 'abandoned', { plan_ix: 2 }),
+  node('k-six', '@recent', 'context', 'HOST-A', { implicit: true, plan_node: true, plan_end_at: NOW - 30 * MIN }),
+  pi6('k-six', '@recent/@x', 'HOST-A', 'done'), pi6('k-six', '@recent/@y', 'HOST-A', 'done'),
+  node('k-six', '@old', 'context', 'HOST-A', { implicit: true, plan_node: true, plan_end_at: NOW - 3 * HOUR }),
+  pi6('k-six', '@old/@z', 'HOST-A', 'done'),
+  node('k-six', 'anode', 'agent', 'HOST-A', { state: 'blocked', current: { id: 'an', ts: NOW - MIN, text: 'on A, the non-home host', state: 'blocked' } }),
+  node('k-six', 'bnode', 'agent', 'HOST-B', { current: { id: 'bn', ts: NOW - MIN, text: 'on B, the home host', state: 'running' }, log: { remote: true, total: 5 } }),
+  node('k-six', 'bnode/@ctx', 'context', 'HOST-B', { current: { id: 'bc', ts: NOW - MIN, text: 'b ctx', state: 'running' }, log: { remote: true, total: 2, partial: true } }),
+  sess('k-roll', 'Rollup', 'SixC', { host: 'HOST-A', self: rootR }),
+  node('k-roll', 'worker', 'agent', 'HOST-A', { state: 'done', active: false, finished_at: NOW - 5 * MIN, current: { id: 'wk', ts: NOW - 5 * MIN, text: 'all files', state: 'done' }, progress: { done: 6, total: 6, unit: 'files' } }),
+  node('k-roll', 'live', 'agent', 'HOST-A', { current: { id: 'lv', ts: NOW - MIN, text: 'some files', state: 'running' }, progress: { done: 2, total: 6, unit: 'files' } }),
+]
+ao.checked = false; ao.dispatchEvent(new win.Event('change'))
+recv({ type: 'activity_board', full: true, epoch: 'E3', seq: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15, finished_plan_open_min: 120, remote_hosts: [] }, upsert: [...units, ...plan, ...six] })
+const inS = (sname, p) => { const rs = rowsT(), i = rs.indexOf(nmRow(sname)); if (i < 0) return null; for (let j = i + 1; j < rs.length && dOf(rs[j]) > 1; j++) if (rs[j].querySelector('.nm')?.getAttribute('title') === p) return rs[j]; return null }
+check('6c open by default: an OPEN plan renders expanded (its items show without a click), even with a skipped and an abandoned item', !!inS('Sixc', '@open/@a') && !!inS('Sixc', '@open/@b') && !!inS('Sixc', '@open/@c'))
+check('6c finished-plan window: an ended plan stays expanded inside finished_plan_open_min (the board\'s head: 120 min) and collapses after it (not removed)', !!inS('Sixc', '@recent/@x') && !!inS('Sixc', '@old') && !inS('Sixc', '@old/@z'),
+  J([!!inS('Sixc', '@recent/@x'), !!inS('Sixc', '@old'), !!inS('Sixc', '@old/@z')]))
+check('6c planOpenDefault: open → true; ended inside the window → true; past it → false; a node without plan items → false', X.planOpenDefault({ planNode: true, endedPlan: false, u: {} }, NOW, 120) && X.planOpenDefault({ planNode: true, endedPlan: true, u: { plan_end_at: NOW - 30 * MIN } }, NOW, 120)
+  && !X.planOpenDefault({ planNode: true, endedPlan: true, u: { plan_end_at: NOW - 3 * HOUR } }, NOW, 120) && !X.planOpenDefault({ planNode: false, u: {} }, NOW, 120))
+const po = doc.getElementById('actPlanOpen'), poV = doc.getElementById('actPlanOpenV'), lsBefore = Object.keys(win.localStorage).sort().join()
+check('6c slider: "plans open" sits beside "stale after", starting at the bridge\'s finished_plan_open_min', !!po && po.closest('.act-bar') === doc.getElementById('actStale').closest('.act-bar') && po.value === '120' && /2h \(bridge default\)/.test(poV.textContent), poV && poV.textContent)
+po.value = '0'; po.dispatchEvent(new win.Event('input'))
+check('6c slider: 0 → the recently ended plan collapses at once (live, no message to the bridge)', !inS('Sixc', '@recent/@x') && !!inS('Sixc', '@recent') && !!inS('Sixc', '@open/@a') && /^0m$/.test(poV.textContent))
+po.value = '240'; po.dispatchEvent(new win.Event('input'))
+check('6c slider: 240 → the plan that ended 3 h ago expands again; the slider is NOT persisted (like the stale slider)', !!inS('Sixc', '@old/@z') && !!inS('Sixc', '@recent/@x') && /4h/.test(poV.textContent) && Object.keys(win.localStorage).sort().join() === lsBefore)
+po.value = '120'; po.dispatchEvent(new win.Event('input'))
+click(inS('Sixc', '@open'))
+check('6c open by default: the viewer\'s own click still wins (an open plan collapses on click)', !inS('Sixc', '@open/@a') && !!inS('Sixc', '@open'))
+click(inS('Sixc', '@open'))
+const abRow = inS('Sixc', '@open/@c')
+check('6c abandoned: a greyed row (class abandoned) with its own dashed plan glyph; the plan bar tooltip counts it', abRow.classList.contains('abandoned') && !!abRow.querySelector('svg.s-abandoned rect[stroke-dasharray]') && /s-abandoned/.test(X.planGlyph('abandoned')) && X.planGlyph('abandoned') !== X.planGlyph('skipped')
+  && /1 abandoned/.test(X.barTip({ done: 1, total: 2, unit: 'done', rollup: true, todos: true, skipped: 1, n: 3, abandoned: 1 })) && /color:var\(--faint\)/.test([...doc.querySelectorAll('style')].map(s => s.textContent).join('').match(/\.ar\.abandoned \.nm[^}]*\}/)?.[0] || ''))
+check('6c abandoned: an agent or a plan node set abandoned gets a distinct glyph too (not gone\'s, not done\'s)', /s-abandoned/.test(X.glyphSvg({ state: 'abandoned' }, NOW)) && X.glyphSvg({ state: 'abandoned' }, NOW) !== X.glyphSvg({ state: 'gone', gone: true }, NOW) && /s-abandoned/.test(X.glyphSvg({ state: 'abandoned' }, NOW, 'ctx')))
+check('6c home host: top-level host tags compare with the session\'s HOME host (B — where it first appeared), not the headline host (A)', inS('Sixc', 'anode')?.querySelector('.htag')?.textContent === 'HOST-A' && !inS('Sixc', 'bnode')?.querySelector('.htag') && inS('Sixc', '@open')?.querySelector('.htag')?.textContent === 'HOST-A' && !inS('Sixc', '@open/@a')?.querySelector('.htag'),
+  J([inS('Sixc', 'anode')?.querySelector('.htag')?.textContent, inS('Sixc', 'bnode')?.querySelector('.htag')?.textContent]))
+click(nmRow('Sixc'))
+const hselfSix = rowsT().filter(r => r.getAttribute('data-kind') === 'host-line' && r.getAttribute('data-session') === 'Sixc')
+check('6c home host: expanded, the home host\'s own line says so (hover)', hselfSix.length === 2 && (r => { const l = r.querySelector('.ln'); l.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true })); return /HOME host/.test(l.getAttribute('title') || '') })(hselfSix.find(r => r.getAttribute('data-host') === 'HOST-B')), J(hselfSix.map(r => r.outerHTML.slice(0, 200))))
+click(nmRow('Sixc'))
+// the bar column: pills sit right after the name, so .pb is always 3rd from the end of a row
+const withBar = rowsT().filter(r => r.querySelector('.pb') && !r.classList.contains('proj'))
+const anodeRow = inS('Sixc', 'anode')
+check('6c bar column (6b rough edge): the bar sits at the same place on a row WITH a pill as on one without — pills come right after the name', withBar.length > 10 && withBar.every(r => r.children[r.children.length - 3] === r.querySelector('.pb'))
+  && pills(anodeRow).includes('blocked') && [...anodeRow.children].indexOf(anodeRow.querySelector('.pills')) < [...anodeRow.children].indexOf(anodeRow.querySelector('.ln')), J(withBar.filter(r => r.children[r.children.length - 3] !== r.querySelector('.pb')).map(r => r.textContent)))
+// gossiped counts
+click(inS('Sixc', 'bnode'))
+const bLog = rowsT().find(r => r.classList.contains('lg') && r.getAttribute('data-host') === 'HOST-B' && r.getAttribute('data-path') === 'bnode')
+check('6c counts: a REMOTE node\'s Log row says "N entries" — its subtree\'s gossiped own counts summed here; "+" when one understates (partial)', !!bLog && /7\+ entries, this node and below/.test(bLog.textContent) && X.subtreeLog({ u: { log: { remote: true, total: 5 } }, kids: [{ u: { log: { remote: true, total: 2, partial: true } }, kids: [] }] }).n === 7
+  && X.subtreeCount({ u: { log: { remote: true } }, kids: [] }) === null, bLog && bLog.textContent)
+click(inS('Sixc', 'bnode'))
+// the run boundary + pruned + by
+click(inS('Rollup', 'live'))
+const liveLog = rowsT().find(r => r.classList.contains('lg') && r.getAttribute('data-path') === 'live')
+click(liveLog)
+const rq = sentOf('activity').pop()
+recv({ type: 'activity', ref: rq.ref, result: { ok: true, log: { host: 'HOST-A', entries: [{ id: 'r2', ts: NOW - MIN, path: 'live', rel: '', current: true, text: 'run 2', rendered: 'run 2', state: 'running' }, { id: 'r1', ts: NOW - 2 * MIN, path: 'live', rel: '', text: 'abandoned by the bridge', rendered: 'abandoned by the bridge', state: 'abandoned', by: 'bridge' }], next_cursor: null, run_start: true, earlier_cursor: 'f1.2026-10-01.900' } } })
+const sre = rowsT().find(r => /start of this run · show earlier runs/.test(r.textContent))
+check('6c run boundary: the log stops at the start of the CURRENT run with a "show earlier runs" control; an entry the bridge wrote says "by bridge"', !!sre && rowsT().some(r => r.querySelector('.by')?.textContent === 'by bridge') && !rowsT().some(r => /load older/.test(r.textContent)))
+click(sre)
+const rq2 = sentOf('activity').pop()
+check('6c run boundary: "show earlier runs" asks for the next page past the boundary — cursor = earlier_cursor, earlier:true', rq2.query.log.cursor === 'f1.2026-10-01.900' && rq2.query.log.earlier === true && rq2.query.log.path === 'live', J(rq2.query))
+recv({ type: 'activity', ref: rq2.ref, result: { ok: true, log: { host: 'HOST-A', entries: [{ id: 'o1', ts: NOW - 3 * HOUR, path: 'live', rel: '', text: 'an earlier run', rendered: 'an earlier run', state: 'done' }], next_cursor: null } } })
+const sep = rowsT().find(r => r.classList.contains('sep')), eo1 = rowsT().find(r => /an earlier run/.test(r.textContent))
+check('6c run boundary: the earlier run\'s entries follow a "— earlier runs —" separator', !!sep && !!eo1 && rowsT().indexOf(sep) < rowsT().indexOf(eo1) && rowsT().indexOf(sep) > rowsT().indexOf(rowsT().find(r => /run 2/.test(r.textContent))))
+click(liveLog)
+click(inS('Rollup', 'live'))
+click(inS('Sixc', 'anode'))
+const aLog = rowsT().find(r => r.classList.contains('lg') && r.getAttribute('data-path') === 'anode')
+click(aLog)
+const rq3 = sentOf('activity').pop()
+recv({ type: 'activity', ref: rq3.ref, result: { ok: true, log: { host: 'HOST-A', entries: [{ id: 'p1', ts: NOW - MIN, path: 'anode', rel: '', text: 'x', rendered: 'x', state: 'blocked' }], next_cursor: null, pruned: true } } })
+check('6c pruned: a run that began in a deleted day file ends in "earlier history pruned" (not a silent gap)', rowsT().some(r => r.classList.contains('pruned') && /earlier history pruned/.test(r.textContent)))
+click(aLog); click(inS('Sixc', 'anode'))
+// rollups follow the filters (the 6b rough edge: a session's rollup counted what the filter hid)
+const rollRow = () => nmRow('Rollup')
+const tipOf = el => { el.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true })); return el.getAttribute('title') }
+const unf = tipOf(rollRow().querySelector('.pb'))
+ao.checked = true; ao.dispatchEvent(new win.Event('change'))
+const fil = tipOf(rollRow().querySelector('.pb'))
+check('6c rollup vs filter: with Active only the session\'s rolled-up bar counts only what is shown (the finished worker\'s 6/6 drops out: 8 of 12 → 2 of 6 files); its line renders against it', unf === '8 of 12 files (66%) — rollup of 2 below it' && fil === '2 of 6 files (33%) — rollup of 1 below it' && rollRow().querySelector('.ln').textContent === 'rolling 2 of 6 files', J([unf, fil]))
+check('6c rollKids: the same strategies as the bridge — sum, mean %, then N of M done (skipped out, abandoned counted)', J(X.rollKids([{ u: { key: 'a' }, fbar: { done: 1, total: 4, unit: 'x' } }, { u: { key: 'b' }, fbar: { done: 1, total: 4, unit: 'x' } }])) === J({ done: 2, total: 8, unit: 'x', pct: 25, rollup: true, n: 2 })
+  && X.rollKids([{ u: { key: 'a' }, fbar: { done: 50, total: 100, unit: '%' } }, { u: { key: 'b' }, fbar: { done: 1, total: 4, unit: 'x' } }]).pct === 37.5
+  && (r => r.todos && r.done === 1 && r.total === 2 && r.abandoned === 1)(X.rollKids([{ u: { key: 'a', plan_item: true, current: { state: 'done' } } }, { u: { key: 'b', plan_item: true, current: { state: 'skipped' } } }, { u: { key: 'c', plan_item: true, current: { state: 'abandoned' } } }])))
+check('6c active only (6c plan rule): the ended plans are hidden, the open one (skipped + abandoned items) stays', !inS('Sixc', '@recent') && !inS('Sixc', '@old') && !!inS('Sixc', '@open/@b'))
+// the Plans filter
+const pf = doc.getElementById('actPlans')
+ao.checked = false; ao.dispatchEvent(new win.Event('change'))
+pf.checked = true; pf.dispatchEvent(new win.Event('change'))
+check('6c Plans filter: beside "active only"; only plan nodes, plan items and what holds them — across all sessions (sessions without plans disappear)', pf.closest('.act-bar') === ao.closest('.act-bar') && !!inS('Sixc', '@open') && !!inS('Sixc', '@open/@a') && !!inS('Sixc', '@recent') && !!inS('Sixc', '@old')
+  && !inS('Sixc', 'anode') && !inS('Sixc', 'bnode') && !nmRow('Rollup') && !nmRow('Orch') && !!nmRow('Planner') && !!inPlanner('@#70/@Spec') && !inPlanner('helper'))
+check('6c Plans filter: an agent holding an open plan stays (it is a plan node — closed here by an earlier Collapse all); the agent working UNDER an item does not', !!inPlanner('retired') && !inPlanner('@#70/@Build/builder') && !!inPlanner('@#70/@Build/@unit'))
+ao.checked = true; ao.dispatchEvent(new win.Event('change'))
+check('6c Plans + Active only: combined — open plans only (ended ones hidden too)', !!inS('Sixc', '@open') && !inS('Sixc', '@recent') && !inS('Sixc', '@old') && !inPlanner('@shipped'))
+pf.checked = false; pf.dispatchEvent(new win.Event('change')); ao.checked = false; ao.dispatchEvent(new win.Event('change'))
+check('6c Plans filter: remembered per browser like active only', win.localStorage.getItem('aimb.act.plans') === '0')
+// the 6d hooks
+const nr = inS('Sixc', 'anode'), sr = nmRow('Sixc')
+check('6d hooks: every node row carries data-kind / data-host (its ORIGIN host) / data-path / data-session / data-project / data-user, and ACT.rowInfo holds the same', nr.getAttribute('data-kind') === 'node' && nr.getAttribute('data-host') === 'HOST-A' && nr.getAttribute('data-path') === 'anode' && nr.getAttribute('data-session') === 'Sixc' && nr.getAttribute('data-project') === 'SixC' && nr.getAttribute('data-user') === 'robin'
+  && nr.getAttribute('data-nkind') === 'agent' && V.rowInfo[nr.getAttribute('data-k')]?.path === 'anode' && inS('Sixc', '@open/@a').getAttribute('data-plan-item') === '1' && inS('Sixc', '@open').getAttribute('data-plan-node') === '1', nr.outerHTML.slice(0, 400))
+check('6d hooks: session rows (data-kind session, its hosts + home), project rows and log entries (data-kind entry + data-id) are tagged too', sr.getAttribute('data-kind') === 'session' && sr.getAttribute('data-home') === 'HOST-B' && sr.getAttribute('data-hosts') === 'HOST-A,HOST-B' && rowOf(/📁 SixC/).getAttribute('data-kind') === 'project'
+  && rowsT().filter(r => r.getAttribute('data-kind') === 'entry').every(r => !!r.getAttribute('data-id')))
+} catch (e) { fail++; console.log('FAIL 6c block crashed:', (e && e.stack) || e) }
 } catch (e) { fail++; console.log('FAIL 6b block crashed:', (e && e.message) || e) }
 
 console.log(`\n${pass} passed, ${fail} failed`)

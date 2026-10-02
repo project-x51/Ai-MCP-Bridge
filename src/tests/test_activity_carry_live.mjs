@@ -97,8 +97,8 @@ check('startup: the replay read only the window — fewer records than were seed
 const t2 = await until(() => tap(G), t => t.carry_forward && t.carry_forward.day === D1, 20000)
 const cf = fileRecs(D1).filter(r => r.kind === 'cf')
 check('rollover: the gateway noticed the new local day and carried the long-lived nodes forward (why: day rollover)', t2.carry_forward?.day === D1 && t2.carry_forward?.why === 'day rollover' && t2.carry_forward?.written === cf.length && t2.cf_day === D1, J(t2.carry_forward))
-check('rollover: the new day\'s file holds a cf of every OPEN item and its ancestors (parents first), each a v3 snapshot', ['', '@#70', '@#70/@Build', '@#70/@Ship', '@#70/@Docs'].every(p => cf.some(r => r.path === p)) && cf.findIndex(r => r.path === '@#70') < cf.findIndex(r => r.path === '@#70/@Ship')
-  && cf.every(r => r.v === 3 && r.session === 'Lead') && cf.find(r => r.path === '@#70/@Ship')?.plan_item === true && cf.find(r => r.path === '@#70/@Build')?.current?.text === 'compiling', J(cf.map(r => r.path)))
+check('rollover: the new day\'s file holds a cf of every OPEN item and its ancestors (parents first), each a v4 snapshot (6c: every item of the OPEN plan, done / skipped ones too)', ['', '@#70', '@#70/@Build', '@#70/@Ship', '@#70/@Docs'].every(p => cf.some(r => r.path === p)) && cf.findIndex(r => r.path === '@#70') < cf.findIndex(r => r.path === '@#70/@Ship')
+  && cf.every(r => r.v === 4 && r.session === 'Lead') && cf.find(r => r.path === '@#70/@Ship')?.plan_item === true && cf.find(r => r.path === '@#70/@Build')?.current?.text === 'compiling', J(cf.map(r => r.path)))
 
 // ---- 3. older history stays in the older files and pages as before
 let page = await call(G, 'activity', { log: { session: 'Lead', path: '@#70', limit: 50 } }), got = [...(page.log?.entries || [])], n = 0

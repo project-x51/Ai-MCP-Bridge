@@ -28,7 +28,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `mayInitiate`/`allow`/`revoke`/…), `reminders.js` (#29 per-session behaviours; `remindersFor`/`set`/`clear`/…),
   `project-names.js` (#71 the replicated first-seen canonical spelling per project; `note`/`merge`/`display`),
   `traces.js` (the observation-plane ring buffer + dashboard fan-out; `collect`/`history`), and `egress-auth.js`
-  (#36 server-side auth token sources — mint/cache/refresh a bearer token for an egress backend). `activity.js` is the
+  (#36 server-side auth token sources — mint/cache/refresh a bearer token for an egress backend). `log-snippet.js` (#70 6c)
+  builds the `{log_snippet}` / `{log_tool_hint}` connect-reminder texts (pure; the bridge fills the paths). `activity.js` is the
   pure core of the #70 agent activity board (no I/O, no clock — `now` is a parameter; bridge.mjs does the I/O): report
   parsing (`@ctx`/`@~ctx`, progress/eta/stale_after, the `log` flag, the locked limits), `apply` over a plain state
   object, text placeholders (`renderText`), checkpoints (`planCheckpoints`), the newest-first replay (`createReplay`),
@@ -60,7 +61,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   - `tools/aimb-log.mjs` — **the activity reporter (#70 step 3)**: a node CLI that reports an agent's or a script's
     status to this host's activity board without registering (one report, or `--stream` NDJSON). It imports
     `lib/activity.js` to validate locally, so it runs from inside the bridge's `src/`. v1.62.0: `--path` (the node
-    tree) and `--batch <file|->`; v1.63.0: `--plan "A" "B" …` and `--done`. See "Log / activity" below.
+    tree) and `--batch <file|->`; v1.63.0: `--plan "A" "B" …` and `--done`; v1.64.0: `--token-file <path>` (#75). See "Log / activity" below.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -130,17 +131,23 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   containment, header filter + server-side inject (#33, 9); and `test_lib_unit.mjs` — the fast pure-`lib/` +
   services units (topics/envelope/refs/consent/reminders/traces, egress incl. server-side auth mint/refresh/
   inject and the secret-resolver, `win-env` reg-parsing, tailscale `hostOf`) (#31/#35/#36, 88); and
-  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 588 — v1.63.0: todos, plans, the
-  rollup variants, lifetime, eviction, carry-forward across rollovers + a restart); `test_activity_gossip_live.mjs`
+  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 630 — v1.63.0: todos, plans, the
+  rollup variants, lifetime, eviction, carry-forward across rollovers + a restart; v1.64.0: abandoned, the plan-end rule,
+  auto-abandon, entry counts, the home host + s0, the run boundary / pruned paging); `test_activity_gossip_live.mjs`
   — four loopback "hosts" + a follower: the mesh board, deltas ≤1/s per link, truncation, remote paging / entries /
   queued fetches, going-down, owner down, forged slices, a legacy hub, dashboards, plans (#70 step 4 / 6b, 51);
   `test_dashboard_activity.mjs` — the dashboard's Activity view in jsdom: client-side stale, the status glyph + ring,
   hover times, placeholders, the delta store, the tree, pills / host down / bell, the project cycle, active only, logs
-  (#70 step 5 / 6b — plan items, the plan bar, host tags, per-host headlines; 105); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
+  (#70 step 5 / 6b — plan items, the plan bar, host tags, per-host headlines; 6c — open by default, the finished-plan
+  window + slider, abandoned, home-host tags, the Plans filter, rollups that follow it, the bar column, counts, the run
+  boundary, the 6d row hooks; 132); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
   board → deltas ≤1/s, seq-gap resync, page leaves refused, paging into the day files (local + remote), queued fetches
   + `busy`, gone vs host down, the doorbell flag, the duplicate-hostname warning, plan units + ticks (#70 step 5 / 6b, 43);
   `test_activity_carry_live.mjs` — the #70 6b carry-forward under the test clock hook: 13 days of seeded files, a real
-  day rollover, a restart a week later rebuilt from the rollover's records alone (11). Tests run in
+  day rollover, a restart a week later rebuilt from the rollover's records alone (11); `test_activity_6c_live.mjs` — #70
+  6c + #75 part 2: the reminders' --token-file (never the token), the exact {log_snippet} / {log_tool_hint}, aimb-log
+  --token-file, the run boundary + pruned history local and remote, gossiped counts, the home host, the board head, and
+  auto-abandon under the clock hook (31). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -397,10 +404,17 @@ node "<abs path>/src/tools/aimb-doorbell.mjs" --name Bridget --project AIMB --st
   `config.json` has no token and your shell doesn't inherit the MCP server's env. Pass `--token-file <same path>`, or
   set `AI_BRIDGE_TOKEN_FILE`. The file may be a bare token or a `KEY=VALUE` env file. An explicit `--token-file` that
   can't be read is exit 64; it never silently falls back to another source.
+- **The reminder carries it (#75 part 2, v1.64.0):** when the bridge itself read its token from `AI_BRIDGE_TOKEN_FILE`,
+  `{doorbell_cmd}`, `set_wake`'s `command` / `hint` and `{log_snippet}` (below) all end with `--token-file "<that path>"`
+  (absolute, forward slashes, quoted) — the PATH only; the token never appears in a reminder or a hint. A token from
+  `config.json` adds nothing (the scripts read that file themselves). A token passed as an env VALUE
+  (`AI_BRIDGE_TOKEN` in the MCP client config) adds nothing either: it can't be handed on safely, so a host that wants
+  the reminders to work verbatim keeps its token in a file (`AI_BRIDGE_TOKEN_FILE`) or in `config.json`.
 
 **You don't need to know that path:** `set_wake` (for a code session) returns a ready-to-run `command`, and a
 `connect` reminder may say `{doorbell_cmd}`, which the bridge expands per session when it emits the reminder
-(#67): `"<abs node>" "<abs path to this host's tools/aimb-doorbell.mjs>" --name "<you>" --project "<proj>"`.
+(#67): `"<abs node>" "<abs path to this host's tools/aimb-doorbell.mjs>" --name "<you>" --project "<proj>"` (+
+`--token-file "<path>"`, #75).
 Forward slashes and double quotes, so it runs from bash everywhere, Git Bash on Windows included, and it works on
 macOS where `node` may not be on a non-login shell's PATH. Also: `{doorbell_path}`, `{node}`, `{name}`,
 `{project}`. Unknown `{tokens}` pass through, and the stored reminder is never modified.
@@ -463,13 +477,15 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
 remote history (step 4, "Mesh-wide" below), the dashboard's **Activity** tree (step 5, "The Activity page" below), and
 the **unified node tree + batch logging** (step 6a, v1.62.0, "The node tree" below) and **todos and plans** (step 6b,
-v1.63.0, "Todos and plans" below). The agent snippet (6c) follows.
+v1.63.0, "Todos and plans" below), and (step 6c, v1.64.0, "Step 6c" below) the paste-ready agent snippet + the connect
+reminders, the abandoned state and the plan-end rule, gossiped entry counts, run-boundary history, the finished-plan
+window, home-host tags and the Plans filter.
 
 ### The node tree (v1.62.0, step 6a)
 A session holds ONE TREE of **nodes**. The session itself is the root. Every other node is one of two kinds:
@@ -523,7 +539,7 @@ files.
 
 **Limits** (locked): depth ≤ **6** segments; per session **128 agents** and **4096 nodes** of either kind (the root not
 counted); text 240, context name 60, `details` 4 KB, `data` 16 KB (unchanged). A message that needs room **evicts the
-oldest finished agent with its whole subtree** — v1.63.0: or the oldest ENDED plan (every item done / skipped), and never
+oldest finished agent with its whole subtree** — v1.63.0: or the oldest ENDED plan (v1.64.0: every item done, or marked complete / abandoned), and never
 a subtree that still holds an OPEN plan item; never an ancestor of its own target; reported in `evicted` — and is refused
 (`too-many-agents` / `too-many-nodes`) only when that can't make room — or when it writes no record (`log:false`).
 
@@ -589,7 +605,8 @@ Opt-in: nothing becomes a todo unless it is created as one, and ordinary context
   the parent's sum. The precedence stays 6a's: the node's reported progress, then the SUM of its ordinary children's bars
   when they share a unit, then their MEAN %, then the plan's N of M — so ordinary children with bars win over the plan.
   Up the tree, plan bars sum like any shared unit (two plans → "3 of 9 done").
-- **Lifetime:** `finished_visible_hours` now defaults to **168 (7 days)** (per host as before). **Open** items (todo /
+- **Lifetime** (v1.64.0 changed when a plan ENDS — see "Step 6c": only all-done, or the plan marked complete / abandoned;
+  what follows is 6b's rule): `finished_visible_hours` now defaults to **168 (7 days)** (per host as before). **Open** items (todo /
   running / blocked) **never expire** while their session exists — not in a finished agent's subtree (the agent stays),
   not in a session that went gone. A **plan** (a node with plan items) **ends** when its last item became done / skipped,
   or when its owner (the plan node itself if it is an agent, else its nearest agent / the session) finishes, and expires
@@ -612,8 +629,8 @@ Opt-in: nothing becomes a todo unless it is created as one, and ordinary context
   once it says more than the item's name), in creation order; a plan node shows a solid green "N of M done" bar (hover:
   "2 of 4 done (50%) · 1 skipped (left out) — its plan: 5 items"). **Active only** keeps open items visible (even under a
   finished agent) and hides ended plans. **Host tags** appear only where a node's host differs from its parent's (a
-  top-level node: from the session's headline host); the session row shows all its hosts and, expanded, each host's own
-  line above its Log.
+  top-level node: from the session's headline host — v1.64.0: its HOME host); the session row shows all its hosts and,
+  expanded, each host's own line above its Log.
 
 **Reporting — `log {as, secret, path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?, plan?, items?}`.**
 You report as a registered session (`as` + `secret`). Address a node with `path` (above; omit it for the session itself)
@@ -694,13 +711,105 @@ checkpoints, and so does the Task Tray before it kills the bridges (`POST /admin
 **Config** — an `activity` block in `config.json` (live-reloaded), each key with an `AI_BRIDGE_ACTIVITY_<KEY>` env override:
 `log_retention_days` 7 · `log_entries_per_agent` 200 (in memory) · `stale_after_min` 15 · `finished_visible_hours` 168 (v1.63.0; was 24; also the replay window) ·
 `memory_budget_mb` 64 (over it, the oldest finished agents, then the oldest log entries, are evicted) ·
-`progress_checkpoint_sec` 60 (10–3600, 0 = off) · `enabled` true. Test-only env: `AI_BRIDGE_ACTIVITY_CHECKPOINT_MS`,
+`progress_checkpoint_sec` 60 (10–3600, 0 = off) · v1.64.0: `abandoned_plan_days` 90 (1–3650; a gone session's open plans are
+abandoned by the bridge after this long) · `finished_plan_open_min` 120 (0–10080; how long an ended plan stays expanded on
+dashboards — sent with the board) · `enabled` true. Test-only env: `AI_BRIDGE_ACTIVITY_CHECKPOINT_MS`,
 `_FWD_MS`, `_LOAD_WAIT_MS`, `_GC_MS`, `_RETENTION_MS`, `_INDEX_MAX`, `_PHASE1_MS`; step 4 (env only, every host should
 agree): `_GOSSIP_MS` (1000), `_SLICE_MAX_BYTES` (262144), `_PAGE_ENTRIES` (50), `_PAGE_BYTES` (32768), `_FETCH_RATE` (4/s),
 `_REMOTE_MS` (4000), `_DOWN_HOLD_MS` (30000); v1.63.0: `_ROLLOVER_CHECK_MS` (30000, the day-rollover check);
 `AI_BRIDGE_TEST_ACTIVITY_TAP=1` (`activity {tap:true}` returns the recent frames, the replay stats and the last
 carry-forward), `AI_BRIDGE_TEST_HOSTNAME` (two loopback "hosts" on one machine) and `AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS`
 (v1.63.0: shifts the activity clock — report times, day files, the window, the rollover) are for tests.
+
+### Step 6c (v1.64.0) — the agent snippet, the connect reminders, and the plan / history / dashboard rules
+**How sessions learn to use the board.** Agents never see reminders, so an orchestrator pastes a ready-made block into each
+agent's prompt. Two new connect-reminder placeholders, expanded per session when the reminder is emitted (like
+`{doorbell_cmd}`; `lib/log-snippet.js`):
+- **`{log_snippet}`** — the ready-to-run `tools/aimb-log.mjs` command with this host's absolute node + script paths, the
+  session's `--session` / `--project`, `--token-file "<path>"` when the bridge read its token from a file (#75), and a
+  `--path <agent-path>` placeholder for the orchestrator to fill in; then six short lines:
+  ```
+  Report your status with: "<node>" "<…/src/tools/aimb-log.mjs>" --session "Orch" --project "AIMB" [--token-file "<path>"] --path <agent-path> "<text>"
+  - Text "@ctx …" logs to a context; "@~ctx …" also sets its current line; "@~root …" sets your own headline.
+  - Report at milestones only (every call costs tokens); a script reporting often adds --no-log.
+  - Before a long silent step (a build, a test run) add --stale-after 60m so you don't show as stale.
+  - --plan "A" "B" creates ☐ plan items under --path, in that order.
+  - --done ticks one: --path "<agent-path>/@~A" --done (no text needed).
+  - Finish with "@~root <summary>" --state done (or --state failed). Never put secrets in status text.
+  ```
+- **`{log_tool_hint}`** — the same guidance for a session without a shell (Cowork), phrased for the `log` tool: `log({
+  as:"<name>", secret, text })`, `path`, `log:false`, `stale_after:"60m"`, `plan:["A","B"]`, a tick with `path:"<path>/@~A",
+  state:"done"`, the finish line, no secrets.
+
+`config.example.json`'s realm block (`behaviors.realm`, published once at deploy time) keeps the doorbell reminder and
+adds two connect reminders: `client:code` — "When you spawn agents, put this block in each agent's prompt (set --path to
+the agent's name): {log_snippet} Report your own status with the log tool: text "@~root <what you are doing>" (plan:[...]
+for a checklist)." — and `client:cowork` — "Show what you are working on on the activity board: {log_tool_hint}". Both
+carry `"id":"activity"`: v1.64.0 lets a config default carry an optional `id` so several defaults share one
+(operation, scope, match) — a ≤1.63 host ignores the id and keeps only the last one, so publish the block once every host
+runs 1.64. The bridge's MCP server instructions now name the `log` / `activity` tools too.
+
+**The abandoned state.** `abandoned` (greyed, a dashed glyph with a slash) is valid only for **plans and plan items**: a
+plan item, or a plan node (a node holding plan items — a context, or an agent / the session, which it then finishes like
+done / failed). Anything else → `not-a-plan`. The tool and the script set it explicitly (`--state abandoned`, 6d adds a
+right-click). In "N of M done" an abandoned item counts as not done and stays in M (`progress.abandoned` counts them;
+skipped items stay out of M, as before — kept, since they are a deliberate decision, and a plan with a skipped item now
+simply stays open until it is marked complete).
+
+**When a plan ENDS (supersedes 6b's "done or skipped ends a plan").** A plan does not end while any item is anything but
+done — skipped, failed, idle, todo, running and blocked all keep it open, and its owner finishing no longer ends it. It ends
+only when **every item is done** (at the last one's time) or when **its node is set `done` (complete) or `abandoned`**
+(`plan_end_at` on the board). Knock-on effects: every node of an OPEN plan (its items, whatever their state, and their
+ancestors) never expires and is never evicted; an ended plan expires `finished_visible_hours` after it ended and is
+evictable; the carry-forward carries every item of an open plan; Active only hides ended plans.
+
+**Auto-abandon.** A session that has been **gone for `abandoned_plan_days`** (default 90) — not on its host's roster and
+quiet that long (its gone time, else its last message: a script-only session is never marked gone, and gone isn't kept
+across restarts) — has its open plans abandoned by the gateway: each open item (todo / running / blocked) and then the plan
+node itself get an `@~` line with state `abandoned` ("abandoned by the bridge — the session has been gone 90 days"),
+logged and persisted as entries with **`by:"bridge"`** (shown "by bridge" in the log). They are SYSTEM messages: they
+touch no activity, so the session doesn't look alive. The plans then expire a window later like any ended plan.
+
+**Gossiped entry counts.** Every gossiped node carries its OWN logged-entry count (`log_n`: memory + what the cap dropped)
+and `log_partial` when its run began before that host's replay window (the count then understates: older entries live
+only in its day files). The board's node `log` is `{entries, dropped, total, partial?}` locally and `{remote:true, total,
+partial?}` for another host's node, so a remote Log row says "N entries" too — the dashboard sums a subtree itself, and
+shows "N+" when a count understates.
+
+**Run-boundary history.** A node's history now stops at the start of its **current run** — the record that began this
+instance of the node (`new_from` at or above it on its chain): the page answers `run_start:true` (no `next_cursor`) and,
+when an earlier run of the same name left entries, `earlier_cursor`. "Show earlier runs" = `log:{…, cursor:earlier_cursor,
+earlier:true}` (the dashboard draws an "— earlier runs —" separator and keeps `earlier:true` for the following pages).
+When the run began in a day file that **retention already deleted** (e.g. a carried-forward node older than
+`log_retention_days`), the files run out before the run's start and the page says **`pruned:true`** — "earlier history
+pruned" on the dashboard, never a silent gap. Local and remote paging alike (the owner does the paging). A session's own
+run spans its children's runs (a child's new run is no boundary for the session).
+
+**The finished-plan window.** An ENDED plan stays **expanded** on the dashboard for `finished_plan_open_min` (per host,
+default 120, sent with the board in `head`), then collapses out of the default view — it isn't removed (the 7-day window
+still does that). A **"plans open"** slider beside "stale after" changes it live (0–8 h; not persisted, like the stale
+slider). Open plans always render expanded by default (a plan node's own click still wins; Collapse all closes them).
+
+**Home-host tags.** A top-level node's host tag now compares with the session's **HOME host** — the host it first appeared
+on: the earliest-created root across hosts, ties by host name (the board's `home`; `created_at` rides every gossip header
+and, since format v4, every record as `s0`, so it survives restarts). The headline still comes from the host that most
+recently set one, but the tags no longer flip with it.
+
+**The Plans filter.** A "plans" checkbox beside "active only" shows only plan nodes, plan items and their ancestors (the
+sessions and agents that hold them), across all sessions; with Active only too, only open plans. Remembered per browser.
+**Rollups follow the filters:** with Active only or Plans on, a rolled-up bar (and a line's `{progress}`) counts only what
+the filter shows — the dashboard recomputes it with the bridge's own rule; a reported bar is shown as reported. (6b's
+session rollup still counted an ended plan Active only hid.)
+
+**Dashboard details.** The Activity section is open by default. Pills now sit right after the name, so the bar column lines
+up on every row. Every row carries its identity for 6d's right-click menu: `data-kind` (project / session / host-line /
+node / log / entry), the node's ORIGIN `data-host` and `data-path`, `data-session` / `data-project` / `data-user`
+(`data-nkind`, `data-plan-item`, `data-plan-node`, an entry's `data-id`); `window.AimbActView.rowInfo[data-k]` holds the
+same object. No menu yet.
+
+**Formats (v1.64.0).** Records + slices are **v4** (`abandoned`, `by`, `s0` on every record, `log_n` / `log_partial` on
+gossip nodes); v2 and v3 records are still read; hubs declare `activity_gossip:4` (a 1.63 hub would misread `abandoned`,
+so the two don't exchange activity). Deploy = restart every host's gateway on 1.64.0 together.
 
 ### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
 Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
@@ -768,8 +877,9 @@ contexts, to any depth) → log entry**.
   explains the glyphs. The colours are the page's tokens: light by default, dark with the OS setting (or `?theme=dark`
   / `?theme=light`); `dashboard.html#activity` opens the section directly.
 
-**Data path — deltas, not boards.** The section is collapsed by default, and a dashboard subscribes only while it is
-open and the browser tab is visible — one that never opens it costs the bridge nothing:
+**Data path — deltas, not boards.** The section is **open by default** (v1.64.0; it was collapsed before — your own
+open / closed choice is remembered per browser), and a dashboard subscribes only while it is open and the browser tab is
+visible — one that closes it costs the bridge nothing:
 - `{type:"activity_sub"}` → `{type:"activity_board", full:true, epoch, seq:1, head, upsert:[…]}`: every **unit** — one
   per session group (header, `self` / `selves`, `bell`, `hosts_down`) and one per **node** (v1.62.0: `kind:"node"`,
   `nkind` agent | context, `path`, `key`, `parent_key`, `depth`, its own `progress` and the rolled-up `bar`) — in the **raw** form: the
@@ -855,8 +965,10 @@ locally with the bridge's own parser first, so a bad one costs no connection.
   name is the session name) with the same realm + project + name under a **different user** (case-insensitive): that
   report is refused with `session-user-mismatch`. Checked by the gateway against its roster on every report. Same user →
   accepted; once the session leaves the roster, accepted.
-- **Token / port:** like the doorbell, from the bridge's `config.json` found relative to the **script**
-  (`../config.json`; `AI_BRIDGE_CONFIG` names another), or `AI_BRIDGE_TOKEN` / `AI_BRIDGE_TOKEN_FILE`, and
+- **Token / port:** like the doorbell — v1.64.0 (#75): **`--token-file <path>`** (a bare token or a `KEY=VALUE` env file,
+  `~` expanded) is AUTHORITATIVE when given (an unreadable or empty one is exit 64, `no-token`, naming the file — never a
+  silent fallback); else `AI_BRIDGE_TOKEN` / `AI_BRIDGE_TOKEN_FILE`, else the bridge's `config.json` found relative to the
+  **script** (`../config.json`; `AI_BRIDGE_CONFIG` names another); and
   `--ws-port` / `--url` / `AI_BRIDGE_WS_PORT`. **`--token` is refused** (exit 64, `token-in-argv`; the value is not
   echoed): argv is readable in the process list and the realm token is also the body-encryption key. The script never
   prints the token.
