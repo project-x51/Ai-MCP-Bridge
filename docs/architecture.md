@@ -1202,6 +1202,9 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.73.0):** *#89 — the agent and session guides come from the script.* `aimb-log --guide agent|session` prints
+  the how-to (`agentGuide` / `sessionGuide` in `lib/log-snippet.js`), tailored to the gateway it asks (≤1.5 s; flags the gateway
+  can't serve are left out or named). `{log_snippet}` is now the command + one line pointing at `--guide agent`. No wire change.
 - **Built (v1.72.0):** *#86 + #87 — a node's details and data on the dashboard; the log panel oldest first.* **Page only, no wire
   change** (format stays v5; `BRIDGE_VERSION` 1.72.0 so the mesh map shows who has the page; wire-compatible with 1.66 – 1.71).
   **#86 — the details section** (`dashboard.html` `actRenderDetails`): the log panel became a column — header, a collapsible

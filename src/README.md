@@ -807,18 +807,23 @@ agent's prompt. Two new connect-reminder placeholders, expanded per session when
 `{doorbell_cmd}`; `lib/log-snippet.js`):
 - **`{log_snippet}`** — the ready-to-run `tools/aimb-log.mjs` command with this host's absolute node + script paths, the
   session's `--session` / `--project`, `--token-file "<path>"` when the bridge read its token from a file (#75), and a
-  `--path <agent-path>` placeholder for the orchestrator to fill in; then six short lines:
+  `--path <agent-path>` placeholder for the orchestrator to fill in; then ONE line (v1.73.0, #89):
   ```
   Report your status with: "<node>" "<…/src/tools/aimb-log.mjs>" --session "Orch" --project "AIMB" [--token-file "<path>"] --path <agent-path> --text "<text>"
-  - --text "@ctx …" logs to a context; "@~ctx …" also sets its line; keep "@~root <what you're doing>" current.
-  - Report at milestones only (every call costs tokens); a script reporting often adds --no-log.
-  - Before a long silent step (a build, a test run) add --stale-after 60m so you don't show as stale.
-  - --item "A" --item "B" creates ☐ plan items under --path, in that order (one name per --item).
-  - Start item A: --path "<agent-path>/@~A" --state running --text "<what>"; when done: same --path + --done.
-  - Finish with --text "@~root <summary>" --state done (or failed). Never put secrets in status text.
+  - First run it with --guide agent in place of --text: it prints the rules (checklist, live items, finishing).
   ```
-  (v1.66.0, #79: the lines as they read now — explicit `--text` and one `--item` per plan item, so no argument depends on its
-  position, and the checklist kept live.)
+  **`--guide agent|session` (v1.73.0, #89).** The rules live in the SCRIPT, not in every brief (Robin, 2026-10-03: the
+  pasted rules were noise in the orchestrator's context, and a copy in a brief can drift from the script). `--guide agent`
+  prints the agent's how-to with its own ready command (its `--path`, `--token-file`): checklist first (`--item`), live
+  items (`--state running --text`, `--done`), unplanned work added first, the `@~root` headline, milestones and
+  `--stale-after`, asking (`--ask … --choice … --wait`), finishing, no secrets. `--guide session` prints an orchestrating
+  session's: its own reports, a truthful plan, tick only after checking the work, and the two-line agent brief
+  (`run <cmd> --path "<item>/<agent>" --guide agent` + its checklist). Both ask this host's gateway its version (≤ 1.5 s)
+  and leave out, or name, the flags it can't serve (e.g. no `--ask` on a 1.65 gateway). Plain text, exit 0; an unknown kind
+  is exit 64. The text is `agentGuide` / `sessionGuide` in `lib/log-snippet.js` — one place to maintain and extend.
+  So a brief is just: *"Before you start, run `<cmd> --path "<item>/<agent>" --guide agent` and follow it. Your checklist:
+  …"* plus the task. (The realm reminder still wraps `{log_snippet}`; pointing it at `--guide session` waits until every
+  host runs 1.73, since a 1.65 host's script has no `--guide`.)
 - **`{log_tool_hint}`** — the same guidance for a session without a shell (Cowork), phrased for the `log` tool: `log({
   as:"<name>", secret, text })`, `path`, `log:false`, `stale_after:"60m"`, `plan:["A","B"]`, a tick with `path:"<path>/@~A",
   state:"done"`, the finish line, no secrets.

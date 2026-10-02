@@ -404,6 +404,20 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
+## #89 — agent and session guides from the script: `aimb-log --guide agent|session`  ·  **DONE (v1.73.0)**
+Robin, 2026-10-03: the logging rules pasted into every agent brief are noise in the orchestrator's context, and a copy in a
+brief can drift from the script. The rules now come from the script itself.
+- **`aimb-log --guide agent`** prints the agent's how-to: its own ready command (its `--path`, `--token-file`), checklist first,
+  live items, unplanned work first, the `@~root` headline, milestones + `--stale-after`, asking (`--ask --choice --wait`),
+  finishing, no secrets. **`--guide session`** prints an orchestrating session's: its own reports, a truthful plan, tick only
+  after checking the work, and the two-line agent brief. Plain text, exit 0; any other kind → exit 64.
+- Each guide asks this host's gateway its version (≤ 1.5 s, only with a token) and leaves out or names the flags it can't
+  serve (a 1.65 gateway: no `--before`/`--move`, no `--ask`). Unreachable → a one-line note.
+- **`{log_snippet}`** shrinks to the command + ONE line: "First run it with --guide agent in place of --text …".
+- The text is `agentGuide` / `sessionGuide` in `lib/log-snippet.js`: one place to maintain.
+- **Later:** point the realm reminder at `--guide session` once every host runs 1.73 (a 1.65 script has no `--guide`); a
+  `log({guide})` tool form for Cowork; maybe realm-published guide text (see Robin's question below).
+
 ## #88 — stable node identity: creator-chosen keys, internal ids, paths as a shorthand (v2.0)  ·  **OPEN (next release)**
 Robin, 2026-10-03: "moving a context is extremely messy … decoupling names/labels from what we log so the logs are more
 agile". Today a node's PATH is its identity, so every move or rename has to rewrite history (#82's `moved_from` aliases,

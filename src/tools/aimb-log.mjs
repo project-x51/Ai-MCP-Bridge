@@ -96,12 +96,13 @@ import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
 import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS, usesPlan82, usesAsk, parseDuration } from '../lib/activity.js'
+import { logCmd, agentGuide, sessionGuide, GUIDE_KINDS } from '../lib/log-snippet.js'   // v1.73.0 (#89): --guide
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …] [--before "Y" | --after "Y" | --first | --last]\n       aimb-log.mjs --session <name> --project <P> [--path p] --ask "<question>" [--choice "A" --choice "B" …] [--free] [--expires 2h] [--details "..."] [--wait 30m]   (a question; --wait = wait for the answer: exit 0 answered, 10 still open, 11 expired, 12 withdrawn, 13 gone)\n       aimb-log.mjs --session <name> --project <P> --wait-answer --path <question> [--wait 30m]   (wait for an existing question\'s answer)\n       aimb-log.mjs --session <name> --project <P> [--path base] --move "<node>" --to "<new parent>" [--before "Y" | --after "Y" | --first | --last]   (re-parent a node + its subtree; "/" = the session root)\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
 const LOG_FIELDS = MESSAGE_FIELDS   // v1.62.0: + path
 const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url', 'token-file', 'text',
-  'move', 'to', 'before', 'after', 'ask', 'expires', 'wait'])   // v1.64.0: + token-file (#75); v1.66.0: + text (#79); v1.69.0: + move / to / before / after (#82); v1.71.0: + ask / expires / wait (#85)
+  'move', 'to', 'before', 'after', 'ask', 'expires', 'wait', 'guide'])   // v1.64.0: + token-file (#75); v1.66.0: + text (#79); v1.69.0: + move / to / before / after (#82); v1.71.0: + ask / expires / wait (#85)
 const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done', 'first', 'last', 'free', 'wait-answer'])   // v1.63.0: + done (= --state done); v1.69.0: + first / last (#82); v1.71.0: + free / wait-answer (#85)
 const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'stream', 'ws-port', 'url', 'token-file'])
 const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'batch', 'ws-port', 'url', 'token-file'])
@@ -207,7 +208,12 @@ function batchInput(items) {
   const sp = splitBatch(input)
   return sp.ok ? { input } : { err: { code: sp.code, what: sp.what } }
 }
-if (!exiting) {
+// v1.73.0 (#89): --guide agent|session prints the how-to for THIS script (and this host's gateway) instead of reporting
+if (!exiting && flags.guide != null) {
+  if (!GUIDE_KINDS.includes(String(flags.guide).toLowerCase())) usage('usage', `--guide takes one of: ${GUIDE_KINDS.join(' / ')}`)
+  else setImmediate(runGuide)
+}
+if (!exiting && flags.guide == null) {
   if (!ident.session) usage('usage', '--session <name> is required')
   else if (!ident.project) usage('usage', '--project <P> is required')
   else if (!ident.user) usage('usage', 'no user: pass --user (the OS login user could not be read)')
@@ -290,7 +296,7 @@ async function readBatch() {
   oneShot = b.input
   sendOne()
 }
-if (!exiting && BATCH) readBatch()
+if (!exiting && flags.guide == null && BATCH) readBatch()
 else if (!exiting && oneShot) sendOne()
 else if (!exiting && WAIT && WAIT.path) waitAnswer(WAIT.path, Date.now() + WAIT.ms, null)
 function sendOne() {
@@ -462,4 +468,24 @@ if (!exiting && STREAM) {
   })
   rl.on('close', () => { eof = true; pump() })
   connect()
+}
+
+// v1.73.0 (#89): --guide agent|session — print the how-to (plain text, not JSON). The command it shows is the one this
+// script was run as (node + script + --session / --project / --token-file); the gateway is asked its version (≤1.5 s,
+// only when a token is at hand) so flags it can't serve are named. Never reports anything.
+function runGuide() {
+  const kind = String(flags.guide).toLowerCase(), fwd = p => String(p).split(path.sep).join('/')
+  let ver = null
+  try { ver = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'package.json'), 'utf8')).version || null } catch { }
+  const cmd = logCmd({ node: fwd(process.execPath), script: fwd(fileURLToPath(import.meta.url)), session: ident.session || '<session>', project: ident.project || '<project>', tokenFile: TOKEN_FILE_ARG })
+  const print = gw => { process.stdout.write((kind === 'session' ? sessionGuide({ cmd, gateway: gw, script: ver }) : agentGuide({ cmd, path: flags.path || null, gateway: gw, script: ver })) + '\n', () => process.exit(0)) }
+  if (!TOKEN || !ident.session || !ident.project || !ident.user) return print(null)
+  let ws, settled = false
+  const end = gw => { if (settled) return; settled = true; clearTimeout(t); try { ws.close() } catch { } print(gw) }
+  const t = setTimeout(() => end(null), 1500)
+  try { ws = new WebSocket(URL_) } catch { return end(null) }
+  ws.on('open', () => hello(ws))
+  ws.on('message', raw => { let m = null; try { m = JSON.parse(raw.toString()) } catch { return } if (m.type === 'welcome') end(m.logger ? m.bridge_version || null : null); else if (m.type === 'error') end(null) })
+  ws.on('error', () => end(null))
+  ws.on('close', () => end(null))
 }
