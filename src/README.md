@@ -935,26 +935,29 @@ nor remaining. Report it with `"3/6 1 skipped"` / `"4812/12000 tiles · 100 skip
   1.65 host ignores it (and shows no skipped segment), a 1.66 host reads a missing one as 0. The format stays v5, so hosts
   can upgrade one at a time.
 
-### Briefing agents (v1.66.0)
-An orchestrating session keeps its agents' work visible:
-- Paste `{log_snippet}` (the code reminder hands it out) into **each agent's prompt with `--path` set to that agent's own,
-  unique name**, and give it its checklist up front — or tell it to make one with `--plan` as its first report.
-- The agent keeps its checklist live: `--path "<agent>/@~<item>" --state running "<what>"` when it starts an item,
-  `--path "<agent>/@~<item>" --done` the moment it's done, `"@~root <what it's doing>"` current, and it finishes with
-  `"@~root <summary>" --state done` (or `--state failed`).
-- The orchestrator keeps its own `@~root` headline current and tracks its agents' work as **its own plan** (one item per
-  agent or task, `plan:["<agent>", …]`), ticking each item as its agent reports back.
+### Briefing agents (v1.66.0; wording revised 2026-10-03)
+An orchestrating session keeps its agents' work visible, and its plan truthful:
+- Each piece of work is a **plan item**; an agent sits **under the item it serves**: paste `{log_snippet}` (the code
+  reminder hands it out) into its prompt with `--path "<plan item>/<agent>"` (e.g. `--path "@Next release/@#81 tests/agent-81"`),
+  and give it its checklist up front (or tell it to make one with `--item "A" --item "B"` as its first report).
+- The agent keeps its checklist live: `--path "<agent>/@~<item>" --state running --text "<what>"` when it starts an item,
+  a new `--text` at each sub-step, `--done` the moment it's done, `--text "@~root <what it's doing>"` current, and it
+  finishes with `--text "@~root <summary>" --state done` (or `failed`).
+- The orchestrator ticks the plan item **after checking the agent's work** (an agent finishing doesn't tick it), keeps its
+  own `@~root` current, **adds unplanned work as a plan item first**, and **reopens** an item (`--state running`) when work
+  on it resumes.
 
-The realm reminders (`config.example.json`, `behaviors.realm`, `updated_at` 2026-10-02T12:00Z) say exactly this, within the
-365-char reminder cap so a 1.65 host shows them whole:
-- `client:code`: "When you spawn agents, paste this block into each one's prompt with --path set to its own unique name and
-  its checklist (or have it --plan one first): {log_snippet} Report your own status with the log tool: keep text "@~root
-  <what you are doing>" current; track your agents as your own plan (plan:["<agent>", …]), ticking each item as its agent
-  reports back."
+The realm reminders (`config.example.json`, `behaviors.realm`) say this within the 365-char reminder cap. They avoid the
+v1.66 flags (`--text` / `--item`) in their own text, because a 1.65 host's script lacks them; `{log_snippet}` is expanded
+by each host from its own script, so it can use them:
+- `client:code`: "When you spawn agents, paste this into each prompt with --path "<plan item>/<agent>" (it sits under the
+  item it serves; you tick the item after checking its work) and a checklist: {log_snippet} Keep your board true with the
+  log tool: "@~root <what you are doing>" current; unplanned work added as an item first; an item reopened (state running)
+  when work resumes."
 - `client:cowork`: "Show what you are working on on the activity board: {log_tool_hint} Handing work to agents? Give each
-  its own path (its unique name) and a checklist (or have it make one with plan first); it ticks items and ends with
-  "@~root <summary>", state:"done". Track their work as your own plan (one item per agent or task), ticking each as its
-  agent reports back."
+  a path under the plan item it serves ("<item>/<agent>") and a checklist; it ticks items and ends with "@~root
+  <summary>", state:"done". Keep your plan true: add unplanned work as an item first; reopen an item (state:"running")
+  when work resumes."
 
 ### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
 Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
