@@ -6,8 +6,13 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-03, v1.71.0) — read this first after a compact
-**Current version: v1.71.0** (#85: QUESTIONS — `log ask` / `aimb-log --ask … [--choice "A" --choice "B"] [--wait 30m]` posts a question (a
+## RESUME STATE (updated 2026-10-03, v1.72.0) — read this first after a compact
+**Current version: v1.72.0** (#86 + #87: the dashboard's log panel opens with the selected node's DETAILS — its line, state,
+three-part progress, ETA, who / when, the ✎ attribution, a question's answer, its `details` text and `data` as a collapsible JSON
+tree with Copy, fetched on demand by the line's entry id — and ¶ / {} markers on lines and entries; the log runs OLDEST FIRST,
+follows the newest end, "N new ↓" when scrolled up, load older keeps the place, a per-viewer toggle for newest first; code done
+in a worktree for review, NOT committed, NOT deployed; **no wire change** — the page uses the v1.60 `entry` request, so it is
+wire-compatible with 1.66 – 1.71 and needs no capability). Before that **v1.71.0** (#85: QUESTIONS — `log ask` / `aimb-log --ask … [--choice "A" --choice "B"] [--wait 30m]` posts a question (a
 context whose line carries `question`; state blocked for older hosts), the dashboard answers it (a "?" bubble, click → Answer…
 with the choices / free text; Withdraw…; a "? N" badge on collapsed ancestors), the owner releases waiting scripts (exit 0 / 10 /
 11 / 12 / 13) and tells the session at once (`activity_answer`, the answer only in the body); `expires`, withdraw; code done in a
@@ -36,6 +41,18 @@ tags only where they differ; record / slice format v3; code done, NOT yet deploy
 (#70 step 6a) is committed (`2d78a21`); v1.63.0 is in the working tree for review. The rebuilt tray (`PrepareShutdown()`
 before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
 Everything below is durable; nothing important is only in chat.
+
+**2026-10-03 (v1.72.0):** Built **#86 + #87** (see "#86 as built", "#87 as built" and architecture.md §13 "Built (v1.72.0)"). PAGE
+ONLY (`dashboard.html`) + `BRIDGE_VERSION` / package.json 1.72.0. The log panel is a column: header (+ the "⇅ oldest first" toggle),
+a collapsible DETAILS section (≤ 45vh) for the selected node / a session's own line — `AimbAct.nodeFacts` + the line's details and
+data, fetched by its entry id through the existing `activity {entry:{id, host}}` (the owner answers; another host's over
+`ACTIVITY_REQ` op `entry`) — and the entry list with its own scroll. Details / data are built from DOM nodes + `textContent` only
+(`ddBuild`, `AimbAct.jsonTree`; `actReconcile` build rows). The log runs oldest first (`AimbAct.logRows`), follows the newest end
+(`atEdge`, `logAnchor` / `logScrollFix`), shows "N new ↓" when scrolled away, MERGES new first pages (`actPollLog` +
+`mergeNewest`: older pages and the reader's place kept — 6d re-read everything), and remembers the order per viewer
+(`aimb.act.logOrder`, try/catch). Tests: `test_dashboard_activity` 327 (+42; 6 order checks updated), new
+`test_activity_detail_live` 14 (+1 mixed vs a real 1.71 owner: 15/15). Full parallel `npm test` (typecheck included): 2740 checks in 59 files, all green on the first run, 5m12s; no #74 flakes.
+**Deploy:** any order; nothing to publish; a host serves the page from disk, so a pull + gateway restart (for the version) is enough.
 
 **2026-10-03 (v1.71.0):** Built **#85** (see "#85 as built" and architecture.md §13 "Built (v1.71.0)"). A question is a
 CONTEXT whose current line carries `question` {status asked | answered | expired | withdrawn, choices ≤ 8 × 60, free, asked_at,
@@ -247,7 +264,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #86, #87, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -387,21 +404,100 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
-## #87 — log panel order: oldest first, auto-scroll to the bottom  ·  **OPEN (next release)**
+## #87 — log panel order: oldest first, auto-scroll to the bottom  ·  **DONE (v1.72.0)**
 Robin, 2026-10-03, asking whether the log panel should run the other way.
 - **Today:** the log panel (6d) lists newest first; older pages load at the bottom.
 - **Proposal:** chat-style. The oldest entry is at the top and the newest at the bottom. The panel opens scrolled to
   the bottom and follows new entries while the reader is at the bottom; scrolling up pauses following and shows an
   "N new ↓" chip. "Load older" moves to the top and keeps the scroll position when older entries are added.
 - **Open question:** whether to keep a toggle for newest-first.
+- **Decided (Robin, 2026-10-03):** oldest first WITH a toggle (per viewer).
 
-## #86 — click an item or log entry to see its details and data  ·  **OPEN (next release)**
+**#87 as built (v1.72.0, 2026-10-03)** — see README "Details, data and the log order" and architecture.md §13 "Built (v1.72.0)".
+- **Order:** the bridge still pages newest first; the page maps it (`AimbAct.logRows`): oldest first by default, the end-of-log
+  row ("load older…", "start of this run · show earlier runs…", "earlier history pruned", "no entries") at the TOP, the "— earlier
+  runs —" separator between the runs in either order; #82's history under a moved node's old path and the merged subtree log
+  unchanged.
+- **Following:** a new selection (and ↻, the chip, the toggle) opens at the newest end; the list follows it while the reader is
+  within 24 px (`AimbAct.atEdge`, from the list's own scroll events). Scrolled away: new entries arrive without moving the view
+  and the **"N new ↓"** chip floats at the bottom of the list (newest first: "N new ↑" at the top); a click jumps back and follows.
+- **Keeping the place:** before each re-render the first visible ENTRY and its offset are noted (`logAnchor` — never the "load
+  older" row, which goes away) and restored after it (`logScrollFix`), so a page added above (load older) or entries added
+  below never move what the reader looks at.
+- **New entries are merged, not re-read** (a 6d rough edge): when the board's count for the selection moves (≥ 1.5 s after the
+  last read) or after one of our own actions, the panel reads the FIRST page again and `AimbAct.mergeNewest` puts only the newer
+  entries on top of what it holds — the older pages, their cursor and the separator stay (6d dropped them; it also never
+  refreshed once an older page was loaded, and lost the "new entries" signal while a page was loading). More than a page at
+  once (no overlap) → that page replaces the list. A poll and a page never overlap.
+- **Toggle:** "⇅ oldest first" / "⇅ newest first" in the panel header (a tooltip + aria-label); kept per viewer in
+  `localStorage` `aimb.act.logOrder` (try/catch on read and write: a private window / blocked or throwing storage starts at
+  oldest first and the toggle still works for the page).
+- **Layout:** the panel is a column (header, the #86 details, the list with its own scroll — the chip floats over it); under
+  900 px it sits below the tree at up to 85vh, so the list still scrolls by itself on a phone (6d let the page scroll).
+- **Tests:** `test_dashboard_activity` — the pure helpers (logRows both orders + the separator, mergeNewest, atEdge), and with a
+  fake layout (20 px rows, a 100 px list): oldest first + "load older" on top + opened at the bottom, scrolling up pauses, a
+  merged poll (first page, no cursor; 2 new at the bottom, place kept, cursor kept, "2 new ↓"), the chip, load older keeping
+  the first visible entry 10 px down, the toggle (newest first at the top, localStorage), newest first + a new entry on top
+  without moving the view ("1 new ↑"), back; storage that throws (the toggle in memory; a fresh page loads oldest first with
+  no script error) and a stored "newest" on a fresh page. 6 older checks now expect oldest first.
+
+## #86 — click an item or log entry to see its details and data  ·  **DONE (v1.72.0)**
 Robin, 2026-10-03.
 - Entries already carry `details` (≤ 4 KB) and `data` (≤ 16 KB JSON); the dashboard doesn't show them.
 - **Proposal:** clicking a node row or a log-panel entry opens a details pane: its text, state, progress, ETA, who and
   when, `details` as plain text, and `data` as a collapsible JSON tree with a copy button. A small marker on rows that
   have details or data.
 - Remote entries fetch `details`/`data` on demand (`ACTIVITY_REQ`), not in gossip, to keep slices small.
+
+**#86 as built (v1.72.0, 2026-10-03)** — see README "Details, data and the log order" and architecture.md §13 "Built (v1.72.0)".
+- **What the dashboard had:** 6d's log panel already expanded a log ENTRY's details (a `<pre>`) and data (`JSON.stringify` in a
+  `<pre>`), fetched by id; the node itself had nothing, and nothing marked a row's line.
+- **Where it lives (chosen: the top of the log panel).** Selecting a row already opens the panel, so a DETAILS section sits
+  between its header and the entries — collapsible (▾ / ▸, the ¶ {} marker stays on the folded header), at most 45vh with
+  its own scroll; the entries below keep theirs. A session row (or one host's line of a multi-host session) shows that host's
+  own line.
+- **Contents:** the rendered line; Kind (agent / context / plan item / question / session), State (+ "was …" when stale /
+  gone, host down, a plan item's state), Progress (#79's three parts + %, reported or rollup), ETA, Who (session · project ·
+  user on host), Line set (when + "by its session" or #83's "edited by robin via dashboard (HOST)"), When (started / created ·
+  last activity · finished / gone), a question's Choices / Asked / Expires / Answer / Answered, Log (the subtree's count);
+  then `details` (plain text, Copy) and `data` as a collapsible JSON tree (Copy = pretty JSON). Log entries expand into the
+  same details + tree block (it replaces 6d's `<pre>`).
+- **On demand, no wire change (chosen over a new `activity_detail` request):** the board already carries the line's entry id
+  + `has_details` / `has_data`, and the v1.60 `activity {entry:{id, host}}` request already returns a CURRENT line's details /
+  data by id from its owner's memory (another host's over `ACTIVITY_REQ` op `entry`, queued at the owner's rate) and an older
+  entry from the owner's day file. So nothing was added to the bridge or the hub protocol, no capability is needed, and every
+  v5 owner (≥ 1.65) answers — checked live against a real 1.71 owner. The page asks outside the render, one fetch at a time per
+  node, keeps the last entry shown while a newer line's is in flight ("updating — its line has changed…"), fetches nothing
+  while the section is folded, and turns refusals into a sentence + Retry: "The details are on HOST-B, which can't be reached
+  right now" (owner-unreachable), "… which runs an older bridge" (owner-unsupported — a pre-1.60 owner; none is on a v5
+  board), "Not available on HOST-B any more …" (unknown-entry), "HOST-B is busy — retry in a moment", "No activity from …
+  is held here any more" (unknown-host).
+- **Markers:** "¶" = the line has details, "{}" = data — a small boxed marker right after a tree row's line text (after ✎;
+  the bar column unchanged) and at the end of a log entry (replacing 6d's "⋯"); the legend names them.
+- **Escaping:** the section, the facts, the details text and the JSON tree are DOM nodes with `textContent` only (the page's
+  other rows stay escaped HTML via `esc`). `actReconcile` gained build rows (`{build, sig}`) for the entry blocks — rebuilt
+  only when their fetch state changes, so a JSON node the viewer opened stays open across the 1 s re-render and deltas.
+- **Also:** the panel title shows the display path ("@Next release/@Docs"; the quoted path on hover).
+- **Tests:** `test_dashboard_activity` — nodeFacts (agent: three-part progress, ETA, who, the ✎ line, when, count; a question
+  answered / open; a plan item; a session), jsonTree (an `<img onerror>` key and a `<script>` value are text; types; open depth;
+  > 50 closed; `{}`), the markers (tree rows, session row, entries, tooltips, bar column), the section (above the list, the line,
+  the facts, loading), the fetch by entry id + host after the board, ESCAPING of details with `<img onerror>` / `<b>` and data
+  with `<script>` (no element, nothing ran), both Copy buttons, an opened JSON node surviving unrelated deltas, a new line →
+  a new fetch with "updating", folded → no fetch, reopened → fetch, a remote node (host HOST-B), owner-unreachable → the
+  sentence + Retry, owner-unsupported → "runs an older bridge", a session selection, a node without details, a log entry's
+  block (escaped, right below its entry). New `test_activity_detail_live` (two loopback hosts): the board / delta frames and
+  the `activity` tool carry the flags and the entry id, never the text; a remote current line's details + data from the
+  owner (memory), a local one, a 300-row data value across the hub link, an older entry from the owner's day file, a line that
+  moved on (new id; the old one now from the file), unknown id / host, an owner that went away refused promptly; + 1 with
+  `AIMB_TEST_OLD_BRIDGE` (a real 1.71 owner answers the same way).
+
+**Questions after #86 / #87 (not decided):**
+- **Details of a node whose line has none:** the section says "Its line has no details or data." — an earlier line of the same
+  node may have had some (they are on its log entries). Fall back to the newest entry with details?
+- **Large data:** ≤ 16 KB is rendered whole (a 300-row array is fine); a viewer-side "show first 200" cut was not needed.
+- **The 45vh cap** on the details section suits a laptop; on a tall monitor it could grow. A drag handle between the details
+  and the list?
+- **Remember the folded details section** per viewer (like the order)? Today it opens with every page load.
 
 ## #85 — questions as a type of context, answerable from the dashboard  ·  **DONE (v1.71.0)**
 Robin, 2026-10-03.

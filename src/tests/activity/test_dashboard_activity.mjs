@@ -246,20 +246,20 @@ recv({ type: 'activity', ref: lq.ref, result: { ok: true, log: { host: 'HOST-A',
   { id: 'e3', ts: NOW - MIN, path: '', rel: '', current: true, text: 'coordinating {progress}', rendered: 'coordinating 3 of 6 tasks', state: 'running' },
   { id: 'e2', ts: NOW - 2 * MIN, path: 'research/@Tharsis/@z12', rel: 'research/@Tharsis/@z12', current: true, text: 'with attachments', rendered: 'with attachments', state: 'blocked', has_details: true, has_data: true }], next_cursor: 'f1.2026-10-02.120', total: 7 } } })
 const eRows = () => pRows().filter(r => r.classList.contains('le'))
-check('log entries newest first: time, state dot, the entry\'s path RELATIVE to the node (@~ on a current line), rendered text', eRows().length === 2 && /^\d\d:\d\d:\d\d$/.test(eRows()[0].querySelector('.tm').textContent) && eRows()[0].querySelector('.ctag').textContent === '@~root'
-  && eRows()[1].querySelector('.ctag').textContent === 'research/@Tharsis/@~z12' && eRows()[1].querySelector('.dot').classList.contains('bg-blocked') && eRows()[0].querySelector('.ln').textContent === 'coordinating 3 of 6 tasks', eRows().map(r => r.textContent).join(' | '))
+check('log entries (#87: OLDEST first — the newest at the bottom): time, state dot, the entry\'s path RELATIVE to the node (@~ on a current line), rendered text', eRows().length === 2 && /^\d\d:\d\d:\d\d$/.test(eRows()[1].querySelector('.tm').textContent) && eRows()[1].querySelector('.ctag').textContent === '@~root'
+  && eRows()[0].querySelector('.ctag').textContent === 'research/@Tharsis/@~z12' && eRows()[0].querySelector('.dot').classList.contains('bg-blocked') && eRows()[1].querySelector('.ln').textContent === 'coordinating 3 of 6 tasks', eRows().map(r => r.textContent).join(' | '))
 const older = pRows().find(r => /load older/.test(r.textContent))
 click(older)
 const lq2 = sentOf('activity').pop()
 check('"load older" asks for the next page with the cursor', lq2.query.log.cursor === 'f1.2026-10-02.120' && lq2.query.log.host === 'HOST-A', J(lq2))
 recv({ type: 'activity', ref: lq2.ref, result: { ok: true, log: { host: 'HOST-A', entries: [{ id: 'e1', ts: NOW - 3 * MIN, path: '', rel: '', text: 'started', rendered: 'started', state: 'running' }], next_cursor: null } } })
-check('... the page appends, and the end of the log has no "load older"', eRows().length === 3 && !pRows().some(r => /load older/.test(r.textContent)))
+check('... the page goes ABOVE (#87: oldest first), and the end of the log has no "load older"', eRows().length === 3 && eRows()[0].getAttribute('data-id') === 'e1' && eRows()[2].getAttribute('data-id') === 'e3' && !pRows().some(r => /load older/.test(r.textContent)))
 click(eRows()[1])
 const eq = sentOf('activity').pop()
 check('an entry with details/data expands → fetches it by id + host', eq.query.entry?.id === 'e2' && eq.query.entry.host === 'HOST-A', J(eq))
 recv({ type: 'activity', ref: eq.ref, result: { ok: true, entry: { id: 'e2', details: 'DETAIL TEXT', data: { rows: 42, ok: true } } } })
 const det = PANEL.querySelector('.ad')
-check('... showing the details text and the pretty-printed JSON', !!det && /DETAIL TEXT/.test(det.textContent) && det.querySelectorAll('pre')[1]?.textContent === J({ rows: 42, ok: true }, null, 2), det && det.innerHTML)
+check('... showing the details text and the data as a JSON TREE (#86: no longer a <pre>)', !!det && det.querySelector('pre.dtx')?.textContent === 'DETAIL TEXT' && det.querySelectorAll('pre').length === 1 && !!det.querySelector('.jt details[open]') && /rows: 42/.test(det.querySelector('.jt').textContent) && /ok: true/.test(det.querySelector('.jt').textContent), det && det.innerHTML)
 click(pathRow('research'))
 const aq = sentOf('activity').pop()
 check('select a node (6d): the selection MOVES (the session row is no longer highlighted) and the panel asks with its PATH (+ host) — the subtree merged by the bridge', aq.query.log.path === 'research' && aq.query.log.host === 'HOST-A' && !('agent' in aq.query.log)
@@ -425,7 +425,7 @@ const rq2 = sentOf('activity').pop()
 check('6c run boundary: "show earlier runs" asks for the next page past the boundary — cursor = earlier_cursor, earlier:true', rq2.query.log.cursor === 'f1.2026-10-01.900' && rq2.query.log.earlier === true && rq2.query.log.path === 'live', J(rq2.query))
 recv({ type: 'activity', ref: rq2.ref, result: { ok: true, log: { host: 'HOST-A', entries: [{ id: 'o1', ts: NOW - 3 * HOUR, path: 'live', rel: '', text: 'an earlier run', rendered: 'an earlier run', state: 'done' }], next_cursor: null } } })
 const sep = pRows().find(r => r.classList.contains('sep')), eo1 = pRows().find(r => /an earlier run/.test(r.textContent))
-check('6c run boundary: the earlier run\'s entries follow a "— earlier runs —" separator', !!sep && !!eo1 && pRows().indexOf(sep) < pRows().indexOf(eo1) && pRows().indexOf(sep) > pRows().indexOf(pRows().find(r => /run 2/.test(r.textContent))))
+check('6c run boundary: the earlier run\'s entries follow a "— earlier runs —" separator', !!sep && !!eo1 && pRows().indexOf(sep) > pRows().indexOf(eo1) && pRows().indexOf(sep) < pRows().indexOf(pRows().find(r => /run 2/.test(r.textContent))))   // #87: oldest first — the earlier run ABOVE the separator
 click(inS('Sixc', 'anode'))
 const rq3 = sentOf('activity').pop()
 recv({ type: 'activity', ref: rq3.ref, result: { ok: true, log: { host: 'HOST-A', entries: [{ id: 'p1', ts: NOW - MIN, path: 'anode', rel: '', text: 'x', rendered: 'x', state: 'blocked' }], next_cursor: null, pruned: true } } })
@@ -602,7 +602,7 @@ const fq = sentOf('activity').at(-1)
 recv({ type: 'activity', ref: fq.ref, result: { ok: true, log: { host: 'HOST-A', entries: [{ id: 'act_f-2', ts: NOW - MIN, path: 'fresh', rel: '', current: true, text: 'fresh work', rendered: 'fresh work', state: 'running' },
   { id: 'act_f-1', ts: NOW - 2 * MIN, path: 'fresh', rel: '', text: 'marked done by robin via dashboard (HOST-A)', rendered: 'marked done by robin via dashboard (HOST-A)', state: 'done', by: { kind: 'dashboard', user: 'robin', host: 'HOST-A' }, act: 'done' }], next_cursor: null } } })
 const ent = pRows().find(r => r.getAttribute('data-id') === 'act_f-1')
-check('6d panel: entries newest first with time, state dot, relative tag, text — an action\'s entry reads "… by <user> via dashboard (<host>)"', !!ent && /marked done by robin via dashboard \(HOST-A\)/.test(ent.textContent) && pRows()[0].getAttribute('data-id') === 'act_f-2' && ent.getAttribute('role') === 'listitem')
+check('6d panel (#87: oldest first): entries with time, state dot, relative tag, text — an action\'s entry reads "… by <user> via dashboard (<host>)"', !!ent && /marked done by robin via dashboard \(HOST-A\)/.test(ent.textContent) && pRows().at(-1).getAttribute('data-id') === 'act_f-2' && pRows()[0] === ent && ent.getAttribute('role') === 'listitem')
 rclick(ent)
 check('6d panel: a log entry\'s menu → Copy entry id / Copy path', J(menuLabels()) === J(['Copy entry id', 'Copy path']) && (pickMenu('Copy entry id'), V.lastCopy === 'act_f-1'), J(menuLabels()))
 recv({ type: 'activity_delta', epoch: 'E6', seq: 2, base: 1, head: head6, upsert: [st6('fresh', { current: { id: 'fr2', ts: NOW, text: 'fresher work', state: 'running' } })], remove: [] })
@@ -960,7 +960,7 @@ try {   // ================================================================= #83
     { id: 'm1', ts: NOW - MIN, path: '@Rel/@Docs', text: 'robin via dashboard: Please also cover the empty-plan case. Thanks!', rendered: 'robin via dashboard: Please also cover the empty-plan case. Thanks!', state: 'todo', act: 'message', has_details: true, by: { kind: 'dashboard', user: 'robin', host: 'HOST-A' } },
     { id: 'm2', ts: NOW - 2 * MIN, path: '@Rel/@Docs', current: true, text: 'Docs: writing (edited by robin via dashboard (HOST-A))', rendered: 'Docs: writing (edited by robin via dashboard (HOST-A))', state: 'running', act: 'edit_text', by: { kind: 'dashboard', user: 'robin', host: 'HOST-A' } }], next_cursor: null } } })
   const les = [...PANEL.querySelectorAll('.ar.le')]
-  check('#84 / #83 log panel: a message entry is marked 💬 (class msg; its details hold the full text), an edit entry ✎', les.length === 2 && /💬/.test(les[0].querySelector('.msgic')?.textContent || '') && les[0].classList.contains('msg') && /✎/.test(les[1].querySelector('.msgic')?.textContent || '') && !les[1].classList.contains('msg'), les.map(e => e.innerHTML.slice(0, 200)).join(' | '))
+  check('#84 / #83 log panel: a message entry is marked 💬 (class msg; its details hold the full text), an edit entry ✎', les.length === 2 && /💬/.test(les[1].querySelector('.msgic')?.textContent || '') && les[1].classList.contains('msg') && /✎/.test(les[0].querySelector('.msgic')?.textContent || '') && !les[0].classList.contains('msg'), les.map(e => e.innerHTML.slice(0, 200)).join(' | '))
   check('#83 / #84 legend: names Edit text… (✎) and Message session… (💬)', /Edit text…/.test(doc.getElementById('actlegend').textContent) && /Message session…/.test(doc.getElementById('actlegend').textContent) && /✎/.test(doc.getElementById('actlegend').textContent))
   const css83 = [...doc.querySelectorAll('style')].map(s => s.textContent).join('\n')
   check('#83 / #84 CSS: the form dialog (inputs, the reason in --bad, the counter), the primary Send / Save button and the amber warning use theme tokens', /\.act-dlg \.act-in \{[^}]*var\(--bg\)[^}]*var\(--fg\)/.test(css83) && /\.act-btn\.primary \{[^}]*var\(--info\)/.test(css83) && /\.ar \.fb\.wn \{[^}]*var\(--warn\)/.test(css83) && /\.act-dlg \.dlg-why \{[^}]*var\(--bad\)/.test(css83))
@@ -1084,6 +1084,217 @@ try {   // ================================================================= #85
   const css85 = [...doc.querySelectorAll('style')].map(s => s.textContent).join('\n')
   check('#85 CSS: the question colours are theme tokens (--ask, --ask-bg) defined for light AND dark', /--ask:#[0-9A-F]{6}; --ask-bg:#[0-9A-F]{6}/.test(css85) && (css85.match(/--ask:#/g) || []).length === 3 && /\.qbadge \{[^}]*var\(--ask\)/.test(css85) && /\.ar\.qopen \{[^}]*var\(--ask-bg\)/.test(css85))
 } catch (e) { fail++; console.log('FAIL #85 block crashed:', (e && e.stack) || e) }
+
+const tick = (ms = 5) => new Promise(r => setTimeout(r, ms))
+try {   // ================================================================= #86 (v1.72.0): the DETAILS section (a node's line, facts, details + data fetched on
+  // demand by its entry id), the JSON tree + Copy, the ¶ {} markers, ESCAPING; #87 (v1.72.0): the log ORDER — oldest first (chat-style), following
+  // the newest end, the "N new ↓" chip, load older keeping the reader's place, the newest-first toggle (per viewer) with storage that throws
+  // ---- the pure part
+  const ents = ['a', 'b', 'c', 'd'].map(id => ({ id }))   // newest first, as the bridge pages them
+  const ord = (rows) => rows.map(r => r.sep ? '|' : r.e.id).join('')
+  check('#87 logRows: oldest first reverses the bridge\'s newest-first list; the "earlier runs" separator sits between the runs in BOTH orders (sepAt = the first earlier-run entry)',
+    ord(X.logRows(ents, null, true)) === 'dcba' && ord(X.logRows(ents, null, false)) === 'abcd' && ord(X.logRows(ents, 2, true)) === 'dc|ba' && ord(X.logRows(ents, 2, false)) === 'ab|cd'
+    && ord(X.logRows(ents, 4, true)) === 'dcba' && ord(X.logRows([], 0, true)) === '', J([ord(X.logRows(ents, 2, true)), ord(X.logRows(ents, 2, false))]))
+  const m1 = X.mergeNewest([{ id: 'c3' }, { id: 'c2' }, { id: 'c1' }], [{ id: 'c5' }, { id: 'c4' }, { id: 'c3' }, { id: 'c2' }]), m2 = X.mergeNewest([{ id: 'c3' }], [{ id: 'x2' }, { id: 'x1' }]), m3 = X.mergeNewest([], [{ id: 'y' }])
+  check('#87 mergeNewest: a fresh first page puts only the NEWER entries on top (older pages kept); no overlap (more than a page arrived) or nothing held → replace',
+    !m1.replace && m1.added === 2 && m1.entries.map(e => e.id).join() === 'c5,c4,c3,c2,c1' && m2.replace && m2.entries.map(e => e.id).join() === 'x2,x1' && m3.replace && m3.added === 1, J([m1, m2]))
+  check('#87 atEdge: oldest first = within 24 px of the BOTTOM, newest first = of the TOP', X.atEdge(476, 1000, 500, true) && !X.atEdge(400, 1000, 500, true) && X.edgeDist(400, 1000, 500, true) === 100 && X.atEdge(0, 1000, 500, false) && !X.atEdge(30, 1000, 500, false) && X.EDGE_PX === 24)
+  const factsOf = (u, o) => Object.fromEntries(X.nodeFacts(u, null, { now: NOW, sm: 15, ...o }).map(f => [f.k, f.v]))
+  const fa = factsOf({ nkind: 'agent', path: 'worker', host: 'HOST-A', created_at: NOW - 60 * MIN, last_activity: NOW - MIN, eta_at: NOW + 30 * MIN, progress: { done: 3, skipped: 1, total: 8, unit: 'files' },
+    current: { id: 'w', ts: NOW - MIN, text: 'crunching', state: 'running', by: { kind: 'dashboard', user: 'robin', host: 'HOST-A' } } }, { session: 'Det86', project: 'D86', user: 'robin', n: 12, partial: true })
+  check('#86 nodeFacts: an agent — kind, state, THREE-PART progress (done · skipped of total, %), ETA, who (session · project · user on its host), when its line was set and by whom (#83 line_by), when (started · last activity), the log count',
+    fa.Kind === 'agent' && fa.State === 'running' && fa.Progress === '3 of 8 files · 1 skipped (37%) — reported' && /^ETA ~30m/.test(fa.ETA) && fa.Who === 'Det86 · D86 · robin on HOST-A' && !('Path' in fa)
+    && /edited by robin via dashboard \(HOST-A\)/.test(fa['Line set']) && /^started .*\d\d:\d\d:\d\d · last activity .*\d\d:\d\d:\d\d$/.test(fa.When)   /* (a date prefix before 01:00: not today) */ && fa.Log === '12+ entries (this node and below)', J(fa))
+  const fq = factsOf({ nkind: 'context', path: 'w/@?1', host: 'HOST-A', created_at: NOW - 5 * MIN, current: { id: 'q', ts: NOW - MIN, text: 'Ship?', state: 'done', question: { status: 'answered', choices: ['Yes', 'No'], free: true, asked_at: NOW - 5 * MIN, answer: { choice: 'Yes', text: 'after review' }, by: { user: 'robin', host: 'HOST-A' }, at: NOW - MIN } } }, {})
+  const fq2 = factsOf({ nkind: 'context', path: 'w/@?2', host: 'HOST-A', current: { id: 'q2', ts: NOW, text: 'Which?', state: 'blocked', question: { status: 'asked', choices: [], free: true, asked_at: NOW - MIN, expires_at: NOW + 60 * MIN } } }, {})
+  check('#86 nodeFacts: a QUESTION — its status, choices (or free text), asked, expires (while open), the answer and who answered when; a plan item says its item state; a root says "session"',
+    fq.Kind === 'question' && fq.State === 'answered' && fq.Choices === 'Yes · No (or free text)' && fq.Answer === 'Yes — after review' && /^by robin via dashboard \(HOST-A\) at /.test(fq.Answered) && !!fq.Asked && !fq.Expires
+    && fq2.State === 'awaiting an answer' && fq2.Choices === 'free text' && !!fq2.Expires && !fq2.Answer
+    && / · item done$/.test(factsOf({ nkind: 'context', plan_item: true, current: { id: 'p', ts: NOW, text: 'X', state: 'done' } }, {}).State) && /^session — its own line on HOST-A$/.test(factsOf({ nkind: 'agent', host: 'HOST-A' }, { kind: 'session' }).Kind), J([fq, fq2]))
+  const evil = { '<img src=x onerror="window.__pwned=1">': '<script>window.__pwned=2</script>', list: [1, null, true, 'two'], nested: { a: { b: { c: 'deep' } } }, big: Array.from({ length: 60 }, (_, i) => i), empty: {} }
+  const jt = X.jsonTree(evil, doc)
+  check('#86 jsonTree: DOM + textContent only — a key or value holding HTML is TEXT (no <img> / <script> element), strings quoted, types classed; open to depth 2, deeper / > 50 items closed; empty {} shown',
+    !jt.querySelector('img, script, b') && jt.textContent.includes('<img src=x onerror="window.__pwned=1">') && jt.textContent.includes('"<script>window.__pwned=2</script>"') && !!jt.querySelector('.j-null') && !!jt.querySelector('.j-bool') && !!jt.querySelector('.j-num')
+    && jt.querySelector('details').open && [...jt.querySelectorAll('summary')].find(s => /^a: /.test(s.textContent))?.parentElement.open === false && [...jt.querySelectorAll('summary')].find(s => /^nested: /.test(s.textContent))?.parentElement.open === true
+    && [...jt.querySelectorAll('summary')].find(s => /^big: \[ 60 items \]/.test(s.textContent))?.parentElement.open === false && /empty: \{\}/.test(jt.textContent) && X.jsonTree('just text', doc).textContent === '"just text"', jt.innerHTML.slice(0, 400))
+  check('#86 ddGlyph / ddWhat: ¶ = details, {} = data', X.ddGlyph({ has_details: true, has_data: true }) === '¶{}' && X.ddGlyph({ has_data: true }) === '{}' && X.ddWhat({ has_details: true, has_data: true }) === 'details and data' && X.ddGlyph(null) === '')
+  // ---- the board: Det86 (HOST-A + HOST-B): worker (a line with details + data, edited from the dashboard), plain (no details), remote (on B, data)
+  const n86 = (p, nk, extra = {}) => node('k-d86', p, nk, extra.host || 'HOST-A', extra)
+  const self86 = root('HOST-A', { current: { id: 's86', ts: NOW - MIN, text: 'detailing', state: 'running', has_details: true } })
+  const plainLog = { entries: 8, dropped: 0 }
+  const u86 = () => [
+    sess('k-d86', 'Det86', 'D86', { hosts: ['HOST-A', 'HOST-B'], multi_host: true, self: self86, selves: [self86, root('HOST-B', { log: { remote: true } })] }),
+    n86('worker', 'agent', { current: { id: 'w86', ts: NOW - MIN, text: 'crunching {progress}', state: 'running', has_details: true, has_data: true, by: { kind: 'dashboard', user: 'robin', host: 'HOST-A' } }, progress: { done: 3, skipped: 1, total: 8, unit: 'files' }, eta_at: NOW + 30 * MIN }),
+    n86('plain', 'agent', { current: { id: 'p86', ts: NOW - MIN, text: 'nothing extra', state: 'running' }, log: plainLog }),
+    n86('remote', 'agent', { host: 'HOST-B', current: { id: 'rm86', ts: NOW - MIN, text: 'over there', state: 'running', has_data: true }, log: { remote: true, total: 1 } }),
+  ]
+  const head86 = { host: 'HOST-A', now: NOW, stale_after_min: 15, finished_plan_open_min: 120, user: 'robin', log_cmd: null, remote_hosts: [{ host: 'HOST-B', plan: true, msg: true, ask: true }] }
+  recv({ type: 'activity_board', full: true, epoch: 'E86', seq: 1, head: head86, upsert: u86() })
+  const in86 = (pth, host = 'HOST-A') => rowsT().find(r => r.getAttribute('data-session') === 'Det86' && r.getAttribute('data-path') === pth && (r.getAttribute('data-host') || '') === host)
+  const wRow = in86('worker'), pRow = in86('plain'), rRow = in86('remote', 'HOST-B')
+  const mkTip = el => { el.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true })); return el.getAttribute('title') || '' }
+  check('#86 markers: a row whose line has details + data shows "¶{}" inside its line (after ✎, the bar column untouched); data only "{}"; none without; the session row "¶"; hover says to select it',
+    wRow?.querySelector('.ln .ddm')?.textContent === '¶{}' && wRow.querySelector('.ln .ddm').getAttribute('aria-label') === 'has details and data' && [...wRow.querySelector('.ln').children].map(c => c.className).join() === 'lt,edby,ddm'
+    && wRow.children[wRow.children.length - 3] === wRow.querySelector('.pb') && rRow?.querySelector('.ddm')?.textContent === '{}' && !pRow?.querySelector('.ddm') && nmRow('Det86')?.querySelector('.ddm')?.textContent === '¶'
+    && /select it to see them in the panel/.test(mkTip(wRow.querySelector('.ddm'))), wRow?.innerHTML.slice(0, 600))
+  // ---- select the worker: the details section, then the on-demand fetch
+  const nE0 = sentOf('activity').length
+  click(wRow)
+  const lq86 = sentOf('activity').at(-1)
+  const PD = () => doc.getElementById('actpd')
+  const dd = () => PD()?.querySelector('.apd-d'), facts = () => Object.fromEntries([...(PD()?.querySelectorAll('.apd-f dt') || [])].map(dt => [dt.textContent, dt.nextElementSibling?.textContent]))
+  check('#86 details section: at the TOP of the panel (above the log list), open, the node\'s rendered line and its facts (three-part progress, ETA, the ✎ attribution); "loading its details…" while the fetch is scheduled',
+    lq86.query.log?.path === 'worker' && !!PD() && !PD().hidden && PD().nextElementSibling?.classList.contains('apw') && PD().previousElementSibling?.id === 'actph' && PD().querySelector('.apd-t').getAttribute('aria-expanded') === 'true'
+    && PD().querySelector('.apd-l').textContent === 'crunching 3 of 8 files · 1 skipped' && facts().Progress === '3 of 8 files · 1 skipped (37%) — reported' && /^ETA/.test(facts().ETA) && /edited by robin via dashboard/.test(facts()['Line set'])
+    && PD().querySelector('.apd-m').textContent === '¶{}' && /loading its details/.test(dd()?.textContent || '') && sentOf('activity').length === nE0 + 1, J([facts(), PD()?.textContent.slice(0, 300)]))
+  await tick()
+  const eq86 = sentOf('activity').at(-1)
+  check('#86 on demand: the details are fetched by the line\'s ENTRY id + the node\'s host (activity {entry:{id, host}}) — nothing about them came with the board', eq86.query.entry?.id === 'w86' && eq86.query.entry.host === 'HOST-A' && sentOf('activity').length === nE0 + 2, J(eq86))
+  const evilDetails = '<img src=x onerror="window.__pwned=1">\nline two & <b>three</b>'
+  recv({ type: 'activity', ref: eq86.ref, result: { ok: true, entry: { id: 'w86', details: evilDetails, data: evil } } })
+  check('#86 ESCAPING: details holding <img onerror> / <b> and data whose keys and values hold <script> render as TEXT — no such element anywhere in the panel, nothing ran',
+    !PANEL.querySelector('img, script, b') && win.__pwned === undefined && dd().querySelector('pre.dtx')?.textContent === evilDetails && dd().querySelector('.jt')?.textContent.includes('<script>window.__pwned=2</script>'), dd()?.innerHTML.slice(0, 500))
+  const copies = [...dd().querySelectorAll('.cp')]
+  click(copies[1])
+  const cData = V.lastCopy
+  click(copies[0])
+  check('#86 Copy: the data as pretty JSON, the details as text (one button each)', copies.length === 2 && cData === J(evil, null, 2) && V.lastCopy === evilDetails, J([copies.length, cData?.slice(0, 60)]))
+  const aSum = [...dd().querySelectorAll('.jt summary')].find(s => /^a: /.test(s.textContent)), aDet = aSum.parentElement
+  aDet.open = true
+  recv({ type: 'activity_delta', epoch: 'E86', seq: 2, base: 1, head: head86, upsert: [n86('plain', 'agent', { current: { id: 'p86b', ts: NOW, text: 'still nothing extra', state: 'running' }, log: plainLog })], remove: [] })
+  check('#86 the tree is not rebuilt by unrelated deltas or the 1 s re-render: a node the viewer opened stays open (same element)', dd().contains(aDet) && aDet.open)
+  // the line moves on → the next fetch; the last details stay shown ("updating") until it lands
+  recv({ type: 'activity_delta', epoch: 'E86', seq: 3, base: 2, head: head86, upsert: [n86('worker', 'agent', { current: { id: 'w86b', ts: NOW, text: 'crunching more', state: 'running', has_data: true }, progress: { done: 4, skipped: 1, total: 8, unit: 'files' } })], remove: [] })
+  await tick()
+  const eq86b = sentOf('activity').at(-1)
+  check('#86 a new line → its entry is fetched; meanwhile the previous details stay, marked "updating"', eq86b.query.entry?.id === 'w86b' && /updating/.test(dd().textContent) && !!dd().querySelector('pre.dtx') && PD().querySelector('.apd-l').textContent === 'crunching more' && PD().querySelector('.apd-m').textContent === '{}', J(eq86b))
+  recv({ type: 'activity', ref: eq86b.ref, result: { ok: true, entry: { id: 'w86b', data: { files: ['a.txt', 'b.txt'] } } } })
+  check('#86 ... then the new data (a JSON array tree), no details, no "updating"', !/updating/.test(dd().textContent) && !dd().querySelector('pre') && /files: \[ 2 items \]/.test(dd().textContent) && /"a\.txt"/.test(dd().textContent))
+  // collapse the section: nothing more is fetched while it is closed
+  click(PD().querySelector('[data-pa="det"]'))
+  check('#86 the section collapses to its header (aria-expanded false; the marker stays visible)', PD().querySelector('.apd-b').hidden && PD().querySelector('.apd-t').getAttribute('aria-expanded') === 'false' && PD().querySelector('.apd-m').textContent === '{}')
+  const nClosed = sentOf('activity').length
+  recv({ type: 'activity_delta', epoch: 'E86', seq: 4, base: 3, head: head86, upsert: [n86('worker', 'agent', { current: { id: 'w86c', ts: NOW, text: 'crunching still', state: 'running', has_data: true } })], remove: [] })
+  await tick()
+  check('#86 ... and a closed section fetches nothing', sentOf('activity').length === nClosed)
+  click(PD().querySelector('[data-pa="det"]'))
+  await tick()
+  check('#86 opened again → it fetches the current line\'s entry', sentOf('activity').at(-1).query.entry?.id === 'w86c' && !PD().querySelector('.apd-b').hidden)
+  // a REMOTE node: fetched from its owner; an unreachable owner degrades to a sentence + Retry
+  click(rRow)
+  await tick()
+  const eqR = sentOf('activity').at(-1)
+  check('#86 a remote node (HOST-B): its entry is asked for WITH its host (the gateway forwards it to the owner over the hub link)', eqR.query.entry?.id === 'rm86' && eqR.query.entry.host === 'HOST-B', J(eqR))
+  recv({ type: 'activity', ref: eqR.ref, result: { ok: false, code: 'owner-unreachable', what: 'host HOST-B is not linked' } })
+  check('#86 an unreachable owner: "The details are on HOST-B, which can\'t be reached right now" + a Retry button', /The details are on HOST-B, which can't be reached right now/.test(dd().textContent) && !!dd().querySelector('button'), dd()?.textContent)
+  click(dd().querySelector('button'))
+  check('#86 Retry asks again', sentOf('activity').at(-1).query.entry?.id === 'rm86')
+  recv({ type: 'activity', ref: sentOf('activity').at(-1).ref, result: { ok: false, code: 'owner-unsupported', what: 'older' } })
+  check('#86 an owner that cannot answer says it runs an older bridge (the sentence, not a code)', /The details are on HOST-B, which runs an older bridge/.test(dd().textContent))
+  // the session row: its own line on that host
+  click(nmRow('Det86'))
+  check('#86 a SESSION selected: the section shows its own line on that host ("session — its own line on HOST-A")', /^session — its own line on HOST-A$/.test(facts().Kind || '') && PD().querySelector('.apd-l').textContent === 'detailing' && /^Det86 · D86 · robin on HOST-A$/.test(facts().Who || ''), J(facts()))
+  click(pRow)
+  check('#86 a node without details or data: the facts, and "Its line has no details or data." (nothing fetched)', /Its line has no details or data/.test(dd().textContent) && !!facts().State)
+  // ---- a LOG ENTRY's details: the same block (marker, escaping, JSON tree)
+  const lqP = sentOf('activity').filter(m => m.query.log).at(-1)
+  recv({ type: 'activity', ref: lqP.ref, result: { ok: true, log: { host: 'HOST-A', entries: [{ id: 'pe2', ts: NOW - MIN, path: 'plain', rel: '', text: 'with data', rendered: 'with data', state: 'running', has_details: true, has_data: true }, { id: 'pe1', ts: NOW - 2 * MIN, path: 'plain', rel: '', text: 'first', rendered: 'first', state: 'running' }], next_cursor: null } } })
+  const le86 = pRows().find(r => r.getAttribute('data-id') === 'pe2')
+  check('#86 a log entry with details / data carries the same ¶{} marker (6d had "⋯")', le86?.querySelector('.ddm')?.textContent === '¶{}' && !/⋯/.test(le86.textContent) && !pRows().find(r => r.getAttribute('data-id') === 'pe1').querySelector('.ddm'))
+  click(le86)
+  const eqE = sentOf('activity').at(-1)
+  recv({ type: 'activity', ref: eqE.ref, result: { ok: true, entry: { id: 'pe2', details: '<img src=y onerror="window.__pwned=3">', data: { '<b>k</b>': [1, 2] } } } })
+  const adE = PANEL.querySelector('.apb .ad')
+  check('#86 ... expanded: details as text + data as a JSON tree, escaped (no <img> / <b> element), right BELOW its entry (oldest first too)', eqE.query.entry?.id === 'pe2' && !!adE && !adE.querySelector('img, b') && win.__pwned === undefined && adE.querySelector('pre.dtx')?.textContent === '<img src=y onerror="window.__pwned=3">' && /<b>k<\/b>: \[ 2 items \]/.test(adE.textContent) && adE.previousElementSibling === le86, adE?.innerHTML.slice(0, 300))
+  // ================= #87: oldest first, following, the chip, load older keeping the place, the toggle
+  // a fake LAYOUT (jsdom has none): rows in the log list are 20 px each, the list shows 100 px
+  const RH = 20, CH = 100, proto = win.HTMLElement.prototype
+  const savedTop = Object.getOwnPropertyDescriptor(proto, 'offsetTop'), savedH = Object.getOwnPropertyDescriptor(proto, 'offsetHeight')
+  Object.defineProperty(proto, 'offsetHeight', { configurable: true, get() { return this.parentElement && this.parentElement.id === 'actpb' ? RH : 0 } })
+  Object.defineProperty(proto, 'offsetTop', { configurable: true, get() { const p = this.parentElement; return p && p.id === 'actpb' ? [...p.children].indexOf(this) * RH : 0 } })
+  const PB = () => doc.getElementById('actpb')
+  const layout = pb => { if (pb._fake) return; pb._fake = true; let st = 0
+    Object.defineProperty(pb, 'scrollHeight', { configurable: true, get() { return pb.children.length * RH } }); Object.defineProperty(pb, 'clientHeight', { configurable: true, get() { return CH } })
+    Object.defineProperty(pb, 'scrollTop', { configurable: true, get() { return st }, set(v) { st = Math.max(0, Math.min(Number(v) || 0, Math.max(0, pb.scrollHeight - CH))) } }) }
+  const scrollTo = y => { PB().scrollTop = y; PB().dispatchEvent(new win.Event('scroll')) }
+  const ids = () => [...PB().children].map(r => r.getAttribute('data-id') || (r.classList.contains('more') ? 'more' : r.className))
+  const chip = () => doc.getElementById('actnew')
+  const pl = i => ({ id: `p${i}`, ts: NOW - (20 - i) * MIN, path: 'plain', rel: '', text: `entry ${i}`, rendered: `entry ${i}`, state: 'running' })
+  layout(PB())
+  click(in86('remote', 'HOST-B')); click(pRow)   // a fresh selection of plain (at the edge again)
+  const lq1 = sentOf('activity').filter(m => m.query.log).at(-1)
+  recv({ type: 'activity', ref: lq1.ref, result: { ok: true, log: { host: 'HOST-A', entries: [8, 7, 6, 5, 4, 3, 2, 1].map(pl), next_cursor: 'cur-1', total: 8 } } })
+  check('#87 oldest first: "load older…" at the TOP, then the oldest … newest at the bottom; the list opens at the BOTTOM (following)', J(ids()) === J(['more', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8']) && /load older/.test(PB().children[0].textContent) && PB().scrollTop === 9 * RH - CH && V.follow === true, J([ids(), PB().scrollTop]))
+  scrollTo(0)
+  check('#87 scrolling up (away from the bottom) pauses following', V.follow === false && chip().hidden)
+  for (const L of Object.values(V.logs)) L.at = 0   // (the poll waits 1.5 s after the last read)
+  recv({ type: 'activity_delta', epoch: 'E86', seq: 5, base: 4, head: head86, upsert: [n86('plain', 'agent', { current: { id: 'p10', ts: NOW, text: 'entry 10', state: 'running' }, log: { entries: 10, dropped: 0 } })], remove: [] })
+  const pq = sentOf('activity').filter(m => m.query.log).at(-1)
+  check('#87 new entries (the board\'s count moved) → the FIRST page is read again (no cursor) — not the whole log', pq !== lq1 && !pq.query.log.cursor && pq.query.log.path === 'plain', J(pq.query))
+  recv({ type: 'activity', ref: pq.ref, result: { ok: true, log: { host: 'HOST-A', entries: [10, 9, 8, 7, 6, 5, 4, 3, 2, 1].map(pl), next_cursor: 'cur-x', total: 10 } } })
+  check('#87 ... MERGED: the 2 new entries go to the bottom, the reader\'s place is kept (scrollTop unchanged), the cursor of the older pages kept, and a "2 new ↓" chip shows',
+    J(ids().slice(-3)) === J(['p8', 'p9', 'p10']) && ids().length === 11 && PB().scrollTop === 0 && !chip().hidden && chip().textContent === '2 new ↓' && Object.values(V.logs).some(L => L.next === 'cur-1'), J([ids(), PB().scrollTop, chip().textContent]))
+  click(chip())
+  check('#87 the chip jumps to the newest and follows again (it hides)', PB().scrollTop === 11 * RH - CH && V.follow === true && chip().hidden && V.newN === 0)
+  // load older: the place is kept (the first visible entry stays where it was)
+  scrollTo(10)   // p1 (row 1, at 20 px) is the first visible entry, 10 px down the view
+  click(PB().children[0])
+  const oq = sentOf('activity').filter(m => m.query.log).at(-1)
+  check('#87 "load older…" (at the top) asks with the cursor', oq.query.log.cursor === 'cur-1' && V.follow === false, J(oq.query))
+  recv({ type: 'activity', ref: oq.ref, result: { ok: true, log: { host: 'HOST-A', entries: [0, -1, -2].map(pl), next_cursor: null } } })
+  const p1Row = [...PB().children].find(r => r.getAttribute('data-id') === 'p1')
+  check('#87 ... the older entries go ABOVE and the view does not jump: p1 stays 10 px down the view (scrollTop moves by what was added)', J(ids().slice(0, 4)) === J(['p-2', 'p-1', 'p0', 'p1']) && p1Row.offsetTop - PB().scrollTop === 10 && V.follow === false, J([ids().slice(0, 5), PB().scrollTop]))
+  // the TOGGLE: newest first, kept per viewer
+  const ordB = () => PANEL.querySelector('[data-pa="order"]')
+  check('#87 the header toggle says the order ("⇅ oldest first"), with a tooltip and an aria-label', /⇅ oldest first/.test(ordB()?.textContent || '') && /chat-style/.test(ordB().getAttribute('title')) && /Switch to newest first/.test(ordB().getAttribute('aria-label')))
+  click(ordB())
+  check('#87 toggled: newest first — the newest on top, the list at the TOP (following), remembered in localStorage', ids()[0] === 'p10' && ids().at(-1) === 'p-2' && PB().scrollTop === 0 && V.follow === true && win.localStorage.getItem('aimb.act.logOrder') === 'newest' && /⇅ newest first/.test(ordB().textContent), J(ids()))
+  scrollTo(60)   // away from the top
+  for (const L of Object.values(V.logs)) L.at = 0
+  recv({ type: 'activity_delta', epoch: 'E86', seq: 6, base: 5, head: head86, upsert: [n86('plain', 'agent', { current: { id: 'p11', ts: NOW, text: 'entry 11', state: 'running' }, log: { entries: 11, dropped: 0 } })], remove: [] })
+  const pq2 = sentOf('activity').filter(m => m.query.log).at(-1)
+  recv({ type: 'activity', ref: pq2.ref, result: { ok: true, log: { host: 'HOST-A', entries: [11, 10, 9].map(pl), next_cursor: 'cur-y', total: 11 } } })
+  check('#87 newest first, scrolled down: a new entry goes on top WITHOUT moving the view (scrollTop + one row) and the chip says "1 new ↑"', ids()[0] === 'p11' && PB().scrollTop === 80 && chip().textContent === '1 new ↑' && !chip().hidden && chip().classList.contains('top'), J([ids().slice(0, 3), PB().scrollTop, chip().textContent]))
+  click(ordB())
+  check('#87 toggled back: oldest first again (stored "oldest"), at the bottom', win.localStorage.getItem('aimb.act.logOrder') === 'oldest' && ids().at(-1) === 'p11' && V.follow === true && PB().scrollTop === PB().scrollHeight - CH)
+  // storage that THROWS: the toggle still works (in memory); a page loaded with throwing / stored storage
+  const realLS = Object.getOwnPropertyDescriptor(win, 'localStorage')
+  Object.defineProperty(win, 'localStorage', { configurable: true, get() { throw new win.DOMException('denied', 'SecurityError') } })
+  let threw = null; try { click(ordB()) } catch (e) { threw = e }
+  check('#87 with storage that THROWS, the toggle still flips the order (kept for this page only)', !threw && ids()[0] === 'p11' && V.logOrder === 'newest', String(threw))
+  click(ordB())
+  if (realLS) Object.defineProperty(win, 'localStorage', realLS); else delete win.localStorage
+  if (savedTop) Object.defineProperty(proto, 'offsetTop', savedTop); if (savedH) Object.defineProperty(proto, 'offsetHeight', savedH)
+  // fresh pages: one whose storage throws on every access (it must load and default to oldest first), one that stored "newest"
+  async function miniPage(before) {
+    class WS2 { constructor() { this.readyState = 0; this.sent = []; WS2.last = this } send(s) { this.sent.push(JSON.parse(s)) } close() { this.readyState = 3 } }
+    const errs = []
+    const { VirtualConsole } = await import('jsdom')
+    const vc = new VirtualConsole(); vc.on('jsdomError', e => errs.push(String(e && (e.stack || e.message || e))))
+    const d2 = new JSDOM(html, { runScripts: 'dangerously', url: 'http://127.0.0.1:12318/dashboard.html?token=t', pretendToBeVisual: true, virtualConsole: vc, beforeParse(w) { w.WebSocket = WS2; before(w) } })
+    const w2 = d2.window, s2 = WS2.last, rc2 = m => s2.onmessage({ data: J(m) })
+    try {
+      s2.readyState = 1; s2.onopen && s2.onopen()
+      rc2({ type: 'welcome', gateway: 'HOST-A/aaa', sessions: [], pages: [], hosts: {}, bridge_version: '1.72.0', profile: {}, capabilities: {} })
+      rc2({ type: 'activity_board', full: true, epoch: 'M1', seq: 1, head: head86, upsert: u86() })
+      const r2 = [...w2.document.querySelectorAll('#acttree .ar')].find(r => r.getAttribute('data-path') === 'plain')
+      r2.dispatchEvent(new w2.MouseEvent('click', { bubbles: true }))
+      const q2 = s2.sent.filter(m => m.type === 'activity' && m.query.log).at(-1)
+      rc2({ type: 'activity', ref: q2.ref, result: { ok: true, log: { host: 'HOST-A', entries: [3, 2, 1].map(pl), next_cursor: null } } })
+      const order = [...w2.document.querySelectorAll('#actpb .ar.le')].map(r => r.getAttribute('data-id'))
+      return { order, errs, logOrder: w2.AimbActView.logOrder, btn: w2.document.querySelector('[data-pa="order"]')?.textContent }
+    } finally { d2.window.close() }
+  }
+  const mThrow = await miniPage(w => Object.defineProperty(w, 'localStorage', { configurable: true, get() { throw new w.DOMException('denied', 'SecurityError') } }))
+  check('#87 a page whose localStorage THROWS loads, renders the board and the log, oldest first (no script error)', J(mThrow.order) === J(['p1', 'p2', 'p3']) && mThrow.logOrder === 'oldest' && !mThrow.errs.length, J(mThrow))
+  const mNew = await miniPage(w => { try { w.localStorage.setItem('aimb.act.logOrder', 'newest') } catch { } })
+  check('#87 a viewer who chose newest first gets it on the next load (per viewer, localStorage)', J(mNew.order) === J(['p3', 'p2', 'p1']) && mNew.logOrder === 'newest' && /newest first/.test(mNew.btn || '') && !mNew.errs.length, J(mNew))
+  const css86 = [...doc.querySelectorAll('style')].map(s => s.textContent).join('\n')
+  check('#86 / #87 CSS: the panel is a column (header, details ≤ 45vh, the list scrolls by itself); 85vh on a narrow screen; the JSON tree + chip + marker use theme tokens',
+    /\.act-panel \{[^}]*display:flex; flex-direction:column;/.test(css86) && /\.apd \{[^}]*max-height:45vh; overflow:auto;/.test(css86) && /\.act-panel \.apb \{[^}]*overflow:auto;/.test(css86) && /@media \(max-width: 900px\) \{[^\n]*\.act-panel \{[^}]*max-height:85vh;/.test(css86)
+    && /\.jt \{[^}]*var\(--surface\)/.test(css86) && /\.jt \.j-str \{ color:var\(--ok\); \}/.test(css86) && /\.apnew \{[^}]*var\(--info\)/.test(css86) && /\.ddm \{[^}]*var\(--muted\)/.test(css86) && !/:has\(/.test(css86))
+  check('#86 legend: names ¶ / {} and the log order', /¶ = its line has details/.test(doc.getElementById('actlegend').textContent) && /oldest first/.test(doc.getElementById('actlegend').textContent))
+} catch (e) { fail++; console.log('FAIL #86/#87 block crashed:', (e && e.stack) || e) }
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close()
 process.exit(fail ? 1 : 0)

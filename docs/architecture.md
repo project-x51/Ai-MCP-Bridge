@@ -354,6 +354,8 @@ more actions, `edit_text` (`args:{text, state?}` — the node's current line, at
 (`args:{text}` — logged on the node, delivered to its session at once); their notices are verbs `activity_text_edited`
 (batched) and `activity_message`; a `message` result says whether it reached an inbox (`delivered`, `delivery:"live" |
 "parked" | "none"`). Hubs declare `activity_msg:1` in PEER_HELLO; the board head's `remote_hosts[]` gets `msg:true` for them.
+v1.72.0 (#86): the page's details section reads a node's details / data with the existing `{type:"activity", query:{entry:{id,
+host}}}` (the line's entry id from the board) — no new frame, request kind or capability.
 
 **Deliberately out of scope here.** Cross-*realm* bridging stays in §8 (a translator, because keys
 differ). And cross-machine hub **high-availability**: if a machine's hub dies its local mesh re-elects
@@ -1200,6 +1202,43 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.72.0):** *#86 + #87 — a node's details and data on the dashboard; the log panel oldest first.* **Page only, no wire
+  change** (format stays v5; `BRIDGE_VERSION` 1.72.0 so the mesh map shows who has the page; wire-compatible with 1.66 – 1.71).
+  **#86 — the details section** (`dashboard.html` `actRenderDetails`): the log panel became a column — header, a collapsible
+  DETAILS section (≤ 45vh, its own scroll), the entry list (its own scroll) — and the section shows the selected node (or a
+  session's own line on that host): the rendered line, then `AimbAct.nodeFacts` (pure, plain-text `{k, v}` pairs: kind, state
+  incl. stale / gone / host down / item state, the three-part `barTip`, `etaTip`, who = session · project · user on host, when
+  the line was set and by whom — #83's `current.by`, when = started · last activity · finished / gone, a question's choices /
+  asked / expires / answer / who answered, the subtree's entry count), then the line's `details` and `data`. **On demand by
+  entry id:** gossip and the boards carry only `current.id` + `has_details` / `has_data` (unchanged since v1.60 `snapLine`), and
+  the v1.60 `activity {entry:{id, host}}` request already serves a CURRENT line by id from memory on its owner (`findEntry` →
+  `lookupActivityEntry`; another host's over `ACTIVITY_REQ` op `entry`, queued at the owner's rate) and an older entry from the
+  day file — so no request kind was added and every v5 owner (≥ 1.65) answers; a mixed live check against a real 1.71 owner
+  passed. The page fetches outside the render (`setTimeout 0`, a failed send answers at once), one at a time per node (`detNk`
+  / `detId`), keeps the last entry shown per node while a newer line's is in flight (`detShown`, "updating"), fetches nothing
+  while folded, caches entries (≤ 240, oldest dropped) and turns refusals into sentences + Retry (`detErrText`:
+  owner-unreachable, owner-unsupported, unknown-entry, busy / rate-limited, unknown-host). **Escaping:** the details / data
+  block (`ddBuild`) and `AimbAct.jsonTree` use DOM nodes + `textContent` only; `actReconcile` gained BUILD rows (`{build, sig}`:
+  rebuilt only when the signature changes, so a viewer's open / closed JSON nodes survive the 1 s re-render and unrelated
+  deltas). The JSON tree: `<details>` per object / array ("{ 3 keys }" / "[ 2 items ]"), open to depth 2, > 50 children start
+  closed, depth > 40 → "…", type classes on theme tokens; Copy = `JSON.stringify(data, null, 2)`. Log entries expand into the
+  same block (6d printed a `<pre>` of JSON). **Markers:** `ddMark` — "¶" (details) / "{}" (data) inside a tree row's line
+  (after ✎, via `lnMark`, so the bar column is untouched) and on log entries (replacing 6d's "⋯").
+  **#87 — the order** (Robin: oldest first WITH a toggle). `AimbAct.logRows(entries, sepAt, oldest)` maps the bridge's
+  newest-first pages to the display order (the "— earlier runs —" separator between the runs either way); the end-of-log row
+  ("load older…", "show earlier runs…", pruned, …) goes on top when oldest first. **Following:** `ACT.follow` = the reader is
+  within `EDGE_PX` (24) of the newest end (`atEdge`; set by the list's scroll events); following, every render pins the list to
+  that edge; not following, `logAnchor` / `logScrollFix` keep the first visible ENTRY at the same offset across the render (so
+  a page prepended above or entries appended below never move the view) and `ACT.newN` counts what arrived — the "N new ↓"
+  chip (↑ newest first) jumps back and follows. **New entries are MERGED** (`actPollLog` + `AimbAct.mergeNewest`): when the
+  board's count for the selection moves (≥ 1.5 s after the last read) or after a dashboard action, the first page is read
+  again and only the newer entries go on top of the held list (older pages, `next_cursor`, `sepAt` kept — 6d re-read the
+  whole log, and not at all once an older page was loaded); no overlap → the page replaces the list. The toggle (`data-pa=
+  "order"`) flips `ACT.logOrder`, kept per viewer in `localStorage` `aimb.act.logOrder` (try/catch both ways; a throwing
+  storage = oldest first, the toggle still works in memory). Tests: `test_dashboard_activity` 327 (+42: the pure helpers,
+  the section, on-demand fetch, escaping, Copy, the tree surviving deltas, folded = no fetch, remote + refusals, entry blocks,
+  a fake layout for follow / chip / load older / newest first, throwing and stored storage on fresh pages, CSS; 6 order checks
+  updated), new `test_activity_detail_live` 14 (+1 mixed vs a real 1.71 owner).
 - **Built (v1.71.0):** *#85 — questions as a type of context, answerable from the dashboard.* **Wire-compatible with 1.66 –
   1.70** (format stays v5; hosts upgrade one at a time). **The model (`lib/activity.js`):** a question is a CONTEXT whose current
   LINE carries `question` = `{status, choices, free, asked_at, expires_at?, answer?{choice?, text?}, by?, at?}` (`normQuestion`:

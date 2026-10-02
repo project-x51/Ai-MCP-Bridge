@@ -70,7 +70,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   sessions/pages as nodes, control/page edges, amber pulse on message activity, gateway↔gateway edge
   appears when cross-host gossip lands), plus roster tables + trace feed, and the **Activity** tree of what every
   agent is doing (#70 step 5 — see "The Activity page"; light / dark follow the OS; v1.65.0: a log panel for the selected
-  row and a right-click menu of actions — see "Step 6d"). **The gateway serves it over
+  row and a right-click menu of actions — see "Step 6d"; v1.72.0: the selected node's details + data at the top of the
+  panel, and the log oldest first — see "Details, data and the log order"). **The gateway serves it over
   HTTP on the ws port** — open `http://127.0.0.1:<wsPort>/?token=<token>` (same origin as the WS, so it
   isn't blocked the way a `file://` page is). Opening the file directly still works if you add `?ws=`.
   Click a node to set an **alias**: sessions/pages rename live (a session's own `set_name` wins later);
@@ -146,7 +147,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   window + slider, abandoned, home-host tags, the Plans filter, rollups that follow it, the bar column, counts, the run
   boundary, the 6d row hooks; 6d — the right-click menu per row and state, copies (never a token), confirmations,
   feedback, keyboard + long-press, the log panel + selection, pin / hide, open ancestors, unfiltered counts, the 0 – 7 day
-  slider; 186); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
+  slider; #86 — the details section, the JSON tree + Copy, the ¶ {} markers, escaping of `<script>` / `<img onerror>`
+  details and data; #87 — oldest first, following, the "N new ↓" chip, load older keeping the place, the toggle with
+  storage that throws; 327); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
   board → deltas ≤1/s, seq-gap resync, page leaves refused, paging into the day files (local + remote), queued fetches
   + `busy`, gone vs host down, the doorbell flag, the duplicate-hostname warning, plan units + ticks (#70 step 5 / 6b, 43);
   `test_activity_carry_live.mjs` — the #70 6b carry-forward under the test clock hook: 13 days of seeded files, a real
@@ -175,7 +178,11 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   owner, incl. a script waiting there; expiry; withdraw by the asker and the dashboard; a wait that runs out; a question that
   goes; script usage; an owner without `activity_ask` refused `owner-unsupported`; the trust wording; `--choice` one per flag, refusing status text / a flag) (37; + 4 with
   `AIMB_TEST_OLD_BRIDGE`: a real 1.70 host — it shows a question as a blocked context, its refusal, its dashboard's Abandon…
-  withdrawing a 1.71 question, a 1.71 script's `--ask` against it `gateway-unsupported`). Tests run in
+  withdrawing a 1.71 question, a 1.71 script's `--ask` against it `gateway-unsupported`); `test_activity_detail_live.mjs` —
+  #86: a node's details + data reach a dashboard on demand (by the line's entry id + host) and never through gossip (the
+  board / delta frames and the `activity` tool carry only the flags), local and from another host's owner, an older entry
+  from the owner's day file, a 300-row data value across the hub link, a line that moves on, unknown id / host, an owner
+  that went away refused promptly (14; + 1 with `AIMB_TEST_OLD_BRIDGE`: a real 1.71 owner answers the same way). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -545,7 +552,7 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82; v1.70.0 #83 / #84; v1.71.0 #85)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82; v1.70.0 #83 / #84; v1.71.0 #85; v1.72.0 #86 / #87)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
@@ -948,7 +955,8 @@ select it (highlighted); the **chevron** (or a double-click) expands it. The sel
 this run · show earlier runs…", "earlier history pruned". A multi-host session's panel switches between its hosts; another
 host's log comes through the bridge's queued remote fetch (a spinner while it waits). The selection survives board deltas
 (the panel re-reads its first page when new entries arrive), and clears when the node leaves the board; ↻ refreshes, ×
-closes.
+closes. (v1.72.0: the panel opens with the node's **details** section, and the log runs **oldest first** with a toggle — see
+"Details, data and the log order".)
 
 **Pin / Hide (this browser only).** *Pin* sorts a node (or a session) to the top of its parent, marked 📌. *Hide* collapses
 it away; its parent shows "N hidden — show" (shown, a hidden row is greyed and the control says "hide N again"). Both are
@@ -1282,6 +1290,50 @@ forwards `answer` / `withdraw` only to an owner that declared it (else `owner-un
 dashboard offers Answer… / Withdraw only for such hosts (`remote_hosts[].ask`). A 1.70 dashboard's Abandon… on a 1.71 question
 withdraws it. A 1.71 follower or script refuses `ask` / `choices` / `free` / `expires` / `state withdrawn` / `--wait` against a
 ≤1.70 gateway (`gateway-unsupported`; it would drop them). `AI_BRIDGE_TEST_NO_ACTIVITY_ASK=1` (tests only) leaves the flag out.
+
+### Details, data and the log order — the log panel (v1.72.0, #86 / #87)
+A line's `details` (≤ 4 KB text) and `data` (≤ 16 KB JSON) were only reachable by expanding a log entry. Now the dashboard shows
+them for the selected node, and the log reads like a chat.
+
+- **The details section** sits at the top of the log panel (above the entries, its own scroll, at most 45 % of the window's
+  height; ▾ / ▸ folds it to one line). For the selected node — or a session's own line on that host — it shows the rendered
+  line, then: **Kind** (agent / context / plan item / question / session), **State** (stale / gone with what it was, the
+  host down, a plan item's state), **Progress** (three parts: "3 of 8 files · 1 skipped (37%) — reported" or the rollup),
+  **ETA**, **Who** (session · project · user on its host), **Line set** (when, and "edited by robin via dashboard (HOST)" for
+  a #83 line), **When** (started / created · last activity · finished or gone), a question's **Choices / Asked / Expires /
+  Answer / Answered**, and the **Log** count. Then its **details** as plain text and its **data** as a collapsible **JSON tree**
+  (objects and arrays fold; open two levels deep, a container of more than 50 starts closed; strings, numbers, booleans and
+  null coloured by type), each with **Copy** (the data as pretty-printed JSON).
+- **On demand.** Gossip and the boards carry only a line's entry id and `has_details` / `has_data`. The section asks for the
+  current line by that id — `activity {entry:{id, host}}`, the v1.60 request: this gateway answers its own nodes, another
+  host's come from their **owner** over the hub link (queued at its fetch rate like any remote fetch). One fetch at a time
+  per node; while a newer line's entry is on its way the last one stays shown ("updating — its line has changed…"); a
+  folded section fetches nothing. Refusals become a sentence + **Retry**: "The details are on HOST-B, which can't be reached
+  right now", "… which runs an older bridge", "Not available on HOST-B any more …", "HOST-B is busy — retry in a moment".
+- **Log entries** with details / data expand into the same block (details text + the JSON tree + Copy) — it was a `<pre>` of
+  JSON before.
+- **Markers.** A line with details shows **¶**, with data **{}** (both: "¶{}") — a small box right after the line's text on
+  the tree's rows (after ✎ when edited) and at the end of a log entry; the section header repeats it.
+- **Escaping.** Details and data are user-supplied: the section and the entries build them from DOM nodes with
+  `textContent` only — never HTML (a `<script>` key or an `<img onerror>` detail shows as text).
+- **Oldest first (default).** The log runs chat-style: the oldest entry at the top, the newest at the bottom. The panel opens
+  scrolled to the bottom and **follows** new entries while the reader is within 24 px of it. Scrolling up **pauses**:
+  new entries arrive below without moving the view and a **"N new ↓"** chip floats at the bottom of the list — click it to
+  jump down and follow again. **"load older…"** moves to the top, and the entries it adds above keep the reader's place
+  (the first visible entry stays where it was). "show earlier runs" / "— earlier runs —", "earlier history pruned" and #82's
+  history under a moved node's old path work the same in either order.
+- **New entries are merged.** When the board's count for the selection moves (or after a dashboard action), the panel reads
+  the first page again and merges it: only the newer entries are added, the older pages, their cursor and the separator stay
+  (6d re-read the whole log and dropped loaded pages). More than a page at once → the page replaces the list.
+- **The toggle.** "⇅ oldest first" / "⇅ newest first" in the panel header switches the order (newest first: the newest on
+  top, following the top, an "N new ↑" chip). Each viewer's choice is kept in `localStorage` (`aimb.act.logOrder`), wrapped
+  in try/catch — a private window or blocked storage just starts at oldest first, and the toggle still works for the page.
+- **Layout.** The panel is a column — header, details, the list (its own scroll) — beside the tree, and under 900 px below
+  it at up to 85 % of the screen's height, so the list still scrolls by itself on a phone.
+
+**Compatibility.** No wire change, no capability: the fetch is the v1.60 `entry` request, which every host on a v5 board
+(≥ 1.65) answers — a 1.66 – 1.71 owner's details show the same way (checked live against a real 1.71 owner). Only the page
+changed; `BRIDGE_VERSION` is 1.72.0 so the mesh map shows who has it.
 
 ### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
 Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
