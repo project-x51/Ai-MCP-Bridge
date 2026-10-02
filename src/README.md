@@ -390,6 +390,10 @@ node "<abs path>/src/tools/aimb-doorbell.mjs" --name Bridget --project AIMB --st
   because on Windows node resolves `/tmp` to `C:	mp`, which usually doesn't exist, and status writes fail silently.
 - The realm token and port come from the bridge's own `src/config.json`, found relative to the **script**, not your
   working directory, so the command runs from anywhere. Don't pass `--token` in a shared command line.
+- **Token in a file (#75):** if the bridge gets its token from `AI_BRIDGE_TOKEN_FILE` (set in the MCP client config),
+  `config.json` has no token and your shell doesn't inherit the MCP server's env. Pass `--token-file <same path>`, or
+  set `AI_BRIDGE_TOKEN_FILE`. The file may be a bare token or a `KEY=VALUE` env file. An explicit `--token-file` that
+  can't be read is exit 64; it never silently falls back to another source.
 
 **You don't need to know that path:** `set_wake` (for a code session) returns a ready-to-run `command`, and a
 `connect` reminder may say `{doorbell_cmd}`, which the bridge expands per session when it emits the reminder

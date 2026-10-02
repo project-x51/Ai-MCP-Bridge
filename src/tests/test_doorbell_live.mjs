@@ -171,6 +171,31 @@ check('timeout summary is self-timestamped too (#51)',
 // #52: a routine no-mail wake carries the brief, built-in re-arm guidance so a doorbell loop stays quiet
 check('timeout carries the silent re-arm guidance', !!(parsed2 && typeof parsed2.guidance === 'string' && /silent re-arm/i.test(parsed2.guidance)), parsed2 && parsed2.guidance)
 
+// ---- 9b. #75 the realm token from a FILE: a host whose bridge reads AI_BRIDGE_TOKEN_FILE (MCP client config) has
+// no token in config.json and the session's shell doesn't inherit the MCP server's env — the doorbell must accept
+// --token-file <path> and AI_BRIDGE_TOKEN_FILE (bare token or KEY=VALUE env file), like the bridge (#46).
+const tokFile = path.join(PDIR, 'realm.token'), envFile = path.join(PDIR, 'bridge.env')
+fs.writeFileSync(tokFile, TOKEN + '\n'); fs.writeFileSync(envFile, `# comment\nAI_BRIDGE_TOKEN=${TOKEN}\nOTHER=x\n`)
+const tokEnv = { ...process.env }; delete tokEnv.AI_BRIDGE_TOKEN; delete tokEnv.AI_BRIDGE_TOKEN_FILE
+function runNoTokenArg(extraArgs, env = {}) {   // no --token; config.json lookup is defeated by AIMB_DOORBELL_TEST_TOOLS-independent ws url + an empty cfg dir
+  const p = spawn('node', [DOORBELL, '--name', 'Owner', '--project', 'DBTEST', '--url', `ws://127.0.0.1:${WSPORT}`, '--timeout', '1', ...extraArgs],
+    { cwd: SRCDIR, env: { ...tokEnv, ...env } })
+  let o = '', e = ''
+  p.stdout.on('data', d => { o += d.toString() }); p.stderr.on('data', d => { e += d.toString() })
+  return new Promise(r => p.on('exit', code => { let j = null; try { j = JSON.parse(o.trim().split('\n').pop()) } catch {}; r({ code, j, err: e.trim(), out: o.trim() }) }))
+}
+await call('inbox', { for: owner.peer_id, secret: 's-own', cursor: 0 })
+await sleep(300)
+const tf1 = await runNoTokenArg(['--token-file', tokFile])
+check('#75 --token-file <bare token file> arms the doorbell (clean timeout, exit 0)', tf1.code === 0 && !!tf1.j && tf1.j.reason === 'timeout', `exit ${tf1.code} ${tf1.out} ${tf1.err}`)
+const tf2 = await runNoTokenArg(['--token-file', envFile])
+check('#75 --token-file <KEY=VALUE env file> arms the doorbell', tf2.code === 0 && !!tf2.j && tf2.j.reason === 'timeout', `exit ${tf2.code} ${tf2.out} ${tf2.err}`)
+const tf3 = await runNoTokenArg([], { AI_BRIDGE_TOKEN_FILE: envFile })
+check('#75 AI_BRIDGE_TOKEN_FILE env arms the doorbell', tf3.code === 0 && !!tf3.j && tf3.j.reason === 'timeout', `exit ${tf3.code} ${tf3.out} ${tf3.err}`)
+const tf4 = await runNoTokenArg(['--token-file', path.join(PDIR, 'missing.token')])
+check('#75 an unreadable --token-file is bad usage (exit 64) and names the file', tf4.code === 64 && /token-file/.test(tf4.err) && /missing\.token/.test(tf4.err), `exit ${tf4.code} ${tf4.err}`)
+check('#75 the token value never appears in the doorbell output', ![tf1, tf2, tf3, tf4].some(r => (r.out + r.err).includes(TOKEN)), 'token leaked')
+
 // ---- 10. #67 hourly chime: NO --timeout => exit at the next boundary with reason:"hourly", the boundary's local
 // time and DISPLAY guidance (not a silent re-arm). The test hook shortens the hour to a 2-second period. A guard
 // kills a script that never chimes (the pre-#67 script would sit on its 1800s default).

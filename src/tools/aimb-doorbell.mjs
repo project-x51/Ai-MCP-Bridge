@@ -10,9 +10,12 @@
 // Usage:
 //   node tools/aimb-doorbell.mjs --name Bridget [--project AIMB] [--topic virtualization]
 //                                [--timeout 1800] [--status /tmp/doorbell.json]
-//                                [--url ws://127.0.0.1:12318] [--token XXX]
+//                                [--url ws://127.0.0.1:12318] [--token-file ~/.aimb/token] [--token XXX]
 //
-// Token/port default to ../config.json (or AI_BRIDGE_TOKEN / AI_BRIDGE_WS_PORT).
+// Token (#75): --token-file <path> > --token > AI_BRIDGE_TOKEN > AI_BRIDGE_TOKEN_FILE > the bridge's own config.json
+// (found relative to THIS SCRIPT — the working directory never matters). A token FILE is preferred: a path is
+// harmless in argv, a token value is not. The file may be a bare token or a KEY=VALUE env file (the bridge's #46
+// format). Port: --ws-port / AI_BRIDGE_WS_PORT / config.json.
 //
 // Hourly chime (#67) — the DEFAULT when no --timeout is given: the doorbell exits at the top of the next hour
 // (LOCAL wall-clock, e.g. 14:00:00), or earlier if mail arrives, with reason:"hourly", time:"14:00" and guidance
@@ -53,6 +56,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
 import { nextBoundary as boundaryAfter, hhmm, isCheckinMark } from './aimb-doorbell-clock.mjs'
@@ -68,7 +72,20 @@ const arg = (k, d = null) => {
 
 let CFG = {}
 try { CFG = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'config.json'), 'utf8')) } catch {}
-const TOKEN = arg('token') || process.env.AI_BRIDGE_TOKEN || CFG.token || ''
+// #75: read the realm token from a FILE too, exactly as the bridge does (#46): a host whose bridge gets its token
+// via AI_BRIDGE_TOKEN_FILE in the MCP client config has NO token in config.json, and a session's shell doesn't
+// inherit the MCP server's env, so the doorbell needs the path (--token-file, or AI_BRIDGE_TOKEN_FILE).
+function readTokenFile(p) {
+  try {
+    const raw = fs.readFileSync(String(p).startsWith('~') ? path.join(os.homedir(), String(p).slice(1)) : String(p), 'utf8')
+    const m = raw.match(/^\s*AI_BRIDGE_TOKEN\s*=\s*(.+?)\s*$/m)   // an env-file line, else the whole (trimmed) file
+    return (m ? m[1] : raw).trim()
+  } catch { return '' }
+}
+const TOKEN_FILE_ARG = arg('token-file')
+// an EXPLICIT --token-file is the only source when given: unreadable/empty => bad usage, never a silent fallback
+const TOKEN = typeof TOKEN_FILE_ARG === 'string' ? readTokenFile(TOKEN_FILE_ARG) : (typeof arg('token') === 'string' ? arg('token') : '')
+  || process.env.AI_BRIDGE_TOKEN || (process.env.AI_BRIDGE_TOKEN_FILE ? readTokenFile(process.env.AI_BRIDGE_TOKEN_FILE) : '') || CFG.token || ''
 const WSPORT = arg('ws-port') || process.env.AI_BRIDGE_WS_PORT || CFG.wsPort || 12318
 const URL_ = arg('url') || `ws://127.0.0.1:${WSPORT}`
 const NAME = arg('name'), PROJECT = arg('project'), TOPIC = arg('topic')
@@ -81,7 +98,12 @@ const EARLY_GONE_ENV = process.env.AIMB_DOORBELL_EARLY_GONE_MS
 const EARLY_GONE_MS = EARLY_GONE_ENV != null && EARLY_GONE_ENV !== '' && Number(EARLY_GONE_ENV) >= 0 ? Number(EARLY_GONE_ENV) : 2000   // #73 legacy-bridge hot-loop guard window (test/tuning knob)
 
 if (!NAME && !TOPIC) { console.error('usage: --name <peer> [--project P] [--topic T] [--timeout sec] [--status file]   (no --timeout = chime at the top of the next hour; 00/06/12/18:00 chimes add inbox_check:true — call your inbox tool)'); process.exit(64) }
-if (!TOKEN) { console.error('no realm token: pass --token, set AI_BRIDGE_TOKEN, or run beside src/config.json'); process.exit(64) }
+if (!TOKEN) {   // #75: name every source, and say config.json is read relative to the SCRIPT (cwd never matters)
+  console.error(typeof TOKEN_FILE_ARG === 'string' ? `no realm token: --token-file ${TOKEN_FILE_ARG} could not be read (or is empty)`
+    : 'no realm token: pass --token-file <path> (the same file as the bridge AI_BRIDGE_TOKEN_FILE), or set AI_BRIDGE_TOKEN_FILE / AI_BRIDGE_TOKEN; '
+      + `${path.join(HERE, '..', 'config.json')} (read relative to this script, not the working directory) has no token`)
+  process.exit(64)
+}
 
 const started = Date.now()
 const watch = { name: NAME || null, project: PROJECT || null, topic: TOPIC || null }

@@ -71,7 +71,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #74 federation test flakes, #70 agent activity board (steps 1–5 built; next: step 6 `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #75 part 2 (`{doorbell_cmd}` carries --token-file), #74 federation test flakes, #70 agent activity board (steps 1–5 built; next: step 6 `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -210,6 +210,31 @@ the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) 
 whenever a send returns `unknown-subpeer`.
 
 ---
+
+## #75 — doorbell can't find the realm token when the bridge reads it from a FILE  ·  **PART 1 DONE (script); part 2 after #70 6b**
+Reported by Architect (Marz, Robins-Mac, 2026-10-02).
+- **What happens:** the doorbell always exits 64 ("no realm token").
+- **Why:**
+  - The Mac's bridge gets its token via `AI_BRIDGE_TOKEN_FILE` in the MCP server env (`~/.claude.json`), so
+    `src/config.json` has no `token`.
+  - A session's shell does not inherit the MCP server's env.
+  - The doorbell read only `--token`, `AI_BRIDGE_TOKEN` and `config.json`, never `AI_BRIDGE_TOKEN_FILE` (#46).
+  - So following the connect reminder's `{doorbell_cmd}` verbatim can never work on such a host.
+- **Why Ferret : Mac.1 could arm it:** its doorbell process has `AI_BRIDGE_TOKEN` in its environment, but neither
+  Claude Code's own environment nor any settings file sets it. So the Ferret session must have read the token file
+  itself and passed the value as an inline env var. It worked around the bug; it did not follow the reminder.
+- **Part 1 (done):** `aimb-doorbell.mjs`
+  - accepts `--token-file <path>` and `AI_BRIDGE_TOKEN_FILE`: a bare token or a KEY=VALUE env file, `~` expanded,
+    as the bridge does;
+  - treats an explicit `--token-file` as authoritative, so an unreadable file is exit 64 naming the file, never a
+    silent fallback;
+  - fixes the misleading "run beside src/config.json" hint: config.json is found relative to the SCRIPT and the
+    working directory never matters.
+
+  `test_doorbell_live` gained 5 checks (bare file, env file, env var, unreadable file, no token leak): 76/76.
+- **Part 2 (after #70 6b, which is editing `bridge.mjs`):** when the bridge itself read its token from a file,
+  `{doorbell_cmd}` (and the `set_wake` hint) include `--token-file "<that path>"`. The path is not secret; the token
+  never appears in a reminder. That makes the connect reminder work verbatim on such hosts.
 
 ## #74 — federation live tests flake under full-suite load  ·  **OPEN**
 - `test_grants_federate_live` failed once in the #70 step 2 full run, with "MCP error -32000: Connection closed" at
