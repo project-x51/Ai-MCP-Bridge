@@ -1643,7 +1643,7 @@
       var wa=pi?AimbAct.workingAgent(ACT.fullIdx[id]||t):null, chip='';
       if(wa){ var we=AimbAct.effState(wa.u,null,now,sm), wl=wa.u.current?AimbAct.renderText(wa.u.current.text,AimbAct.barOf(wa.u),wa.u.eta_at,now):(wa.u.implicit?'not reported yet':'no current line');
         chip='<span class="agon" data-tip="'+tipK(id+'w','agent '+wa.u.path+' is on it — '+(we.stale?'stale, was '+we.was:we.state)+'\n'+wl)+'">'+AimbAct.glyphSvg(we,now,null)+'<span class="agn">'+esc(wa.u.name)+'</span>'+esc(wl)+'</span>'; }
-      var line=pi&&u.current&&String(u.current.text)===String(u.name)?'<span class="ln">'+chip+'</span>':u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+(chip?' '+chip:'')+'</span>':'<span class="ln none">'+(ctx?'no current line':u.implicit?'not reported yet':'no current line')+'</span>';
+      var line=pi&&u.current&&String(u.current.text)===String(u.name)?'<span class="ln">'+chip+'</span>':u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+(chip?' '+chip:'')+'</span>':'<span class="ln none">'+(ctx?'':u.implicit?'not reported yet':'no current line')+'</span>';
       var ddm=u.current?ddMark(u.current,function(tt){ return tipK(id+'dd',tt); }):'';   // #86: ¶ {} = its line has details / data
       if(u.current) line=lnMark(line,edMark(u.current,function(f){ return tipK(id+'ed',f); })+ddm);   // #83: ✎ = its line was edited from the dashboard
       var qp='';

@@ -168,7 +168,7 @@ check('view: an agent row — monospace name, glyph with the ring, rendered line
   && !!resRow.querySelector('svg.gl circle.ring') && /⌛/.test(resRow.textContent) && !resRow.querySelector('.htag') && dOf(resRow) === 2)
 check('view (6b): a host tag only where the host of a node differs from that of its parent — a top-level node on another host than the headline', pathRow('build')?.querySelector('.htag')?.textContent === 'HOST-B' && pathRow('deploy')?.querySelector('.htag')?.textContent === 'HOST-B' && !pathRow('old').querySelector('.htag'))
 const c70 = pathRow('@#70')
-check('view (6a): an implicit grouping context — "@#70", no current line, the "none" mark, its rolled-up bar, no pills', c70.querySelector('.nm.ctx')?.textContent === '@#70' && /no current line/.test(c70.querySelector('.ln.none')?.textContent || '')
+check('view (6a): an implicit grouping context — "@#70", no current line (the line is left EMPTY — Robin, 2026-10-03), the "none" mark, its rolled-up bar, no pills', c70.querySelector('.nm.ctx')?.textContent === '@#70' && c70.querySelector('.ln.none')?.textContent === ''
   && !!c70.querySelector('svg.s-none') && !!c70.querySelector('.pb.roll') && c70.querySelectorAll('.pill').length === 0)
 // per-node expand: its subtree Log, then its children one level deeper
 tog(resRow)
@@ -180,7 +180,7 @@ check('view (6a): a context row — "@Tharsis", a state MARK (no ring), its line
   && thRow.querySelector('.ln').textContent === 'tiling 2 of 8 tiles' && !!thRow.querySelector('.pb') && !thRow.classList.contains('stale'), thRow.innerHTML)
 tog(thRow)
 const nol = pathRow('research/@Tharsis/@nol'), z12 = pathRow('research/@Tharsis/@z12')
-check('view (6a): nested contexts (depth 3) under the open context; one with no line shows "no current line" and no pills', dOf(z12) === 4 && dOf(nol) === 4 && /no current line/.test(nol.textContent) && nol.querySelectorAll('.pill').length === 0 && z12.querySelector('.ln').textContent === 'strip z12')
+check('view (6a): nested contexts (depth 3) under the open context; one with no line shows an empty line and no pills', dOf(z12) === 4 && dOf(nol) === 4 && !/no current line/.test(nol.textContent) && nol.querySelector('.ln.none')?.textContent === '' && nol.querySelectorAll('.pill').length === 0 && z12.querySelector('.ln').textContent === 'strip z12')
 const pills = r => [...(r?.querySelectorAll('.pill') || [])].map(p => p.className.replace('pill ', ''))
 check('view: pills only for blocked / failed / stale / gone (running and done have none)', J(pills(pathRow('research/sub'))) === J(['blocked']) && J(pills(pathRow('deploy'))) === J(['failed']) && J(pills(pathRow('old'))) === J(['stale'])
   && J(pills(pathRow('w'))) === J(['gone']) && J(pills(resRow)) === '[]' && J(pills(pathRow('build'))) === '[]', J([pills(pathRow('research/sub')), pills(pathRow('deploy')), pills(pathRow('old')), pills(pathRow('w'))]))
