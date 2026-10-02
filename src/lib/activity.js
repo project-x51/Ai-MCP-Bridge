@@ -138,6 +138,15 @@
 // day files (nodeAliases). `abandoned` is valid on ANY context and CASCADES to the open contexts / items under it
 // (cascadeAbandon). Dashboard actions `move` / `reorder`. Still format v5: rank / moved_from / moved are optional fields a 1.68
 // host ignores.
+//
+// #83 / #84 (v1.70.0): two more dashboard actions (MSG_ACTIONS). `edit_text` (args.text, args.state?) sets a node's CURRENT
+// LINE for its session — a SYSTEM message like the others (no activity); the line remembers who wrote its text (`line.by`, the
+// record's `line_by`, gossiped / checkpointed / replayed) until the session's next line replaces it (a tick that keeps the text
+// keeps it too); the logged entry says "<text> (edited by <user> via dashboard (<host>))". `message` (args.text, ≤ 2000 chars)
+// LOGS "<user> via dashboard: <first 120 chars>…" on the node (the full text in `details`); the bridge delivers it. Notices:
+// actionNotice (edit_text → verb activity_text_edited, batched; several merge through combineActionNotices) and messageNotice
+// (verb activity_message, sent at once; a public subject of who + path + firstWords, the text in the body).
+// Still format v5: line_by / line.by are optional fields a 1.69 host ignores.
 import { lc, projKey } from './keys.js'
 
 /** The locked #70 limits (6a: depth/nodes replace "agent path depth 3" + "32 contexts per agent"). text/context in code
@@ -908,7 +917,7 @@ export function splitBatch(input) {
 
 /**
  * @typedef {{ id:string, ts:number, text:string, state:string, details?:string|null, data?:any, data_bytes?:number,
- *   has_details?:boolean, has_data?:boolean }} ActivityLine
+ *   has_details?:boolean, has_data?:boolean, by?:any }} ActivityLine   (#83: by = who wrote its text when not its session — a dashboard edit)
  * @typedef {{ key:string, path:string, name:string, kind:'agent'|'context', parent:string|null, depth:number,
  *   created_at:number, last_activity:number, stale_after_ms:number|null, current:ActivityLine|null,
  *   progress:ActivityProgress|null, eta_at:number|null, finished_at:number|null, gone_at:number|null, implicit:boolean,
@@ -1108,7 +1117,7 @@ function notePersisted(span, tgt, what, ts) {
 /** The record fields of a plan item (6b): the marker + its plan position. */
 const planFields = n => (n && n.plan ? { plan_item: true, ...(Number.isInteger(n.plan_ix) ? { plan_ix: n.plan_ix } : {}) } : {})
 const cpId = (sKey, nKey) => JSON.stringify([sKey, nKey])
-const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, details: l.details || null, data: l.data != null ? l.data : null } : null)
+const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, details: l.details || null, data: l.data != null ? l.data : null, ...(l.by ? { line_by: l.by } : {}) } : null)   // #83: + line_by
 
 /**
  * Apply one parsed message from a LOCAL session. Atomic: a rejected message changes nothing.
@@ -1251,11 +1260,13 @@ export function apply(state, ident, msg, now, opts = {}) {
     let lineId = id, planEnd = planEndOpt
     if (cur) {
       // a log:false line IDENTICAL to the current one (text, state, details, data) keeps it — "alive, unchanged" (a rep, not a cp)
+      // #83: who wrote the line's TEXT when not its session — a dashboard edit; a tick that keeps the text keeps it; any other line clears it
+      const lineBy = msg.keepText ? (c0 && c0.by) || null : act === 'edit_text' && by && typeof by === 'object' ? by : null
       const same = !logged && c0 && c0.text === text && c0.state === entryState && (c0.details || null) === (msg.details || null)
-        && JSON.stringify(c0.data != null ? c0.data : null) === JSON.stringify(msg.data != null ? msg.data : null)
+        && JSON.stringify(c0.data != null ? c0.data : null) === JSON.stringify(msg.data != null ? msg.data : null) && (c0.by || null) === lineBy   // #83: the session re-sending an edited text takes the line back
       if (same) lineId = c0.id
       else tgt.current = { id, ts: now, text, state: entryState, details: msg.details || null, data: msg.data != null ? msg.data : null,
-        data_bytes: msg.data != null ? utf8(JSON.stringify(msg.data)) : 0 }
+        data_bytes: msg.data != null ? utf8(JSON.stringify(msg.data)) : 0, ...(lineBy ? { by: lineBy } : {}) }
       if (tgt.kind === 'agent') {
         if (DONE_OR_FAILED.has(entryState)) { if (!tgt.finished_at) tgt.finished_at = now }
         else tgt.finished_at = null
@@ -1287,6 +1298,7 @@ export function apply(state, ident, msg, now, opts = {}) {
         details: msg.details || null, data: msg.data != null ? msg.data : null, ...planFields(tgt), ...persistMarks(chain),
         ...(cur && tgt.kind === 'agent' ? { finished_at: tgt.finished_at } : {}),
         ...(cur && entryText && entryText !== text ? { line_text: text } : {}),   // 6d: the LINE kept its text; the entry says what was done (+ by whom)
+        ...(cur && tgt.current && tgt.current.by ? { line_by: tgt.current.by } : {}),   // #83: who wrote the line's text (a dashboard edit; kept by a tick)
         ...(planEnd ? { plan_end: planEnd } : {}), ...(rankSet ? { rank: tgt.rank } : {}) }   // #82: the node's new position
       res.records.push(res.entry)
     }
@@ -1669,12 +1681,40 @@ export function autoAbandon(state, now, opts = {}) {
 
 /** The actions (wire names). Plan items: done / skip / reopen (→ todo) / abandon; plan nodes: complete / abandon_plan /
  * reopen_plan (the table's "Reopen" on a plan); agents and the session: abandon_plan / finish (args.state done|failed) / dismiss. */
-export const ACTIVITY_ACTIONS = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss', 'move', 'reorder'])   // #82: + move (args.to, + a position) and reorder (args.before | after | position); abandon on ANY context
+export const ACTIVITY_ACTIONS = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss', 'move', 'reorder', 'edit_text', 'message'])   // #82: + move (args.to, + a position) and reorder (args.before | after | position); abandon on ANY context; #83 / #84: + edit_text (args.text, state?) and message (args.text)
 /** #82: the actions a ≤1.68 owner doesn't know (its dashboard path answers bad-action) — a 1.69 gateway forwards them only to a 1.69 owner. */
 export const PLAN82_ACTIONS = Object.freeze(['move', 'reorder'])
+/** #83 / #84 (v1.70.0): the actions a ≤1.69 owner doesn't know — a 1.70 gateway forwards them only to an owner that declared activity_msg. */
+export const MSG_ACTIONS = Object.freeze(['edit_text', 'message'])
+/** #84: a dashboard message's limits — its full text (code points), and the preview logged as the entry's text. */
+export const MESSAGE_LIMITS = Object.freeze({ text: 2000, preview: 120 })
 const ITEM_ACTIONS = Object.freeze({ done: 'done', skip: 'skipped', reopen: 'todo', abandon: 'abandoned' })
 const ACTION_LABEL = Object.freeze({ done: 'marked done', skip: 'skipped', reopen: 'reopened (back to to do)', abandon: 'abandoned', complete: 'plan marked complete',
-  abandon_plan: 'plan abandoned', reopen_plan: 'plan reopened', finish: 'marked finished', dismiss: 'dismissed from the board', move: 'moved', reorder: 'moved' })
+  abandon_plan: 'plan abandoned', reopen_plan: 'plan reopened', finish: 'marked finished', dismiss: 'dismissed from the board', move: 'moved', reorder: 'moved', edit_text: 'edited', message: 'message' })
+/**
+ * #83: the states the dashboard's Edit text… may set on a node — what a report could set there: a plan item any state; another
+ * context any but todo / skipped (plan states); an agent / the session running | blocked | idle | done | failed, + abandoned only
+ * while it holds plan items (it then finishes and ends its plan, as a report would). In ACTIVITY_STATES order.
+ * @param {any} sess @param {any} node @returns {string[]}
+ */
+export function editStates(sess, node) {
+  if (!node) return []
+  if (node.kind === 'context') return node.plan ? [...ACTIVITY_STATES] : ACTIVITY_STATES.filter(s => !PLAN_STATES.has(s))
+  const holds = !!(sess && childrenOf(sess, node).some(c => c.plan))
+  return ACTIVITY_STATES.filter(s => !PLAN_STATES.has(s) && (s !== 'abandoned' || holds))
+}
+/** #84: a message's text as kept — control characters out except newlines / tabs (CRLF → LF), trimmed. */
+const msgText = s => (typeof s === 'string' ? s.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim() : '')
+/** #84: the first `max` code points of a text as ONE line ("…" when cut). */
+const preview = (s, max) => { const t = normText(String(s || '')); return cpLen(t) > max ? cpSlice(t, max - 1).trimEnd() + '…' : t }
+/** #84: a few words for a PUBLIC subject — at most `words` words and `chars` code points ("…" when cut). */
+export function firstWords(s, words = 6, chars = 40) {
+  const ws = normText(String(s || '')).split(' ').filter(Boolean)
+  let out = ''
+  const cut = o => (o.endsWith('…') ? o : o.replace(/[\s.,;:!?]+$/u, '') + '…')   // "…" after the last word (no "case.…")
+  for (const w of ws.slice(0, words)) { const nx = out ? out + ' ' + w : w; if (cpLen(nx) > chars) return cut(out || cpSlice(w, chars - 1) + '…'); out = nx }
+  return ws.length > words ? cut(out) : out
+}
 const identOf = s => ({ realm: s.realm, project: s.project, user: s.user, session: s.session })
 /** #82: an action's position args (before / after / position) as message fields. */
 const posArgs = a => { const o = {}; for (const k of ['before', 'after', 'position']) if (a && typeof a[k] === 'string' && a[k].trim()) o[k] = a[k]; return o }
@@ -1817,6 +1857,43 @@ export function applyAction(state, q, now, opts = {}) {
       const st = stateOf(node), w = (r.records[0] && r.records[0].text || '').replace(/^placed /, '').replace(/ by .*$/, '')
       return { ...done(r.records, { state: st }), from_state: st, where: w === 'first' ? 'to the top' : w === 'last' ? 'to the end' : w, rank: r.rank || null }
     }
+    case 'edit_text': {   // ---- #83: set the node's CURRENT LINE (+ optionally its state) for its session — any node, the session root too
+      if (typeof args.text !== 'string' || !normText(args.text)) return bad('bad-args', 'edit_text takes args.text — the new line (and optionally args.state)')
+      const valid = editStates(sess, node)
+      const st = typeof args.state === 'string' && args.state.trim() ? args.state.trim().toLowerCase() : null
+      if (st && !valid.includes(st)) return bad('bad-state', `"${node.path || '@root'}" can be ${valid.join('|')} — not ${st}`)
+      const keep = st || (node.current ? stateOf(node) : null)   // no state given: the line keeps its state (a ☐ item is not started by an edit)
+      const pm = parseMessage({ path: lineAddr(node), text: 'x', ...(keep ? { state: keep } : {}) }, { now })   // the address only: the text is taken LITERALLY (a leading "@…" is text, not a path)
+      if (!pm.ok) return pm
+      let text = normText(args.text)
+      if (cpLen(text) > ACTIVITY_LIMITS.text) { text = cpSlice(text, ACTIVITY_LIMITS.text - 1) + '…'; pm.msg.warnings.push('text-truncated') }   // the same limit as a report
+      pm.msg.text = text
+      if (node.current) { pm.msg.details = node.current.details || null; pm.msg.data = node.current.data != null ? node.current.data : null }   // only the TEXT (and state) change: the line keeps its details / data
+      if (node.current && node.current.text === text && stateOf(node) === (keep || 'running')) return bad('no-change', `"${node.path || '@root'}" already reads that`)
+      const suffix = ` (edited ${byText(by)})`, room = ACTIVITY_LIMITS.text - cpLen(suffix)   // the LOGGED entry: the text + who edited it (the line keeps the text alone)
+      const et = (cpLen(text) > room ? cpSlice(text, room - 1) + '…' : text) + suffix
+      const r = apply(state, identOf(sess), pm.msg, now, { by, act: action, entryText: et })
+      if (!r.ok) return r
+      const casc = (r.cascade || []).map(c => ({ path: c.path, state: 'abandoned', from: c.from, entry_id: c.entry_id }))
+      const st2 = stateOf(node)
+      return { ...done(r.records, { state: st2 }, { ...(casc.length ? { applied: [{ path: node.path, state: st2 }, ...casc] } : {}) }), from_text: lineText, new_text: text,
+        ...(r.warnings && r.warnings.length ? { warnings: r.warnings } : {}) }
+    }
+    case 'message': {   // ---- #84: a message to the node's session — LOGGED on the node here; the bridge delivers it (messageNotice)
+      const full = msgText(args.text)
+      if (!full) return bad('bad-args', 'message takes args.text — what to tell the session')
+      if (cpLen(full) > MESSAGE_LIMITS.text) return bad('message-too-long', `a message is at most ${MESSAGE_LIMITS.text} characters (got ${cpLen(full)}) — shorten it`)
+      const pm = parseMessage({ ...(node.path ? { path: node.path } : {}), text: 'x' }, { now })
+      if (!pm.ok) return pm
+      pm.msg.text = cpSlice(`${by.user} via dashboard: ${preview(full, MESSAGE_LIMITS.preview)}`, ACTIVITY_LIMITS.text)
+      let det = full   // the full text in details (≤ 4 KB: a long non-ASCII message is cut there — the delivered message carries all of it)
+      while (utf8(det) > ACTIVITY_LIMITS.detailsBytes) det = cpSlice(det, Math.max(1, cpLen(det) - Math.ceil((utf8(det) - ACTIVITY_LIMITS.detailsBytes) / 4) - 1)) + '…'
+      pm.msg.details = det
+      const r = apply(state, identOf(sess), pm.msg, now, { by, act: action })
+      if (!r.ok) return r
+      const st2 = stateOf(node)
+      return { ...done(r.records, { state: st2 }), from_state: st2, message: full }
+    }
     case 'complete': {   // ---- a PLAN NODE: ends its plan (a context: its line done; an agent / the session: the marker)
       if (!plan) return bad('not-a-plan', `"${node.path || '@root'}" holds no plan items`)
       if (planEndAt(sess, node, plan) != null) return bad('already-ended', `the plan of "${node.path || '@root'}" has already ended`)
@@ -1888,12 +1965,16 @@ function dismissNode(state, sess, node, now, o) {
 // { action, path, host, from_state, to_state, of?, by:{ user, host }, entry_id, session, project, text, ts, items? } and a
 // batch is { actions:[…those], count, session, project, host }.
 export const NOTICE_VERB = 'activity_changed'
+/** #83 (v1.70.0): the verb of a dashboard EDIT of a node's line (batched like activity_changed; several merge through combineActionNotices). */
+export const EDIT_NOTICE_VERB = 'activity_text_edited'
+/** #84 (v1.70.0): the verb of a dashboard viewer's MESSAGE about a node (sent at once — a person waits on it). */
+export const MESSAGE_NOTICE_VERB = 'activity_message'
 const NOTICE_ONE = Object.freeze({ done: 'marked {p} done', skip: 'skipped {p}', reopen: 'reopened {p}', abandon: 'abandoned {p}', complete: 'completed the plan {p}',
   abandon_plan: 'abandoned the plan {p}', reopen_plan: 'reopened the plan {p}', finish: 'marked {p} finished ({s})', dismiss: 'dismissed {p} from the board',
-  move: 'moved {p} to {t}', reorder: 'moved {p} {w}' })   // #82
+  move: 'moved {p} to {t}', reorder: 'moved {p} {w}', edit_text: 'edited {p}' })   // #82; #83
 const NOTICE_MANY = Object.freeze({ done: 'marked {n} done', skip: 'skipped {n}', reopen: 'reopened {n}', abandon: 'abandoned {n}', complete: 'completed {n}',
-  abandon_plan: 'abandoned {n}', reopen_plan: 'reopened {n}', finish: 'finished {n}', dismiss: 'dismissed {n}', move: 'moved {n}', reorder: 'reordered {n}' })
-const NOTICE_NOUN = Object.freeze({ done: 'item', skip: 'item', reopen: 'item', abandon: 'item', complete: 'plan', abandon_plan: 'plan', reopen_plan: 'plan', finish: 'agent', dismiss: 'agent', move: 'node', reorder: 'node' })
+  abandon_plan: 'abandoned {n}', reopen_plan: 'reopened {n}', finish: 'finished {n}', dismiss: 'dismissed {n}', move: 'moved {n}', reorder: 'reordered {n}', edit_text: 'edited {n}' })
+const NOTICE_NOUN = Object.freeze({ done: 'item', skip: 'item', reopen: 'item', abandon: 'item', complete: 'plan', abandon_plan: 'plan', reopen_plan: 'plan', finish: 'agent', dismiss: 'agent', move: 'node', reorder: 'node', edit_text: 'line' })
 const NOTICE_SUBJECT_MAX = 200
 const segsOf = p => (typeof p === 'string' && p ? p.match(/@"[^"]*"|[^/]+/g) || [] : [])
 /** A node path for people: `@"Next release"/@Docs` → `@Next release/@Docs`; the session root → the session's name. */
@@ -1903,17 +1984,33 @@ export function displayPath(path, session) { return path ? String(path).replace(
  * @param {any} r @param {{ by?: any, host?: string, ts?: number }} [opts]
  */
 export function actionNotice(r, opts = {}) {
+  if (r && r.action === 'message') return messageNotice(r, opts)   // #84
   const b = normBy(opts.by), by = b && typeof b === 'object' ? { user: b.user, host: b.host } : { user: typeof b === 'string' ? b : 'dashboard', host: opts.host || '?' }
   const id = r.ident || {}, action = r.action
   const p = displayPath(action === 'move' && r.moved_from != null ? r.moved_from : r.path, id.session)   // #82: "moved @A/@x to @B" names the OLD path
   const pp =(r.kind === 'agent' && NOTICE_NOUN[action] === 'plan') ? `of ${p}` : p   // "completed the plan of lead"
   const tpl = action === 'abandon_plan' && r.kind === 'agent' ? 'abandoned the open plans {p}' : (NOTICE_ONE[action] || `${action} {p}`)
-  const subject = cpSlice(`${by.user} ${tpl.replace('{p}', pp).replace('{s}', r.to_state || '').replace('{t}', displayPath(r.to || '', id.session)).replace('{w}', r.where || 'elsewhere')}`, NOTICE_SUBJECT_MAX)
+  const st83 = action === 'edit_text' && r.from_state && r.to_state && r.from_state !== r.to_state ? ` (${r.from_state} → ${r.to_state})` : ''   // #83: an edit that changed the state says so
+  const subject = cpSlice(`${by.user} ${tpl.replace('{p}', pp).replace('{s}', r.to_state || '').replace('{t}', displayPath(r.to || '', id.session)).replace('{w}', r.where || 'elsewhere')}${st83}`, NOTICE_SUBJECT_MAX)
   const items = (r.applied || []).filter(a => a.path !== r.path).map(a => compact({ path: a.path, from_state: a.from || null, to_state: a.state, entry_id: a.entry_id || null }))
   const body = { action, path: r.path || '', host: opts.host || null, from_state: r.from_state || null, to_state: r.to_state || null, ...(r.of ? { of: r.of } : {}), by,
     entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, text: r.text || null, ts: opts.ts || null, ...(items.length ? { items } : {}),
-    ...(r.moved_from != null ? { moved_from: r.moved_from, to: r.to || '' } : {}), ...(r.where ? { where: r.where } : {}) }   // #82: a move's old path + new parent; a reorder's place
-  return { verb: NOTICE_VERB, subject, body }
+    ...(r.moved_from != null ? { moved_from: r.moved_from, to: r.to || '' } : {}), ...(r.where ? { where: r.where } : {}),   // #82: a move's old path + new parent; a reorder's place
+    ...(action === 'edit_text' ? { from_text: r.from_text != null ? r.from_text : null, text: r.new_text != null ? r.new_text : null } : {}) }   // #83: the line before → after (text = the NEW line)
+  return { verb: action === 'edit_text' ? EDIT_NOTICE_VERB : NOTICE_VERB, subject, body }
+}
+/**
+ * #84: a dashboard viewer's MESSAGE about a node (applyAction's `message` result) → { verb:"activity_message", subject, body }.
+ * The SUBJECT is public (never encrypted): only who, the node's path and a few words — "robin about @Next release/@#83: can you
+ * also cover…". The BODY (encrypted like any body) carries the full text: { action:"message", path, host (the owner), text,
+ * by:{ user, host }, entry_id (the logged entry), session, project, ts }.
+ * @param {any} r @param {{ by?: any, host?: string, ts?: number }} [opts]
+ */
+export function messageNotice(r, opts = {}) {
+  const b = normBy(opts.by), by = b && typeof b === 'object' ? { user: b.user, host: b.host } : { user: typeof b === 'string' ? b : 'dashboard', host: opts.host || '?' }
+  const id = r.ident || {}, text = typeof r.message === 'string' ? r.message : ''
+  const subject = cpSlice(`${by.user} about ${displayPath(r.path, id.session)}: ${firstWords(text)}`, NOTICE_SUBJECT_MAX)
+  return { verb: MESSAGE_NOTICE_VERB, subject, body: { action: 'message', path: r.path || '', host: opts.host || null, text, by, entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, ts: opts.ts || null } }
 }
 /**
  * Several notices for ONE session (bodies from actionNotice) → ONE { subject, body }: "robin skipped 2 items and abandoned 1 in
@@ -2388,8 +2485,9 @@ export function createReplay(state, { now }) {
   }
   function lineOf(r) {
     const data = r.data != null && typeof r.data === 'object' ? r.data : null
+    const lb = r.line_by && typeof r.line_by === 'object' ? normBy(r.line_by) : null   // #83: who wrote its text (an entry's / a cp's current line_by; never the entry's own `by`)
     return { id: String(r.id || ''), ts: finite(r.ts) ? r.ts : 0, text: typeof r.line_text === 'string' && r.line_text ? r.line_text : String(r.text), state: ACTIVITY_STATES.includes(r.state) ? r.state : 'running',   // 6d: line_text = the line's own text (the entry's says what a dashboard did)
-      details: typeof r.details === 'string' && r.details ? r.details : null, data, data_bytes: data != null ? utf8(JSON.stringify(data)) : 0 }
+      details: typeof r.details === 'string' && r.details ? r.details : null, data, data_bytes: data != null ? utf8(JSON.stringify(data)) : 0, ...(lb && typeof lb === 'object' ? { by: lb } : {}) }
   }
   /** Nodes seen so far whose phase-1 fields are not all resolved yet. */
   function pending() { let n = 0; for (const s of sessions.values()) for (const x of s.nodes.values()) if (!nodeDone(x)) n++; return n }
@@ -2540,9 +2638,11 @@ export function renderText(template, progress, eta_at, now) {
 // read views (the `activity` tool; the dashboard builds on the raw form)
 
 // a current line renders against the node's BAR (its reported progress, else its rollup) + ETA
+// #83: `by` = who wrote the line's text when not its session ({ user, host } — a dashboard edit)
+const lineByView = l => (l && l.by && typeof l.by === 'object' ? { user: l.by.user, host: l.by.host } : null)
 const lineView = (l, p, eta, now) => (l ? compact({ id: l.id, ts: l.ts, text: l.text, rendered: renderText(l.text, p, eta, now), state: l.state,
-  has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null)
-const rawLine = l => (l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null)
+  has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data), by: lineByView(l) }) : null)
+const rawLine = l => (l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data), by: lineByView(l) }) : null)
 /** Is `key` inside `k`'s subtree (or `k` itself)? '' = everything. */
 const under = (key, k) => !k || key === k || key.startsWith(k + '/')
 /**
@@ -2984,7 +3084,8 @@ export function findEntry(state, id, now = Date.now()) {
 // gossip: snapshot + per-origin merge (FORMAT v2: one unit per node)
 
 function snapLine(l) {
-  return l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null
+  return l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data),
+    by: l.by && typeof l.by === 'object' ? { kind: 'dashboard', user: l.by.user, host: l.by.host } : null }) : null   // #83: who wrote its text (a ≤1.69 receiver ignores it)
 }
 /** A node's replicated form: its OWN fields (never children, rollup, log, details/data). 6b: + plan_item / plan_ix. 6c: + log_n
  * (its OWN entry count: memory + dropped; a remote node re-gossips what it was told) and log_partial (the count understates). */
@@ -3029,8 +3130,9 @@ function wLine(l) {
   if (!l || typeof l !== 'object') return null
   const text = wText(l.text)
   if (!text) return null
+  const by = l.by && typeof l.by === 'object' ? normBy({ ...l.by, kind: 'dashboard' }) : null   // #83
   return { id: typeof l.id === 'string' ? l.id.slice(0, 100) : '', ts: wTime(l.ts) || 0, text, state: ACTIVITY_STATES.includes(l.state) ? l.state : 'running',
-    has_details: !!l.has_details, has_data: !!l.has_data }
+    has_details: !!l.has_details, has_data: !!l.has_data, ...(by && typeof by === 'object' ? { by } : {}) }
 }
 /** A node from the wire (validated path → canonical key), or null. */
 function wNode(r) {

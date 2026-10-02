@@ -163,7 +163,12 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `test_activity_plan82_live.mjs` — #82: insert before / after / first / last (tool + script), reorder, move with its
   history (memory + the day files under the old path), abandon an ordinary context with the cascade, dashboard Move up /
   Move to (local and forwarded to the owner) with the #80 notice, gossip of ranks + moves to a second host, and a restart
-  that replays it all (26). Tests run in
+  that replays it all (26); `test_activity_msg_live.mjs` — #83 / #84: Edit text (the line + state, attributed on the line,
+  in the entry and through gossip; the batched `activity_text_edited`; the session's next report takes it back) and Message
+  session (logged with details; `activity_message` at once — subject, body, entry id; live, parked, or "not delivered" for a
+  script-only session), both directions across two hosts, refusals over the wire, an owner without `activity_msg` refused
+  `owner-unsupported` before forwarding, the trust wording (34; + 3 with `AIMB_TEST_OLD_BRIDGE=<an older bridge.mjs>`: a real
+  1.69 owner — boards both ways, its refusal, its dashboard acting on a 1.70 node). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -533,7 +538,7 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82; v1.70.0 #83 / #84)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
@@ -893,6 +898,7 @@ carry `plan_end_how`: `all-done`, `done` (marked complete) or `abandoned`.
 | Agent / session holding open plan items | Abandon open plan items… (`abandon_plan`: only its OPEN items — todo / running / blocked — of the plans it holds without crossing another agent; those plans end; the agent or session itself **keeps running**) |
 | Agent / session that is stale or gone | Mark finished — done… / — failed… (`finish`, args `state`) |
 | Agent / session that is stale, gone or finished | Dismiss from the board… (`dismiss`) — never when its subtree holds part of an open plan (`has-open-items`) |
+| Any node / a session's own line (v1.70.0, a 1.70+ owner) | Edit text… (`edit_text`) · Message session… (`message`) — see "Edit a line, message the session" below |
 | Any node / session | Copy path (a session: Copy session name) · Copy its aimb-log command · Pin / Unpin · Hide / Unhide |
 | A log entry (in the log panel) | Copy entry id · Copy path |
 
@@ -990,7 +996,7 @@ bridge (they live in the browser), and a refused action or a read sends nothing.
   session's own board) — nothing else is opened.
 - **What the session does:** the server instructions and the `log` tool say it: summarise the change for the user and don't
   act on it (stop or redo work) without their permission.
-- **For later notices (#83 edit text, #84 message the session, #85 answers):** the gateway's one internal hook
+- **For later notices (#83 edit text and #84 message the session — built in v1.70.0, below; #85 answers):** the gateway's one internal hook
   `notifyActivitySession(ident, {verb, subject, body}, {now})` (`bridge.mjs`) batches per session and delivers as above;
   `ACT_NOTICE_COMBINE[verb]` merges several notices of one verb (the default: `{notices:[…], count}`), `now:true` sends at
   once.
@@ -1117,6 +1123,77 @@ owner that declared it (else `owner-unsupported`), and its dashboard offers them
 A 1.69 follower refuses (`gateway-unsupported`) a `log` using move / to / before / after / position when its gateway is
 older (it would drop the fields silently), and so does the 1.69 script. Downgrading a host to ≤1.68 after a move is not
 supported: its replay would rebuild the moved node at both paths.
+
+### Edit a line, message the session — from the dashboard (v1.70.0, #83 / #84)
+Two more right-click items on **any node** — a context, a plan item, an agent, or a session's own line (a multi-host
+session: each host's line, not the session row):
+
+| Menu item | Wire action | What the owning host does | The session is told |
+|---|---|---|---|
+| **Edit text…** | `edit_text`, args `{text, state?}` | sets the node's **current line** (and optionally its state) for its session | `activity_text_edited`, batched |
+| **Message session…** | `message`, args `{text}` | **logs** the message on the node and delivers it to the session | `activity_message`, at once |
+
+Both travel the 6d action path (`activity_action` → the node's owner; another host's node is forwarded as `ACTIVITY_ACT`),
+are SYSTEM entries attributed to the viewer (`by:{kind:"dashboard", user, host}` + `act`; they never refresh an agent's
+activity), and reach the session through #80's notice hook.
+
+**Edit text… (#83).** A dialog prefilled with the node's RAW line (`{progress}`, `{pct}`, `{eta}` … stay placeholders and
+still render), a state picker — "keep <state>" or one of the states that node can take (a plan item: any; another context:
+all but `todo` / `skipped`; an agent / the session: `running` · `blocked` · `failed` · `done` · `idle`, + `abandoned` only
+while it holds plan items) — a live "N / 240" counter, and Save (disabled with a reason: empty, too long, nothing changed;
+Enter saves, Escape cancels).
+- The same limits as a report: 240 characters (the bridge truncates a longer one with `text-truncated`, as for a report),
+  newlines become spaces, and the text is taken **literally** (a leading `@Docs` is text, not a path). No state → the line
+  keeps its state (an edit doesn't start a ☐ item). Only the text and state change: the line keeps its details and data.
+- **Attribution:** the line remembers who wrote it — `current.by = {user, host}` on the board (a raw / rendered line, the
+  `activity` tool, gossip, checkpoints, the carry-forward and the restart replay all carry it; the record field is
+  `line_by`). The dashboard shows a small **✎** right after the text (hover: "Edited by robin via dashboard (HOST) — its
+  session's next report replaces it"). The logged entry reads `Docs: README first (edited by robin via dashboard (ROBIN-Z790))`
+  (`act:"edit_text"`; the record's `line_text` keeps the line alone).
+- **The session's next report** replaces the line and its ✎ as usual; a tick that keeps the text (`@~…/@~Docs` + a state)
+  keeps the attribution — the text is still the viewer's.
+- Codes: `bad-args` (no text), `bad-state` (a state that node can't take), `no-change` (the same text and state), + the 6d ones.
+- **Notice:** verb `activity_text_edited`, batched with the session's other notices (`notice_batch_sec`). Subject e.g.
+  `robin edited @Rel/@Docs (todo → running)` (no arrow without a state change); body
+  ```json
+  { "action": "edit_text", "path": "@Rel/@Docs", "host": "ROBIN-Z790", "from_state": "todo", "to_state": "running",
+    "by": { "user": "robin", "host": "LITTLE-001" }, "entry_id": "act_…", "session": "Lead", "project": "AIMB",
+    "text": "Docs: README first {progress}", "from_text": "Docs", "ts": 1790956444869 }
+  ```
+  Several edits in one window merge into ONE message (`ACT_NOTICE_COMBINE.activity_text_edited`): `robin edited 2 lines in
+  @Rel`, body `{actions:[…], count, session, project, host}`.
+
+**Message session… (#84).** A text box (up to **2000** characters; newlines kept; a live counter; Ctrl+Enter sends) titled
+"Message <session> about <path>".
+- The owner **logs** it on the node: `robin via dashboard: <the first 120 characters on one line>…` (`act:"message"`, not
+  a current line — the node's line is untouched), the full text in the entry's `details` (cut to 4 KB only for a very long
+  non-ASCII message; the delivered body always has all of it).
+- It **delivers** it at once (`now:true` — not held for the batch window), verb `activity_message`. The **subject is public
+  (not encrypted)**, so it names only who, the node's path and a few words (≤ 6 words / 40 characters): `robin about
+  @Rel/@Code: Please also cover the empty-plan case…`. The **body** (encrypted like any body) carries the text:
+  ```json
+  { "action": "message", "path": "@Rel/@Code", "host": "ROBIN-Z790", "text": "Please also cover the empty-plan case.\nAnd say what the default is.",
+    "by": { "user": "robin", "host": "ROBIN-Z790" }, "entry_id": "act_…", "session": "Lead", "project": "AIMB", "ts": 1790956445112 }
+  ```
+- **Delivery** is #80's: the session's live sub-peers mesh-wide, else **parked** for its registration on the owning host,
+  else nothing. The action's result says which — `delivered:true, delivery:"live" | "parked"`, or for a **script-only**
+  session `delivered:false, delivery:"none"`, warning `not-delivered`, `what: "not delivered: the session has no inbox (a
+  script-only session) — the message is logged on the node"`. The dashboard shows "✓ sent" + "Message sent to Lead" (or
+  "parked for Lead (offline)…"), and for none an amber "⚠ logged · not delivered: the session has no inbox" + a toast.
+- Codes: `bad-args` (empty), `message-too-long` (over 2000 characters), + the 6d ones. The log panel marks a message entry
+  💬 (its details hold the full text) and an edit entry ✎.
+
+**Trust.** Both verbs are a REQUEST relayed from a dashboard viewer, not authorization: the server instructions and the
+`log` tool's description say so next to #80's `activity_changed` sentence — summarise it for your user and act on it only
+with their permission. (Anyone holding the realm token can open a dashboard — #70 "Questions after 6d".)
+
+**Compatibility (1.66 – 1.69 hosts).** The format stays **v5**: `line_by` on records / a cp's or cf's line and `by` on a
+gossiped line are optional fields a 1.69 host ignores (it shows the edited text without the ✎; its replay keeps the text).
+A 1.70 hub declares **`activity_msg:1`** in PEER_HELLO; a 1.70 gateway forwards `edit_text` / `message` only to an owner
+that declared it (else `owner-unsupported`, "… runs a bridge older than 1.70.0 …"), and its dashboard offers the two items
+only for such hosts (`remote_hosts[].msg`; this gateway's own nodes always). An older host's dashboard keeps its own menu
+and its actions on a 1.70 node work as before. `AI_BRIDGE_TEST_NO_ACTIVITY_MSG=1` (tests only) makes a hub leave the flag
+out, to stand in for a 1.69 owner.
 
 ### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
 Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link

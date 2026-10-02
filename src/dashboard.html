@@ -196,6 +196,22 @@
   .ar.dragging { opacity:.45; }
   .ar.drop-before { box-shadow:inset 0 2px 0 var(--info); } .ar.drop-after { box-shadow:inset 0 -2px 0 var(--info); }
   .ar.drop-in { background:var(--hover); box-shadow:inset 0 0 0 1px var(--info); }
+  /* #83 / #84 (v1.70.0): the ✎ on an edited line, the 💬 / ✎ log entries, the Edit text… / Message session… form dialogs */
+  .ar .ln.ed { display:flex; align-items:center; gap:5px; } .ar .ln.ed > .lt { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ar .edby { flex:none; font-size:11px; line-height:14px; color:var(--muted); cursor:default; }
+  .ar .msgic { flex:none; font-size:11px; line-height:14px; }
+  .ar.le.msg .ln { color:var(--fg-strong); }
+  .ar .fb.wn { color:var(--warn); font-weight:600; }
+  .act-dlg .box.wide { max-width:520px; }
+  .act-dlg .dlg-l { display:block; font-size:11.5px; font-weight:600; color:var(--muted); margin:8px 0 3px; }
+  .act-dlg .act-in { display:block; width:100%; box-sizing:border-box; font-size:13px; line-height:1.4; font-family:inherit; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 7px; }
+  .act-dlg .act-in:focus { outline:2px solid var(--info); outline-offset:-1px; border-color:var(--info); }
+  .act-dlg textarea.act-in { resize:vertical; min-height:96px; }
+  .act-dlg select.act-in { width:auto; min-width:160px; }
+  .act-dlg .dlg-st { display:flex; gap:8px; align-items:baseline; margin:6px 0 2px; font-size:11.5px; min-height:16px; }
+  .act-dlg .dlg-why { flex:1 1 auto; color:var(--bad); } .act-dlg .dlg-n { flex:none; color:var(--faint); font-variant-numeric:tabular-nums; } .act-dlg .dlg-n.over { color:var(--bad); font-weight:600; }
+  .act-btn.primary { color:var(--bg); background:var(--info); border-color:var(--info); font-weight:600; } .act-btn.primary:hover { color:var(--bg); filter:brightness(1.08); }
+  .act-btn.primary:disabled { opacity:.45; cursor:not-allowed; filter:none; }
   .act-dlg select.act-pick { width:100%; margin:2px 0 6px; font:12px ui-monospace, Menlo, Consolas, monospace; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:2px; }
   .ar .by { flex:none; font-size:10.5px; color:var(--faint); font-style:italic; }
   .ar.sep .nm { color:var(--faint); font-weight:600; font-size:11px; letter-spacing:.02em; }
@@ -1167,6 +1183,9 @@
         if(m.owns_open&&!ab) out.push({id:'abandon_plan',label:'Abandon open plan items…',act:'abandon_plan',confirm:true});
         if(m.quiet&&!m.finished){ out.push({id:'finish-done',label:'Mark finished — done…',act:'finish',args:{state:'done'},confirm:true}); out.push({id:'finish-failed',label:'Mark finished — failed…',act:'finish',args:{state:'failed'},confirm:true}); }
         if((m.quiet||m.finished)&&m.subtree_quiet&&!m.holds_open) out.push({id:'dismiss',label:'Dismiss from the board…',act:'dismiss',confirm:true}); }
+      if(m.can_msg){ sep();   // #83 / #84: the node's host must run 1.70+ (a session row: one host's line)
+        out.push({id:'edit-text',label:'Edit text…',act:'edit_text',dlg:'edit'});
+        out.push({id:'message',label:'Message session…',act:'message',dlg:'message'}); }
       if(m.kind==='node'&&m.can_plan){ sep();   // #82: ORDER and MOVE (the node's host must run 1.69+)
         if(m.up) out.push({id:'move-up',label:'Move up',act:'reorder',args:m.up});
         if(m.down) out.push({id:'move-down',label:'Move down',act:'reorder',args:m.down});
@@ -1217,14 +1236,39 @@
     function workingAgent(t){ var ags=(t&&t.kids||[]).filter(function(c){ return c.u.nkind==='agent'; }); if(!ags.length) return null;
       var live=ags.filter(function(c){ return !c.u.finished_at&&c.u.state!=='gone'; }), pool=live.length?live:ags;
       return pool.slice().sort(function(a,b){ return (b.u.last_activity||0)-(a.u.last_activity||0); })[0]; }
-    var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed',move:'moved',reorder:'moved'};
+    // #83 (v1.70.0): EDIT TEXT… — the states a node's line may be given (the bridge's lib/activity.js editStates): a plan item any;
+    // another context any but todo / skipped; an agent / the session running · blocked · idle · done · failed (+ abandoned only
+    // while it holds plan items). u = { nkind, plan_item, holds_plan }
+    var STATES=['running','blocked','failed','done','idle','todo','skipped','abandoned'];
+    function editStates(u){ u=u||{}; if(u.nkind==='context') return u.plan_item?STATES.slice():STATES.filter(function(s){ return s!=='todo'&&s!=='skipped'; });
+      return STATES.filter(function(s){ return s!=='todo'&&s!=='skipped'&&(s!=='abandoned'||!!u.holds_plan); }); }
+    function cpLen(s){ return Array.from(String(s||'')).length; }
+    function oneLine(s){ return String(s||'').replace(/\s*[\r\n\t\f\v]+\s*/g,' ').trim(); }
+    var EDIT_MAX=240, MSG_MAX=2000;
+    // the edit dialog's check: { ok, n (code points, one line), why } — empty, over 240, or nothing changed (same text + state)
+    function checkEdit(text,state,cur){ var t=oneLine(text), n=cpLen(t); cur=cur||{};
+      if(!t) return {ok:false,n:0,why:'The line can\'t be empty.'};
+      if(n>EDIT_MAX) return {ok:false,n:n,why:'Too long: '+n+' of '+EDIT_MAX+' characters.'};
+      if(cur.text!=null&&t===String(cur.text)&&(!state||state===(cur.state||'running'))) return {ok:false,n:n,why:'Nothing changed.'};
+      return {ok:true,n:n,why:''}; }
+    // the message dialog's check: { ok, n, why } — empty or over 2000 characters (newlines are kept)
+    function checkMsg(text){ var t=String(text||'').replace(/\r\n?/g,'\n').trim(), n=cpLen(t);
+      if(!t) return {ok:false,n:0,why:'Write something to send.'};
+      if(n>MSG_MAX) return {ok:false,n:n,why:'Too long: '+n+' of '+MSG_MAX+' characters.'};
+      return {ok:true,n:n,why:''}; }
+    // the line's attribution (#83): "edited by robin via dashboard (HOST)" while its session hasn't reported again; '' for none
+    // a node path for people (the bridge's displayPath): @"Next release"/@Docs -> @Next release/@Docs
+    function dispPath(p){ return String(p||'').replace(/@"([^"]*)"/g,'@$1'); }
+    function editedBy(cur){ var b=cur&&cur.by; return b&&typeof b==='object'?'edited by '+(b.user||'dashboard')+' via dashboard ('+(b.host||'?')+')':''; }
+    var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed',move:'moved',reorder:'moved',edit_text:'edited',message:'sent'};
     return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg, sessGlyph:sessGlyph, sessKind:sessKind,   // #79: sessGlyph
       applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, entryTag:entryTag, subtreeCount:subtreeCount, barOf:barOf,
       fmtDur:fmtDur, fmtClock:fmtClock, pct:pct, planGlyph:planGlyph, isOpenItem:isOpenItem, planEnded:planEnded, hostTagOn:hostTagOn, itemState:itemState, barText:barText,
       planOpenDefault:planOpenDefault, rollKids:rollKids, subtreeLog:subtreeLog, norm3:norm3, force:force, skOf:skOf, skPct:skPct, ownBar:ownBar, progressText:progressText,   // #79
       nodeOpenDefault:nodeOpenDefault, PLAN_OPEN_STEPS:PLAN_OPEN_STEPS, planOpenIndex:planOpenIndex, planOpenValue:planOpenValue, logCmd:logCmd, quietAgent:quietAgent, subtreeAgentsQuiet:subtreeAgentsQuiet,
       rootQuiet:rootQuiet, ownsOpenPlan:ownsOpenPlan, openItemsOwned:openItemsOwned, countNodes:countNodes, menuFor:menuFor, ACTION_DONE:ACTION_DONE, lcs:lcs,   // 6d
-      rankOf:rankOf, rankGroup:rankGroup, cmpRank:cmpRank, sibRef:sibRef, moveSteps:moveSteps, canMoveInto:canMoveInto, moveTargets:moveTargets, dropPlan:dropPlan, workingAgent:workingAgent };   // #82
+      rankOf:rankOf, rankGroup:rankGroup, cmpRank:cmpRank, sibRef:sibRef, moveSteps:moveSteps, canMoveInto:canMoveInto, moveTargets:moveTargets, dropPlan:dropPlan, workingAgent:workingAgent,   // #82
+      editStates:editStates, checkEdit:checkEdit, checkMsg:checkMsg, editedBy:editedBy, dispPath:dispPath, EDIT_MAX:EDIT_MAX, MSG_MAX:MSG_MAX };   // #83 / #84
   })();
   window.AimbAct=AimbAct;
 
@@ -1318,10 +1362,17 @@
   // #82: does the node's host apply move / reorder / abandon-any-context? This gateway (it served this page) does; another host
   // when the board head says so (remote_hosts[].plan — a ≤1.68 owner would refuse them)
   function hostPlan(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return true; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return !!(r&&r.plan); }
+  // #83 / #84 (v1.70.0): does the node's host apply Edit text… / Message session…? This gateway does; another host when the board
+  // head says so (remote_hosts[].msg — a ≤1.69 owner would refuse them: the menu leaves them out)
+  function hostMsg(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return true; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return !!(r&&r.msg); }
+  // #83: the line's ✎ marker — its text was written from the dashboard (until its session reports again)
+  function edMark(cur,tip){ var w=AimbAct.editedBy(cur); return w?'<span class="edby" aria-label="'+attr(w)+'" data-tip="'+tip(function(){ return w.charAt(0).toUpperCase()+w.slice(1)+' — its session\'s next report replaces it'; })+'">✎</span>':''; }
+  // … placed right after the line's text, INSIDE its span (the text still ellipsises; the ✎ stays visible): ln → ln ed > lt + ✎
+  function lnMark(html,mark){ if(!mark) return html; var i=html.indexOf('>'); return html.slice(0,i).replace('class="ln"','class="ln ed"')+'><span class="lt">'+html.slice(i+1,-7)+'</span>'+mark+'</span>'; }
   // ---- 6d: action FEEDBACK on the row: a spinner while pending (and queued), then ✓ (a few seconds) or the error code
   function fbHtml(id){ var f=ACT.fb[id]; if(!f) return ''; var age=Date.now()-f.at;
     if(f.st==='pending') return '<span class="fb pending"><span class="spin"></span>'+esc(f.label)+'…'+(f.queued?' (queued)':'')+'</span>';
-    if(f.st==='ok'){ if(age>5000){ delete ACT.fb[id]; return ''; } return '<span class="fb ok">✓ '+esc(f.label)+(f.warn?' · '+esc(f.warn):'')+'</span>'; }
+    if(f.st==='ok'){ if(age>(f.warnOnly?12000:5000)){ delete ACT.fb[id]; return ''; } return '<span class="fb '+(f.warnOnly?'wn':'ok')+'">'+(f.warnOnly?'⚠ ':'✓ ')+esc(f.label)+(f.warn?' · '+esc(f.warn):'')+'</span>'; }   // #84: warnOnly = applied, but not what was hoped (a message nobody can receive)
     if(age>15000){ delete ACT.fb[id]; return ''; } return '<span class="fb err" title="'+attr(f.what||'')+'">✗ '+esc(f.code)+'</span>'; }
   function actToast(text){ var t=document.createElement('div'); t.className='act-toast'; t.setAttribute('role','status'); t.textContent=text; document.body.appendChild(t); setTimeout(function(){ if(t.parentNode) t.parentNode.removeChild(t); },2600); }
   // ---- 6d: SELECTION → the log panel
@@ -1357,7 +1408,7 @@
     // ---- a session row: its own line (the root node); a multi-host session opens into each host's own line. Click = select
     function sessionRow(id,cls,d,ent,nameHtml,tagsHtml,parentDown,bell,fbar,info,ex){
       var e=AimbAct.effState(ent,null,now,sm), noLine=!ent.current, bar=fbar!==undefined?fbar:AimbAct.barOf(ent);
-      var line=ent.current?'<span class="ln">'+esc(AimbAct.renderText(ent.current.text,bar,ent.eta_at,now))+'</span>':'<span class="ln none">no status line of its own</span>';
+      var line=ent.current?lnMark('<span class="ln">'+esc(AimbAct.renderText(ent.current.text,bar,ent.eta_at,now))+'</span>',edMark(ent.current,function(f){ return tipK(id+'ed',f); })):'<span class="ln none">no status line of its own</span>';   // #83: ✎ = edited from the dashboard
       var open=!!ACT.open[id], st=(ent.current&&ent.current.state)||'', can=!!ex.multi;
       row(id,cls+(e.stale&&!noLine?' stale':'')+(e.gone?' gone':'')+(st==='abandoned'?' abandoned':'')+(ex.sel?' sel':'')+(ex.hid?' hid':'')+(ex.pinned?' pinned':''),d,'<span class="chv">'+(can?(open?'▾':'▸'):'')+'</span>'+
         '<span data-tip="'+tipK(id+'g',function(){ return noLine&&!e.gone?'No status line of its own (report @~root to set one)':AimbAct.statusTip(ent,null,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.sessGlyph(ex.kind,e,now,{none:noLine&&!e.gone})+'</span>'+   // #79: a session's own glyph (a window), not the agent ring
@@ -1374,6 +1425,7 @@
         holds_open:!!ft.open, has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,u.path):null, pinned:!!ACT.pins[u.id], hidden:!!ACT.hidden[u.id], id:u.id, fbId:u.id,
         name:(ag?'agent ':'')+u.path, why:e.gone?'gone':e.stale?'stale':u.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(ft), nNodes:AimbAct.countNodes(ft), host:u.host,
         own_state:(u.current&&u.current.state)||null, can_plan:hostPlan(u.host), sid:s.id, session:s.session, nid:u.id,   // #82: Move up / down / to…, Abandon… (a 1.69+ owner)
+        can_msg:hostMsg(u.host), cur:u.current?{text:u.current.text,state:u.current.state}:null, edit_states:AimbAct.editStates({nkind:u.nkind,plan_item:!!u.plan_item,holds_plan:!!ft.planNode}),   // #83 / #84 (a 1.70+ owner)
         up:steps(ft).up, down:steps(ft).down }; }; }
     function steps(ft){ var par=ACT.fullPar[ft.u.id]; return AimbAct.moveSteps(ft,par?par.kids:[]); }   // its siblings: the parent's (or the session's top-level) children
     // … of a SESSION row (one host's root): a multi-host session's row offers only copies + pin / hide; its actions sit on each
@@ -1385,7 +1437,8 @@
       return { kind:'session', plan_node:tgt&&pn, plan_end_how:pn&&root.endedPlan?(se.plan_end_how||'done'):null, agent_ok:tgt, owns_open:AimbAct.ownsOpenPlan(root), quiet:quiet, finished:!!se.finished_at,
         subtree_quiet:quiet&&kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }), holds_open:root.open, has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,null):null,
         pinned:!!ACT.pins[s.id], hidden:!!ACT.hidden[s.id], no_view:!!hostLine, id:s.id, fbId:rowId, name:'session '+s.session+(multi?' on '+host:''), why:e.gone?'gone':e.stale?'stale':se.finished_at?'finished':'',
-        nOpen:AimbAct.openItemsOwned(root), nNodes:AimbAct.countNodes(root), host:host }; }; }
+        nOpen:AimbAct.openItemsOwned(root), nNodes:AimbAct.countNodes(root), host:host, session:s.session,
+        can_msg:tgt&&hostMsg(host), cur:se&&se.current?{text:se.current.text,state:se.current.state}:null, edit_states:AimbAct.editStates({nkind:'agent',holds_plan:pn}) }; }; }   // #83 / #84: the session root (one host's line)
     function hiddenRow(pid,nHidden,nShown,d){
       if(nHidden>0) row(pid+'|hid','ar more click hidn',d,'<span class="chv"></span><span class="nm">'+nHidden+' hidden — show</span>',function(){ ACT.showHidden[pid]=true; actRender(); },null);
       else if(ACT.showHidden[pid]&&nShown>0) row(pid+'|hid','ar more click hidn',d,'<span class="chv"></span><span class="nm">hide '+nShown+' again</span>',function(){ delete ACT.showHidden[pid]; actRender(); },null);
@@ -1405,6 +1458,7 @@
       if(wa){ var we=AimbAct.effState(wa.u,null,now,sm), wl=wa.u.current?AimbAct.renderText(wa.u.current.text,AimbAct.barOf(wa.u),wa.u.eta_at,now):(wa.u.implicit?'not reported yet':'no current line');
         chip='<span class="agon" data-tip="'+tipK(id+'w','agent '+wa.u.path+' is on it — '+(we.stale?'stale, was '+we.was:we.state)+'\n'+wl)+'">'+AimbAct.glyphSvg(we,now,null)+'<span class="agn">'+esc(wa.u.name)+'</span>'+esc(wl)+'</span>'; }
       var line=pi&&u.current&&String(u.current.text)===String(u.name)?'<span class="ln">'+chip+'</span>':u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+(chip?' '+chip:'')+'</span>':'<span class="ln none">'+(ctx?'no current line':u.implicit?'not reported yet':'no current line')+'</span>';
+      if(u.current) line=lnMark(line,edMark(u.current,function(f){ return tipK(id+'ed',f); }));   // #83: ✎ = its line was edited from the dashboard
       var glyph=pi?AimbAct.glyphSvg(e,now,'plan'):AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':ctx?'ctx':null);
       var info={kind:'node',nkind:u.nkind,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',plan_item:pi?'1':'',plan_node:t.planNode?'1':'',drag:hostPlan(u.host)?'1':''};   // #82: drag = it can be dragged (reorder / move)
       ACT.rowNode[kOf(id)]=id;
@@ -1436,7 +1490,7 @@
           var hid='hself|'+s.key+'|'+se.host, he=AimbAct.effState(se,null,now,sm), hNo=!se.current, hd=lcs(se.host)===lcs(self.host);
           var sb=x.fbars?(x.fbars[lcs(se.host)]||null):AimbAct.barOf(se), isHome=s.home&&lcs(se.host)===lcs(s.home), hsel=!!ACT.sel&&ACT.sel.kind==='session'&&ACT.sel.sid===s.id&&lcs(ACT.sel.host)===lcs(se.host);
           row(hid,'ar click'+(he.stale&&!hNo?' stale':'')+(he.gone?' gone':'')+(hsel?' sel':''),2,'<span class="chv"></span><span data-tip="'+tipK(hid+'g',function(){ return hNo&&!he.gone?'No headline from '+se.host:AimbAct.statusTip(se,null,anow(),actStaleMin(),se.host); })+'">'+AimbAct.sessGlyph(s.client_kind,he,now,{none:hNo&&!he.gone})+'</span>'+
-            hostTags([se.host],se.host_down?[se.host]:[])+pillsHtml(he,hNo,false)+(se.current?'<span class="ln" data-tip="'+tipK(hid+'l',(hd?'the headline: this host set it most recently':'this host\'s own line (another host set a headline more recently)')+(isHome?' · the session\'s HOME host (where it first appeared): top-level rows from it carry no host tag':''))+'">'+esc(AimbAct.renderText(se.current.text,sb,se.eta_at,now))+'</span>':'<span class="ln none">no headline from this host</span>')+
+            hostTags([se.host],se.host_down?[se.host]:[])+pillsHtml(he,hNo,false)+(se.current?lnMark('<span class="ln" data-tip="'+tipK(hid+'l',(hd?'the headline: this host set it most recently':'this host\'s own line (another host set a headline more recently)')+(isHome?' · the session\'s HOME host (where it first appeared): top-level rows from it carry no host tag':''))+'">'+esc(AimbAct.renderText(se.current.text,sb,se.eta_at,now))+'</span>',edMark(se.current,function(f){ return tipK(hid+'ed',f); })):'<span class="ln none">no headline from this host</span>')+
             fbHtml(hid)+barHtml(sb,tipK(hid+'b',AimbAct.barTip(sb)))+'<span class="ic nil"></span><span class="ic nil"></span>',selS(se.host),sInfo(s,{kind:'host-line',host:se.host,path:''}),{menu:sessMenu(s,se.host,hid,true),sel:hsel});
         });
         if(lvl!=='all') return;
@@ -1477,8 +1531,9 @@
     if(L) L.entries.forEach(function(x,i){
       if(L.sepAt===i) prow(key+'|sep','ar more sep',0,'<span class="chv"></span><span class="nm">— earlier runs —</span>');   // 6c: past the current run's start
       var ek=key+'|e|'+x.id, can=!!(x.has_details||x.has_data), eo=can&&!!ACT.open[ek], by=x.by&&typeof x.by==='string'?x.by:null;
-      prow(ek,'ar le'+(can?' click':'')+(x.dismiss||x.act==='dismiss'?' dm':''),0,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span><span class="dot bg-'+esc(x.state||'running')+'" data-tip="'+tipK(ek+'s',(x.state||'running')+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"></span>'+
-        '<span class="ctag'+(x.current?' cur':'')+'" title="'+attr(x.path!=null?(x.path||'(the session)'):'')+'">'+esc(AimbAct.entryTag(x))+'</span><span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(by?'<span class="by">by '+esc(by)+'</span>':'')+(can?'<span class="ic" data-tip="'+tipK(ek+'i','has '+(x.has_details?'details':'')+(x.has_details&&x.has_data?' + ':'')+(x.has_data?'data':''))+'">⋯</span>':''),
+      var mg=x.act==='message'?'<span class="msgic" data-tip="'+tipK(ek+'m','A message to the session, from the dashboard — the full text is in its details')+'">💬</span>':x.act==='edit_text'?'<span class="msgic" data-tip="'+tipK(ek+'m','The line was edited from the dashboard')+'">✎</span>':'';   // #84 / #83
+      prow(ek,'ar le'+(can?' click':'')+(x.dismiss||x.act==='dismiss'?' dm':'')+(x.act==='message'?' msg':''),0,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span><span class="dot bg-'+esc(x.state||'running')+'" data-tip="'+tipK(ek+'s',(x.state||'running')+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"></span>'+
+        '<span class="ctag'+(x.current?' cur':'')+'" title="'+attr(x.path!=null?(x.path||'(the session)'):'')+'">'+esc(AimbAct.entryTag(x))+'</span>'+mg+'<span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(by?'<span class="by">by '+esc(by)+'</span>':'')+(can?'<span class="ic" data-tip="'+tipK(ek+'i','has '+(x.has_details?'details':'')+(x.has_details&&x.has_data?' + ':'')+(x.has_data?'data':''))+'">⋯</span>':''),
         can?function(){ ACT.open[ek]=!eo; if(!eo) actLoadEntry(x.id,q.host); actRender(); }:null,
         {kind:'entry',id:x.id,host:q.host||'',path:x.path!=null?x.path:'',session:q.session,project:q.project||'',user:q.user||''},{menu:{kind:'entry',has_path:true}});
       if(eo){ var E=ACT.ents[x.id]||{}, inner='';
@@ -1555,6 +1610,8 @@
       if(it.view==='pin'||it.view==='hide') set[key]=1; else delete set[key];
       saveSet(set===ACT.pins?'aimb.act.pins':'aimb.act.hidden',set); actRender(); return; }
     if(it.pick){ actPickMove(info,model); return; }   // #82: Move to… — a picker of valid targets, then a confirm
+    if(it.dlg==='edit'){ actEditDlg(info,model); return; }      // #83: Edit text… — the line (+ a state), then send
+    if(it.dlg==='message'){ actMsgDlg(info,model); return; }    // #84: Message session… — a text box, then send
     if(it.act){ if(it.confirm) actConfirm(actConfirmText(it,model),function(){ actDo(info,model,it); }); else actDo(info,model,it); }
   }
   // #82: MOVE TO… — pick the new parent (every node of the session on that host it may go under, and the session root), then confirm
@@ -1573,6 +1630,57 @@
     d.addEventListener('keydown',function(ev){ if(ev.key==='Escape'){ ev.preventDefault(); actDlgClose(); } });
     document.body.appendChild(d);
     var sl=d.querySelector('select'); if(sl) try{ sl.focus(); }catch(e){}
+  }
+  // #83 / #84 (v1.70.0): a FORM dialog — o = { title, body (HTML: the fields), note, ok, check(d) → { ok, why, n }, max, send(d) }.
+  // The counter and the reason update as the viewer types; the send button stays disabled until check() passes; Enter sends from
+  // a one-line field, Ctrl/Cmd+Enter from a text box; Escape / Cancel / a click outside closes it; focus stays inside.
+  function actFormDlg(o){
+    actDlgClose();
+    var d=document.createElement('div'); d.className='act-dlg';
+    d.innerHTML='<div class="box wide" role="dialog" aria-modal="true" aria-labelledby="actdlgt"><h3 id="actdlgt">'+esc(o.title)+'</h3>'+(o.intro?'<p>'+esc(o.intro)+'</p>':'')+o.body+
+      '<div class="dlg-st"><span class="dlg-why" aria-live="polite"></span><span class="dlg-n"></span></div>'+(o.note?'<p class="note">'+esc(o.note)+'</p>':'')+
+      '<div class="btns"><button type="button" class="act-btn" data-dlg="cancel">Cancel</button> <button type="button" class="act-btn primary" data-dlg="ok">'+esc(o.ok||'OK')+'</button></div></div>';
+    ACT.dlg={el:d,cb:null,prev:document.activeElement};
+    var okB=d.querySelector('[data-dlg="ok"]'), why=d.querySelector('.dlg-why'), cnt=d.querySelector('.dlg-n');
+    function upd(){ var c=o.check(d); okB.disabled=!c.ok; why.textContent=c.ok?'':c.why; cnt.textContent=(c.n||0)+' / '+o.max; cnt.className='dlg-n'+(c.n>o.max?' over':''); return c; }
+    function go(){ if(!upd().ok) return; var f=o.send; actDlgClose(); f(d); }
+    d.addEventListener('input',upd); d.addEventListener('change',upd);
+    d.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-dlg]'):null; if(b){ if(b.getAttribute('data-dlg')==='ok') go(); else actDlgClose(); } else if(ev.target===d) actDlgClose(); });
+    d.addEventListener('keydown',function(ev){ var tg=ev.target, ta=tg&&tg.tagName==='TEXTAREA';
+      if(ev.key==='Escape'){ ev.preventDefault(); actDlgClose(); }
+      else if(ev.key==='Enter'&&tg&&(tg.tagName==='INPUT'||(ta&&(ev.ctrlKey||ev.metaKey)))){ ev.preventDefault(); go(); }
+      else if(ev.key==='Tab'){ var fs=[].slice.call(d.querySelectorAll('input,select,textarea,button')).filter(function(x){ return !x.disabled; }), a=document.activeElement; if(!fs.length) return;
+        if(ev.shiftKey&&a===fs[0]){ ev.preventDefault(); fs[fs.length-1].focus(); } else if(!ev.shiftKey&&a===fs[fs.length-1]){ ev.preventDefault(); fs[0].focus(); } } });
+    document.body.appendChild(d);
+    upd();
+    var f0=d.querySelector('input,textarea'); if(f0) try{ f0.focus(); if(f0.select&&o.selectAll) f0.select(); }catch(e){}
+    return d;
+  }
+  // #83: EDIT TEXT… — the line prefilled (its raw text: {progress} etc. stay placeholders), an optional state limited to the node's
+  // valid ones; sends edit_text { text, state? }; the owner logs it "<text> (edited by <user> via dashboard (<host>))" and tells the session
+  function actEditDlg(info,model){
+    var h=ACT.st.head||{}, who=(h.user||'dashboard')+' via dashboard ('+(h.host||'?')+')', cur=model.cur||null, sts=model.edit_states||[];
+    var nm=model.kind==='session'?'session '+(model.session||info.session):(model.nkind==='agent'?'agent ':'')+AimbAct.dispPath(info.path);
+    var opts='<option value="">keep '+esc(cur?cur.state:'running')+'</option>'+sts.filter(function(s){ return !cur||s!==cur.state; }).map(function(s){ return '<option value="'+attr(s)+'">'+esc(s)+'</option>'; }).join('');
+    actFormDlg({ title:'Edit the line of '+nm, max:AimbAct.EDIT_MAX, ok:'Save', selectAll:true,
+      intro:'Sets its current line for its session'+(cur?'':' (it has none yet)')+'. Placeholders such as {progress}, {pct} and {eta} still render.',
+      body:'<label class="dlg-l" for="actEdT">Line</label><input id="actEdT" class="act-in" type="text" autocomplete="off" spellcheck="true" value="'+attr(cur?cur.text:'')+'">'+
+        '<label class="dlg-l" for="actEdS">State</label><select id="actEdS" class="act-in">'+opts+'</select>',
+      note:'Logged as "… (edited by '+who+')"; the line shows ✎ until its session reports again — its next report replaces it. The session is told.',
+      check:function(d){ return AimbAct.checkEdit(d.querySelector('#actEdT').value,d.querySelector('#actEdS').value,cur); },
+      send:function(d){ var t=d.querySelector('#actEdT').value.replace(/\s*[\r\n\t\f\v]+\s*/g,' ').trim(), st=d.querySelector('#actEdS').value, a={text:t}; if(st) a.state=st;
+        actDo(info,model,{act:'edit_text',args:a}); } });
+  }
+  // #84: MESSAGE SESSION… — a text box (≤ 2000 characters); sends message { text }; the owner logs it on the node and delivers it
+  // to the session's inbox (live, else parked for its registration); a script-only session has none: "not delivered"
+  function actMsgDlg(info,model){
+    var sess=model.session||info.session, p=info.path||'';
+    actFormDlg({ title:'Message '+sess+(p?' about '+AimbAct.dispPath(p):''), max:AimbAct.MSG_MAX, ok:'Send',
+      intro:'Goes to the session\'s inbox (the doorbell wakes it). It reads it as a request from you, relayed by the dashboard: it asks its user before acting on it.',
+      body:'<label class="dlg-l" for="actMsgT">Message</label><textarea id="actMsgT" class="act-in" rows="6" spellcheck="true" placeholder="What should the session know or do?"></textarea>',
+      note:'The subject (not encrypted) names only the path and your first few words; the text travels in the encrypted body. Logged on the node as "'+((ACT.st.head||{}).user||'dashboard')+' via dashboard: …". Ctrl+Enter sends.',
+      check:function(d){ return AimbAct.checkMsg(d.querySelector('#actMsgT').value); },
+      send:function(d){ actDo(info,model,{act:'message',args:{text:d.querySelector('#actMsgT').value.replace(/\r\n?/g,'\n').trim()}}); } });
   }
   function actConfirmMove(info,model,to){
     var h=ACT.st.head||{}, who='by '+(h.user||'dashboard')+' via dashboard ('+(h.host||'?')+')', n=model.nNodes||1;
@@ -1617,6 +1725,9 @@
       if(r&&r.ok){ ACT.fb[fid]={st:'ok',label:label,at:Date.now(),warn:r.warnings&&r.warnings.indexOf('plan-ended')>=0?'its plan is still ended — reopen the plan too':''};
         if(r.dismissed) actToast('Dismissed '+(model.name||info.path)+' — '+r.dismissed.nodes+' node'+(r.dismissed.nodes===1?'':'s')+' off the board (history kept)');
         if(it.act==='move') actToast('Moved '+info.path+' to '+(r.to||info.session||'the session root'));   // #82: the row itself is now under its new parent
+        if(it.act==='message'){ var sn=model.session||info.session;   // #84: did it reach an inbox?
+          if(r.delivered===false){ ACT.fb[fid]={st:'ok',label:'logged',warn:'not delivered: the session has no inbox',warnOnly:true,at:Date.now()}; actToast('Not delivered: '+sn+' has no inbox (a script-only session) — the message is logged on the node'); }
+          else actToast(r.delivery==='parked'?'Message parked for '+sn+' (offline) — it gets it when it registers again':'Message sent to '+sn); }
         actRefreshSel(); }
       else ACT.fb[fid]={st:'err',code:(r&&r.code)||'error',what:(r&&r.what)||'',at:Date.now()};
       actRender();
@@ -1727,7 +1838,8 @@
         '<span>· green = done only, cyan = in progress</span>'+
         '<span>· the ring is the time left before an agent goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of what is below it · green bar = a plan\'s N of M done · <span class="pb plan sk2 lgb"><i style="width:40%"></i><b class="sk" style="width:20%"></b></span> grey hatch = skipped (or abandoned) · a done node\'s bar is full · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'+
         '<span>· click a row to see its log · right-click (Menu key / Shift+F10; long-press on touch) for its actions · 📌 pinned · “N hidden — show” under a parent (pin / hide stay in this browser)</span>'+
-        '<span>· order: plan items first, then contexts, then agents · drag a row onto a sibling to reorder it, onto another node to move it there (or right-click → Move up / down / to…) · a plan item shows the agent working on it · everything under an abandoned node is greyed</span>'; }   // #82
+        '<span>· order: plan items first, then contexts, then agents · drag a row onto a sibling to reorder it, onto another node to move it there (or right-click → Move up / down / to…) · a plan item shows the agent working on it · everything under an abandoned node is greyed</span>'+   // #82
+        '<span>· right-click → Edit text… sets a line for its session (✎ until it reports again) · Message session… writes to the session about that node (💬 in the log)</span>'; }   // #83 / #84
     document.addEventListener('visibilitychange',actSync);
   }
 

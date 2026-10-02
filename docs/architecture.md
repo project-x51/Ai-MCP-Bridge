@@ -349,7 +349,11 @@ forward waits) → `{type:"activity_action", ref, result}`; accepted only from a
 leaf, a logger or a socket without a hello → `unauthorized`); the board `head` carries `log_cmd` (this host's aimb-log
 paths), `user` (who actions are attributed to) and each `remote_hosts[]` entry its own `log_cmd`. v1.68.0 (#80): the
 gateway that APPLIES an action (the owner) then tells the node's session with a `system` envelope, verb `activity_changed`
-(batched per session) — an ordinary message on the existing delivery paths, so no frame changes.
+(batched per session) — an ordinary message on the existing delivery paths, so no frame changes. v1.70.0 (#83 / #84): two
+more actions, `edit_text` (`args:{text, state?}` — the node's current line, attributed on the line itself) and `message`
+(`args:{text}` — logged on the node, delivered to its session at once); their notices are verbs `activity_text_edited`
+(batched) and `activity_message`; a `message` result says whether it reached an inbox (`delivered`, `delivery:"live" |
+"parked" | "none"`). Hubs declare `activity_msg:1` in PEER_HELLO; the board head's `remote_hosts[]` gets `msg:true` for them.
 
 **Deliberately out of scope here.** Cross-*realm* bridging stays in §8 (a translator, because keys
 differ). And cross-machine hub **high-availability**: if a machine's hub dies its local mesh re-elects
@@ -1196,6 +1200,49 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.70.0):** *#83 + #84 — Edit text… and Message session… from the dashboard.* **Wire-compatible with 1.66 – 1.69**
+  (format stays v5; hosts upgrade one at a time). **Actions (`lib/activity.js`):** `ACTIVITY_ACTIONS` + `edit_text` and
+  `message`; `MSG_ACTIONS` = those two (a ≤1.69 owner answers `bad-action`). **`edit_text`** (`args:{text, state?}`) on any node
+  (the session root too): `editStates(sess, node)` = what a report could set there (a plan item: every state; another context:
+  no todo / skipped; an agent / the session: running · blocked · failed · done · idle, + abandoned only while it holds plan
+  items) → else `bad-state`; `bad-args` (no text), `no-change`. The message is parsed with a placeholder text and the text set
+  afterwards (LITERAL: no `@ctx` prefix parsing; `normText`; > 240 → 239 + "…", `text-truncated`, the report rule); no state =
+  the line's (an edit never starts a ☐ item); the line's details / data are carried over. Applied through `apply` as a SYSTEM
+  `@~` line (`by`, `act:"edit_text"`, `entryText` = the line + " (edited by <user> via dashboard (<host>))" fitted to 240), so
+  no activity, the abandon cascade if abandoned. **The line's attribution:** `ActivityLine.by` (a normBy object) = who wrote
+  its TEXT when not its session — set by `edit_text`, kept by a keepText tick, cleared by any other line (the log:false
+  "same line" shortcut now also compares `by`, so a session re-sending the edited text takes it back); records carry
+  `line_by` (entries, a cp's / cf's `current` via `fullLine`), the replay's `lineOf` reads only `line_by` (never an entry's
+  own `by`), gossip's `snapLine` / `wLine` carry `by` (bounded by `normBy`), `lineView` / `rawLine` give `by:{user, host}`.
+  Result: `from_text`, `new_text` (+ the 6d / #80 fields). **`message`** (`args:{text}`, `MESSAGE_LIMITS` 2000 code points /
+  a 120-character preview): `msgText` keeps newlines / tabs, drops other control characters; `bad-args`, `message-too-long`;
+  ONE non-current SYSTEM entry on the node, text `<user> via dashboard: <preview>`, `details` = the full text (cut to 4 KB
+  for a very long non-ASCII text), `act:"message"`; result `message` = the full text. **Notices:** `actionNotice` returns
+  verb `activity_text_edited` (`EDIT_NOTICE_VERB`; subject "robin edited @Rel/@Docs" + " (todo → running)" on a state
+  change; body + `from_text` / `text`) and delegates `message` to `messageNotice` → verb `activity_message`
+  (`MESSAGE_NOTICE_VERB`; PUBLIC subject "robin about @Rel/@Code: " + `firstWords(text)` — ≤ 6 words / 40 characters; body
+  `{action, path, host, text, by:{user, host}, entry_id, session, project, ts}`); `NOTICE_*` tables gain `edit_text` (noun
+  "line"), so `combineActionNotices` merges edits ("robin edited 2 lines in @Rel"). **Bridge:** `actActionQuery` passes
+  `args.text` (≤ 8192 UTF-16 units); `activityAction` forwards `MSG_ACTIONS` only to an owner whose PEER_HELLO declared
+  **`activity_msg:1`** (`p.act.msg`; else `owner-unsupported`, before queueing); `actRemoteInfo` adds `msg:true`;
+  `actApplyAction` sends an edit's notice batched and a message's with `{now:true}`, AWAITS it and returns `delivered` +
+  `delivery` (`live` | `parked` | `none` — none adds warning `not-delivered` and "not delivered: the session has no inbox (a
+  script-only session) — the message is logged on the node"); an edit's result carries the kept `text`.
+  `ACT_NOTICE_COMBINE[activity_text_edited] = combineActionNotices`. `AI_BRIDGE_TEST_NO_ACTIVITY_MSG=1` (tests) omits the flag.
+  The server instructions and the `log` tool's description add one sentence next to #80's: both verbs are a REQUEST relayed
+  from a dashboard viewer, not authorization — summarise for the user, act only with their permission. **Dashboard:**
+  `hostMsg(host)` (this gateway, or `remote_hosts[].msg`) gates the two menu items (`menuFor` `can_msg`: nodes; a session's own
+  host line; never a multi-host session row); `actFormDlg` (a form dialog: fields, a live reason + counter, the primary button
+  disabled until `check()` passes, Enter / Ctrl+Enter, Escape, a focus trap); `actEditDlg` (the raw line, `editStates`
+  picker, `checkEdit`) and `actMsgDlg` (`checkMsg`, ≤ 2000); `actDo` shows "✓ sent" / "⚠ logged · not delivered: the session
+  has no inbox" (`fb.wn`) + toasts; `edMark` / `lnMark` put a muted ✎ right after an edited line's text (inside `.ln.ed`);
+  the log panel marks `act:"message"` entries 💬 and `edit_text` ones ✎; the legend says both; `dispPath` for the dialog
+  titles. **Mixed versions (live, loopback):** a 1.69 (`git archive HEAD`) and 1.70 bridges — boards both ways (the 1.69 board
+  shows the edited text, no ✎), edit / message on the 1.69 owner `owner-unsupported` while its 6d skip still forwards, the
+  1.69 dashboard's skip on a 1.70 node applied and notified: 37/37 with `AIMB_TEST_OLD_BRIDGE` (3 checks; 34 without).
+  **Tests:** `test_activity_unit` 798 (+34, incl. 4 seeded replay == apply runs with edits / messages / ticks / moves),
+  `test_dashboard_activity` 259 (+29; one 6d menu expectation gained the two items), new `test_activity_msg_live` 34.
+  Full parallel `npm test` (typecheck included): 2569 checks in 57 files, all green on the first run, 4m40s; no #74 flakes.
 - **Built (v1.69.0):** *#82 — the plan workflow: ORDER (fractional ranks), insert anywhere, reorder, MOVE (re-parent with
   history), abandon any context with a CASCADE, the agent on its item, dashboard Move up / down / to + drag and drop.*
   **Wire-compatible with 1.66 – 1.68** (format stays v5; hosts upgrade one at a time). **Order (`lib/activity.js`):** a node's

@@ -2468,5 +2468,145 @@ await section(async () => {
     check(`#82 replay == chronological apply with moves (seed ${seed}: ${applied} applied, ${moves} moves): the whole state incl. logs, ranks and move histories`, dump(st) === dump(B) && d82(st) === d82(B), firstDiff(dump(st) + d82(st), dump(B) + d82(B)))
   }
 })
+// ================================================================= #83 / #84 (v1.70.0): EDIT TEXT and MESSAGE from the dashboard — applyAction's
+// edit_text (the line, its state, its attribution through records / checkpoints / carry-forward / gossip / the replay) and message
+// (the logged entry, details, limits), their notices (editNotice via actionNotice, messageNotice, the combined edits), firstWords
+await section(async () => {
+  check('#83/#84 actions: edit_text + message are dashboard actions; MSG_ACTIONS names exactly them (a 1.70 gateway forwards them only to an owner that declared activity_msg)',
+    A.ACTIVITY_ACTIONS.includes('edit_text') && A.ACTIVITY_ACTIONS.includes('message') && J(A.MSG_ACTIONS) === J(['edit_text', 'message']) && A.MESSAGE_LIMITS.text === 2000 && A.MESSAGE_LIMITS.preview === 120)
+  const st = mk(), I = { ...S1, session: 'Lead', project: 'ACTS' }
+  sayC(st, I, { path: '@"Dash test"', plan: ['Docs', 'Code', 'Ship'] }, T0)
+  sayC(st, I, { path: '@notes/@~root', text: 'some notes', details: 'the details', data: { k: 1 } }, T0)
+  sayC(st, I, { path: 'lead/@~root', text: 'leading', plan: ['L1'] }, T0)
+  sayC(st, I, { path: 'helper/@~root', text: 'helping' }, T0)
+  sayC(st, I, { text: '@~root the headline' }, T0)
+  const sess = A.getSession(st, I)
+  const ES = p => A.editStates(sess, N(st, I, p))
+  check('#83 editStates: a plan item any state; another context all but todo / skipped; an agent / the session running · blocked · failed · done · idle (+ abandoned only while it holds plan items)',
+    J(ES('@"Dash test"/@Docs')) === J(A.ACTIVITY_STATES) && J(ES('@notes')) === J(['running', 'blocked', 'failed', 'done', 'idle', 'abandoned'])
+    && J(ES('helper')) === J(['running', 'blocked', 'failed', 'done', 'idle']) && J(ES('lead')) === J(['running', 'blocked', 'failed', 'done', 'idle', 'abandoned']), J([ES('@notes'), ES('helper'), ES('lead')]))
+  // ---- edit_text on a ☐ plan item: the text changes, the state stays todo (an edit doesn't start it)
+  const lastAct0 = N(st, I, '@"Dash test"/@Docs').last_activity
+  const e1 = ACT(st, I, '@"Dash test"/@Docs', 'edit_text', { text: '@Docs then the README: {progress}' }, T0 + MIN)
+  const d1 = N(st, I, '@"Dash test"/@Docs'), rec1 = (e1.records || [])[0] || {}
+  check('#83 edit_text: the line takes the text LITERALLY (a leading "@Docs" is text, not a path); a ☐ item stays todo; the line remembers who wrote it (by)',
+    e1.ok && d1.current.text === '@Docs then the README: {progress}' && d1.current.state === 'todo' && J(d1.current.by) === J({ kind: 'dashboard', user: 'robin', host: 'DASH-HOST' }) && !A.getNode(st, I, '@"Dash test"/@Docs/@"Docs then the README: {progress}"'), J([e1.code, d1.current]))
+  check('#83 edit_text record: a current entry, act edit_text, by the viewer; its TEXT says "… (edited by robin via dashboard (DASH-HOST))"; line_text = the line; line_by = the author',
+    rec1.current === true && rec1.act === 'edit_text' && J(rec1.by) === J(BY) && rec1.text === '@Docs then the README: {progress} (edited by robin via dashboard (DASH-HOST))' && rec1.line_text === '@Docs then the README: {progress}'
+    && J(rec1.line_by) === J(BY) && rec1.state === 'todo' && rec1.plan_item === true, J(rec1))
+  check('#83 edit_text: a SYSTEM message — no activity (last_activity unchanged)', d1.last_activity === lastAct0)
+  check('#83 edit_text result: kind, from_text → new_text, from_state → to_state, entry id, ident', e1.from_text === 'Docs' && e1.new_text === '@Docs then the README: {progress}' && e1.from_state === 'todo' && e1.to_state === 'todo' && e1.entry_id === rec1.id && e1.ident.session === 'Lead', J(e1))
+  const bvR = nodeOf(A.boardView(st, T0 + MIN, { raw: true })[0], '@"Dash test"/@Docs'), bv = nodeOf(A.boardView(st, T0 + MIN)[0], '@"Dash test"/@Docs')
+  check('#83 board: the line carries by:{user, host} — raw (the dashboard) and rendered (the activity tool)', J(bvR.current.by) === J({ user: 'robin', host: 'DASH-HOST' }) && J(bv.current.by) === J({ user: 'robin', host: 'DASH-HOST' }) && /^@Docs then the README: 0 of 0|^@Docs then the README: \{progress\}/.test(bv.current.rendered), J([bvR.current, bv.current]))
+  // gossip: the snapshot carries it and a receiver keeps it
+  const snap = A.snapshot(st), sn = snap.sessions[0].nodes.find(n => n.path === '@"Dash test"/@Docs')
+  const here = mk({}, 'HOST-B'); A.mergeSnapshot(here, 'HOST-A', JSON.parse(J(snap)))
+  check('#83 gossip: the snapshot\'s line carries by; a receiver keeps it ({kind:"dashboard", user, host}) and its board shows it', J(sn.current.by) === J(BY) && J(N(here, I, '@"Dash test"/@Docs', 'HOST-A').current.by) === J(BY)
+    && J(nodeOf(A.boardView(here, T0 + MIN, { raw: true })[0], '@"Dash test"/@Docs').current.by) === J({ user: 'robin', host: 'DASH-HOST' }), J(sn.current))
+  const junk = mk({}, 'HOST-B'); const sj = JSON.parse(J(snap)); sj.sessions[0].nodes.find(n => n.path === '@"Dash test"/@Docs').current.by = { user: 'x'.repeat(500), host: 7, kind: 'nope' }
+  A.mergeSnapshot(junk, 'HOST-A', sj)
+  check('#83 gossip: an untrusted by is bounded (user ≤ 64, a bad host → "?")', (b => b && b.user.length === 64 && b.host === '?')(N(junk, I, '@"Dash test"/@Docs', 'HOST-A').current.by))
+  // ---- with a state; the notice
+  const e2 = ACT(st, I, '@"Dash test"/@Code', 'edit_text', { text: 'Code: merged', state: 'done' }, T0 + 2 * MIN)
+  const n2 = A.actionNotice(e2, { by: BY, host: 'HOST-A', ts: T0 + 2 * MIN })
+  check('#83 edit_text + state: the item is done with the new text; the notice is verb activity_text_edited, subject "robin edited @Dash test/@Code (todo → done)", body { action, path, host, from_text, text (the new line), from_state, to_state, by, entry_id, session, project }',
+    e2.ok && N(st, I, '@"Dash test"/@Code').current.state === 'done' && n2.verb === 'activity_text_edited' && n2.subject === 'robin edited @Dash test/@Code (todo → done)'
+    && n2.body.action === 'edit_text' && n2.body.from_text === 'Code' && n2.body.text === 'Code: merged' && n2.body.from_state === 'todo' && n2.body.to_state === 'done' && J(n2.body.by) === J({ user: 'robin', host: 'DASH-HOST' }) && n2.body.entry_id === e2.entry_id && n2.body.host === 'HOST-A', J(n2))
+  check('#83 notice: without a state change the subject has no arrow ("robin edited @Dash test/@Docs")', A.actionNotice(e1, { by: BY }).subject === 'robin edited @Dash test/@Docs' && A.actionNotice(e1, { by: BY }).verb === A.EDIT_NOTICE_VERB)
+  const many = A.combineActionNotices([A.actionNotice(e1, { by: BY, host: 'HOST-A' }), n2])
+  check('#83 several edits → ONE message: "robin edited 2 lines in @Dash test" (body.actions:[2])', many.subject === 'robin edited 2 lines in @Dash test' && many.body.count === 2 && J(many.body.actions.map(a => a.path)) === J(['@"Dash test"/@Docs', '@"Dash test"/@Code']), many.subject)
+  // ---- refusals + limits
+  check('#83 refusals: no text → bad-args; a state the node can\'t take → bad-state (todo on an agent, skipped on an ordinary context, abandoned on an agent without a plan); the same text + state → no-change; an unknown node → unknown-node',
+    ACT(st, I, '@notes', 'edit_text', { text: '  ' }, T0 + 3 * MIN).code === 'bad-args' && ACT(st, I, '@notes', 'edit_text', {}, T0 + 3 * MIN).code === 'bad-args'
+    && ACT(st, I, 'helper', 'edit_text', { text: 'x', state: 'todo' }, T0 + 3 * MIN).code === 'bad-state' && ACT(st, I, '@notes', 'edit_text', { text: 'x', state: 'skipped' }, T0 + 3 * MIN).code === 'bad-state'
+    && ACT(st, I, 'helper', 'edit_text', { text: 'x', state: 'abandoned' }, T0 + 3 * MIN).code === 'bad-state' && ACT(st, I, '@notes', 'edit_text', { text: 'some notes' }, T0 + 3 * MIN).code === 'no-change'
+    && ACT(st, I, '@nope', 'edit_text', { text: 'x' }, T0 + 3 * MIN).code === 'unknown-node')
+  const long = 'é'.repeat(300)
+  const e3 = ACT(st, I, '@notes', 'edit_text', { text: long + '\nsecond line' }, T0 + 3 * MIN), n3 = N(st, I, '@notes'), r3 = e3.records[0]
+  check('#83 limits: the same 240 as a report — a longer line is truncated (239 + "…", warning text-truncated); newlines become spaces; the entry text keeps the attribution within 240',
+    e3.ok && [...n3.current.text].length === 240 && n3.current.text.endsWith('…') && (e3.warnings || []).includes('text-truncated') && [...r3.text].length <= 240 && r3.text.endsWith('(edited by robin via dashboard (DASH-HOST))'), J([e3.code, [...(r3.text || '')].length]))
+  check('#83 an edit changes only the text (+ state): the line keeps its details and data', n3.current.details === 'the details' && J(n3.current.data) === J({ k: 1 }))
+  // ---- an agent and the session root
+  const e4 = ACT(st, I, 'helper', 'edit_text', { text: 'helping (paused by robin)', state: 'blocked' }, T0 + 4 * MIN), e5 = ACT(st, I, '', 'edit_text', { text: 'the new headline' }, T0 + 4 * MIN)
+  check('#83 agents + the session root: an agent\'s line (and state), the session\'s headline (path "")', e4.ok && N(st, I, 'helper').current.state === 'blocked' && N(st, I, 'helper').current.text === 'helping (paused by robin)' && e5.ok && root(st, I).current.text === 'the new headline' && !!root(st, I).current.by
+    && A.actionNotice(e5, { by: BY }).subject === 'robin edited Lead', J([e4.code, e5.code]))
+  // ---- the session takes the line back
+  sayC(st, I, { path: '@"Dash test"/@~Docs', state: 'running' }, T0 + 5 * MIN)
+  check('#83 a TICK by the session (state only — the text kept) keeps the attribution: the text is still the viewer\'s', N(st, I, '@"Dash test"/@Docs').current.state === 'running' && !!N(st, I, '@"Dash test"/@Docs').current.by)
+  sayC(st, I, { path: '@"Dash test"/@~Docs', text: 'Docs: my own words' }, T0 + 6 * MIN)
+  check('#83 the session\'s next report REPLACES the line and its attribution', N(st, I, '@"Dash test"/@Docs').current.text === 'Docs: my own words' && !N(st, I, '@"Dash test"/@Docs').current.by && !nodeOf(A.boardView(st, T0 + 6 * MIN, { raw: true })[0], '@"Dash test"/@Docs').current.by)
+  sayC(st, I, { path: 'helper/@~root', text: 'helping (paused by robin)', state: 'blocked', log: false }, T0 + 6 * MIN)
+  check('#83 a log:false re-send of the SAME text takes it back too (it is the session\'s now)', !N(st, I, 'helper').current.by)
+  // ---- the replay: the entry record, a checkpoint (cp) and the carry-forward (cf) all restore it
+  const st2 = mk(), recs = []
+  const go = (input, t) => { const r = sayC(st2, I, input, t); if (r.ok) recs.push(...r.records.map(x => JSON.parse(J(x)))); return r }
+  const ga = (p, a, args, t) => { const r = ACT(st2, I, p, a, args, t); if (r.ok) recs.push(...r.records.map(x => JSON.parse(J(x)))); return r }
+  go({ path: '@P', plan: ['a', 'b'] }, T0); ga('@P/@a', 'edit_text', { text: 'edited a' }, T0 + MIN); ga('@P/@b', 'edit_text', { text: 'edited b', state: 'blocked' }, T0 + MIN)
+  go({ path: '@P/@~b', state: 'done' }, T0 + 2 * MIN)   // a tick: b's text stays robin's
+  const B1 = mk(); A.replayNewestFirst(B1, recs.slice().reverse(), T0 + 3 * MIN)
+  check('#83 replay (entry records): both lines come back with their attribution — the tick kept it on b', J(N(B1, I, '@P/@a').current.by) === J(BY) && N(B1, I, '@P/@a').current.text === 'edited a' && J(N(B1, I, '@P/@b').current.by) === J(BY) && N(B1, I, '@P/@b').current.state === 'done' && dump(st2) === dump(B1), firstDiff(dump(st2), dump(B1)))
+  go({ path: '@P/@a', progress: '3/9', log: false }, T0 + 4 * MIN)
+  const cps = A.flushCheckpoints(st2, T0 + 5 * MIN).map(w => w.rec), cpa = cps.find(r => r.path === '@P/@a')
+  check('#83 a checkpoint (cp) of an edited line carries line_by in its current', cpa && J(cpa.current.line_by) === J(BY), J(cpa && cpa.current))
+  const B2 = mk(); A.replayNewestFirst(B2, [...recs, ...cps].slice().reverse(), T0 + 6 * MIN)
+  check('#83 replay through the cp: the line keeps its attribution', J(N(B2, I, '@P/@a').current.by) === J(BY))
+  const cfs = A.planCarryForward(st2, T0 + 10 * DAY).map(w => w.rec), cfa = cfs.find(r => r.path === '@P/@a')
+  const B3 = mk({ finished_visible_hours: 48 }); A.replayNewestFirst(B3, cfs.slice().reverse(), T0 + 10 * DAY + MIN)
+  check('#83 the carry-forward (cf) carries it and a replay of only the cf restores it', cfa && J(cfa.current.line_by) === J(BY) && J(N(B3, I, '@P/@a').current.by) === J(BY), J(cfa && cfa.current))
+  const old = recs.map(r => { const x = { ...r }; delete x.line_by; return x })
+  const B4 = mk(); A.replayNewestFirst(B4, old.slice().reverse(), T0 + 3 * MIN)
+  check('#83 a record WITHOUT line_by (as a 1.69 host wrote it) replays as before: the text, no attribution — the entry\'s own by is never mistaken for it', N(B4, I, '@P/@a').current.text === 'edited a' && !N(B4, I, '@P/@a').current.by)
+  // ---- #84 message
+  const msg = 'Please also cover the empty-plan case.\nAnd say what the default is.'
+  const lastM = N(st, I, '@"Dash test"/@Ship').last_activity, curM = J(N(st, I, '@"Dash test"/@Ship').current)
+  const m1 = ACT(st, I, '@"Dash test"/@Ship', 'message', { text: '  ' + msg + '  ' }, T0 + 7 * MIN), mr = m1.records[0] || {}
+  check('#84 message: ONE logged (non-current) entry on the node — text "robin via dashboard: <the text on one line>", the full text in details, act message, by the viewer; the line, its state and its activity are untouched',
+    m1.ok && mr.current === false && mr.text === 'robin via dashboard: Please also cover the empty-plan case. And say what the default is.' && mr.details === msg && mr.act === 'message' && J(mr.by) === J(BY)
+    && J(N(st, I, '@"Dash test"/@Ship').current) === curM && N(st, I, '@"Dash test"/@Ship').last_activity === lastM && m1.message === msg && m1.entry_id === mr.id, J([m1.code, mr]))
+  const nm = A.actionNotice(m1, { by: BY, host: 'HOST-A', ts: T0 + 7 * MIN })
+  check('#84 messageNotice: verb activity_message; the PUBLIC subject = who + the path + a few words ("robin about @Dash test/@Ship: Please also cover the empty-plan case…"); the body has the full text { action, path, host, text, by, entry_id, session, project, ts }',
+    nm.verb === 'activity_message' && nm.subject === 'robin about @Dash test/@Ship: Please also cover the empty-plan case…' && nm.body.text === msg && nm.body.path === '@"Dash test"/@Ship' && nm.body.host === 'HOST-A' && J(nm.body.by) === J({ user: 'robin', host: 'DASH-HOST' }) && nm.body.entry_id === m1.entry_id && nm.body.session === 'Lead' && nm.body.project === 'ACTS' && J(A.messageNotice(m1, { by: BY, host: 'HOST-A', ts: T0 + 7 * MIN })) === J(nm), J(nm))
+  check('#84 the subject never carries more than a few words of the text (≤ 6 words / 40 characters)', !nm.subject.includes('default') && A.firstWords('one two three four five six seven') === 'one two three four five six…' && A.firstWords('short') === 'short' && A.firstWords('x'.repeat(60)) === 'x'.repeat(39) + '…' && A.firstWords('a\nb  c') === 'a b c' && A.firstWords('Done. Next: ship it now please, thanks') === 'Done. Next: ship it now please…')
+  const big = 'word '.repeat(60).trim(), m2 = ACT(st, I, '', 'message', { text: big }, T0 + 8 * MIN), r2 = m2.records[0]
+  check('#84 a long message: the entry shows the first 120 characters + "…" (details: all of it); the session root works (path "")', m2.ok && r2.path === '' && r2.text.startsWith('robin via dashboard: word word') && r2.text.endsWith('…') && [...r2.text].length <= 'robin via dashboard: '.length + 120 && r2.details === big && A.actionNotice(m2, { by: BY }).subject.startsWith('robin about Lead: '), J(r2 && r2.text))
+  const wide = '日'.repeat(2000), m3 = ACT(st, I, '@notes', 'message', { text: wide }, T0 + 9 * MIN)
+  check('#84 limits: 2000 characters is fine (a non-ASCII one is cut to 4 KB in details — the delivered body has all of it); 2001 → message-too-long; empty → bad-args',
+    m3.ok && Buffer.byteLength(m3.records[0].details) <= 4096 && m3.records[0].details.endsWith('…') && m3.message === wide && ACT(st, I, '@notes', 'message', { text: 'x'.repeat(2001) }, T0 + 9 * MIN).code === 'message-too-long'
+    && ACT(st, I, '@notes', 'message', { text: ' \n ' }, T0 + 9 * MIN).code === 'bad-args' && ACT(st, I, '@notes', 'message', {}, T0 + 9 * MIN).code === 'bad-args', J([m3.code, Buffer.byteLength(m3.records[0]?.details || '')]))
+  check('#84 control characters go, newlines and tabs stay (CRLF → LF)', (r => r.ok && r.message === 'a\nb\tc')(ACT(st, I, '@notes', 'message', { text: 'a\r\nb\tc\u0007' }, T0 + 10 * MIN)))
+})
+await section(async () => {
+  // ---- replay == chronological apply with dashboard EDITS (+ ticks, the session's own lines, messages, moves, expiry), seeded random
+  const BYF = { kind: 'dashboard', user: 'robin', host: 'D' }
+  for (const seed of [83, 84, 830, 8484]) {
+    const r = rng(seed), pick = a => a[Math.floor(r() * a.length)]
+    const st = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 6 } }), recs = []
+    const id = { session: 'Alpha', project: 'AIMB', user: 'robin' }
+    let t = T0, applied = 0, edits = 0
+    for (let i = 0; i < 400; i++) {
+      t += 1000 + Math.floor(r() * 60000)
+      const s = A.getSession(st, id), nodes = s ? [...s.nodes.values()] : []
+      const x = r()
+      let res = null
+      if (x < 0.25 && nodes.length) {
+        const n = pick(nodes), valid = A.editStates(s, n)
+        res = A.applyAction(st, { ...id, path: n.path, action: 'edit_text', args: { text: `ed${i} {progress}`, ...(r() < 0.4 ? { state: pick(valid) } : {}) } }, t, { by: BYF })
+        if (res.ok) edits++
+      } else if (x < 0.32 && nodes.length) res = A.applyAction(st, { ...id, path: pick(nodes).path, action: 'message', args: { text: `msg ${i}` } }, t, { by: BYF })
+      else if (x < 0.4 && nodes.length) { const n = pick(nodes.filter(m => m.plan)); if (n) res = sayC(st, id, { path: n.path.replace(/@(?=[^/]*$)/, '@~'), state: pick(['running', 'done', 'blocked']) }, t) }   // a tick
+      else if (x < 0.45 && nodes.length) { const n = pick(nodes.filter(m => m.key && m.kind === 'context')); if (n) res = sayC(st, id, { move: '/' + n.path, to: r() < 0.5 ? '/' : '/@Q' }, t) }
+      else if (x < 0.5) res = sayC(st, id, { path: pick(['@P', '@Q']), plan: [`i${i}`] }, t)
+      else if (x < 0.52) A.expire(st, t)
+      if (!res) res = sayC(st, id, { path: pick(['@P/@~a', '@Q/@~b', 'w1/@~root', '@~root', 'w1/@R/@~c']), text: `m${i}`, ...(r() < 0.3 ? { progress: `${i % 9}/9` } : {}) }, t)
+      if (res && res.ok && res.records) { applied++; recs.push(...res.records.map(q => JSON.parse(J(q)))) }
+    }
+    const now = t + MIN
+    A.expire(st, now)
+    const B = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 6 } })
+    A.replayNewestFirst(B, recs.slice().reverse(), now)
+    const byOf = q => J([...q.local.values()].map(x => [...x.nodes.values()].sort(byKey).map(n => [n.key, n.current && n.current.by ? n.current.by.user : null])))
+    check(`#83 replay == chronological apply with dashboard edits (seed ${seed}: ${applied} applied, ${edits} edits): the whole state incl. every line's attribution`, dump(st) === dump(B) && byOf(st) === byOf(B) && /robin/.test(byOf(st)), firstDiff(dump(st) + byOf(st), dump(B) + byOf(B)))
+  }
+})
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

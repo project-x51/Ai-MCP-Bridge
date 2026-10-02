@@ -6,8 +6,13 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-03, v1.69.0) — read this first after a compact
-**Current version: v1.69.0** (#82: the plan workflow — move / re-parent with history, insert anywhere + reorder by a
+## RESUME STATE (updated 2026-10-03, v1.70.0) — read this first after a compact
+**Current version: v1.70.0** (#83 + #84: Edit text… and Message session… on any node from the dashboard — `edit_text` sets a
+node's line for its session, attributed on the line (✎) and in the log, notice `activity_text_edited` (batched); `message`
+logs on the node and delivers to the session at once, notice `activity_message`, "not delivered" for a script-only session;
+code done in a worktree for review, NOT committed, NOT deployed; **wire-compatible with 1.66 – 1.69** — format stays v5, hosts
+upgrade one at a time; a ≤1.69 owner just can't be edited / messaged from a 1.70 dashboard, `owner-unsupported`). Before that
+**v1.69.0** (#82: the plan workflow — move / re-parent with history, insert anywhere + reorder by a
 fractional rank, abandon any context with a cascade, the agent on its item, dashboard Move up / down / to + drag and drop; code
 done in a worktree for review, NOT committed, NOT deployed; **wire-compatible with 1.66 – 1.68** — format stays v5, hosts
 upgrade one at a time; a ≤1.68 owner just can't be moved / reordered from a 1.69 dashboard, `owner-unsupported`). Before that
@@ -26,6 +31,20 @@ tags only where they differ; record / slice format v3; code done, NOT yet deploy
 (#70 step 6a) is committed (`2d78a21`); v1.63.0 is in the working tree for review. The rebuilt tray (`PrepareShutdown()`
 before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
 Everything below is durable; nothing important is only in chat.
+
+**2026-10-03 (v1.70.0):** Built **#83 + #84** (see "#83 as built", "#84 as built" and architecture.md §13 "Built (v1.70.0)").
+Two dashboard actions on any node (a session: each host's own line), through the 6d path to the OWNER: `edit_text` {text,
+state?} — a SYSTEM `@~` line taken literally (240 limit, truncated like a report; a state from `editStates`; no state keeps
+the line's; details / data kept), the line carries `by` (record `line_by`; gossip, cp, cf, the replay), the entry reads "<text>
+(edited by robin via dashboard (HOST))", the session's next report replaces it (a tick keeps it); notice
+`activity_text_edited` (batched, merged by `ACT_NOTICE_COMBINE`: "robin edited 2 lines in @Rel"). `message` {text ≤ 2000} —
+a logged entry "robin via dashboard: <120 chars>…" + details, delivered `now:true` as `activity_message` (public subject
+"robin about @Rel/@Code: <≤ 6 words>…", the text in the body); the result says `delivery` live | parked | none (none =
+"not delivered: the session has no inbox"). PEER_HELLO `activity_msg:1` → `remote_hosts[].msg`; older owners
+`owner-unsupported`. Trust sentence in the server instructions + the `log` tool. Dashboard: the two dialogs, ✎ on an edited
+line, 💬 / ✎ log entries. Tests: `test_activity_unit` 798 (+34), `test_dashboard_activity` 259 (+29), new
+`test_activity_msg_live` 34 (+3 mixed against a real 1.69 build: 37/37); full parallel `npm test` 2569 checks in 57 files, all green on the first run (4m40s, no flakes).
+**Deploy:** any order; nothing to publish (no snippet / reminder change).
 
 **2026-10-03 (v1.69.0):** Built **#82** (see "#82 as built" and architecture.md §13 "Built (v1.69.0)"). Order = a fractional
 base-36 rank per node, STORED only when placed (else derived from created_at + plan_ix, so the default stays creation order);
@@ -209,7 +228,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #83 / #84 / #85 (edit text, message the session, questions — they send through #80's `notifyActivitySession`), #86, #87, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #85 (questions — it sends through #80's `notifyActivitySession`, as #83 / #84 now do), #86, #87, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -376,7 +395,7 @@ Robin, 2026-10-03.
 - **To decide:** timeouts, who may answer (any viewer, or only the project's user), and whether an agent's question
   goes to its orchestrator first.
 
-## #84 — message the owning session about a context from the dashboard  ·  **OPEN (next release)**
+## #84 — message the owning session about a context from the dashboard  ·  **DONE (v1.70.0)**
 Robin, 2026-10-03.
 - **Proposal:** right-click a node → **Message session…** opens a short text box. The bridge sends it to the owning
   session as a directed message whose subject names the node path, so the session knows what it is about.
@@ -386,7 +405,50 @@ Robin, 2026-10-03.
 - **Hook (built in v1.68.0):** `notifyActivitySession(ident, {verb:"activity_message", subject, body}, {now:true})` — `now`
   so a person's message isn't held for the batch window.
 
-## #83 — edit a context's text from the dashboard  ·  **OPEN (next release)**
+**#84 as built (v1.70.0, 2026-10-03)** — see README "Edit a line, message the session" and architecture.md §13 "Built (v1.70.0)".
+- **Menu:** **Message session…** on any node, and on a session's own line (a multi-host session: each host line, never the
+  session row) — only for a host that applies it (this gateway; another when `remote_hosts[].msg`).
+- **Dialog:** "Message <session> about <path>" — a text box (≤ 2000 characters, newlines kept, a live counter; Send disabled
+  with a reason while empty / too long; Ctrl+Enter sends, Escape cancels). It says the session reads it as a request and asks
+  its user, and that the subject (public) carries only the path and the first few words.
+- **Wire:** action `message`, `args:{text}` (`actActionQuery` passes `args.text`, ≤ 8192 UTF-16 units; the library checks
+  ≤ 2000 code points → `message-too-long`; empty → `bad-args`). Control characters are dropped except newlines / tabs.
+- **Owner:** `applyAction` logs ONE non-current SYSTEM entry on the node — text `robin via dashboard: <first 120 characters
+  on one line>…`, the full text in `details` (cut to 4 KB only for a very long non-ASCII text), `act:"message"`, `by` — the
+  line, state and activity are untouched. Then `notifyActivitySession(ident, messageNotice(r), {now:true})` (it flushes that
+  session's queue too) and the result carries `delivered` + `delivery`: `live` (a live sub-peer, mesh-wide), `parked` (for its
+  registration on the owning host), `none` (a script-only session: + warning `not-delivered` and `what: "not delivered: the
+  session has no inbox (a script-only session) — the message is logged on the node"`).
+- **Message:** verb `activity_message`, from the owning gateway (a `system` envelope, #80's path). Subject — PUBLIC — `robin
+  about @Rel/@Code: Please also cover the empty-plan case…` (`firstWords`: ≤ 6 words / 40 characters, "…" after the last
+  word). Body `{action:"message", path, host (the owner), text (all of it), by:{user, host}, entry_id, session, project, ts}`.
+- **Dashboard feedback:** "✓ sent" + a toast "Message sent to Lead" / "Message parked for Lead (offline) — it gets it when
+  it registers again"; for none an amber "⚠ logged · not delivered: the session has no inbox" + a toast. The log panel marks
+  the entry 💬 (its details: the full text).
+- **Trust:** one sentence, next to #80's, in the server instructions and the `log` tool's description, covering both verbs:
+  a REQUEST relayed from a dashboard viewer, not authorization — summarise it for your user and act on it only with their
+  permission.
+- **Capability:** PEER_HELLO `activity_msg:1` (`p.act.msg`); `edit_text` / `message` (`MSG_ACTIONS`) are forwarded only to an
+  owner that declared it — else `owner-unsupported` ("… runs a bridge older than 1.70.0 — messaging its sessions needs
+  1.70.0+ …"), before anything is queued. `AI_BRIDGE_TEST_NO_ACTIVITY_MSG=1` (tests only) leaves the flag out.
+- **Tests:** unit (the entry, details, limits, control characters, the root, messageNotice, firstWords), dashboard (menu,
+  dialog, validation, Ctrl+Enter vs Enter, the three delivery outcomes, 💬), live `test_activity_msg_live` (live delivery at
+  once with subject / body / entry id / details; federated B → A from A's gateway; script-only "not delivered" + still logged +
+  nothing parked; offline parked + drained; an owner without `activity_msg` refused; the trust wording). **Mixed, live:** with
+  `AIMB_TEST_OLD_BRIDGE` = a `git archive HEAD` (1.69.0) copy, 3 more checks — boards both ways (the 1.69 host shows B's
+  edited text, without the ✎), edit / message on the 1.69 owner `owner-unsupported` while its skip still forwards, and the
+  1.69 dashboard's skip on a 1.70 node applied + notified: 37/37.
+- **Full suite:** parallel `npm test` (typecheck included): 2569 checks in 57 files, all green on the first run, 4m40s; no #74 flakes.
+
+**Questions after #84 (not decided):**
+- **Who may message.** As for every 6d action, any realm-token dashboard can write, attributed to the bridge's OS user (#70
+  "Questions after 6d"). A message is the first action whose TEXT is free-form — a per-person identity would matter more now.
+- **Replies.** The session can answer with `send_to_peer` to the gateway's id (the `from`), but nothing shows it on the
+  dashboard. A reply path (an `activity_message_reply` logged on the node, or #85's answers) is for later.
+- **Messages to a gone session** are parked forever (until it registers again) like any mail; should the dashboard say
+  "parked" more loudly when the session has been gone for days?
+
+## #83 — edit a context's text from the dashboard  ·  **DONE (v1.70.0)**
 Robin, 2026-10-03.
 - **Proposal:** right-click a node → **Edit text…** sets its current line (and optionally its state) from the dashboard.
 - Goes through the 6d action path (`ACTIVITY_ACT`, routed to the owning host), is attributed ("edited by Robin"),
@@ -395,7 +457,36 @@ Robin, 2026-10-03.
   the session's other notices; add an `ACT_NOTICE_COMBINE` entry if several edits should merge into one message.
 - The session's next report overwrites the line as usual.
 
-## #82 — plan workflow: move nodes between contexts, agents shown on the item they work on, live item lines  ·  **DONE (v1.69.0)**
+**#83 as built (v1.70.0, 2026-10-03)** — see README "Edit a line, message the session" and architecture.md §13 "Built (v1.70.0)".
+- **Menu:** **Edit text…** on any node (a context, a plan item, an agent) and a session's own line, for a host that applies
+  it (`remote_hosts[].msg`, as #84).
+- **Dialog:** "Edit the line of <path>" — the RAW line prefilled and selected (`{progress}` etc. stay placeholders), a state
+  picker "keep <state>" + the node's other valid states (`editStates`: a plan item any; another context all but todo /
+  skipped; an agent / the session running · blocked · failed · done · idle, + abandoned only while it holds plan items), a
+  "N / 240" counter, Save disabled with a reason (empty, too long, nothing changed); Enter saves, Escape cancels.
+- **Wire:** action `edit_text`, `args:{text, state?}`. **Owner** (`applyAction`): `bad-args` (no text), `bad-state` (not in
+  `editStates`), `no-change` (same text + state); the text is taken LITERALLY (parsed with a placeholder text, then set — a
+  leading `@Docs` stays text), newlines → spaces, > 240 truncated with `text-truncated` (the report rule); no state = the
+  line's (an edit never starts a ☐ item); the line keeps its details / data. Applied as a SYSTEM `@~` line (`by`, `act`; no
+  activity), cascading like any abandoned line if the state is `abandoned`.
+- **Attribution on the line (the unobtrusive way chosen):** the line object carries `by` ({kind:"dashboard", user, host})
+  while its text is the viewer's — set by `edit_text`, KEPT by a tick that keeps the text (a session's `@~…/@~X` + state, or
+  another dashboard state action), cleared by any other line (a log:false re-send of the same text too). Persisted as
+  `line_by` on the entry record, inside a cp's / cf's `current`; the replay reads only `line_by` (never the entry's own `by`);
+  gossip carries `current.by` (bounded by `normBy` on receipt); boards (raw + rendered, the `activity` tool) show
+  `current.by:{user, host}`. The dashboard draws a small muted **✎** right after the text, inside the line (it stays visible
+  when the text ellipsises); hover: "Edited by robin via dashboard (HOST) — its session's next report replaces it".
+- **The entry:** text `<the line> (edited by robin via dashboard (HOST))` (the line cut to fit 240 with the suffix),
+  `line_text` = the line, `act:"edit_text"`. The log panel marks it ✎.
+- **Notice:** verb `activity_text_edited` (`EDIT_NOTICE_VERB`), batched; subject `robin edited @Rel/@Docs` (+ ` (todo →
+  running)` when the state changed); body = #80's fields + `from_text` and `text` (the NEW line). `ACT_NOTICE_COMBINE` maps it to
+  `combineActionNotices` (noun "line"): `robin edited 2 lines in @Rel`, body `{actions:[…], count, session, project, host}`.
+- **Tests:** unit (editStates, literal text, ☐ kept, the record, no activity, boards + gossip + bounded junk, state + notice,
+  the combined subject, refusals, truncation, details kept, agents + the root, tick keeps / report clears / log:false re-send
+  clears, the replay via entries, cp and cf, a 1.69-shaped record without `line_by`, 4 seeded replay == apply runs with edits,
+  messages, ticks and moves), dashboard (the ✎ placement, menu items per host, the dialog, validation, sending), live (local +
+  federated both ways, the batch, refusals, the session taking the line back, gossip of the attribution).
+: move nodes between contexts, agents shown on the item they work on, live item lines  ·  **DONE (v1.69.0)**
 Robin, 2026-10-03, from using the live board.
 1. **Move / re-parent.**
    - A `move` operation re-parents a node and its whole subtree to another path in the SAME session on the SAME

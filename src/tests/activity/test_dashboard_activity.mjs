@@ -526,7 +526,7 @@ const rclick = el => el.dispatchEvent(new win.MouseEvent('contextmenu', { bubble
 const pickMenu = label => { const b = [...(menuEl()?.querySelectorAll('.mi') || [])].find(x => x.textContent === label); if (b) click(b); return !!b }
 const leadRow = inD('lead')
 rclick(leadRow)
-check('6d menu (right-click): a STALE agent holding an open plan (itself a plan node) — Mark plan complete, Abandon plan…, Mark finished done / failed, no Dismiss (open items); (#82: then Move down + Move to…); then Copy path, Copy its aimb-log command, Pin, Hide', !!menuEl() && J(menuLabels()) === J(['Mark plan complete', 'Abandon plan…', 'Mark finished — done…', 'Mark finished — failed…', 'Move down', 'Move to…', 'Copy path', 'Copy its aimb-log command', 'Pin to the top', 'Hide']), J(menuLabels()))
+check('6d menu (right-click): a STALE agent holding an open plan (itself a plan node) — Mark plan complete, Abandon plan…, Mark finished done / failed, no Dismiss (open items); (#83 / #84: then Edit text… + Message session…; #82: then Move down + Move to…); then Copy path, Copy its aimb-log command, Pin, Hide', !!menuEl() && J(menuLabels()) === J(['Mark plan complete', 'Abandon plan…', 'Mark finished — done…', 'Mark finished — failed…', 'Edit text…', 'Message session…', 'Move down', 'Move to…', 'Copy path', 'Copy its aimb-log command', 'Pin to the top', 'Hide']), J(menuLabels()))
 check('6d menu: it is a role=menu of menuitems with the first one focused', menuEl().getAttribute('role') === 'menu' && [...menuEl().querySelectorAll('.mi')].every(b => b.getAttribute('role') === 'menuitem') && doc.activeElement === menuEl().querySelector('.mi'))
 pickMenu('Copy its aimb-log command')
 check('6d copy: "Copy its aimb-log command" = the session\'s command for THIS node on ITS host — the token FILE path, never a token; the menu closes', V.lastCopy === X.logCmd(LC, 'Sixd', 'SixD', 'lead') && /--token-file "C:\/Users\/robin\/\.aimb\/realm token\.txt"/.test(V.lastCopy) && !/token=|--token /.test(V.lastCopy) && !menuEl(), V.lastCopy)
@@ -833,6 +833,138 @@ try {   // ================================================================= #82
   check('#82 legend: says how order, drag and drop, the agent on its item and the greyed subtrees work', /plan items first, then contexts, then agents/.test(doc.getElementById('actlegend').textContent) && /drag a row/.test(doc.getElementById('actlegend').textContent))
 } catch (e) { fail++; console.log('FAIL #82 block crashed:', (e && e.stack) || e) }
 
+
+try {   // ================================================================= #83 / #84 (v1.70.0): EDIT TEXT… and MESSAGE SESSION… — the menu items (only
+  // for hosts that apply them), the two dialogs (prefill, the state picker, validation, sending), the result ("not delivered"), the ✎ on an
+  // edited line, the 💬 / ✎ log entries, the legend
+  // ---- the pure part
+  check('#83 editStates (the bridge\'s rule): a plan item any state; another context no todo / skipped; an agent / the session no plan states, abandoned only while it holds plan items',
+    J(X.editStates({ nkind: 'context', plan_item: true })) === J(['running', 'blocked', 'failed', 'done', 'idle', 'todo', 'skipped', 'abandoned']) && J(X.editStates({ nkind: 'context' })) === J(['running', 'blocked', 'failed', 'done', 'idle', 'abandoned'])
+    && J(X.editStates({ nkind: 'agent' })) === J(['running', 'blocked', 'failed', 'done', 'idle']) && J(X.editStates({ nkind: 'agent', holds_plan: true })) === J(['running', 'blocked', 'failed', 'done', 'idle', 'abandoned']))
+  const cur = { text: 'Docs', state: 'todo' }
+  check('#83 checkEdit: empty → "can\'t be empty"; over 240 characters (code points, one line) → "Too long"; the same text + state → "Nothing changed"; a new text, or the same text with a new state, is fine',
+    !X.checkEdit('  ', '', cur).ok && /can't be empty/.test(X.checkEdit('', '', cur).why) && (c => !c.ok && c.n === 241 && /Too long: 241 of 240/.test(c.why))(X.checkEdit('é'.repeat(241), '', cur))
+    && X.checkEdit('é'.repeat(240), '', cur).ok && /Nothing changed/.test(X.checkEdit('Docs', '', cur).why) && /Nothing changed/.test(X.checkEdit(' Docs ', 'todo', cur).why) && X.checkEdit('Docs', 'done', cur).ok && X.checkEdit('Docs v2', '', cur).ok
+    && X.checkEdit('a\nb', '', null).ok && X.checkEdit('a\nb', '', null).n === 3)
+  check('#84 checkMsg: empty → "Write something"; ≤ 2000 characters fine (newlines kept and counted); 2001 → "Too long"', !X.checkMsg(' \n ').ok && /Write something/.test(X.checkMsg('').why) && X.checkMsg('x'.repeat(2000)).ok && (c => !c.ok && /Too long: 2001 of 2000/.test(c.why))(X.checkMsg('x'.repeat(2001))) && X.checkMsg('a\r\nb').n === 3)
+  check('#83 dispPath: a path for people (quotes dropped), as the bridge\'s displayPath', X.dispPath('@"Next release"/@"#83 x"/w') === '@Next release/@#83 x/w' && X.dispPath('') === '')
+  check('#83 editedBy: "edited by robin via dashboard (HOST-A)" for a line with by; "" without', X.editedBy({ text: 'x', by: { user: 'robin', host: 'HOST-A' } }) === 'edited by robin via dashboard (HOST-A)' && X.editedBy({ text: 'x' }) === '' && X.editedBy(null) === '')
+  // ---- the board: a local session (HOST-A), a node on HOST-B (1.70: msg) and one on HOST-C (≤1.69: no msg)
+  const n83 = (p, nk, extra = {}) => node('k-e83', p, nk, extra.host || 'HOST-A', extra)
+  const self83 = root('HOST-A', { current: { id: 's83', ts: NOW - MIN, text: 'running the release', state: 'running' } })
+  const u83 = [
+    sess('k-e83', 'Edit83', 'E83', { hosts: ['HOST-A', 'HOST-B', 'HOST-C'], multi_host: true, self: self83, selves: [self83, root('HOST-B', { current: { id: 'sb', ts: NOW - 2 * MIN, text: 'on B', state: 'running' } }), root('HOST-C', { current: { id: 'sc', ts: NOW - 3 * MIN, text: 'on C', state: 'running' } })] }),
+    sess('k-s83', 'Solo83', 'E83', { host: 'HOST-A', self: root('HOST-A', { current: { id: 'so', ts: NOW - MIN, text: 'solo line', state: 'running', by: { user: 'robin', host: 'HOST-A' } } }) }),
+    n83('@Rel', 'context', { plan_node: true, implicit: true }),
+    n83('@Rel/@Docs', 'context', { plan_item: true, state: 'todo', current: { id: 'd1', ts: NOW - MIN, text: 'Docs: {progress}', state: 'todo' }, progress: { done: 2, total: 5, unit: 'pages' } }),
+    n83('@Rel/@Code', 'context', { plan_item: true, state: 'running', current: { id: 'c1', ts: NOW - MIN, text: 'Code: merging', state: 'running', by: { user: 'robin', host: 'HOST-A' } } }),
+    n83('wB', 'agent', { host: 'HOST-B', current: { id: 'wb', ts: NOW - MIN, text: 'on B', state: 'running' }, log: { remote: true, total: 1 } }),
+    n83('wC', 'agent', { host: 'HOST-C', current: { id: 'wc', ts: NOW - MIN, text: 'on C', state: 'running' }, log: { remote: true, total: 1 } }),
+  ]
+  recv({ type: 'activity_board', full: true, epoch: 'E83', seq: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15, finished_plan_open_min: 120, user: 'robin', log_cmd: null, remote_hosts: [{ host: 'HOST-B', plan: true, msg: true }, { host: 'HOST-C', plan: true }] }, upsert: u83 })
+  const in83 = p => { const rs = rowsT(), i = rs.indexOf(nmRow('Edit83')); if (i < 0) return null; for (let j = i + 1; j < rs.length && dOf(rs[j]) > 1; j++) if (rs[j].querySelector('.nm')?.getAttribute('title') === p) return rs[j]; return null }
+  if (!in83('@Rel')) tog(nmRow('Edit83'))
+  if (in83('@Rel') && !in83('@Rel/@Docs')) tog(in83('@Rel'))
+  const mEl = () => doc.querySelector('.act-menu'), mLab = () => [...(mEl()?.querySelectorAll('.mi') || [])].map(b => b.textContent)
+  const rc = el => el.dispatchEvent(new win.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))
+  const pick = label => { const b = [...(mEl()?.querySelectorAll('.mi') || [])].find(x => x.textContent === label); if (b) click(b); return !!b }
+  const escK = el => (el || doc).dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  const dlg = () => doc.querySelector('.act-dlg')
+  const typeIn = (el, v) => { el.value = v; el.dispatchEvent(new win.Event('input', { bubbles: true })) }
+  // ---- the ✎ on an edited line
+  const rCode = in83('@Rel/@Code'), rDocs = in83('@Rel/@Docs')
+  check('#83 tree: a line edited from the dashboard shows ✎ right after its text, inside the line (the text ellipsises, the ✎ stays) — its tooltip: who, and that the session\'s next report replaces it; an ordinary line has none',
+    !!rCode?.querySelector('.ln.ed > .lt + .edby') && rCode.querySelector('.ln.ed > .lt').textContent === 'Code: merging' && !!rCode?.querySelector('.edby') && rCode.querySelector('.edby').textContent === '✎' && rCode.querySelector('.edby').getAttribute('aria-label') === 'edited by robin via dashboard (HOST-A)' && !!rCode.querySelector('.edby').getAttribute('data-tip')
+    && !rDocs?.querySelector('.edby'), rCode?.innerHTML.slice(0, 500))
+  check('#83 tree: a SESSION row\'s headline shows ✎ too', !!nmRow('Solo83')?.querySelector('.edby'))
+  // ---- the menu: local nodes and the session's own host line get both items; HOST-B (msg) too; HOST-C (≤1.69) never
+  rc(rDocs)
+  check('#83/#84 menu: a plan item → Edit text… + Message session… (after its item actions, before Move…)', mLab().includes('Edit text…') && mLab().includes('Message session…') && mLab().indexOf('Edit text…') > mLab().indexOf('Mark done') && mLab().indexOf('Message session…') < mLab().indexOf('Move to…'), J(mLab()))
+  escK(); rc(in83('wB'))
+  const labB = mLab(); escK(); rc(in83('wC'))
+  const labC = mLab(); escK()
+  check('#83/#84 menu: a node on a 1.70 host (remote_hosts[].msg) offers them; on an older host (no msg) they are HIDDEN', labB.includes('Edit text…') && labB.includes('Message session…') && !labC.includes('Edit text…') && !labC.includes('Message session…'), J([labB, labC]))
+  rc(nmRow('Edit83'))
+  const labM = mLab(); escK()
+  check('#83/#84 menu: a multi-host session\'s own row has none (an action names one host\'s line) …', !labM.includes('Edit text…') && !labM.includes('Message session…'), J(labM))
+  const hlOf = h => rowsT().find(r => r.getAttribute('data-kind') === 'host-line' && r.getAttribute('data-session') === 'Edit83' && r.getAttribute('data-host') === h)
+  if (!hlOf('HOST-A')) tog(nmRow('Edit83'))
+  const hlA = rowsT().find(r => r.getAttribute('data-kind') === 'host-line' && r.getAttribute('data-session') === 'Edit83' && r.getAttribute('data-host') === 'HOST-A'), hlC = rowsT().find(r => r.getAttribute('data-kind') === 'host-line' && r.getAttribute('data-session') === 'Edit83' && r.getAttribute('data-host') === 'HOST-C')
+  let labHA = [], labHC = []
+  if (hlA) { rc(hlA); labHA = mLab(); escK() }
+  if (hlC) { rc(hlC); labHC = mLab(); escK() }
+  check('#83/#84 menu: … each host\'s own line does (this host\'s), unless that host is older', labHA.includes('Edit text…') && labHA.includes('Message session…') && !!hlC && !labHC.includes('Edit text…'), J([labHA, labHC]))
+  rc(nmRow('Solo83'))
+  check('#83/#84 menu: a single-host session row → Edit text… + Message session…', mLab().includes('Edit text…') && mLab().includes('Message session…'), J(mLab()))
+  escK()
+  // ---- the EDIT dialog
+  const nA0 = sentOf('activity_action').length
+  rc(in83('@Rel/@Docs')); pick('Edit text…')
+  const ed = dlg(), tIn = ed?.querySelector('#actEdT'), sIn = ed?.querySelector('#actEdS'), okB = ed?.querySelector('[data-dlg="ok"]')
+  check('#83 Edit text…: a dialog prefilled with the RAW line ({progress} stays a placeholder), focused; the state picker = "keep todo" + the node\'s other valid states; Save disabled ("Nothing changed"); a counter "16 / 240"',
+    !!ed && ed.querySelector('[role="dialog"]')?.getAttribute('aria-modal') === 'true' && tIn?.value === 'Docs: {progress}' && doc.activeElement === tIn
+    && J([...sIn.options].map(o => o.value)) === J(['', 'running', 'blocked', 'failed', 'done', 'idle', 'skipped', 'abandoned']) && sIn.options[0].textContent === 'keep todo'
+    && okB.disabled && /Nothing changed/.test(ed.querySelector('.dlg-why').textContent) && ed.querySelector('.dlg-n').textContent === '16 / 240' && /Placeholders such as \{progress\}/.test(ed.textContent) && /edited by robin via dashboard \(HOST-A\)/.test(ed.textContent), ed?.outerHTML.slice(0, 900))
+  typeIn(tIn, '')
+  const emptyWhy = ed.querySelector('.dlg-why').textContent, emptyDis = okB.disabled
+  typeIn(tIn, 'x'.repeat(241))
+  const longWhy = ed.querySelector('.dlg-why').textContent, longDis = okB.disabled, overCls = ed.querySelector('.dlg-n').className
+  check('#83 validation: empty → disabled "The line can\'t be empty."; 241 characters → disabled "Too long: 241 of 240", the counter red', emptyDis && /can't be empty/.test(emptyWhy) && longDis && /Too long: 241 of 240/.test(longWhy) && /over/.test(overCls) && sentOf('activity_action').length === nA0)
+  typeIn(tIn, 'Docs: writing the README {progress}'); sIn.value = 'running'; sIn.dispatchEvent(new win.Event('change', { bubbles: true }))
+  check('#83 a valid edit: Save enabled, no reason shown', !okB.disabled && ed.querySelector('.dlg-why').textContent === '')
+  click(okB)
+  const se = sentOf('activity_action').at(-1)
+  check('#83 Save: sends {action:"edit_text", path, host, session, project, args:{text, state}} and closes the dialog', sentOf('activity_action').length === nA0 + 1 && se.action === 'edit_text' && se.path === '@Rel/@Docs' && se.host === 'HOST-A' && se.session === 'Edit83' && se.project === 'E83'
+    && se.args.text === 'Docs: writing the README {progress}' && se.args.state === 'running' && !dlg(), J(se))
+  recv({ type: 'activity_action', ref: se.ref, result: { ok: true, host: 'HOST-A', action: 'edit_text', path: '@Rel/@Docs', applied: [{ path: '@Rel/@Docs', state: 'running' }], text: 'Docs: writing the README {progress}' } })
+  check('#83 the result: ✓ edited on the row', /✓ edited/.test(in83('@Rel/@Docs')?.querySelector('.fb')?.textContent || ''), in83('@Rel/@Docs')?.querySelector('.fb')?.outerHTML)
+  rc(in83('@Rel/@Code')); pick('Edit text…')
+  const ed2 = dlg(), t2 = ed2.querySelector('#actEdT')
+  typeIn(t2, '  Code: merged and tagged '); t2.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  const se2 = sentOf('activity_action').at(-1)
+  check('#83 Enter in the line sends (no state chosen → none sent: the line keeps its state); the text trimmed', sentOf('activity_action').length === nA0 + 2 && se2.action === 'edit_text' && se2.args.text === 'Code: merged and tagged' && !('state' in se2.args) && !dlg(), J(se2))
+  rc(in83('@Rel/@Code')); pick('Edit text…'); escK(dlg())
+  check('#83 Escape closes the dialog and sends nothing', !dlg() && sentOf('activity_action').length === nA0 + 2)
+  // ---- the MESSAGE dialog
+  rc(in83('wB')); pick('Message session…')
+  const md = dlg(), ta = md?.querySelector('textarea#actMsgT'), sB = md?.querySelector('[data-dlg="ok"]')
+  check('#84 Message session…: a dialog titled "Message Edit83 about wB" with a focused, empty text box; Send disabled ("Write something…"); it says the session treats it as a request and what the public subject shows',
+    !!md && /Message Edit83 about wB/.test(md.querySelector('h3').textContent) && !!ta && doc.activeElement === ta && ta.value === '' && sB.disabled && /Write something/.test(md.querySelector('.dlg-why').textContent)
+    && /request from you/.test(md.textContent) && /subject \(not encrypted\) names only the path and your first few words/.test(md.textContent) && md.querySelector('.dlg-n').textContent === '0 / 2000', md?.textContent)
+  typeIn(ta, 'y'.repeat(2001))
+  const mLong = sB.disabled && /Too long: 2001 of 2000/.test(md.querySelector('.dlg-why').textContent)
+  typeIn(ta, 'Please also cover the empty-plan case.\nThanks!')
+  check('#84 validation: 2001 characters → disabled "Too long"; a real message → Send enabled', mLong && !sB.disabled)
+  ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  check('#84 a plain Enter in the text box is a newline, not a send', !!dlg() && sentOf('activity_action').length === nA0 + 2)
+  ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))
+  const sm = sentOf('activity_action').at(-1)
+  check('#84 Ctrl+Enter sends {action:"message", host HOST-B (the node\'s owner), path, args:{text} — newlines kept}', sentOf('activity_action').length === nA0 + 3 && sm.action === 'message' && sm.host === 'HOST-B' && sm.path === 'wB' && sm.args.text === 'Please also cover the empty-plan case.\nThanks!' && !dlg(), J(sm))
+  const toasts0 = doc.querySelectorAll('.act-toast').length
+  recv({ type: 'activity_action', ref: sm.ref, result: { ok: true, host: 'HOST-B', action: 'message', path: 'wB', applied: [{ path: 'wB', state: 'running' }], delivered: true, delivery: 'live' } })
+  check('#84 delivered: ✓ sent on the row + a toast "Message sent to Edit83"', /✓ sent/.test(in83('wB')?.querySelector('.fb')?.textContent || '') && [...doc.querySelectorAll('.act-toast')].some(t => t.textContent === 'Message sent to Edit83') && doc.querySelectorAll('.act-toast').length > toasts0)
+  rc(nmRow('Solo83')); pick('Message session…'); const ta2 = dlg().querySelector('textarea'); typeIn(ta2, 'are you still there?'); click(dlg().querySelector('[data-dlg="ok"]'))
+  const sm2 = sentOf('activity_action').at(-1)
+  recv({ type: 'activity_action', ref: sm2.ref, result: { ok: true, host: 'HOST-A', action: 'message', path: '', applied: [{ path: '', state: 'running' }], delivered: false, delivery: 'none', warnings: ['not-delivered'], what: 'not delivered: the session has no inbox (a script-only session) — the message is logged on the node' } })
+  const fbS = nmRow('Solo83')?.querySelector('.fb')
+  check('#84 NOT delivered (a script-only session): the row says "⚠ logged · not delivered: the session has no inbox" (amber, not a ✓) and a toast says so', sm2.path === '' && sm2.session === 'Solo83' && !!fbS && /⚠ logged · not delivered: the session has no inbox/.test(fbS.textContent) && fbS.classList.contains('wn')
+    && [...doc.querySelectorAll('.act-toast')].some(t => /Not delivered: Solo83 has no inbox/.test(t.textContent)), fbS?.outerHTML)
+  rc(in83('wB')); pick('Message session…'); typeIn(dlg().querySelector('textarea'), 'x'); click(dlg().querySelector('[data-dlg="ok"]'))
+  const sm3 = sentOf('activity_action').at(-1)
+  recv({ type: 'activity_action', ref: sm3.ref, result: { ok: false, code: 'owner-unsupported', host: 'HOST-B', what: 'host HOST-B runs a bridge older than 1.70.0' } })
+  check('#84 a refusal shows its code on the row (✗ owner-unsupported)', /✗ owner-unsupported/.test(in83('wB')?.querySelector('.fb')?.textContent || ''))
+  // ---- the log panel: 💬 on a message entry, ✎ on an edit entry
+  click(in83('@Rel/@Docs'))
+  const lq83 = sentOf('activity').pop()
+  recv({ type: 'activity', ref: lq83.ref, result: { ok: true, log: { host: 'HOST-A', entries: [
+    { id: 'm1', ts: NOW - MIN, path: '@Rel/@Docs', text: 'robin via dashboard: Please also cover the empty-plan case. Thanks!', rendered: 'robin via dashboard: Please also cover the empty-plan case. Thanks!', state: 'todo', act: 'message', has_details: true, by: { kind: 'dashboard', user: 'robin', host: 'HOST-A' } },
+    { id: 'm2', ts: NOW - 2 * MIN, path: '@Rel/@Docs', current: true, text: 'Docs: writing (edited by robin via dashboard (HOST-A))', rendered: 'Docs: writing (edited by robin via dashboard (HOST-A))', state: 'running', act: 'edit_text', by: { kind: 'dashboard', user: 'robin', host: 'HOST-A' } }], next_cursor: null } } })
+  const les = [...PANEL.querySelectorAll('.ar.le')]
+  check('#84 / #83 log panel: a message entry is marked 💬 (class msg; its details hold the full text), an edit entry ✎', les.length === 2 && /💬/.test(les[0].querySelector('.msgic')?.textContent || '') && les[0].classList.contains('msg') && /✎/.test(les[1].querySelector('.msgic')?.textContent || '') && !les[1].classList.contains('msg'), les.map(e => e.innerHTML.slice(0, 200)).join(' | '))
+  check('#83 / #84 legend: names Edit text… (✎) and Message session… (💬)', /Edit text…/.test(doc.getElementById('actlegend').textContent) && /Message session…/.test(doc.getElementById('actlegend').textContent) && /✎/.test(doc.getElementById('actlegend').textContent))
+  const css83 = [...doc.querySelectorAll('style')].map(s => s.textContent).join('\n')
+  check('#83 / #84 CSS: the form dialog (inputs, the reason in --bad, the counter), the primary Send / Save button and the amber warning use theme tokens', /\.act-dlg \.act-in \{[^}]*var\(--bg\)[^}]*var\(--fg\)/.test(css83) && /\.act-btn\.primary \{[^}]*var\(--info\)/.test(css83) && /\.ar \.fb\.wn \{[^}]*var\(--warn\)/.test(css83) && /\.act-dlg \.dlg-why \{[^}]*var\(--bad\)/.test(css83))
+} catch (e) { fail++; console.log('FAIL #83/#84 block crashed:', (e && e.stack) || e) }
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close()
 process.exit(fail ? 1 : 0)
