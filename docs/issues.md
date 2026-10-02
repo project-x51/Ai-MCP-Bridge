@@ -6,8 +6,13 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-03, v1.70.0) — read this first after a compact
-**Current version: v1.70.0** (#83 + #84: Edit text… and Message session… on any node from the dashboard — `edit_text` sets a
+## RESUME STATE (updated 2026-10-03, v1.71.0) — read this first after a compact
+**Current version: v1.71.0** (#85: QUESTIONS — `log ask` / `aimb-log --ask … [--choice "A" --choice "B"] [--wait 30m]` posts a question (a
+context whose line carries `question`; state blocked for older hosts), the dashboard answers it (a "?" bubble, click → Answer…
+with the choices / free text; Withdraw…; a "? N" badge on collapsed ancestors), the owner releases waiting scripts (exit 0 / 10 /
+11 / 12 / 13) and tells the session at once (`activity_answer`, the answer only in the body); `expires`, withdraw; code done in a
+worktree for review, NOT committed, NOT deployed; **wire-compatible with 1.66 – 1.70** — format stays v5; a ≤1.70 owner just can't
+be answered from a 1.71 dashboard, `owner-unsupported`). Before that **v1.70.0** (#83 + #84: Edit text… and Message session… on any node from the dashboard — `edit_text` sets a
 node's line for its session, attributed on the line (✎) and in the log, notice `activity_text_edited` (batched); `message`
 logs on the node and delivers to the session at once, notice `activity_message`, "not delivered" for a script-only session;
 code done in a worktree for review, NOT committed, NOT deployed; **wire-compatible with 1.66 – 1.69** — format stays v5, hosts
@@ -31,6 +36,20 @@ tags only where they differ; record / slice format v3; code done, NOT yet deploy
 (#70 step 6a) is committed (`2d78a21`); v1.63.0 is in the working tree for review. The rebuilt tray (`PrepareShutdown()`
 before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
 Everything below is durable; nothing important is only in chat.
+
+**2026-10-03 (v1.71.0):** Built **#85** (see "#85 as built" and architecture.md §13 "Built (v1.71.0)"). A question is a
+CONTEXT whose current line carries `question` {status asked | answered | expired | withdrawn, choices ≤ 8 × 60, free, asked_at,
+expires_at?, answer?, by?, at?} — the line's text is the question (≤ 240, refused when longer); the line STATE follows the status
+(asked = blocked, answered = done, expired / withdrawn = abandoned), which is all a ≤1.70 host shows. `ask` on a new / line-less
+leaf context (or an existing question) makes THAT node the question, anywhere else a child `@?<n>`. Answer (dashboard `answer`
+{choice?, text?}, attributed), withdraw (the asker's `state:"withdrawn"`, the dashboard's `withdraw`, or any abandon / cascade),
+expiry (`expires`, closed by the bridge). Counts as an item in "N of M done" and of the plan above it. Scripts WAIT on the logger
+link (`wait_answer` → one `answer` frame; `--wait`, `--wait-answer`; exit 0 answered · 10 still open · 11 expired · 12 withdrawn ·
+13 gone); the session gets `activity_answer` at once (body.agent names an agent that asked). PEER_HELLO `activity_ask:1` →
+`remote_hosts[].ask`. Snippet: a seventh line (`--ask "…" --choice "A" --choice "B" --wait 30m waits for the answer`); trust sentence in
+the server instructions + the `log` tool. Tests: `test_activity_unit` 849 (+51), `test_dashboard_activity` 285 (+26),
+`test_activity_6c_live` 34 (+1), new `test_activity_ask_live` 37 (+4 mixed against a real 1.70 build: 41/41). Full parallel `npm test` (typecheck included): 2684 checks in 58 files, all green, 5m04s (one earlier run: a load failure in `mesh/test_mesh`, green alone 3/3).
+**Deploy:** any order; nothing to publish (the snippet's seventh line rides `{log_snippet}`, expanded by each host).
 
 **2026-10-03 (v1.70.0):** Built **#83 + #84** (see "#83 as built", "#84 as built" and architecture.md §13 "Built (v1.70.0)").
 Two dashboard actions on any node (a session: each host's own line), through the 6d path to the OWNER: `edit_text` {text,
@@ -228,7 +247,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #85 (questions — it sends through #80's `notifyActivitySession`, as #83 / #84 now do), #86, #87, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #86, #87, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -384,7 +403,7 @@ Robin, 2026-10-03.
   have details or data.
 - Remote entries fetch `details`/`data` on demand (`ACTIVITY_REQ`), not in gossip, to keep slices small.
 
-## #85 — questions as a type of context, answerable from the dashboard  ·  **OPEN (next release)**
+## #85 — questions as a type of context, answerable from the dashboard  ·  **DONE (v1.71.0)**
 Robin, 2026-10-03.
 - **Proposal:** a session or agent can post a QUESTION node (`--ask "<question>"`, optionally `--choices "A" "B"`,
   the tool's `ask`). It shows with a distinct glyph and an "awaiting answer" state, and counts as blocked for its plan.
@@ -394,6 +413,77 @@ Robin, 2026-10-03.
 - **Hook (built in v1.68.0):** `notifyActivitySession(ident, {verb:"activity_answer", subject, body}, {now:true})`.
 - **To decide:** timeouts, who may answer (any viewer, or only the project's user), and whether an agent's question
   goes to its orchestrator first.
+- **Decided (2026-10-03, Bridget's defaults):** any dashboard viewer answers (attributed like every action); no timeout by
+  default, an optional `expires` marks it expired; an agent's question is answered like any other and the answer goes to its
+  SESSION (the orchestrator relays it); a waiting agent (no inbox) uses the script's `--wait`.
+
+**#85 as built (v1.71.0, 2026-10-03)** — see README "Questions" and architecture.md §13 "Built (v1.71.0)".
+- **The model (chosen: the question rides the LINE).** A question is a CONTEXT whose current line carries `question`
+  {status, choices, free, asked_at, expires_at?, answer?{choice?, text?}, by?, at?}; the line's text is the question. Why the
+  line and not a new node kind: the line already travels everywhere (records, cp / cf, gossip, the replay, the boards) and #83
+  proved the pattern (`line_by`), so no new record / slice format; a ≤1.70 host simply drops the field and — because the line's
+  STATE follows the status (asked = blocked, answered = done, expired / withdrawn = abandoned) — shows an ordinary blocked /
+  done / abandoned context whose text is the question. Agents never carry one.
+- **Where it lands (chosen: both, by a simple rule).** `ask` on a CONTEXT that is new, line-less with no children (not a plan
+  item), or already a question → that node; on anything else (an agent, the session, a context with a line or children, a
+  plan item) → a new child `@?1`, `@?2` … (1 + the highest `?<digits>` sibling). So an agent asks with its own `--path` and gets
+  `<agent>/@?1`, while `--path "lead/@db" --ask …` names the question. The result's `path` names it.
+- **Asking:** the tool's `ask` + `choices` (≤ 8, each ≤ 60, distinct) + `free` (free text allowed; default only without
+  choices) + `expires` (> 0, ≤ 7 days) + details / data; the script's `--ask "…" [--choice "A" --choice "B" …] [--free] [--expires 2h]` — ONE choice per `--choice`
+  (review fix: an earlier `--choices "A" "B"` took every following argument, the positional footgun #79 removed; it was dropped
+  before release, no alias); like `--item`, a `--choice` value that looks like status text or is a flag is refused.
+  The question ≤ 240 characters — REFUSED (`question-too-long`) rather than cut: a cut question is no question. No text / state
+  / bar / plan / position beside it, always logged (`bad-ask`). The tool form returns at once.
+- **States:** asked → answered (the dashboard's `answer` {choice?, text?}: a choice matched to its canonical spelling, text only
+  when free, ≤ 1000, newlines kept) | expired (the bridge, at `expires_at`: "expired — nobody answered within 2h", `by:"bridge"`)
+  | withdrawn. **Withdraw (chosen: `--state withdrawn`, not re-asking):** the asker sends `state:"withdrawn"` (optional text =
+  a note: "withdrawn: <note>"); the dashboard has **Withdraw question…**; any abandon of an open question (an ancestor's
+  cascade, Abandon plan, a 1.70 dashboard's Abandon…) withdraws it too. Asking again on a CLOSED question starts a new one
+  there; on an OPEN one it is refused `question-open` (withdraw it first) — so re-asking never silently replaces a question.
+  Other lines on a question: `question-node` (a log-only message is fine); `edit_text` too.
+- **Rollup:** a question is an ITEM in "N of M done" (open = remaining, answered = done, expired / withdrawn = skipped); under a
+  node holding plan items it is one of that plan's items — an open question keeps the plan open (and protected from expiry).
+- **Answering on the dashboard:** a speech-bubble "?" (fuchsia while open; green ✓ answered; dashed grey expired / withdrawn),
+  an "awaiting answer" pill and a tinted row; an answered question shows "→ <answer>" after it. Click an open question (or
+  right-click → **Answer…**): the shared `actFormDlg` with the question, its choices as a radio group of buttons, a text box when
+  free, Answer disabled until something is picked / typed (≤ 1000). No Edit text… / Abandon… on a question.
+- **The owner applies it** (forwarded as `ACTIVITY_ACT` for another host's node): an entry "answered by robin via dashboard
+  (HOST): SQLite — smaller to ship" (`act:"answer"`), the line done with the answer, then it releases every waiting script and
+  sends **`activity_answer`** at once (`now:true`): subject (PUBLIC) "robin answered @Next release/@#85/ask-85/@?1: Postgres or
+  SQLite for the cache?" — the question's first words, never the answer; body {action, status, path, host, question, choices,
+  free, answer, by, entry_id, session, project, agent, asked_at, ts}. A dashboard withdrawal ("robin withdrew …") and an expiry
+  ("question expired …") send the same verb. The result says `released` and `delivery`; "not delivered" is warned only when
+  nobody got it.
+- **Waiting:** `aimb-log --ask … --wait 30m` asks, then waits on the SAME logger link: `{type:"wait_answer", ref, path,
+  timeout_ms}` → one `{type:"answer", ref, result}` when the question closes or the time (≤ 24 h) runs out — a long poll on the
+  gateway, no board polling; a dropped link is re-dialled and the wait resumed. `--wait-answer --path <q> [--wait 30m]` waits for
+  an existing one. One JSON line {ok, outcome, path, question, choices, answer?, by?, at?, waited_ms, asked?}; **exit 0 answered ·
+  10 the wait ran out (still open) · 11 expired · 12 withdrawn · 13 gone** (4 / 64 as always).
+- **Attention badge** (deferred from #82): "? N" on a collapsed row with open questions below it, always on the session and
+  project rows, and "? N open questions" in the section tag; rows keep their order.
+- **Capability:** PEER_HELLO `activity_ask:1` → `remote_hosts[].ask`; answer / withdraw forwarded only to such owners (else
+  `owner-unsupported`); the menu hides them for older hosts. A 1.71 follower / script refuses the question fields, `state
+  withdrawn` and `--wait` against a ≤1.70 gateway (`gateway-unsupported`). `AI_BRIDGE_TEST_NO_ACTIVITY_ASK=1` (tests only).
+- **Snippet + trust:** a seventh `{log_snippet}` line `- Need a decision? --ask "…" --choice "A" --choice "B" --wait 30m waits for the
+  answer (exit 0 = answered).` and a `{log_tool_hint}` line (ask + choices, the answer as activity_answer), each ≤ 110
+  characters (`test_activity_6c_live` pins 8 lines now). The server instructions and the `log` tool: an `activity_answer` is the
+  dashboard viewer's answer to a question YOUR session asked — you may proceed on it within what your user already approved.
+- **Tests:** unit (parsing + limits, where a question lands, every transition and refusal, cascade / abandon plan / a 1.70
+  abandon, expiry, rollup + plans, notices, the waiter's view, views, gossip incl. junk, records + cf + a 1.70-shaped record, 4
+  seeded replay == apply runs), dashboard (glyphs, checkAnswer, the menu per host, the row, the badge, the dialog — choices, free
+  text, sending, results — withdraw, a delta), live `test_activity_ask_live` (tool ask, answer → notice at once, script `--wait`,
+  an agent's question to its session, federated answers incl. a script waiting on the other host, expiry, withdraw (asker +
+  dashboard), timeout, gone, script usage, an older owner refused, the trust wording; mixed vs a real 1.70 build: 41/41; review fix: `--choice` one per flag).
+  Full parallel `npm test` (typecheck included): 2684 checks in 58 files, all green, 5m04s (an earlier run had one load failure in `mesh/test_mesh` — "Connection closed" from a bridge child; 22/22 alone three times).
+
+**Questions after #85 (not decided):**
+- **Several askers, one question?** Each ask is its own node; two agents asking the same thing make two rows. Fine, or
+  de-duplicate by text under one parent?
+- **The answer is realm-visible** (it is on the board for every dashboard and the `activity` tool) — only the notice subject
+  keeps it out. Should a question be able to ask for a private answer (body only, not on the board)?
+- **Answering from the phone / a notification:** the badge shows there is something to answer; a push (the doorbell, a
+  topic) to the PERSON when a question is asked is not built.
+- **A per-person identity** (#84's question) matters more now: an answer is attributed to the bridge's OS user.
 
 ## #84 — message the owning session about a context from the dashboard  ·  **DONE (v1.70.0)**
 Robin, 2026-10-03.

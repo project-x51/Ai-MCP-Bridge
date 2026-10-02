@@ -62,7 +62,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
     status to this host's activity board without registering (one report, or `--stream` NDJSON). It imports
     `lib/activity.js` to validate locally, so it runs from inside the bridge's `src/`. v1.62.0: `--path` (the node
     tree) and `--batch <file|->`; v1.63.0: `--plan "A" "B" …` and `--done`; v1.64.0: `--token-file <path>` (#75); v1.69.0:
-    `--before` / `--after` / `--first` / `--last` and `--move` / `--to` (#82). See "Log / activity" below.
+    `--before` / `--after` / `--first` / `--last` and `--move` / `--to` (#82); v1.71.0: `--ask` / `--choice` / `--free` /
+    `--expires` / `--wait` and `--wait-answer` (#85: a question, and waiting for its answer). See "Log / activity" below.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -168,7 +169,13 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   session (logged with details; `activity_message` at once — subject, body, entry id; live, parked, or "not delivered" for a
   script-only session), both directions across two hosts, refusals over the wire, an owner without `activity_msg` refused
   `owner-unsupported` before forwarding, the trust wording (34; + 3 with `AIMB_TEST_OLD_BRIDGE=<an older bridge.mjs>`: a real
-  1.69 owner — boards both ways, its refusal, its dashboard acting on a 1.70 node). Tests run in
+  1.69 owner — boards both ways, its refusal, its dashboard acting on a 1.70 node); `test_activity_ask_live.mjs` — #85:
+  questions (the tool's ask; an answer from the dashboard → `activity_answer` at once, the answer never in the subject; a
+  script's `--ask … --wait` released by the answer; an agent's question to its session; answers forwarded to another host's
+  owner, incl. a script waiting there; expiry; withdraw by the asker and the dashboard; a wait that runs out; a question that
+  goes; script usage; an owner without `activity_ask` refused `owner-unsupported`; the trust wording; `--choice` one per flag, refusing status text / a flag) (37; + 4 with
+  `AIMB_TEST_OLD_BRIDGE`: a real 1.70 host — it shows a question as a blocked context, its refusal, its dashboard's Abandon…
+  withdrawing a 1.71 question, a 1.71 script's `--ask` against it `gateway-unsupported`). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -538,7 +545,7 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82; v1.70.0 #83 / #84)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82; v1.70.0 #83 / #84; v1.71.0 #85)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
@@ -898,7 +905,8 @@ carry `plan_end_how`: `all-done`, `done` (marked complete) or `abandoned`.
 | Agent / session holding open plan items | Abandon open plan items… (`abandon_plan`: only its OPEN items — todo / running / blocked — of the plans it holds without crossing another agent; those plans end; the agent or session itself **keeps running**) |
 | Agent / session that is stale or gone | Mark finished — done… / — failed… (`finish`, args `state`) |
 | Agent / session that is stale, gone or finished | Dismiss from the board… (`dismiss`) — never when its subtree holds part of an open plan (`has-open-items`) |
-| Any node / a session's own line (v1.70.0, a 1.70+ owner) | Edit text… (`edit_text`) · Message session… (`message`) — see "Edit a line, message the session" below |
+| Any node / a session's own line (v1.70.0, a 1.70+ owner) | Edit text… (`edit_text`) · Message session… (`message`) — see "Edit a line, message the session" below (not on a question: its line is the question) |
+| An OPEN question (v1.71.0, a 1.71+ owner) | Answer… (`answer`, args `{choice?, text?}`) · Withdraw question… (`withdraw`) — see "Questions" below; a click on the row opens Answer… too |
 | Any node / session | Copy path (a session: Copy session name) · Copy its aimb-log command · Pin / Unpin · Hide / Unhide |
 | A log entry (in the log panel) | Copy entry id · Copy path |
 
@@ -1195,6 +1203,86 @@ only for such hosts (`remote_hosts[].msg`; this gateway's own nodes always). An 
 and its actions on a 1.70 node work as before. `AI_BRIDGE_TEST_NO_ACTIVITY_MSG=1` (tests only) makes a hub leave the flag
 out, to stand in for a 1.69 owner.
 
+### Questions — ask, answer from the dashboard, wait for the answer (v1.71.0, #85)
+A session or one of its agents asks the person watching the dashboard a QUESTION, and gets the answer back — as a message,
+or by waiting for it in a script.
+
+```bash
+# an agent (a script): ask, then WAIT for the answer on the same connection (≤ 24h)
+node "<abs>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --path "@Next release/@#85/ask-85" \
+     --ask "Postgres or SQLite for the cache?" --choice "Postgres" --choice "SQLite" --free --expires 2h --wait 30m
+# → {"ok":true,"outcome":"answered","path":"…/ask-85/@?1","question":"Postgres or SQLite for the cache?","choices":["Postgres","SQLite"],
+#    "free":true,"answer":{"choice":"SQLite","text":"smaller to ship"},"by":{"user":"robin","host":"ROBIN-Z790"},"at":…,"waited_ms":41250,
+#    "asked":{"id":"act_…","path":"…/ask-85/@?1"}}          exit 0
+# wait for an existing question (default 30m):   --wait-answer --path "…/ask-85/@?1" [--wait 30m]
+# withdraw your own question:                     --path "…/ask-85/@?1" --state withdrawn [--text "decided myself"]
+```
+The tool form: `log({ as, secret, path:"ask-85", ask:"Postgres or SQLite?", choices:["Postgres","SQLite"], free?, expires?,
+details?, data? })` — it returns AT ONCE with the question's `path` and `question:{status:"asked", …}`; the answer arrives as
+an `activity_answer` message.
+
+**The model.** A question is a **context whose current line carries `question`** — `{status, choices, free, asked_at,
+expires_at?, answer?{choice?, text?}, by?, at?}`; the line's text IS the question. Asked on a context that is new, has no line
+and no children (and isn't a plan item), or is already a question, THAT node becomes it (`--path "lead/@db" --ask …` →
+`lead/@db`); asked anywhere else — an agent, the session, a context with a line or children, a plan item — it becomes a new
+child `@?1`, `@?2` … (`--path ask-85` → `ask-85/@?1`). The result's `path` names it. Questions ride the line everywhere the
+line goes (records, checkpoints, the carry-forward, gossip, the restart replay), so they need no new record or slice format.
+
+| Status | How | The line's state (what a ≤1.70 host shows) | In "N of M done" |
+|---|---|---|---|
+| `asked` (awaiting an answer) | `ask` | `blocked` | remaining |
+| `answered` | the dashboard's `answer` (a choice and / or free text, attributed) | `done` | done |
+| `expired` | `expires` ran out — the bridge closes it (`by:"bridge"`, "expired — nobody answered within 2h") | `abandoned` | skipped |
+| `withdrawn` | the asker's `state:"withdrawn"`, the dashboard's `withdraw`, or any abandon of it (an ancestor's cascade, Abandon plan, a ≤1.70 dashboard's Abandon…) | `abandoned` | skipped |
+
+- **Limits:** the question ≤ 240 characters (refused `question-too-long`, never cut — put background in `details`); ≤ 8
+  choices, each ≤ 60 characters, distinct (`bad-choices`); free text allowed by default only without choices (`free:true` /
+  `--free` allows both); a free-text answer ≤ 1000 characters (`answer-too-long`); `expires` > 0 and ≤ 7 days (`bad-expires`).
+  `ask` takes no `text` / `state` / bar / plan / position, and is always logged (`bad-ask`).
+- **Rollup:** a question counts as an ITEM in "N of M done" — of its parent, and of the plan above it when its parent holds
+  plan items (an open question keeps that plan open; answered counts as done). A plain report can't overwrite a question's
+  line (`question-node`); a log-only message to it (no `@~`) is fine. Asking again on a closed question starts a new one
+  there; on an open one → `question-open` (withdraw it first).
+- **Answering (the dashboard).** A question shows a speech-bubble **"?"** (fuchsia while open, green ✓ answered, greyed
+  expired / withdrawn), an "awaiting answer" pill and a tinted row; an answered one shows its answer after the question
+  ("→ SQLite — smaller to ship"). **Click an open question** (or right-click → **Answer…**) for the dialog: the question, its
+  choices as buttons (a radio group), a text box when free text is allowed, Answer disabled until something is picked / typed.
+  **Withdraw question…** asks first. Neither offers Edit text… or Abandon… on a question.
+- **The owner applies it** (the 6d path, `ACTIVITY_ACT` for another host's node): an entry `answered by robin via dashboard
+  (ROBIN-Z790): SQLite — smaller to ship` (`act:"answer"`), the line → done with the answer on it, then (1) every script
+  WAITING on it is released and (2) the session is told AT ONCE (`now:true`), verb **`activity_answer`**:
+  subject (PUBLIC) `robin answered @Next release/@#85/ask-85/@?1: Postgres or SQLite for the cache?` — who, the path and the
+  question's first words, **never the answer**; body (encrypted):
+  ```json
+  { "action": "answer", "status": "answered", "path": "…/ask-85/@?1", "host": "ROBIN-Z790", "question": "Postgres or SQLite for the cache?",
+    "choices": ["Postgres", "SQLite"], "free": true, "answer": { "choice": "SQLite", "text": "smaller to ship" },
+    "by": { "user": "robin", "host": "ROBIN-Z790" }, "entry_id": "act_…", "session": "Bridget", "project": "AIMB",
+    "agent": "@Next release/@#85/ask-85", "asked_at": 1790958497365, "ts": 1790958498854 }
+  ```
+  `agent` = the asking agent's path (null = the session itself): an AGENT's question goes to its SESSION — the orchestrator
+  relays it (a subagent usually has no inbox; it waits with `--wait` instead). A withdrawal from the dashboard sends the
+  same verb (`robin withdrew …`, status `withdrawn`), an expiry too (`question expired …`, `by:"bridge"`). The action's result
+  says `released` (waiting scripts) and `delivery` (live / parked / none); "not delivered" is warned only when nobody got it.
+- **Waiting (`--wait`, `--wait-answer`).** The script sends `{type:"wait_answer", ref, path, timeout_ms}` on its logger
+  connection — a long poll on the gateway (no board polling) — and gets ONE `{type:"answer", ref, result}` when the question
+  closes or the time runs out. A dropped link is re-dialled and the wait resumed. **Exit codes: 0 answered · 10 the wait ran
+  out (the question stays open) · 11 expired · 12 withdrawn · 13 gone** (it left the board, e.g. its agent was dismissed) ·
+  4 / 64 as always (`not-a-question`, `gateway-unsupported` … / usage).
+- **Attention badge.** A collapsed row with open questions below it shows **"? N"**; the session and project rows always show
+  their count, and the section header says "? N open questions". Rows keep their order.
+
+**Trust.** An `activity_answer` is the dashboard viewer's answer to a question the session ITSELF asked: the server
+instructions and the `log` tool say the session may proceed on it within what its user already approved (it doesn't widen
+that; expired / withdrawn = no answer).
+
+**Compatibility (1.66 – 1.70 hosts).** The format stays **v5**: `question` is an optional field on a line (records, cp / cf,
+gossip) that a 1.70 host drops — it shows an open question as an ordinary **blocked** context whose text is the question, an
+answered one as done, a closed one as abandoned. A 1.71 hub declares **`activity_ask:1`** in PEER_HELLO; a 1.71 gateway
+forwards `answer` / `withdraw` only to an owner that declared it (else `owner-unsupported`, "… older than 1.71.0 …"), and its
+dashboard offers Answer… / Withdraw only for such hosts (`remote_hosts[].ask`). A 1.70 dashboard's Abandon… on a 1.71 question
+withdraws it. A 1.71 follower or script refuses `ask` / `choices` / `free` / `expires` / `state withdrawn` / `--wait` against a
+≤1.70 gateway (`gateway-unsupported`; it would drop them). `AI_BRIDGE_TEST_NO_ACTIVITY_ASK=1` (tests only) leaves the flag out.
+
 ### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
 Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
 (one-hop, like the roster slices; followers hold no board and forward their reads to the gateway as before, so a
@@ -1336,7 +1424,10 @@ like status text is `bad-plan` ("pass text with --text"). Programs keep using JS
 --done`. **v1.69.0 (#82):** `--before "Y"` / `--after "Y"` / `--first` / `--last` place new `--item`s there (else they
 REORDER the `--path` node: `--path "@Plan/@~X" --before "Y"`), and `--move "<node>" --to "<new parent>"` re-parents a
 node with its subtree (relative to `--path`; see "The plan workflow" above). Against a ≤1.68 gateway these flags are
-refused with `gateway-unsupported` (exit 4) — that gateway would ignore them. **`--batch <items.json|->`** (v1.62.0) sends a JSON array of items (the tool's item fields + `ref`; ≤64, ≤64 KB) in ONE
+refused with `gateway-unsupported` (exit 4) — that gateway would ignore them. **v1.71.0 (#85):** `--ask "<question>"
+[--choice "A" --choice "B" …] [--free] [--expires 2h] [--wait 30m]` posts a question (ONE choice per `--choice`, repeatable,
+like `--item` — a value that looks like status text or is a flag is refused; `--wait` waits for the answer), `--wait-answer --path <question> [--wait 30m]` waits for an existing
+one, `--state withdrawn` withdraws yours — see "Questions" above (exit codes 0 / 10 / 11 / 12 / 13 for a wait). **`--batch <items.json|->`** (v1.62.0) sends a JSON array of items (the tool's item fields + `ref`; ≤64, ≤64 KB) in ONE
 call — `--agent` / `--path` / `--ctx` / `--no-log` are the defaults (v1.63.0: an item's own path is relative to them; a
 leading `/` = absolute) — and prints ONE line `{ok, results, applied,
 failed}`: exit 0 when every item applied, 4 when the bridge refused the call or any item failed, 64 for a bad file or
@@ -1349,7 +1440,8 @@ locally with the bridge's own parser first, so a bad one costs no connection.
 - **Exit codes** (doorbell conventions): **0** ok · **4** the bridge said no or the transport failed (`link-error` = no
   bridge, `unauthorized`, `session-user-mismatch`, `gateway-unsupported` = a pre-1.59 gateway, `timeout`, …) · **64**
   bad usage (a missing `--session`/`--project`, an unknown flag, bad `--data` JSON, a report the bridge would reject
-  such as `bad-state` / `bad-text`, `token-in-argv`, `no-token`).
+  such as `bad-state` / `bad-text`, `token-in-argv`, `no-token`). v1.71.0 (#85) — a wait (`--wait` / `--wait-answer`):
+  **0** answered · **10** the wait ran out (still open) · **11** expired · **12** withdrawn · **13** gone.
 - **Identity:** realm + project + user + session — `--session` and `--project` are required, `--user` defaults to
   `AI_BRIDGE_USER`, else the OS login user (`os.userInfo().username`); the realm is `AI_BRIDGE_REALM`, else
   `config.json`'s `realm`, else `default` (the bridge's rule; the gateway refuses another realm). A script-only session

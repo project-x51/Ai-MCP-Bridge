@@ -35,6 +35,18 @@
 // session root), at the end of its kind there unless placed; its history follows it. --state abandoned works on any context and
 // cascades to the open contexts / items under it. A gateway older than 1.69.0 would ignore these flags: refused (gateway-unsupported).
 //
+// v1.71.0 (#85): QUESTIONS. --ask "<question>" [--choice "A" --choice "B" …] [--free] [--expires 2h] posts a question for the
+// dashboard viewer to answer, under --path (the addressed context itself when it is new / line-less / already a question, else a
+// new child @?1, @?2 …; the result's `path` names it). ONE choice per --choice, repeatable, in order (≤ 8, each ≤ 60 characters;
+// like --item, a value that looks like status text or is a flag is refused — no argument's meaning depends on its position, the
+// #79 rule); --free also allows free text beside them (without choices free text is the only answer). It returns at once —
+// unless --wait <dur> (≤ 24h): then it WAITS on the same connection (a long poll on the gateway, no board polling) until the
+// question is answered, expired or withdrawn, or the wait runs out, and prints ONE JSON line { ok, outcome, path, question,
+// choices, answer?{choice?, text?}, by?, at?, waited_ms, asked? } — exit 0 answered, 10 the wait ran out (the question stays
+// open), 11 expired, 12 withdrawn, 13 gone (it left the board); 4 / 64 as always. --wait-answer --path <question> [--wait 30m]
+// waits for an existing question (default 30m). A dropped link is re-dialled (backoff) and the wait resumed until it runs out.
+// Withdraw your question: --path <question> --state withdrawn [--text "<note>"]. A gateway older than 1.71.0: gateway-unsupported.
+//
 // Usage (one report):
 //   node tools/aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path p] [--ctx "@~Ctx"] [--state S | --done]
 //        [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."]
@@ -71,9 +83,11 @@
 //
 // Exit codes (doorbell conventions): 0 ok (stream: stdin EOF) · 4 the bridge said no / transport error (no bridge, link
 // lost, timeout, a pre-1.59 gateway) · 64 bad usage (a missing flag, bad JSON, a report the bridge would reject).
+// #85 --wait / --wait-answer: 0 answered · 10 the wait ran out (still open) · 11 expired · 12 withdrawn · 13 gone.
 // stdout is ONE JSON line (the bridge's `log` result, or {ok:false, code, what}); usage text goes to stderr.
 // Protocol: hello {type:"hello", kind:"logger", token, ident:{session, project, user, realm}} → {type:"welcome", logger:true,
-// bridge_version, ident} | {type:"error", code, what}; then {type:"log", ref, input} → {type:"logged", ref, result}.
+// bridge_version, ident} | {type:"error", code, what}; then {type:"log", ref, input} → {type:"logged", ref, result}; #85:
+// {type:"wait_answer", ref, path, timeout_ms} → {type:"answer", ref, result} (one, when the question closes or the time runs out).
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -81,14 +95,14 @@ import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
-import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS, usesPlan82 } from '../lib/activity.js'
+import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS, usesPlan82, usesAsk, parseDuration } from '../lib/activity.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …] [--before "Y" | --after "Y" | --first | --last]\n       aimb-log.mjs --session <name> --project <P> [--path base] --move "<node>" --to "<new parent>" [--before "Y" | --after "Y" | --first | --last]   (re-parent a node + its subtree; "/" = the session root)\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
+const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …] [--before "Y" | --after "Y" | --first | --last]\n       aimb-log.mjs --session <name> --project <P> [--path p] --ask "<question>" [--choice "A" --choice "B" …] [--free] [--expires 2h] [--details "..."] [--wait 30m]   (a question; --wait = wait for the answer: exit 0 answered, 10 still open, 11 expired, 12 withdrawn, 13 gone)\n       aimb-log.mjs --session <name> --project <P> --wait-answer --path <question> [--wait 30m]   (wait for an existing question\'s answer)\n       aimb-log.mjs --session <name> --project <P> [--path base] --move "<node>" --to "<new parent>" [--before "Y" | --after "Y" | --first | --last]   (re-parent a node + its subtree; "/" = the session root)\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
 const LOG_FIELDS = MESSAGE_FIELDS   // v1.62.0: + path
 const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url', 'token-file', 'text',
-  'move', 'to', 'before', 'after'])   // v1.64.0: + token-file (#75); v1.66.0: + text (#79); v1.69.0: + move / to / before / after (#82)
-const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done', 'first', 'last'])   // v1.63.0: + done (= --state done); v1.69.0: + first / last (#82)
+  'move', 'to', 'before', 'after', 'ask', 'expires', 'wait'])   // v1.64.0: + token-file (#75); v1.66.0: + text (#79); v1.69.0: + move / to / before / after (#82); v1.71.0: + ask / expires / wait (#85)
+const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done', 'first', 'last', 'free', 'wait-answer'])   // v1.63.0: + done (= --state done); v1.69.0: + first / last (#82); v1.71.0: + free / wait-answer (#85)
 const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'stream', 'ws-port', 'url', 'token-file'])
 const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'batch', 'ws-port', 'url', 'token-file'])
 const num = (v, d) => (Number(v) > 0 ? Number(v) : d)
@@ -110,7 +124,7 @@ function usage(code, what, extra) { console.error(USAGE); finish(64, { ok: false
 // #79 (v1.66.0): a --plan name that looks like STATUS TEXT — "@~…" (a current line), "@ctx words" (a context message), or a
 // — is refused with bad-plan saying so ("@Spec" alone stays a valid name: one leading @ is dropped)
 const looksLikeText = n => { const s = String(n).trim(); return s.startsWith('@~') || (s.startsWith('@') && /\s/.test(s)) }
-const isFlag = s => { const m = /^--([A-Za-z-]+)(=|$)/.exec(s); return !!m && (VALUE_FLAGS.has(m[1].toLowerCase()) || BOOL_FLAGS.has(m[1].toLowerCase()) || ['plan', 'item', 'token'].includes(m[1].toLowerCase())) }
+const isFlag = s => { const m = /^--([A-Za-z-]+)(=|$)/.exec(s); return !!m && (VALUE_FLAGS.has(m[1].toLowerCase()) || BOOL_FLAGS.has(m[1].toLowerCase()) || ['plan', 'item', 'token', 'choice'].includes(m[1].toLowerCase())) }
 const flags = {}, words = []
 {
   const argv = process.argv.slice(2)
@@ -135,6 +149,12 @@ const flags = {}, words = []
       const txt = names.find(looksLikeText)   // #79: --plan swallows every following argument, so trailing status text became an item
       if (txt) { err = ['bad-plan', `"${txt.length > 60 ? txt.slice(0, 57) + '…' : txt}" looks like status text — put text before --plan: "<text>" --plan "A" "B"`]; break }
       flags.plan = (flags.plan || []).concat(names); continue
+    }
+    if (name === 'choice') {   // v1.71.0 (#85): ONE choice per --choice, repeatable, in command-line order (as --item: never positional)
+      const v = eq > 0 ? a.slice(eq + 1) : argv[i + 1]
+      if (eq < 0) { if (v === undefined || v.startsWith('--')) { err = ['usage', '--choice needs a value: --choice "A" --choice "B"']; break } i++ }
+      if (looksLikeText(v)) { err = ['bad-choices', `--choice "${v.length > 60 ? v.slice(0, 57) + '…' : v}" looks like status text — the question goes in --ask "<question>"`]; break }
+      flags.choices = (flags.choices || []).concat([v]); continue
     }
     if (BOOL_FLAGS.has(name)) { if (eq > 0) err = ['usage', `--${name} takes no value`]; else flags[name] = true; continue }
     if (!VALUE_FLAGS.has(name)) { err = ['usage', `unknown flag --${name}`]; break }
@@ -179,6 +199,7 @@ if (flags.path != null) defaults.path = flags.path
 if (flags.ctx != null) defaults.context = flags.ctx
 if (flags['no-log']) defaults.log = false
 let oneShot = null
+let WAIT = /** @type {{ ms: number, path: string|null }|null} */ (null)   // v1.71.0 (#85): wait for an answer (path = an existing question; null = the one --ask posts)
 // a batch (6a): the items + the command line's defaults, checked locally (bounds, JSON) — each item is answered by the bridge
 function batchInput(items) {
   if (!Array.isArray(items)) return { err: { code: 'bad-batch', what: 'a batch is a JSON array of items' } }
@@ -209,6 +230,10 @@ if (!exiting) {
     for (const [f, k] of [['state', 'state'], ['progress', 'progress'], ['eta', 'eta'], ['stale-after', 'stale_after'], ['details', 'details']]) if (flags[f] != null) input[k] = flags[f]
     if (flags.plan) input.plan = flags.plan                                   // v1.63.0 (#70 6b)
     for (const k of ['move', 'to', 'before', 'after']) if (flags[k] != null) input[k] = flags[k]   // v1.69.0 (#82): move / re-parent; place before / after a sibling
+    if (flags.ask != null) input.ask = flags.ask                              // v1.71.0 (#85): a question
+    if (flags.choices) input.choices = flags.choices
+    if (flags.free) input.free = true
+    if (flags.expires != null) input.expires = flags.expires
     if (flags.first && flags.last) usage('usage', '--first and --last are exclusive')
     else if (flags.first || flags.last) input.position = flags.first ? 'first' : 'last'
     if (exiting) { /* usage printed */ } else if (flags.done && flags.state != null) usage('usage', '--done and --state are exclusive (--done = --state done)')
@@ -220,7 +245,19 @@ if (!exiting) {
       try { raw = fs.readFileSync(String(flags['data-file']), 'utf8') } catch (e) { usage('bad-data', `--data-file unreadable: ${e.code || e.message}`) }
       if (raw != null) { try { input.data = JSON.parse(raw.replace(/^﻿/, '')) } catch (e) { usage('bad-data', `--data-file is not JSON: ${e.message}`) } }
     }
-    if (!exiting) {
+    // v1.71.0 (#85): --wait (with --ask) / --wait-answer (an existing question): how long to wait for the answer
+    if (!exiting && (flags.wait != null || flags['wait-answer'])) {
+      const ms = flags.wait != null ? parseDuration(flags.wait) : 30 * 60000
+      if (!Number.isFinite(ms) || ms <= 0 || ms > 24 * 3600000) usage('usage', '--wait takes a duration > 0 and ≤ 24h, e.g. 30m or 2h')
+      else if (flags['wait-answer']) {
+        const extra = Object.keys(flags).filter(k => !['session', 'project', 'user', 'agent', 'path', 'ws-port', 'url', 'token-file', 'wait', 'wait-answer'].includes(k))
+        if (extra.length || words.length) usage('usage', `--wait-answer waits for an existing question (--path <its path>) — not --${extra.join(' / --') || 'text'}`)
+        else if (flags.path == null && flags.agent == null) usage('usage', '--wait-answer needs --path <the question\'s path> (the path its --ask returned)')
+        else WAIT = { ms, path: [flags.agent, flags.path].filter(x => x != null).map(x => String(x).trim().replace(/^\/+|\/+$/g, '')).filter(Boolean).join('/') }
+      } else if (flags.ask == null) usage('usage', '--wait waits for the answer to a question: use it with --ask "…" (or --wait-answer --path <question>)')
+      else WAIT = { ms, path: null }
+    }
+    if (!exiting && !flags['wait-answer']) {   // --wait-answer sends no report
       const p = parseMessage(input, { now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset() })
       if (!p.ok) usage(p.code || 'bad-input', p.what || 'invalid report')
       else oneShot = input
@@ -235,6 +272,9 @@ const unsupported = m => ({ ok: false, code: 'gateway-unsupported', what: `the g
 // never happens) — refuse up front instead
 const verLt = (a, b) => { const x = String(a || '0').split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); return false }
 const plan82Unsupported = m => ({ ok: false, code: 'gateway-unsupported', what: `the gateway on ${URL_} runs bridge ${m.bridge_version || '?'}; --move / --to / --before / --after / --first / --last need 1.69.0+ on this host's gateway (restart it on the new version)` })
+// v1.71.0 (#85): a ≤1.70 gateway drops --ask / --choice / --free / --expires (and refuses --state withdrawn); it can't wait either
+const askUnsupported = m => ({ ok: false, code: 'gateway-unsupported', what: `the gateway on ${URL_} runs bridge ${m.bridge_version || '?'}; questions (--ask / --choice / --free / --expires / --wait / --wait-answer, --state withdrawn) need 1.71.0+ on this host's gateway (restart it on the new version)` })
+const EXIT_OF = { answered: 0, timeout: 10, expired: 11, withdrawn: 12, gone: 13 }   // #85: the wait's outcome → exit code
 
 // ---- a batch: read the array (file or stdin), check it locally, then ONE call like a one-shot (exit 0 only when every item applied)
 async function readBatch() {
@@ -252,12 +292,13 @@ async function readBatch() {
 }
 if (!exiting && BATCH) readBatch()
 else if (!exiting && oneShot) sendOne()
+else if (!exiting && WAIT && WAIT.path) waitAnswer(WAIT.path, Date.now() + WAIT.ms, null)
 function sendOne() {
   // ONE report (or one batch): connect → hello → welcome → log → logged → print → exit
   const ws = new WebSocket(URL_)
-  let welcomed = false
+  let welcomed = false, handedOff = false   // #85: handedOff = the link now serves the wait (waitAnswer owns it)
   const timer = setTimeout(() => { finish(4, { ok: false, code: 'timeout', what: `no answer from ${URL_} within ${TIMEOUT_MS}ms` }); try { ws.terminate() } catch { } }, TIMEOUT_MS)
-  const done = (code, obj) => { clearTimeout(timer); try { ws.close() } catch { } finish(code, obj) }
+  const done = (code, obj) => { if (handedOff) return; clearTimeout(timer); try { ws.close() } catch { } finish(code, obj) }
   ws.on('open', () => hello(ws))
   ws.on('message', raw => {
     let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
@@ -265,12 +306,64 @@ function sendOne() {
       welcomed = true
       if (!m.logger) return done(4, unsupported(m))   // a pre-1.59 gateway took the hello for a page: close at once
       if (usesPlan82(oneShot) && verLt(m.bridge_version, '1.69.0')) return done(4, plan82Unsupported(m))   // #82: it would silently ignore the fields
+      if ((usesAsk(oneShot) || WAIT) && verLt(m.bridge_version, '1.71.0')) return done(4, askUnsupported(m))   // #85: it would drop the question fields
       ws.send(JSON.stringify({ type: 'log', ref: 1, input: oneShot }))
-    } else if (m.type === 'logged') done(m.result && m.result.ok && !(m.result.failed > 0) ? 0 : 4, m.result || { ok: false, code: 'bad-reply' })   // a batch with a failed item → 4
+    } else if (m.type === 'logged') {
+      const r = m.result || { ok: false, code: 'bad-reply' }
+      if (WAIT && r.ok && r.path != null && r.question) {   // #85: asked — now wait for the answer, on this same link
+        clearTimeout(timer); handedOff = true
+        return waitAnswer(r.path, Date.now() + WAIT.ms, { ws, asked: { id: r.id, ts: r.ts, path: r.path } })
+      }
+      done(r.ok && !(r.failed > 0) ? 0 : 4, r)   // a batch with a failed item → 4
+    }
     else if (m.type === 'error') done(4, { ok: false, code: m.code || 'error', what: m.what || null })
   })
   ws.on('close', () => done(4, { ok: false, code: 'link-closed', what: welcomed ? 'the bridge closed the link before answering' : 'the bridge closed the link (bad token?)' }))
   ws.on('error', e => done(4, { ok: false, code: 'link-error', what: String((e && e.message) || e) }))
+}
+
+/**
+ * #85: WAIT for the answer to the question at `path` until `deadline` — {type:"wait_answer", ref, path, timeout_ms} on a logger
+ * link (the one --ask just used, else a new one), then ONE {type:"answer"} → print + exit (EXIT_OF). A dropped link is re-dialled
+ * with backoff and the wait sent again for the time left; at the deadline with no link → outcome "timeout" (exit 10).
+ * @param {string} path @param {number} deadline @param {{ ws?: any, asked?: any }|null} o
+ */
+function waitAnswer(path, deadline, o) {
+  let ws = o && o.ws, backoff = 200, n = 0, cur = null, retry = null, lastErr = null
+  const t0 = Date.now(), asked = o && o.asked ? o.asked : null
+  const out = (code, r) => { if (retry) clearTimeout(retry); clearTimeout(stop); try { cur && cur.close() } catch { } finish(code, { ...r, ...(asked ? { asked } : {}) }) }
+  const stop = setTimeout(() => out(EXIT_OF.timeout, { ok: true, outcome: 'timeout', path, waited_ms: Date.now() - t0, ...(lastErr ? { note: `no link to the bridge at the end (${lastErr})` } : {}) }), Math.max(0, deadline - Date.now()) + 3000)   // the bridge answers "timeout" itself; this covers a bridge that can't
+  const ask = sock => { const left = deadline - Date.now(); sock.send(JSON.stringify({ type: 'wait_answer', ref: `w${++n}`, path, timeout_ms: Math.max(1, left) })) }
+  const onMsg = (sock, raw) => {
+    let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
+    if (m.type === 'welcome') {
+      if (!m.logger) return out(4, unsupported(m))
+      if (verLt(m.bridge_version, '1.71.0')) return out(4, askUnsupported(m))
+      backoff = 200; ask(sock)
+    } else if (m.type === 'answer') {
+      const r = m.result || { ok: false, code: 'bad-reply' }
+      if (!r.ok) return out(4, r)
+      out(EXIT_OF[r.outcome] != null ? EXIT_OF[r.outcome] : 4, { ...r, waited_ms: Date.now() - t0 })
+    } else if (m.type === 'error') { if (FATAL.has(m.code)) out(4, { ok: false, code: m.code, what: m.what || null }); else lastErr = m.code }
+  }
+  const redial = () => {
+    retry = null
+    if (exiting) return
+    if (Date.now() >= deadline) return out(EXIT_OF.timeout, { ok: true, outcome: 'timeout', path, waited_ms: Date.now() - t0, note: `no link to the bridge at the end${lastErr ? ` (${lastErr})` : ''}` })
+    const sock = new WebSocket(URL_)
+    cur = sock
+    sock.on('open', () => hello(sock))
+    sock.on('message', raw => onMsg(sock, raw))
+    sock.on('close', () => { if (cur !== sock || exiting) return; cur = null; lastErr = lastErr || 'link-closed'; retry = setTimeout(redial, backoff); backoff = Math.min(backoff * 2, BACKOFF_MAX_MS) })
+    sock.on('error', e => { lastErr = String((e && e.code) || (e && e.message) || e) })
+  }
+  if (ws) {   // the link the ask went over: reuse it (already welcomed)
+    cur = ws
+    ws.removeAllListeners('message'); ws.removeAllListeners('close')
+    ws.on('message', raw => onMsg(ws, raw))
+    ws.on('close', () => { if (cur !== ws || exiting) return; cur = null; lastErr = 'link-closed'; retry = setTimeout(redial, backoff) })
+    ask(ws)
+  } else redial()
 }
 
 if (!exiting && STREAM) {
@@ -284,7 +377,8 @@ if (!exiting && STREAM) {
   function pump() {   // emit answered heads; send the next report when the link is up and nothing is in flight
     if (inflight || exiting) return
     const old82 = it => ready && ws && usesPlan82(it.input) && verLt(gwVer, '1.69.0')   // #82: a ≤1.68 gateway would drop the fields silently
-    while (queue.length && (queue[0].result || old82(queue[0]))) { const it = queue.shift(); emit(it, it.result || plan82Unsupported({ bridge_version: gwVer })) }
+    const old85 = it => ready && ws && usesAsk(it.input) && verLt(gwVer, '1.71.0')      // #85: a ≤1.70 gateway would drop the question fields
+    while (queue.length && (queue[0].result || old82(queue[0]) || old85(queue[0]))) { const it = queue.shift(); emit(it, it.result || (old82(it) ? plan82Unsupported({ bridge_version: gwVer }) : askUnsupported({ bridge_version: gwVer }))) }
     if (ready && ws && queue.length) {
       const it = queue.shift()
       it.wire = ++nextRef

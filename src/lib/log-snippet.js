@@ -4,11 +4,13 @@
 // --session / --project, #75's --token-file when the bridge read its token from a file, and a `--path <agent-path>`
 // placeholder the orchestrator fills in) — and {log_tool_hint}, the same guidance for a session WITHOUT a shell (Cowork),
 // phrased for the `log` tool (its `plan` field included). Pure, so tests pin the exact text; bridge.mjs supplies the paths.
-// Keep it short: it rides register_self responses and every agent prompt (a command line + six guidance lines each).
+// Keep it short: it rides register_self responses and every agent prompt (a command line + seven guidance lines each; #85: was six).
 // #79 (v1.66.0): the --plan line says text goes BEFORE --plan (--plan takes every following argument as a name), and the
 // checklist stays LIVE: start an item with --state running, tick it the moment it is done, keep "@~root …" current.
 // #79 (call signature): the snippet uses the explicit --text "<text>" and one --item per plan item, so no argument's
 // meaning depends on its position (positional text and --plan "A" "B" still work).
+// #85 (v1.71.0): a SEVENTH guidance line — asking the dashboard viewer a question and waiting for the answer (--ask … --wait;
+// the tool form: ask + choices, the answer as activity_answer). Each line stays ≤ 110 characters.
 
 /** Double-quote a value for a shell command line (paths contain spaces; the command runs from bash everywhere, Git Bash
  * included). @param {any} v */
@@ -23,7 +25,7 @@ export function logCmd(o) {
   return `${dq(o.node)} ${dq(o.script)} --session ${dq(o.session)} --project ${dq(o.project || 'unclassified')}` + (o.tokenFile ? ` --token-file ${dq(o.tokenFile)}` : '')
 }
 
-/** The six guidance lines under the command (shell form). */
+/** The seven guidance lines under the command (shell form; #85: + the question line). */
 export const LOG_SNIPPET_LINES = Object.freeze([
   '- --text "@ctx …" logs to a context; "@~ctx …" also sets its line; keep "@~root <what you\x27re doing>" current.',   // #79
   '- Report at milestones only (every call costs tokens); a script reporting often adds --no-log.',
@@ -31,6 +33,7 @@ export const LOG_SNIPPET_LINES = Object.freeze([
   '- --item "A" --item "B" creates ☐ plan items under --path, in that order (one name per --item).',   // #79
   '- Start item A: --path "<agent-path>/@~A" --state running --text "<what>"; when done: same --path + --done.',   // #79: keep the checklist live
   '- Finish with --text "@~root <summary>" --state done (or failed). Never put secrets in status text.',
+  '- Need a decision? --ask "…" --choice "A" --choice "B" --wait 30m waits for the answer (exit 0 = answered).',   // #85
 ])
 
 /**
@@ -49,6 +52,7 @@ export const LOG_TOOL_LINES = Object.freeze([
   '- plan:["A","B"] (its own field; status text stays in text) creates ☐ plan items under path, in that order.',   // #79
   '- Start item A: path:"<path>/@~A", state:"running", text:"<what>"; once it\x27s done: same path, state:"done".',   // #79
   '- Finish with text "@~root <summary>", state:"done" (or "failed"). Never put secrets in status text.',
+  '- Need a decision? ask:"…", choices:["A","B"] posts a question; the answer arrives as activity_answer.',   // #85
 ])
 
 /**

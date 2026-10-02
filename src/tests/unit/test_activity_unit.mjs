@@ -45,7 +45,7 @@ check('limits + defaults are frozen', Object.isFrozen(A.ACTIVITY_LIMITS) && Obje
 check('defaults: the #70 per-host config (+ step 2 progress_checkpoint_sec; 6b: finished_visible_hours 168 = 7 days; 6c: abandoned_plan_days 90, finished_plan_open_min 120; #80: notice_batch_sec 3)', J(A.ACTIVITY_DEFAULTS) === J({ log_retention_days: 7, log_entries_per_agent: 200, stale_after_min: 15, finished_visible_hours: 168, memory_budget_mb: 64, progress_checkpoint_sec: 60, abandoned_plan_days: 90, finished_plan_open_min: 120, notice_batch_sec: 3, enabled: true }))
 check('states: running|blocked|failed|done|idle + (6b) todo|skipped + (6c) abandoned', J(A.ACTIVITY_STATES) === J(['running', 'blocked', 'failed', 'done', 'idle', 'todo', 'skipped', 'abandoned']))
 check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 'AI_BRIDGE_ACTIVITY_STALE_AFTER_MIN' && A.ACTIVITY_ENV.enabled === 'AI_BRIDGE_ACTIVITY_ENABLED' && A.ACTIVITY_ENV.progress_checkpoint_sec === 'AI_BRIDGE_ACTIVITY_PROGRESS_CHECKPOINT_SEC' && A.ACTIVITY_ENV.abandoned_plan_days === 'AI_BRIDGE_ACTIVITY_ABANDONED_PLAN_DAYS' && A.ACTIVITY_ENV.finished_plan_open_min === 'AI_BRIDGE_ACTIVITY_FINISHED_PLAN_OPEN_MIN' && A.ACTIVITY_ENV.notice_batch_sec === 'AI_BRIDGE_ACTIVITY_NOTICE_BATCH_SEC' && Object.keys(A.ACTIVITY_ENV).length === 10)
-check('message fields: + path (6a), + plan (6b), + move / to / before / after / position (#82)', J(A.MESSAGE_FIELDS) === J(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan', 'move', 'to', 'before', 'after', 'position']))
+check('message fields: + path (6a), + plan (6b), + move / to / before / after / position (#82), + ask / choices / free / expires (#85)', J(A.MESSAGE_FIELDS) === J(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan', 'move', 'to', 'before', 'after', 'position', 'ask', 'choices', 'free', 'expires']))
 
 // ================================================================= resolveConfig
 await section(async () => {
@@ -2606,6 +2606,202 @@ await section(async () => {
     A.replayNewestFirst(B, recs.slice().reverse(), now)
     const byOf = q => J([...q.local.values()].map(x => [...x.nodes.values()].sort(byKey).map(n => [n.key, n.current && n.current.by ? n.current.by.user : null])))
     check(`#83 replay == chronological apply with dashboard edits (seed ${seed}: ${applied} applied, ${edits} edits): the whole state incl. every line's attribution`, dump(st) === dump(B) && byOf(st) === byOf(B) && /robin/.test(byOf(st)), firstDiff(dump(st) + byOf(st), dump(B) + byOf(B)))
+  }
+})
+// ================================================================= #85 (v1.71.0): QUESTIONS — parsing + limits, the node a question lands on, the state machine
+// (asked → answered | expired | withdrawn), the line state a ≤1.70 host sees, the rollup / plan, expiry, notices, the waiter's view,
+// gossip + records + the replay (incl. seeded replay == apply)
+const BYF85 = { kind: 'dashboard', user: 'robin', host: 'D' }
+await section(async () => {
+  check('#85 constants: the limits (8 choices × 60, answers ≤ 1000, expires ≤ 7 d), the line state per status, the verb, the actions, the message fields',
+    A.QUESTION_LIMITS.choices === 8 && A.QUESTION_LIMITS.choice === 60 && A.QUESTION_LIMITS.answer === 1000 && A.QUESTION_LIMITS.expiresMaxMs === 7 * 24 * HOUR
+    && J(A.QUESTION_LINE_STATE) === J({ asked: 'blocked', answered: 'done', expired: 'abandoned', withdrawn: 'abandoned' }) && A.ANSWER_NOTICE_VERB === 'activity_answer'
+    && J(A.ASK_ACTIONS) === J(['answer', 'withdraw']) && ['ask', 'choices', 'free', 'expires'].every(k => A.MESSAGE_FIELDS.includes(k)) && J(A.QUESTION_STATUSES) === J(['asked', 'answered', 'expired', 'withdrawn']))
+  check('#85 usesAsk: ask / choices / free / expires or state withdrawn (any case), in a batch item too — nothing else', A.usesAsk({ ask: 'q?' }) && A.usesAsk({ choices: [] }) && A.usesAsk({ state: ' Withdrawn ' }) && A.usesAsk({ items: [{ text: 'x' }, { expires: '1h' }] })
+    && !A.usesAsk({ text: 'x', state: 'done' }) && !A.usesAsk({ items: [{ text: 'x' }] }) && !A.usesAsk(null))
+  // ---- parsing
+  const q1 = P({ path: 'lead', ask: '  Postgres or SQLite?\n ', choices: [' Postgres ', 'SQLite'], expires: '2h', details: 'why: the cache' }, { now: T0 })
+  check('#85 parse: ask → msg.ask { choices (trimmed), free false (choices given), expires_at = now + 2h }; text = the question (one line), state blocked, current, logged; details kept',
+    q1.ok && J(q1.msg.ask) === J({ choices: ['Postgres', 'SQLite'], free: false, expires_at: T0 + 2 * HOUR }) && q1.msg.text === 'Postgres or SQLite?' && q1.msg.state === 'blocked' && q1.msg.current === true && q1.msg.log === true && q1.msg.details === 'why: the cache' && q1.msg.path === 'lead', J(q1))
+  check('#85 parse: no choices → free text (free true); free:true beside choices allows both; free:"yes" is a boolean', P({ ask: 'Why?' }, { now: T0 }).msg.ask.free === true && P({ ask: 'A?', choices: ['a'], free: true }, { now: T0 }).msg.ask.free === true && P({ ask: 'A?', choices: ['a'], free: 'yes' }, { now: T0 }).msg.ask.free === true)
+  check('#85 parse: the question is taken LITERALLY (a leading "@x" is text, not a path)', (r => r.ok && r.msg.text === '@Docs: rename it?' && r.msg.path === 'lead')(P({ path: 'lead', ask: '@Docs: rename it?' }, { now: T0 })))
+  check('#85 limits: a question of 240 code points is fine; 241 → question-too-long (refused, never cut)', C({ ask: 'é'.repeat(239) + '?' }) === 'OK' && C({ ask: 'é'.repeat(241) }) === 'question-too-long' && C({ ask: '   ' }) === 'bad-ask' && C({ ask: 42 }) === 'bad-ask')
+  check('#85 limits: 8 choices fine, 9 → bad-choices; a 60-character choice fine, 61 → bad-choices; a duplicate (any case), an empty one, a non-array → bad-choices',
+    C({ ask: 'q?', choices: Array.from({ length: 8 }, (_, i) => 'c' + i) }) === 'OK' && C({ ask: 'q?', choices: Array.from({ length: 9 }, (_, i) => 'c' + i) }) === 'bad-choices'
+    && C({ ask: 'q?', choices: ['x'.repeat(60)] }) === 'OK' && C({ ask: 'q?', choices: ['x'.repeat(61)] }) === 'bad-choices' && C({ ask: 'q?', choices: ['Yes', 'yes'] }) === 'bad-choices' && C({ ask: 'q?', choices: ['a', ' '] }) === 'bad-choices' && C({ ask: 'q?', choices: 'a,b' }) === 'bad-choices')
+  check('#85 parse refusals: free:false with no choices, choices / free / expires without ask, text / state / progress / plan / a position / log:false beside ask → bad-ask; a bad expires → bad-expires',
+    C({ ask: 'q?', free: false }) === 'bad-ask' && C({ choices: ['a'] }) === 'bad-ask' && C({ expires: '1h' }) === 'bad-ask' && C({ ask: 'q?', text: 'x' }) === 'bad-ask' && C({ ask: 'q?', state: 'done' }) === 'bad-ask'
+    && C({ ask: 'q?', progress: '1/2' }) === 'bad-ask' && C({ ask: 'q?', plan: ['a'] }) === 'bad-ask' && C({ ask: 'q?', before: 'x' }) === 'bad-ask' && C({ ask: 'q?', log: false }) === 'bad-ask' && C({ ask: 'q?', free: 'maybe' }) === 'bad-ask'
+    && C({ ask: 'q?', expires: '0m' }) === 'bad-expires' && C({ ask: 'q?', expires: '8d' }) === 'bad-expires' && C({ ask: 'q?', expires: 'soon' }) === 'bad-expires' && C({ ask: 'q?', expires: '7d' }) === 'OK' && C({ ask: 'q?', text: '' }) === 'OK')
+  check('#85 parse: state withdrawn → msg.withdraw { note }, a tick (keepText, current, abandoned, logged); on an agent / the session → not-a-question; with a plan / progress → bad-state',
+    (r => r.ok && J(r.msg.withdraw) === J({ note: 'not needed' }) && r.msg.keepText && r.msg.current && r.msg.state === 'abandoned' && r.msg.log)(P({ path: 'lead/@?1', state: 'Withdrawn', text: 'not needed' }, { now: T0 }))
+    && C({ path: 'lead', state: 'withdrawn' }) === 'not-a-question' && C({ state: 'withdrawn' }) === 'not-a-question' && C({ path: '@q', state: 'withdrawn', plan: ['a'] }) === 'bad-state' && C({ path: '@q', state: 'withdrawn', log: false }) === 'bad-state')
+  // ---- where a question lands
+  const st = mk(), I = { session: 'Lead', project: 'Q85', user: 'robin' }
+  const a1 = say(st, I, { path: 'lead', ask: 'Postgres or SQLite?', choices: ['Postgres', 'SQLite'], expires: '1h', details: 'ctx', data: { k: 1 } }, T0)
+  const a2 = say(st, I, { path: 'lead', ask: 'Ship Friday?' }, T0 + 1000)
+  const a3 = say(st, I, { ask: 'Root question?' }, T0 + 2000)
+  check('#85 an agent / the session: a new child context @?1, @?2 … (path "lead" → lead/@?1, then lead/@?2; the session → @?1); the result carries path + question',
+    a1.ok && a1.path === 'lead/@?1' && a2.path === 'lead/@?2' && a3.path === '@?1' && a1.context === '?1' && a1.agent === 'lead' && a1.state === 'blocked' && a1.question && a1.question.status === 'asked' && J(a1.question.choices) === J(['Postgres', 'SQLite']) && a1.question.expires_at === T0 + HOUR, J([a1.path, a2.path, a3.path, a1.question]))
+  const n1 = N(st, I, 'lead/@?1')
+  check('#85 the question node: a CONTEXT whose line = the question, state BLOCKED (what a ≤1.70 host shows), question { status asked, choices, free false, asked_at, expires_at }, details / data on the line',
+    n1.kind === 'context' && n1.current.text === 'Postgres or SQLite?' && n1.current.state === 'blocked' && J(A.questionView(n1.current.question)) === J({ status: 'asked', choices: ['Postgres', 'SQLite'], free: false, asked_at: T0, expires_at: T0 + HOUR }) && n1.current.details === 'ctx' && J(n1.current.data) === J({ k: 1 }) && A.isOpenQuestion(n1) && !A.isOpenQuestion(N(st, I, 'lead')))
+  check('#85 asking is the session\'s own message: the agent is reported (not implicit) and fresh', !N(st, I, 'lead').implicit && N(st, I, 'lead').last_activity === T0 + 1000)
+  const c1 = say(st, I, { path: 'lead/@db', ask: 'Which DB?' }, T0 + 3000)
+  say(st, I, { path: '@Rel/@~Docs', text: 'writing docs' }, T0 + 4000)
+  const c2 = say(st, I, { path: '@Rel/@Docs', ask: 'Rename the docs?' }, T0 + 5000)
+  say(st, I, { path: '@Plan', plan: ['A', 'B'] }, T0 + 6000)
+  const c3 = say(st, I, { path: '@Plan/@A', ask: 'A first?' }, T0 + 7000)
+  check('#85 a NEW context becomes the question itself (lead/@db); a context WITH a line gets a child (@Rel/@Docs/@?1); a plan item too (@Plan/@A/@?1)', c1.path === 'lead/@db' && c2.path === '@Rel/@Docs/@?1' && c3.path === '@Plan/@A/@?1' && N(st, I, '@Rel/@Docs').current.text === 'writing docs', J([c1.path, c2.path, c3.path]))
+  say(st, I, { path: '@G/@leaf/@x', text: 'deep' }, T0 + 8000)
+  check('#85 a line-less context WITH children gets a child; asking AGAIN on an open question → question-open', say(st, I, { path: '@G/@leaf', ask: 'Grouped?' }, T0 + 9000).path === '@G/@leaf/@?1' && say(st, I, { path: 'lead/@db', ask: 'Again?' }, T0 + 9000).code === 'question-open')
+  check('#85 depth: asking on a node at depth 6 (its child would be 7) → path-too-deep', sayC(st, I, { path: 'a/b/c/d/e/f', ask: 'too deep?' }, T0 + 9000).code === 'path-too-deep')
+  // ---- the state machine
+  check('#85 a plain report on a question\'s line → question-node (its line is the question); a state tick too; a log-only message (no @~) is fine',
+    sayC(st, I, { path: 'lead/@~?1', text: 'hi' }, T0 + 10000).code === 'question-node' && sayC(st, I, { path: 'lead/@~?1', state: 'done' }, T0 + 10000).code === 'question-node' && sayC(st, I, { path: 'lead/@?1', text: 'a note' }, T0 + 10000).ok)
+  check('#85 edit_text on a question → question-node; done / skip → not-a-plan-item', ACT(st, I, 'lead/@?1', 'edit_text', { text: 'x' }, T0 + 11000).code === 'question-node' && ACT(st, I, 'lead/@?1', 'done', {}, T0 + 11000).code === 'not-a-plan-item')
+  check('#85 answer refusals: no args / an empty choice → bad-args; a choice it doesn\'t have → bad-choice; free text on a choices-only question → bad-args; a non-question → not-a-question',
+    ACT(st, I, 'lead/@?1', 'answer', {}, T0 + 12000).code === 'bad-args' && ACT(st, I, 'lead/@?1', 'answer', { choice: ' ' }, T0 + 12000).code === 'bad-args' && ACT(st, I, 'lead/@?1', 'answer', { choice: 'MySQL' }, T0 + 12000).code === 'bad-choice'
+    && ACT(st, I, 'lead/@?1', 'answer', { choice: 'SQLite', text: 'because' }, T0 + 12000).code === 'bad-args' && ACT(st, I, 'lead', 'answer', { choice: 'x' }, T0 + 12000).code === 'not-a-question' && ACT(st, I, '@Rel/@Docs', 'withdraw', {}, T0 + 12000).code === 'not-a-question')
+  check('#85 answer refusals: free text over 1000 characters → answer-too-long; a question with no choices refuses a choice', ACT(st, I, 'lead/@?2', 'answer', { text: 'x'.repeat(1001) }, T0 + 12000).code === 'answer-too-long' && ACT(st, I, 'lead/@?2', 'answer', { choice: 'Yes' }, T0 + 12000).code === 'bad-args')
+  const lastLead = N(st, I, 'lead').last_activity
+  const an = ACT(st, I, 'lead/@?1', 'answer', { choice: ' sqlite ' }, T0 + 13000), ar = an.records[0] || {}
+  const n1b = N(st, I, 'lead/@?1')
+  check('#85 ANSWER: the line → state DONE, the question → answered { answer { choice (its canonical spelling) }, by { user, host }, at }; the line keeps the question text, details and data',
+    an.ok && n1b.current.state === 'done' && n1b.current.text === 'Postgres or SQLite?' && J(A.questionView(n1b.current.question)) === J({ status: 'answered', choices: ['Postgres', 'SQLite'], free: false, asked_at: T0, expires_at: T0 + HOUR, answer: { choice: 'SQLite' }, by: { user: 'robin', host: 'DASH-HOST' }, at: T0 + 13000 })
+    && n1b.current.details === 'ctx' && J(n1b.current.data) === J({ k: 1 }), J(n1b.current))
+  check('#85 the answer entry: "answered by robin via dashboard (DASH-HOST): SQLite" (act answer, by), the line\'s text kept as line_text, the record carries the question; the result says agent + question + answer; no activity',
+    ar.text === 'answered by robin via dashboard (DASH-HOST): SQLite' && ar.act === 'answer' && J(ar.by) === J(BY) && ar.line_text === 'Postgres or SQLite?' && ar.question && ar.question.status === 'answered' && J(ar.question.answer) === J({ choice: 'SQLite' }) && ar.current === true
+    && an.agent === 'lead' && J(an.answer) === J({ choice: 'SQLite' }) && an.question.status === 'answered' && an.from_state === 'blocked' && an.to_state === 'done' && N(st, I, 'lead').last_activity === lastLead, J([ar, an.agent]))
+  check('#85 a closed question: answering / withdrawing again → question-closed', ACT(st, I, 'lead/@?1', 'answer', { choice: 'Postgres' }, T0 + 14000).code === 'question-closed' && ACT(st, I, 'lead/@?1', 'withdraw', {}, T0 + 14000).code === 'question-closed' && sayC(st, I, { path: 'lead/@?1', state: 'withdrawn' }, T0 + 14000).code === 'question-closed')
+  const an2 = ACT(st, I, 'lead/@?2', 'answer', { text: '  Yes —\r\nafter the review\u0007 ' }, T0 + 15000)
+  check('#85 a free-text answer: newlines kept (CRLF → LF), control characters out, trimmed; the entry shows it on one line', an2.ok && J(an2.answer) === J({ text: 'Yes —\nafter the review' }) && an2.records[0].text === 'answered by robin via dashboard (DASH-HOST): Yes — after the review', J(an2.answer))
+  const w1 = sayC(st, I, { path: 'lead/@db', state: 'withdrawn', text: 'decided myself' }, T0 + 16000)
+  check('#85 WITHDRAW (the asker): state withdrawn → line ABANDONED, question withdrawn (no by: the session itself), entry "withdrawn: decided myself" (line_text = the question)',
+    w1.ok && N(st, I, 'lead/@db').current.state === 'abandoned' && N(st, I, 'lead/@db').current.question.status === 'withdrawn' && !N(st, I, 'lead/@db').current.question.by && w1.records[0].text === 'withdrawn: decided myself' && w1.records[0].line_text === 'Which DB?' && w1.question.status === 'withdrawn', J(w1.records && w1.records[0]))
+  const w2 = ACT(st, I, '@?1', 'withdraw', {}, T0 + 17000)
+  check('#85 WITHDRAW (the dashboard): attributed — "withdrawn by robin via dashboard (DASH-HOST)", question.by = the viewer', w2.ok && w2.records[0].text === 'withdrawn by robin via dashboard (DASH-HOST)' && w2.records[0].act === 'withdraw' && J(A.questionView(N(st, I, '@?1').current.question).by) === J({ user: 'robin', host: 'DASH-HOST' }))
+  const ra = say(st, I, { path: 'lead/@db', ask: 'Which DB, really?', choices: ['A', 'B'] }, T0 + 18000)
+  check('#85 asking AGAIN on a closed question starts a new one there (asked, new asked_at, the new text)', ra.ok && ra.path === 'lead/@db' && N(st, I, 'lead/@db').current.question.status === 'asked' && N(st, I, 'lead/@db').current.question.asked_at === T0 + 18000 && N(st, I, 'lead/@db').current.text === 'Which DB, really?')
+  const ab = ACT(st, I, 'lead/@db', 'abandon', {}, T0 + 19000)
+  check('#85 an ABANDON of an open question (a ≤1.70 dashboard\'s "Abandon…") withdraws it — status withdrawn, by the viewer', ab.ok && N(st, I, 'lead/@db').current.question.status === 'withdrawn' && J(A.questionView(N(st, I, 'lead/@db').current.question).by) === J({ user: 'robin', host: 'DASH-HOST' }))
+  say(st, I, { path: '@Cas/@~x', text: 'x' }, T0 + 20000)
+  say(st, I, { path: '@Cas/@x', ask: 'Cascade me?' }, T0 + 20000)
+  const cs = sayC(st, I, { path: '@~Cas', state: 'abandoned' }, T0 + 21000)
+  check('#85 the CASCADE of an abandoned ancestor withdraws an open question under it (logged "abandoned with @Cas")', cs.ok && N(st, I, '@Cas/@x/@?1').current.question.status === 'withdrawn' && (cs.cascade || []).some(c => c.path === '@Cas/@x/@?1'), J(cs.cascade))
+  // ---- expiry
+  const ex0 = A.expireQuestions(st, T0 + 30 * MIN)
+  check('#85 nextQuestionExpiry = the soonest OPEN question\'s expires_at (none open with one → null)', ex0.records.length === 0 && A.nextQuestionExpiry(st) === null)
+  say(st, I, { path: 'lead', ask: 'Expire me?', expires: '10m' }, T0 + 40 * MIN)
+  say(st, I, { path: 'lead', ask: 'Later?', expires: '30m' }, T0 + 41 * MIN)
+  const qx = A.getSession(st, I) && [...A.getSession(st, I).nodes.values()].find(n => n.current && n.current.text === 'Expire me?')
+  check('#85 nextQuestionExpiry: the soonest', A.nextQuestionExpiry(st) === T0 + 50 * MIN)
+  const ex1 = A.expireQuestions(st, T0 + 50 * MIN), ex1r = ex1.records[0] || {}
+  check('#85 EXPIRY: at expires_at the question → expired (line abandoned), by the bridge, a SYSTEM entry "expired — nobody answered within 10m"; the other one stays open',
+    ex1.records.length === 1 && qx.current.question.status === 'expired' && qx.current.state === 'abandoned' && qx.current.question.by === 'bridge' && ex1r.text === 'expired — nobody answered within 10m' && ex1r.by === 'bridge' && ex1.expired.length === 1 && ex1.expired[0].path === qx.path && ex1.expired[0].agent === 'lead' && ex1.expired[0].text === 'Expire me?'
+    && A.nextQuestionExpiry(st) === T0 + 71 * MIN, J([ex1r, ex1.expired]))
+  // ---- notices
+  const nt = A.actionNotice(an, { by: BY, host: 'HOST-A', ts: T0 + 13000 })
+  check('#85 answerNotice: verb activity_answer; the PUBLIC subject = who answered + the path + the QUESTION\'s first words — never the answer; the body has the answer, the agent, the question',
+    nt.verb === 'activity_answer' && nt.subject === 'robin answered lead/@?1: Postgres or SQLite?' && !/SQLite"/.test(nt.subject) && nt.body.action === 'answer' && nt.body.status === 'answered' && J(nt.body.answer) === J({ choice: 'SQLite' }) && nt.body.agent === 'lead'
+    && nt.body.question === 'Postgres or SQLite?' && J(nt.body.choices) === J(['Postgres', 'SQLite']) && nt.body.free === false && J(nt.body.by) === J({ user: 'robin', host: 'DASH-HOST' }) && nt.body.entry_id === an.entry_id && nt.body.session === 'Lead' && nt.body.project === 'Q85' && nt.body.host === 'HOST-A' && nt.body.asked_at === T0, J(nt))
+  const an3 = (() => { const s2 = mk(); say(s2, I, { path: 'w', ask: 'Use the secret key ABC123 for prod or staging deploys today?', choices: ['prod', 'staging'] }, T0); return A.actionNotice(ACT(s2, I, 'w/@?1', 'answer', { choice: 'staging' }, T0 + 1), { by: BY }) })()
+  check('#85 the subject carries at most a few words of the question (≤ 6 words / 40 characters) and none of the answer', an3.subject === 'robin answered w/@?1: Use the secret key ABC123 for…' && !/staging/.test(an3.subject), an3.subject)
+  const wn = A.actionNotice(w2, { by: BY, host: 'HOST-A' }), en = A.answerNotice(ex1.expired[0], { host: 'HOST-A', ts: 1 })
+  check('#85 withdraw / expire notices: "robin withdrew @?1: Root question?" (status withdrawn) and "question expired lead/@?3: Expire me?" (by bridge, status expired, no answer)',
+    wn.verb === 'activity_answer' && wn.subject === 'robin withdrew @?1: Root question?' && wn.body.status === 'withdrawn' && wn.body.action === 'withdraw' && wn.body.agent === null
+    && en.subject === `question expired ${qx.path}: Expire me?` && en.body.status === 'expired' && en.body.by === 'bridge' && en.body.action === 'expire' && !en.body.answer, J([wn.subject, en]))
+  // ---- the waiter's view
+  const sess = A.getSession(st, I), qo = A.questionOutcome(st, sess, N(st, I, 'lead/@?1')), qopen = [...sess.nodes.values()].find(n => n.current && n.current.text === 'Later?')
+  check('#85 questionOutcome: answered → { outcome answered, answer, by, question, choices, entry_id }; open → outcome "open"; a node no longer on the board → "gone"',
+    qo.outcome === 'answered' && J(qo.answer) === J({ choice: 'SQLite' }) && qo.question === 'Postgres or SQLite?' && J(qo.by) === J({ user: 'robin', host: 'DASH-HOST' }) && qo.entry_id === N(st, I, 'lead/@?1').current.id
+    && A.questionOutcome(st, sess, qopen).outcome === 'open' && A.questionOutcome(st, sess, { key: 'nope', path: 'nope' }).outcome === 'gone' && A.questionOutcome(st, null, qopen).outcome === 'gone')
+  // ---- the rollup + plans
+  const sr = mk(), R = { session: 'Roll', project: 'Q85', user: 'robin' }
+  say(sr, R, { path: 'ag', ask: 'One?' }, T0)
+  const bar1 = A.rollup(A.getSession(sr, R), N(sr, R, 'ag'))
+  check('#85 rollup: a question counts as an ITEM — an agent with one open question shows "0 of 1 done"', bar1 && bar1.items && bar1.done === 0 && bar1.total === 1 && bar1.skipped === 0, J(bar1))
+  A.applyAction(sr, { ...R, path: 'ag/@?1', action: 'answer', args: { text: 'yes' } }, T0 + 1, { by: BY })
+  const bar2 = A.rollup(A.getSession(sr, R), N(sr, R, 'ag'))
+  check('#85 rollup: answered = done ("1 of 1 done")', bar2 && bar2.done === 1 && bar2.total === 1, J(bar2))
+  say(sr, R, { path: '@P', plan: ['A', 'B'] }, T0 + 2)
+  say(sr, R, { path: '@P', ask: 'Blocker?' }, T0 + 3)
+  say(sr, R, { path: '@P/@~A', state: 'done' }, T0 + 4)
+  say(sr, R, { path: '@P/@~B', state: 'done' }, T0 + 5)
+  const bP = () => A.boardView(sr, T0 + 10, { raw: true })[0].nodes.find(n => n.path === '@P')
+  check('#85 plan: an open question under a plan node is one of its items — every plan item done but the question open: "2 of 3 done" and the plan stays OPEN (no plan_end_at)', bP().bar.done === 2 && bP().bar.total === 3 && bP().plan_node && bP().plan_end_at == null, J(bP()))
+  A.applyAction(sr, { ...R, path: '@P/@?1', action: 'answer', args: { text: 'none' } }, T0 + 6, { by: BY })
+  check('#85 plan: answered → "3 of 3 done", the plan ENDS (all-done)', bP().bar.done === 3 && bP().plan_end_at === T0 + 6 && bP().plan_end_how === 'all-done', J(bP()))
+  const sw = mk()
+  say(sw, R, { path: '@P', plan: ['A'] }, T0); say(sw, R, { path: '@P', ask: 'Q?' }, T0 + 1)
+  const abp = A.applyAction(sw, { ...R, path: '@P', action: 'abandon_plan' }, T0 + 2, { by: BY })
+  check('#85 plan: "Abandon plan" withdraws its open question with the open items (the question → withdrawn = skipped)', abp.ok && N(sw, R, '@P/@?1').current.question.status === 'withdrawn' && (abp.applied || []).some(x => x.path === '@P/@?1'), J(abp.applied))
+  // ---- the board views
+  const bv = A.boardView(st, T0 + 52 * MIN, {})[0], rv = A.boardView(st, T0 + 52 * MIN, { raw: true })[0]
+  const vq = bv.nodes.find(n => n.path === 'lead/@?1'), rq = rv.nodes.find(n => n.path === 'lead/@?1')
+  check('#85 views: the activity tool (current.question, by as { user, host }) and the dashboard\'s raw board carry the question; an open one shows state blocked',
+    vq.current.question.status === 'answered' && J(vq.current.question.by) === J({ user: 'robin', host: 'DASH-HOST' }) && J(rq.current.question.answer) === J({ choice: 'SQLite' }) && rv.nodes.find(n => n.current && n.current.text === 'Later?').state === 'blocked', J(vq.current))
+  // ---- gossip
+  const rcv = mk({}, 'HOST-B'), mg = A.mergeSnapshot(rcv, 'HOST-A', A.snapshot(st))
+  const gq = A.getNode(rcv, I, 'lead/@?1', 'HOST-A')
+  check('#85 gossip: a receiver holds the question (status, choices, answer, by) on the line', mg.ok && J(A.questionView(gq.current.question)) === J(A.questionView(N(st, I, 'lead/@?1').current.question)) && gq.current.state === 'done')
+  const junk = { v: A.ACTIVITY_FORMAT, origin: 'HOST-A', sessions: [{ session: 'J', project: 'Q85', user: 'robin', nodes: [
+    { path: 'w', current: { id: 'a', ts: 1, text: 'agent', state: 'running', question: { status: 'asked' } } },
+    { path: 'w/@?1', current: { id: 'b', ts: 1, text: 'Q?', state: 'blocked', question: { status: 'answered', choices: Array.from({ length: 12 }, (_, i) => 'c' + i).concat(['x'.repeat(99)]), answer: { choice: 'y'.repeat(70), text: 'z'.repeat(5000) }, by: { user: 'u'.repeat(100), host: 'h' }, at: 5 } } },
+    { path: 'w/@?2', current: { id: 'c', ts: 1, text: 'Q2?', state: 'blocked', question: { status: 'pondering' } } }] }] }
+  const rj = mk({}, 'HOST-B'); A.mergeSnapshot(rj, 'HOST-A', junk)
+  const J1 = { session: 'J', project: 'Q85', user: 'robin' }, jq = A.getNode(rj, J1, 'w/@?1', 'HOST-A').current.question
+  check('#85 gossip is untrusted: an agent never carries a question; ≤ 8 choices of ≤ 60; a 70-character answer choice dropped, the text cut to 1000; a bad status → no question',
+    !A.getNode(rj, J1, 'w', 'HOST-A').current.question && jq.choices.length === 8 && !jq.answer.choice && [...jq.answer.text].length === 1000 && jq.answer.text.endsWith('…') && jq.by.user.length <= 64 && !A.getNode(rj, J1, 'w/@?2', 'HOST-A').current.question, J(jq).slice(0, 300))
+})
+await section(async () => {
+  // ---- records: the replay restores questions exactly (entries, cf); a 1.70-shaped record (no question) replays as an ordinary blocked context
+  const st = mk(), I = { session: 'Rec', project: 'Q85', user: 'robin' }, recs = []
+  const put = r => { if (r && r.ok) recs.push(...r.records.map(x => JSON.parse(J(x)))); return r }
+  put(say(st, I, { path: 'w', ask: 'Q1?', choices: ['a', 'b'], details: 'bg' }, T0))
+  put(say(st, I, { path: 'w', ask: 'Q2?', expires: '5m' }, T0 + 1000))
+  put(say(st, I, { path: 'w', ask: 'Q3?' }, T0 + 2000))
+  put(ACT(st, I, 'w/@?1', 'answer', { choice: 'B' }, T0 + 3000))
+  put(sayC(st, I, { path: 'w/@?3', state: 'withdrawn' }, T0 + 4000))
+  const ex = A.expireQuestions(st, T0 + 7 * MIN); recs.push(...ex.records.map(x => JSON.parse(J(x))))
+  put(say(st, I, { path: 'w', ask: 'Q4 open?' }, T0 + 8 * MIN))
+  const B = mk(); A.replayNewestFirst(B, recs.slice().reverse(), T0 + 9 * MIN)
+  check('#85 replay: the questions come back exactly (answered / expired / withdrawn / open; details kept)', dump(st) === dump(B), firstDiff(dump(st), dump(B)))
+  check('#85 records: the ask entry and each status change carry `question` (a status change keeps the question as line_text)', recs.filter(r => r.question).length === 7 && recs.find(r => r.path === 'w/@?1' && r.act === 'answer').line_text === 'Q1?')
+  const old = recs.map(r => { const x = { ...r }; delete x.question; return x }), B2 = mk(); A.replayNewestFirst(B2, old.slice().reverse(), T0 + 9 * MIN)
+  check('#85 a record WITHOUT question (as a ≤1.70 host would hold it) replays as an ordinary context: the question as its text, blocked / done / abandoned', N(B2, I, 'w/@?4').current.text === 'Q4 open?' && N(B2, I, 'w/@?4').current.state === 'blocked' && !N(B2, I, 'w/@?4').current.question && N(B2, I, 'w/@?1').current.state === 'done')
+  const cfs = A.planCarryForward(st, T0 + 9 * DAY).map(w => w.rec), cq = cfs.find(r => r.path === 'w/@?4')
+  const B3 = mk(); A.replayNewestFirst(B3, cfs.slice().reverse(), T0 + 9 * DAY + MIN)
+  check('#85 the carry-forward (cf) carries an open question and a replay of only the cf restores it', cq && cq.current.question.status === 'asked' && N(B3, I, 'w/@?4').current.question.status === 'asked' && A.isOpenQuestion(N(B3, I, 'w/@?4')), J(cq && cq.current))
+})
+await section(async () => {
+  // ---- replay == chronological apply with QUESTIONS (asks, answers, withdrawals, abandons + cascades, expiry, moves), seeded random
+  for (const seed of [85, 850, 8585, 58]) {
+    const r = rng(seed), pick = a => a[Math.floor(r() * a.length)]
+    const st = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 6 } }), recs = []
+    const id = { session: 'Alpha', project: 'AIMB', user: 'robin' }
+    let t = T0, applied = 0, qs = 0, closed = 0
+    for (let i = 0; i < 400; i++) {
+      t += 1000 + Math.floor(r() * 60000)
+      const s = A.getSession(st, id), nodes = s ? [...s.nodes.values()] : [], open = nodes.filter(n => A.isOpenQuestion(n))
+      const x = r()
+      let res = null
+      if (x < 0.2) { res = sayC(st, id, { path: pick(['w1', '@P', '@Q/@x', 'w1/@R', '', '@P/@a']), ask: `q${i}?`, ...(r() < 0.5 ? { choices: ['A', 'B'] } : {}), ...(r() < 0.3 ? { expires: `${1 + Math.floor(r() * 20)}m` } : {}) }, t); if (res.ok) qs++ }
+      else if (x < 0.32 && open.length) { const n = pick(open), q = n.current.question; res = A.applyAction(st, { ...id, path: n.path, action: 'answer', args: q.choices.length ? { choice: pick(q.choices) } : { text: `ans ${i}` } }, t, { by: BYF85 }); if (res.ok) closed++ }
+      else if (x < 0.37 && open.length) { res = r() < 0.5 ? sayC(st, id, { path: pick(open).path, state: 'withdrawn' }, t) : A.applyAction(st, { ...id, path: pick(open).path, action: 'withdraw' }, t, { by: BYF85 }); if (res.ok) closed++ }
+      else if (x < 0.4 && nodes.length) { const n = pick(nodes.filter(m => m.key && m.kind === 'context' && !A.isQuestion(m))); if (n) res = sayC(st, id, { path: n.path.replace(/@(?=[^/]*$)/, '@~'), state: 'abandoned' }, t) }
+      else if (x < 0.44 && nodes.length) { const n = pick(nodes.filter(m => m.key && m.kind === 'context')); if (n) res = sayC(st, id, { move: '/' + n.path, to: r() < 0.5 ? '/' : '/@Q' }, t) }
+      else if (x < 0.48) { const ex = A.expireQuestions(st, t); if (ex.records.length) { closed += ex.expired.length; recs.push(...ex.records.map(q => JSON.parse(J(q)))); applied++ } }
+      else if (x < 0.52) res = sayC(st, id, { path: pick(['@P', '@Q']), plan: [`i${i}`] }, t)
+      else if (x < 0.54) A.expire(st, t)
+      if (!res && x >= 0.54) res = sayC(st, id, { path: pick(['@P/@~a', '@Q/@~b', 'w1/@~root', '@~root', 'w1/@R/@~c']), text: `m${i}`, ...(r() < 0.3 ? { progress: `${i % 9}/9` } : {}) }, t)
+      if (res && res.ok && res.records) { applied++; recs.push(...res.records.map(q => JSON.parse(J(q)))) }
+    }
+    const now = t + MIN
+    A.expire(st, now)
+    const B = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 6 } })
+    A.replayNewestFirst(B, recs.slice().reverse(), now)
+    check(`#85 replay == chronological apply with questions (seed ${seed}: ${applied} applied, ${qs} asked, ${closed} closed): the whole state incl. every question`, dump(st) === dump(B) && qs > 10 && closed > 5, firstDiff(dump(st), dump(B)))
   }
 })
 console.log(`\n${pass} passed, ${fail} failed`)

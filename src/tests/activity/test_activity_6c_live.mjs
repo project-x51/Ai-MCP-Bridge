@@ -2,7 +2,7 @@
 // src/config.json); no token is ever printed (each check that touches output proves the token is absent).
 // 1. #75 part 2 + the connect reminders: a gateway whose token comes from AI_BRIDGE_TOKEN_FILE, with the realm block of
 //    config.example.json — a code session gets the doorbell reminder AND the activity one, each command carrying
-//    --token-file "<that path>" (never the token); {log_snippet} expands to the exact aimb-log command + the six guidance
+//    --token-file "<that path>" (never the token); {log_snippet} expands to the exact aimb-log command + the seven guidance
 //    lines; a cowork session gets {log_tool_hint} (the log tool, its plan field) and not the script; set_wake's hint carries
 //    the path. The snippet's command, run VERBATIM (placeholders filled), reports with only --token-file as the token source;
 //    aimb-log's explicit --token-file is authoritative (a wrong file fails even with a good env token; an unreadable one is
@@ -78,11 +78,12 @@ const lines = snip.split('\n'), cmd = lines[0].replace(/^Report your status with
 const want = `"${NODE}" "${fwd(LOGGER)}" --session "Orch" --project "SixC" --token-file "${TF}" --path <agent-path> --text "<text>"`
 console.log('  {log_snippet} =\n' + snip.split(TF).join('<token-file>').replace(/^/gm, '    | '))
 check('{log_snippet}: the EXACT ready-to-run command — absolute node + script paths, --session / --project, #75\'s --token-file, a --path <agent-path> placeholder', cmd === want || cmd.replace(/^"[^"]*node(\.exe)?"/i, '"N"') === want.replace(/^"[^"]*"/, '"N"'), J([cmd.split(TF).join('<tf>'), want.split(TF).join('<tf>')]))
-check('{log_snippet}: then six short guidance lines (≤ 110 chars each; 7 lines in all)', lines.length === 7 && lines.slice(1).every(l => l.startsWith('- ') && l.length <= 110), J(lines.map(l => l.length)))
+check('{log_snippet}: then seven short guidance lines (≤ 110 chars each; 8 lines in all — #85: + the question line)', lines.length === 8 && lines.slice(1).every(l => l.startsWith('- ') && l.length <= 110), J(lines.map(l => l.length)))
 const G = lines.slice(1).join('\n')
 check('{log_snippet}: @ctx vs @~ctx · milestones (tool calls cost) + --no-log · --stale-after 60m · (#79) one line on --item "A" --item "B" and one on starting an item (--state running --text) + ticking it (--done) · finish with --text "@~root …" --state done / failed · never secrets',
   /--text "@ctx …" logs/.test(G) && /"@~ctx …" also sets its line/.test(G) && /milestones/.test(G) && /--no-log/.test(G) && /--stale-after 60m/.test(G) && lines.filter(l => /--item "A" --item "B"/.test(l)).length === 1
   && lines.filter(l => /--state running --text "<what>"/.test(l) && /--done/.test(l)).length === 1 && /--text "@~root <summary>" --state done \(or failed\)/.test(G) && /Never put secrets/.test(G), G)
+check('#85 {log_snippet}: one line on asking — --ask "…" --choice "A" --choice "B" --wait 30m waits for the answer (exit 0 = answered); one --choice per choice, never --choices', lines.filter(l => /--ask "…" --choice "A" --choice "B" --wait 30m waits for the answer/.test(l) && /exit 0 = answered/.test(l)).length === 1 && !/--choices/.test(G), G)
 check('the code reminder: an orchestrator puts the block into its agents\' prompts and keeps its own @~root current', /paste this into each prompt/.test(actR) && /@~root/.test(actR.slice(actR.lastIndexOf('\nKeep your board true'))))
 const orchB = actR.slice(0, actR.indexOf('Report your status with:')), ownB = actR.slice(actR.lastIndexOf('\nKeep your board true'))
 check('#79 snippet: the checklist stays LIVE and no argument depends on its position — "@~root" kept current; one --item per plan item (no --plan); start an item with --state running --text, tick it with --done the moment it is done', /keep "@~root <what you're doing>" current/.test(G) && /--item "A" --item "B" creates .*one name per --item/.test(G) && !/--plan/.test(G)
@@ -92,7 +93,7 @@ check('briefing (Robin, 2026-10-03): the code reminder tells an orchestrator to 
   && /"@~root <what you are doing>" current/.test(ownB) && /unplanned work added as an item first/.test(ownB) && /an item reopened \(state running\) when work resumes/.test(ownB) && !/\{\w+\}/.test(actR), actR.split(TF).join('<tf>'))
 const hintR = rCow.find(b => /log tool/.test(b)) || '', hint = hintR.slice(hintR.indexOf('Report your status with the log tool'), hintR.includes('\nHanding work to agents') ? hintR.indexOf('\nHanding work to agents') : undefined)   // #79: the orchestrator briefing follows the hint
 check('{log_tool_hint}: a COWORK session gets the log-tool form — as:"Cow", plan:["A","B"], a tick via path "…/@~A" + state done, stale_after, finish, no secrets — and no script path', /log\(\{ as:"Cow", secret, text \}\)/.test(hint) && /plan:\["A","B"\]/.test(hint) && /state:"done"/.test(hint) && /state:"running"/.test(hint) && /keep "@~root/.test(hint) && /Give each a path under the plan item it serves \("<item>\/<agent>"\) and a checklist; it ticks items and ends with "@~root <summary>", state:"done"\. Keep your plan true: add unplanned work as an item first; reopen an item \(state:"running"\) when work resumes/.test(hintR) && !/\{\w+\}/.test(hintR) && /stale_after:"60m"/.test(hint) && /Never put secrets/.test(hint) && !/aimb-log|aimb-doorbell/.test(hint)
-  && hint.split('\n').length === 7, hint)
+  && hint.split('\n').length === 8 && /ask:"…", choices:\["A","B"\] posts a question; the answer arrives as activity_answer/.test(hint), hint)   // #85: + the question line
 check('reminder audience: the code session does NOT get the cowork reminder, and the cowork session gets neither the doorbell nor the script', !rOrch.some(b => /log tool: log\(/.test(b) && /as:"Orch"/.test(b) && !/aimb-log/.test(b)) && !rCow.some(b => /aimb-doorbell|aimb-log/.test(b)), J([rOrch.length, rCow.length]))
 const wake = await call(G1, 'set_wake', { as: 'Orch', secret: 'o' })
 check('#75: set_wake\'s code hint carries --token-file "<path>" and says the token comes from it', (wake.command || '').endsWith(`--token-file "${TF}"`) && /the token comes from --token-file/.test(wake.hint || ''), wake.hint)

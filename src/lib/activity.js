@@ -147,6 +147,19 @@
 // actionNotice (edit_text → verb activity_text_edited, batched; several merge through combineActionNotices) and messageNotice
 // (verb activity_message, sent at once; a public subject of who + path + firstWords, the text in the body).
 // Still format v5: line_by / line.by are optional fields a 1.69 host ignores.
+//
+// #85 (v1.71.0): QUESTIONS. A question is a CONTEXT whose current LINE carries `question` = { status, choices, free, asked_at,
+// expires_at?, answer?, by?, at? } — the line's text IS the question (≤ 240 code points; longer is refused, never cut). `ask`
+// (+ choices ≤ 8 × ≤ 60, free, expires) posts one: on a context that is new, line-less and leaf, or already a question, THAT node
+// becomes it; on anything else (an agent, the session, a context with a line or children) a new child `@?<n>` is created
+// (applyAsk). STATUS asked → answered (the dashboard's `answer`: a choice and/or free text, attributed) | expired (the bridge,
+// after `expires`) | withdrawn (the asker's state "withdrawn", the dashboard's `withdraw`, or any abandon / cascade of an open one).
+// For WIRE COMPATIBILITY the line's STATE follows the status — asked = blocked, answered = done, expired / withdrawn = abandoned —
+// so a ≤1.70 host (which drops the unknown `question` field) shows an ordinary blocked / done / abandoned context with the
+// question as its text. A question counts as an ITEM in "N of M done" (open = remaining, answered = done, closed unanswered =
+// skipped) and, under a node holding plan items, as an item of that plan. The question rides the line everywhere `line_by` does:
+// the entry record's `question`, a cp's / cf's `current.question`, gossip `current.question`, the replay (lineOf). A plain report
+// can't overwrite a question's line ('question-node'). Still format v5: `question` is an optional field a 1.70 host ignores.
 import { lc, projKey } from './keys.js'
 
 /** The locked #70 limits (6a: depth/nodes replace "agent path depth 3" + "32 contexts per agent"). text/context in code
@@ -196,7 +209,16 @@ export const ACTIVITY_DEFAULTS = Object.freeze({
 export const ACTIVITY_ENV = Object.freeze(Object.fromEntries(Object.keys(ACTIVITY_DEFAULTS).map(k => [k, 'AI_BRIDGE_ACTIVITY_' + k.toUpperCase()])))
 /** The message fields of a `log` call / batch item (6a: + path; 6b: + plan; #82: + move / to (re-parent) and before / after /
  * position (where new plan items, a moved node or the addressed node go among their siblings)). */
-export const MESSAGE_FIELDS = Object.freeze(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan', 'move', 'to', 'before', 'after', 'position'])
+export const MESSAGE_FIELDS = Object.freeze(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan', 'move', 'to', 'before', 'after', 'position', 'ask', 'choices', 'free', 'expires'])
+/** #85: the fields of a QUESTION (ask = the question; choices; free = free text allowed; expires = a duration) — a ≤1.70 gateway
+ * doesn't know them (it would drop them silently), so a 1.71 follower / script refuses to send them there; so is state "withdrawn". */
+export const ASK_FIELDS = Object.freeze(['ask', 'choices', 'free', 'expires'])
+const isWithdrawn = v => typeof v === 'string' && v.trim().toLowerCase() === 'withdrawn'
+/** Does a `log` input (or a batch of them) use a #85 field (or state "withdrawn")? */
+export const usesAsk = input => {
+  const one = x => !!x && typeof x === 'object' && (ASK_FIELDS.some(k => x[k] !== undefined) || isWithdrawn(x.state))
+  return !!input && typeof input === 'object' && (one(input) || (Array.isArray(input.items) && input.items.some(one)))
+}
 /** #82: the fields a ≤1.68 gateway doesn't know (it would silently ignore them) — a 1.69 follower / script refuses to send them there. */
 export const PLAN82_FIELDS = Object.freeze(['move', 'to', 'before', 'after', 'position'])
 /** Does a `log` input (or a batch of them) use any #82 field? */
@@ -257,6 +279,70 @@ export function normBy(v) {
 }
 /** 6d: the attribution phrase — "by robin via dashboard (ROBIN-Z790)" / "by bridge"; '' for none. */
 export function byText(v) { const b = normBy(v); return !b ? '' : typeof b === 'string' ? `by ${b}` : `by ${b.user} via dashboard (${b.host})` }
+
+// ---------------------------------------------------------------------------------------------------------------
+// #85 (v1.71.0): QUESTIONS — the question object a question line carries (see the header)
+/** The statuses: asked (open, awaiting an answer) → answered | expired | withdrawn (closed). */
+export const QUESTION_STATUSES = Object.freeze(['asked', 'answered', 'expired', 'withdrawn'])
+/** The limits: ≤ 8 choices of ≤ 60 code points each; a free-text answer ≤ 1000 code points; expires ≤ 7 days. The question itself
+ * is a line: ≤ 240 code points (ACTIVITY_LIMITS.text — refused when longer, never truncated). */
+export const QUESTION_LIMITS = Object.freeze({ choices: 8, choice: 60, answer: 1000, expiresMaxMs: 7 * 86400000 })
+/** The line STATE of each status — what a ≤1.70 host (which drops `question`) shows: an open question is a BLOCKED context. */
+export const QUESTION_LINE_STATE = Object.freeze({ asked: 'blocked', answered: 'done', expired: 'abandoned', withdrawn: 'abandoned' })
+/** The answer notice's verb (the session's own question was answered / withdrawn / expired) — sent at once, never batched. */
+export const ANSWER_NOTICE_VERB = 'activity_answer'
+/** A choice / an answer choice as kept: one line, ≤ 60 code points (longer → null: refused by the parsers). */
+const qChoice = v => { const s = typeof v === 'string' ? normText(v) : ''; return s && cpLen(s) <= QUESTION_LIMITS.choice ? s : null }
+/** A free-text answer as kept: newlines / tabs kept, other control characters dropped, trimmed (≤ 1000 code points: the caller checks). */
+const qAnswerText = s => (typeof s === 'string' ? s.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim() : '')
+/**
+ * A question object from memory, a record or the wire → its canonical form, or null (not a question). Untrusted input is bounded:
+ * ≤ 8 distinct choices of ≤ 60 code points, an answer only when answered (choice ≤ 60, text ≤ 1000), `by` / `at` only once closed.
+ * free = free text is allowed (always, when there are no choices).
+ * @param {any} v
+ * @returns {{ status:string, choices:string[], free:boolean, asked_at:number, expires_at?:number, answer?:{ choice?:string, text?:string }, by?:any, at?:number }|null}
+ */
+export function normQuestion(v) {
+  if (!v || typeof v !== 'object' || !QUESTION_STATUSES.includes(v.status)) return null
+  const choices = [], seen = new Set()
+  for (const c of Array.isArray(v.choices) ? v.choices.slice(0, 32) : []) { const s = qChoice(c); if (s && !seen.has(lc(s)) && choices.length < QUESTION_LIMITS.choices) { seen.add(lc(s)); choices.push(s) } }
+  const num = x => { const n = Number(x); return Number.isFinite(n) && n > 0 ? Math.floor(n) : null }
+  /** @type {any} */
+  const out = { status: v.status, choices, free: v.free === true || !choices.length, asked_at: num(v.asked_at) || 0 }
+  if (num(v.expires_at)) out.expires_at = num(v.expires_at)
+  if (v.status === 'answered' && v.answer && typeof v.answer === 'object') {
+    const a = {}, ch = qChoice(v.answer.choice), tx = qAnswerText(v.answer.text)
+    if (ch) a.choice = ch
+    if (tx) a.text = cpLen(tx) > QUESTION_LIMITS.answer ? cpSlice(tx, QUESTION_LIMITS.answer - 1) + '…' : tx
+    if (a.choice || a.text) out.answer = a
+  }
+  if (v.status !== 'asked') {
+    const by = normBy(v.by && typeof v.by === 'object' ? { ...v.by, kind: 'dashboard' } : v.by)
+    if (by) out.by = by
+    if (num(v.at)) out.at = num(v.at)
+  }
+  return out
+}
+/** A question as records / gossip carry it (plain JSON; `by` as { kind, user, host } or "bridge"). */
+const qOut = q => { const n = normQuestion(q); return n ? compact({ ...n, choices: n.choices.length ? n.choices : null, free: n.free || null, by: n.by && typeof n.by === 'object' ? { ...n.by } : n.by }) : null }
+/** A question as the board / the activity tool show it (`by` as { user, host }, or "bridge"). @param {any} q @returns {any} */
+export const questionView = q => {
+  const n = normQuestion(q)
+  return n ? { status: n.status, choices: n.choices, free: n.free, ...compact({ asked_at: n.asked_at || null, expires_at: n.expires_at || null, answer: n.answer || null,
+    by: n.by && typeof n.by === 'object' ? { user: n.by.user, host: n.by.host } : n.by || null, at: n.at || null }) } : null
+}
+/** The answer as one line for people: "Postgres — because the rest of the stack uses it" / just the choice / just the text. */
+export function answerText(a, max = 160) {
+  const parts = []
+  if (a && a.choice) parts.push(a.choice)
+  if (a && a.text) parts.push(normText(a.text))
+  const s = parts.join(' — ')
+  return cpLen(s) > max ? cpSlice(s, max - 1).trimEnd() + '…' : s
+}
+/** Is this node a question (its current line carries one)? */
+export const isQuestion = n => !!(n && n.kind !== 'agent' && n.current && n.current.question)
+/** Is this node an OPEN question (asked, awaiting an answer)? */
+export const isOpenQuestion = n => isQuestion(n) && n.current.question.status === 'asked'
 
 /**
  * The session key: realm + projKey(project) + lc(user) + lc(session) + lc(host), JSON-encoded so no separator can collide.
@@ -664,7 +750,8 @@ const ownerIndex = segs => { for (let i = segs.length - 1; i >= 0; i--) if (segs
  *   segs: PathSeg[], path: string, key: string, agent: string|null, context: string, root: boolean, current: boolean,
  *   text: string, state: string|null, progress?: ActivityProgress|null, eta_at?: number|null, stale_after_ms: number|null,
  *   details: string|null, data: any, log: boolean, warnings: string[], plan?: string[], keepText?: boolean, planOnly?: boolean,
- *   pos?: any, posOnly?: boolean, move?: { toSegs: PathSeg[], toPath: string, toKey: string } }} ActivityMsg
+ *   pos?: any, posOnly?: boolean, move?: { toSegs: PathSeg[], toPath: string, toKey: string },
+ *   ask?: { choices: string[], free: boolean, expires_at: number|null }, withdraw?: { note: string|null } }} ActivityMsg
  *   `path`/`key` address the TARGET node ('' = the session root); `agent` = its OWNER's path (null = the session), `context`
  *   = the target's name when it is a context, else 'root' (the old shape); `root` = the target is an agent or the session.
  *   `progress` / `eta_at` are ABSENT when not given and null when explicitly cleared ("none").
@@ -693,12 +780,14 @@ export function parseMessage(input, opts = {}) {
   if (log === null) return bad('bad-log', 'log must be true (append to the log; the default) or false (update the board only)')
   const pos = parsePosition(input); if (!pos.ok) return pos
   if (has(input, 'move') || has(input, 'to')) return parseMove(input, pos.pos, warnings)   // #82: a MOVE (re-parent) is its own operation
+  if (ASK_FIELDS.some(k => input[k] !== undefined && input[k] !== null)) return parseAsk(input, opts, pos.pos, log)   // #85: a QUESTION is its own operation
+  if (isWithdrawn(input.state)) return parseWithdraw(input, opts, pos.pos, log)                                    // #85: the asker withdraws its question
   let plan = null
   if (input.plan !== undefined) { const pl = parsePlan(input.plan); if (!pl.ok) return pl; plan = pl.names; if (pl.warning) warnings.push(pl.warning) }
   let state = null
   if (has(input, 'state')) {
     state = typeof input.state === 'string' ? input.state.trim().toLowerCase() : ''
-    if (!ACTIVITY_STATES.includes(state)) return bad('bad-state', `state must be one of ${ACTIVITY_STATES.join('|')}`)
+    if (!ACTIVITY_STATES.includes(state)) return bad('bad-state', `state must be one of ${ACTIVITY_STATES.join('|')} (or withdrawn: a question you asked)`)
   }
   const bar = has(input, 'progress') || has(input, 'eta')   // a bar update may omit text: it defaults to a template
   if (input.text != null && typeof input.text !== 'string') return bad('bad-text', 'text must be a string')
@@ -854,6 +943,78 @@ function parseMove(input, pos, warnings) {
     text: '', state: null, stale_after_ms: null, details: null, data: null, log: true, warnings, move: { toSegs: t.segs, toPath, toKey }, ...(pos ? { pos } : {}) }
   return { ok: true, msg }
 }
+/**
+ * #85: a QUESTION — `ask` (the question: one line, ≤ 240 code points; longer is REFUSED 'question-too-long' — a cut question is no
+ * question) + optional `choices` (≤ 8 distinct, each ≤ 60 code points), `free` (free text allowed; default: only when there are no
+ * choices) and `expires` (a duration > 0, ≤ 7 days: the question becomes expired, unanswered, after it). Addressed like any message
+ * (path / agent / context; the question text is taken LITERALLY — a leading "@…" is not a path); the node is decided in apply
+ * (applyAsk). It may carry details / data (context for whoever answers) and stale_after; not text / state / a bar / a plan / a
+ * move / a position, and it is always logged. → msg with msg.ask = { choices, free, expires_at|null }, text = the question, state
+ * = blocked, current.
+ */
+function parseAsk(input, opts, pos, log) {
+  if (!has(input, 'ask')) return bad('bad-ask', 'choices / free / expires belong to a question — give ask (the question) too')
+  if (typeof input.ask !== 'string') return bad('bad-ask', 'ask must be a string: the question')
+  const question = normText(input.ask)
+  if (!question) return bad('bad-ask', 'the question (ask) is empty')
+  if (cpLen(question) > ACTIVITY_LIMITS.text) return bad('question-too-long', `a question is at most ${ACTIVITY_LIMITS.text} characters (got ${cpLen(question)}) — shorten it (put background in details)`)
+  const extra = ['state', 'progress', 'eta', 'plan', 'move', 'to'].filter(k => has(input, k))
+  if (has(input, 'text') && !(typeof input.text === 'string' && !input.text.trim())) extra.unshift('text')
+  if (pos) extra.push('before / after / position')
+  if (extra.length) return bad('bad-ask', `a question takes path / agent / context, ask, choices, free, expires, details, data and stale_after — not ${extra.join(', ')} (the question goes in ask)`)
+  if (log === false) return bad('bad-ask', 'a question is always logged (log:false can\'t go with ask)')
+  const choices = [], seen = new Set()
+  if (input.choices != null) {
+    if (!Array.isArray(input.choices)) return bad('bad-choices', 'choices must be an array of strings, e.g. ["Postgres", "SQLite"]')
+    if (input.choices.length > QUESTION_LIMITS.choices) return bad('bad-choices', `a question has at most ${QUESTION_LIMITS.choices} choices (got ${input.choices.length})`)
+    for (const c of input.choices) {
+      if (typeof c !== 'string' || !normText(c)) return bad('bad-choices', 'each choice must be a non-empty string')
+      const s = normText(c)
+      if (cpLen(s) > QUESTION_LIMITS.choice) return bad('bad-choices', `choice "${cpSlice(s, 30)}…" is longer than ${QUESTION_LIMITS.choice} characters`)
+      if (seen.has(lc(s))) return bad('bad-choices', `choice "${cpSlice(s, 40)}" is given twice`)
+      seen.add(lc(s)); choices.push(s)
+    }
+  }
+  let free = !choices.length
+  if (input.free !== undefined && input.free !== null) {
+    const b = boolVal(input.free)
+    if (b === null) return bad('bad-ask', 'free must be true (free text allowed) or false')
+    free = b
+  }
+  if (!choices.length && !free) return bad('bad-ask', 'a question needs choices, free text, or both (free:false with no choices can\'t be answered)')
+  let expires_at = null
+  if (has(input, 'expires')) {
+    const ms = parseDuration(input.expires)
+    if (!Number.isFinite(ms) || ms <= 0 || ms > QUESTION_LIMITS.expiresMaxMs) return bad('bad-expires', 'expires must be a duration > 0 and ≤ 7 days, e.g. "2h" or "30m"')
+    if (!Number.isFinite(opts.now)) return bad('bad-expires', 'expires needs the current time (parseMessage opts.now)')
+    expires_at = opts.now + ms
+  }
+  // the address + details / data / stale_after, checked the usual way (a placeholder text: the question is set below, literally)
+  const base = parseMessage({ agent: input.agent, path: input.path, context: input.context, text: 'x', details: input.details, data: input.data, stale_after: input.stale_after }, opts)
+  if (!base.ok) return base
+  const msg = base.msg
+  Object.assign(msg, { text: question, state: 'blocked', current: true, log: true, ask: { choices, free, expires_at } })
+  return { ok: true, msg }
+}
+/**
+ * #85: the asker WITHDRAWS its question — state "withdrawn" on the question node (its path; no `@~` needed). Optional text = a note for
+ * the log ("withdrawn: <text>"); the line keeps the question. → msg with msg.withdraw = { note }, keepText, current, state abandoned.
+ */
+function parseWithdraw(input, opts, pos, log) {
+  const extra = ['progress', 'eta', 'plan'].filter(k => has(input, k))
+  if (pos) extra.push('before / after / position')
+  if (extra.length) return bad('bad-state', `withdrawn (a question) takes path / agent / context and an optional text note — not ${extra.join(', ')}`)
+  if (log === false) return bad('bad-state', 'withdrawing a question is always logged (log:false can\'t go with state withdrawn)')
+  if (input.text != null && typeof input.text !== 'string') return bad('bad-text', 'text must be a string')
+  const base = parseMessage({ agent: input.agent, path: input.path, context: input.context, text: 'x', details: input.details, data: input.data, stale_after: input.stale_after }, opts)
+  if (!base.ok) return base
+  const msg = base.msg
+  if (msg.root) return bad('not-a-question', `"${msg.path || '@root'}" is ${msg.path ? 'an agent' : 'the session'} — state withdrawn is for a question you asked (its path)`)
+  let note = typeof input.text === 'string' ? normText(input.text) : ''
+  if (cpLen(note) > ACTIVITY_LIMITS.text) { note = cpSlice(note, ACTIVITY_LIMITS.text - 1) + '…'; msg.warnings.push('text-truncated') }
+  Object.assign(msg, { text: '', keepText: true, state: 'abandoned', current: true, log: true, withdraw: { note: note || null } })
+  return { ok: true, msg }
+}
 const trimSlashes = s => String(s).trim().replace(/^\/+|\/+$/g, '')
 /**
  * Merge batch / stream DEFAULTS under one item. `log` is a plain default. ADDRESS defaults — 6b (#70 "Decisions before 6b"
@@ -917,7 +1078,7 @@ export function splitBatch(input) {
 
 /**
  * @typedef {{ id:string, ts:number, text:string, state:string, details?:string|null, data?:any, data_bytes?:number,
- *   has_details?:boolean, has_data?:boolean, by?:any }} ActivityLine   (#83: by = who wrote its text when not its session — a dashboard edit)
+ *   has_details?:boolean, has_data?:boolean, by?:any, question?:any }} ActivityLine   (#83: by = who wrote its text when not its session — a dashboard edit; #85: question = the line's question)
  * @typedef {{ key:string, path:string, name:string, kind:'agent'|'context', parent:string|null, depth:number,
  *   created_at:number, last_activity:number, stale_after_ms:number|null, current:ActivityLine|null,
  *   progress:ActivityProgress|null, eta_at:number|null, finished_at:number|null, gone_at:number|null, implicit:boolean,
@@ -1019,8 +1180,9 @@ function openPlanKeys(sess) {
  * running / blocked; allDoneAt (6c) = when the last item became done, once EVERY item is done (else null).
  */
 function planOf(sess, node) {
-  const items = childrenOf(sess, node).filter(c => c.plan)
+  const kids = childrenOf(sess, node), items = kids.filter(c => c.plan)
   if (!items.length) return null
+  for (const c of kids) if (!c.plan && isQuestion(c)) items.push(c)   // #85: a question under a plan node is one of its items (open = blocked: the plan stays open)
   let open = 0, doneAt = 0, all = true
   for (const it of items) {
     const s = stateOf(it)
@@ -1117,7 +1279,7 @@ function notePersisted(span, tgt, what, ts) {
 /** The record fields of a plan item (6b): the marker + its plan position. */
 const planFields = n => (n && n.plan ? { plan_item: true, ...(Number.isInteger(n.plan_ix) ? { plan_ix: n.plan_ix } : {}) } : {})
 const cpId = (sKey, nKey) => JSON.stringify([sKey, nKey])
-const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, details: l.details || null, data: l.data != null ? l.data : null, ...(l.by ? { line_by: l.by } : {}) } : null)   // #83: + line_by
+const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, details: l.details || null, data: l.data != null ? l.data : null, ...(l.by ? { line_by: l.by } : {}), ...(l.question ? { question: qOut(l.question) } : {}) } : null)   // #83: + line_by; #85: + question
 
 /**
  * Apply one parsed message from a LOCAL session. Atomic: a rejected message changes nothing.
@@ -1147,7 +1309,7 @@ const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, d
  * @param {{ session:string, project?:string, user?:string|null, realm?:string, host?:string }} ident  the reporting session
  * @param {ActivityMsg} msg  parseMessage(...).msg
  * @param {number} now
- * @param {{ by?: any, act?: string, entryText?: string, planEnd?: string, cascade?: boolean }} [opts]  by (6d) may be a dashboard { kind, user, host }; act / entryText (the LOG text; the line keeps its own) / planEnd (done | abandoned | open); cascade:false (#82) = no abandon cascade (the cascade's own entries)
+ * @param {{ by?: any, act?: string, entryText?: string, planEnd?: string, cascade?: boolean, question?: any }} [opts]  by (6d) may be a dashboard { kind, user, host }; act / entryText (the LOG text; the line keeps its own) / planEnd (done | abandoned | open); cascade:false (#82) = no abandon cascade (the cascade's own entries); question (#85) = the line's new question object (applyAsk, an answer, the expiry)
  * @returns {ActivityResult} { ok:true, id, ts, logged, entry, records, current, state, stale_at, path, agent, context,
  *   evicted:string[], warnings:string[], plan? } or { ok:false, code, what } — `records` = every JSONL record this call
  *   wrote, in order (the target's entry first, then each new plan item's)
@@ -1158,6 +1320,7 @@ export function apply(state, ident, msg, now, opts = {}) {
   if (!Number.isFinite(now)) return bad('bad-now', 'now must be a ms epoch')
   if (!msg || typeof msg.text !== 'string' || !(msg.text || msg.keepText || msg.planOnly || msg.posOnly || msg.move) || !Array.isArray(msg.segs)) return bad('bad-message', 'pass the msg from parseMessage()')
   if (msg.move) return applyMove(state, ident, msg, now, opts)   // #82: a re-parent is its own operation
+  if (msg.ask) return applyAsk(state, ident, msg, now, opts)     // #85: a question — decides its node, then applies its line here
   const posOnly = !!msg.posOnly, logged = msg.log !== false || posOnly, planOnly = !!msg.planOnly   // #82: a placement is always logged (its rank must reach the files)
   const sessName = str(ident && ident.session)
   if (!sessName) return bad('bad-session', 'the reporting session needs a name')
@@ -1178,6 +1341,25 @@ export function apply(state, ident, msg, now, opts = {}) {
   const act = opts && typeof opts.act === 'string' && ACTIVITY_ACTIONS.includes(opts.act) ? opts.act : null                                       // 6d: which action wrote it
   const entryText = opts && typeof opts.entryText === 'string' && normText(opts.entryText) ? cpSlice(normText(opts.entryText), L.text) : null   // 6d: the LOG text (the line keeps its own)
   const planEndOpt = opts && (PLAN_END.has(opts.planEnd) || opts.planEnd === 'open') ? opts.planEnd : null                                       // 6d: set / clear the plan-end marker
+  // #85: a QUESTION's line is its question — the new one (applyAsk; an answer; the expiry) comes in opts.question; the asker's
+  // withdrawal, or any abandon / cascade of an OPEN question, withdraws it; any other line on a question node is refused
+  const q0 = tgt0 && tgt0.current && tgt0.current.question ? tgt0.current.question : null
+  const qIn = opts && opts.question ? normQuestion(opts.question) : null
+  let qLine = null, qEntry = null
+  if (!planOnly && !posOnly && msg.current) {
+    if (qIn) qLine = qIn
+    else if (msg.withdraw) {
+      if (!q0) return bad('not-a-question', `"${msg.path}" is not a question — state withdrawn withdraws a question you asked (ask)`)
+      if (q0.status !== 'asked') return bad('question-closed', `the question "${msg.path}" is already ${q0.status}`)
+      qLine = { ...q0, status: 'withdrawn', at: now, ...(by ? { by } : {}) }
+      qEntry = cpSlice(`withdrawn${by ? ' ' + byText(by) : ''}${msg.withdraw.note ? ': ' + msg.withdraw.note : ''}`, L.text)
+    } else if (q0) {
+      if (msg.keepText && msg.state === 'abandoned' && q0.status === 'asked') qLine = { ...q0, status: 'withdrawn', at: now, ...(by ? { by } : {}) }   // abandoned / cascaded: an open question is withdrawn
+      else return bad('question-node', `"${msg.path}" is a question — its line is the question: it is answered on the dashboard${q0.status === 'asked' ? ', or withdraw it (state withdrawn)' : '; ask again on it (ask) for a new one'}`)
+    }
+    if (qLine) qLine = normQuestion(qLine)
+    if (qLine && msg.keepText && tgt0 && tgt0.current) msg = { ...msg, details: tgt0.current.details || null, data: tgt0.current.data != null ? tgt0.current.data : null }   // a status change keeps the question's details / data
+  }
   // 6b: the plan's items under the target: new (create), an ordinary context with no line of its own (adopt), an item (keep)
   const items = []
   for (const name of msg.plan || []) {
@@ -1266,7 +1448,7 @@ export function apply(state, ident, msg, now, opts = {}) {
         && JSON.stringify(c0.data != null ? c0.data : null) === JSON.stringify(msg.data != null ? msg.data : null) && (c0.by || null) === lineBy   // #83: the session re-sending an edited text takes the line back
       if (same) lineId = c0.id
       else tgt.current = { id, ts: now, text, state: entryState, details: msg.details || null, data: msg.data != null ? msg.data : null,
-        data_bytes: msg.data != null ? utf8(JSON.stringify(msg.data)) : 0, ...(lineBy ? { by: lineBy } : {}) }
+        data_bytes: msg.data != null ? utf8(JSON.stringify(msg.data)) : 0, ...(lineBy ? { by: lineBy } : {}), ...(qLine ? { question: qLine } : {}) }   // #85: a question line
       if (tgt.kind === 'agent') {
         if (DONE_OR_FAILED.has(entryState)) { if (!tgt.finished_at) tgt.finished_at = now }
         else tgt.finished_at = null
@@ -1279,13 +1461,14 @@ export function apply(state, ident, msg, now, opts = {}) {
     if ('progress' in msg) tgt.progress = msg.progress ? { ...msg.progress } : null   // ANY message moves the bar
     if ('eta_at' in msg) tgt.eta_at = msg.eta_at || null
     if (DONE_OR_FAILED.has(stateOf(tgt))) tgt.eta_at = null                          // dropped on done/failed, ignored while it is
-    Object.assign(res, { id: lineId, logged, current: cur, state: entryState, stale_at: staleAt(tgt, state.config.stale_after_min, owner), ...(rankSet ? { rank: tgt.rank } : {}) })
+    Object.assign(res, { id: lineId, logged, current: cur, state: entryState, stale_at: staleAt(tgt, state.config.stale_after_min, owner), ...(rankSet ? { rank: tgt.rank } : {}),
+      ...(cur && qLine ? { question: questionView(qLine) } : {}) })   // #85
     if (!logged) {   // the board only: mark what changed for the next checkpoint, and the node as live this interval
       const bits = (tgt.current !== before.cur ? CP_CUR : 0) | (JSON.stringify(tgt.progress) !== before.prog ? CP_PROG : 0) | (tgt.eta_at !== before.eta ? CP_ETA : 0)
       tgt.cp_dirty = (tgt.cp_dirty || 0) | bits
       state.cpLive.set(cpId(sKey, tKey), [sKey, tKey])
     } else {
-      const small = smallOf({ id, ts: now, current: cur, text: entryText || text, state: entryState,
+      const small = smallOf({ id, ts: now, current: cur, text: entryText || qEntry || text, state: entryState,
         progress: 'progress' in msg ? msg.progress : undefined, eta_at: 'eta_at' in msg ? msg.eta_at : undefined, stale_after_ms: msg.stale_after_ms,
         has_details: !!msg.details, has_data: msg.data != null, by, act })
       logInsert(tgt, small)
@@ -1297,8 +1480,9 @@ export function apply(state, ident, msg, now, opts = {}) {
       res.entry = { v: ACTIVITY_FORMAT, ...small, current: cur, path: tgt.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
         details: msg.details || null, data: msg.data != null ? msg.data : null, ...planFields(tgt), ...persistMarks(chain),
         ...(cur && tgt.kind === 'agent' ? { finished_at: tgt.finished_at } : {}),
-        ...(cur && entryText && entryText !== text ? { line_text: text } : {}),   // 6d: the LINE kept its text; the entry says what was done (+ by whom)
+        ...(cur && (entryText || qEntry) && (entryText || qEntry) !== text ? { line_text: text } : {}),   // 6d: the LINE kept its text; the entry says what was done (+ by whom)
         ...(cur && tgt.current && tgt.current.by ? { line_by: tgt.current.by } : {}),   // #83: who wrote the line's text (a dashboard edit; kept by a tick)
+        ...(cur && tgt.current && tgt.current.question ? { question: qOut(tgt.current.question) } : {}),   // #85: the line's question (status, choices, the answer …)
         ...(planEnd ? { plan_end: planEnd } : {}), ...(rankSet ? { rank: tgt.rank } : {}) }   // #82: the node's new position
       res.records.push(res.entry)
     }
@@ -1337,6 +1521,32 @@ export function apply(state, ident, msg, now, opts = {}) {
     if (state.cp) state.cp.rep = null                      // any other write closes the open repeat line
   }
   return res
+}
+
+/**
+ * #85: ASK — decide the QUESTION's node, then apply its line. The addressed node itself when it is a CONTEXT that is new, has no
+ * line, no children and is not a plan item, or is already a question (asking again on a CLOSED one starts a new question there;
+ * on an OPEN one → 'question-open'); otherwise (an agent, the session, a context with a line or children, a plan item) a new
+ * child context `@?<n>` (n = 1 + the highest `?<digits>` among its children). The line: text = the question, state blocked,
+ * question = { status:"asked", choices, free, asked_at, expires_at? } — logged, the session's own message (activity as usual).
+ */
+function applyAsk(state, ident, msg, now, opts = {}) {
+  const sessName = str(ident && ident.session)
+  if (!sessName) return bad('bad-session', 'the reporting session needs a name')
+  const sess = state.local.get(keyOf(state, { realm: ident.realm, project: ident.project, user: ident.user, session: sessName }))
+  const segs = msg.segs, node = sess ? sess.nodes.get(msg.key) : null, last = segs.length ? segs[segs.length - 1] : null
+  const self = !!last && last.kind === 'context' && (!node || isQuestion(node) || (!node.current && !node.plan && !childrenOf(sess, node).length))
+  let qs = segs
+  if (!self) {
+    if (segs.length + 1 > ACTIVITY_LIMITS.depth) return tooDeep(segs.length + 1)
+    let n = 0
+    for (const c of node ? childrenOf(sess, node) : []) { const m = c.kind === 'context' && /^\?(\d{1,9})$/.exec(c.name); if (m) n = Math.max(n, Number(m[1])) }
+    qs = [...segs, { kind: /** @type {'context'} */ ('context'), name: `?${n + 1}` }]
+  } else if (isOpenQuestion(node)) return bad('question-open', `"${node.path}" is still waiting for an answer — withdraw it first (state withdrawn), or ask under another path`)
+  const path = formatPath(qs), oi = ownerIndex(qs)
+  const q = { status: 'asked', choices: msg.ask.choices, free: msg.ask.free, asked_at: now, ...(msg.ask.expires_at ? { expires_at: msg.ask.expires_at } : {}) }
+  const m2 = { ...msg, segs: qs, path, key: pathKey(path), agent: oi ? formatPath(qs.slice(0, oi)) : null, context: qs[qs.length - 1].name, root: false, current: true, ask: undefined }
+  return apply(state, ident, m2, now, { ...opts, question: q })
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1681,16 +1891,19 @@ export function autoAbandon(state, now, opts = {}) {
 
 /** The actions (wire names). Plan items: done / skip / reopen (→ todo) / abandon; plan nodes: complete / abandon_plan /
  * reopen_plan (the table's "Reopen" on a plan); agents and the session: abandon_plan / finish (args.state done|failed) / dismiss. */
-export const ACTIVITY_ACTIONS = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss', 'move', 'reorder', 'edit_text', 'message'])   // #82: + move (args.to, + a position) and reorder (args.before | after | position); abandon on ANY context; #83 / #84: + edit_text (args.text, state?) and message (args.text)
+export const ACTIVITY_ACTIONS = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss', 'move', 'reorder', 'edit_text', 'message', 'answer', 'withdraw'])   // #82: + move (args.to, + a position) and reorder (args.before | after | position); abandon on ANY context; #83 / #84: + edit_text (args.text, state?) and message (args.text)
 /** #82: the actions a ≤1.68 owner doesn't know (its dashboard path answers bad-action) — a 1.69 gateway forwards them only to a 1.69 owner. */
 export const PLAN82_ACTIONS = Object.freeze(['move', 'reorder'])
 /** #83 / #84 (v1.70.0): the actions a ≤1.69 owner doesn't know — a 1.70 gateway forwards them only to an owner that declared activity_msg. */
 export const MSG_ACTIONS = Object.freeze(['edit_text', 'message'])
+/** #85 (v1.71.0): the actions a ≤1.70 owner doesn't know — a 1.71 gateway forwards them only to an owner that declared activity_ask. */
+export const ASK_ACTIONS = Object.freeze(['answer', 'withdraw'])
 /** #84: a dashboard message's limits — its full text (code points), and the preview logged as the entry's text. */
 export const MESSAGE_LIMITS = Object.freeze({ text: 2000, preview: 120 })
 const ITEM_ACTIONS = Object.freeze({ done: 'done', skip: 'skipped', reopen: 'todo', abandon: 'abandoned' })
 const ACTION_LABEL = Object.freeze({ done: 'marked done', skip: 'skipped', reopen: 'reopened (back to to do)', abandon: 'abandoned', complete: 'plan marked complete',
-  abandon_plan: 'plan abandoned', reopen_plan: 'plan reopened', finish: 'marked finished', dismiss: 'dismissed from the board', move: 'moved', reorder: 'moved', edit_text: 'edited', message: 'message' })
+  abandon_plan: 'plan abandoned', reopen_plan: 'plan reopened', finish: 'marked finished', dismiss: 'dismissed from the board', move: 'moved', reorder: 'moved', edit_text: 'edited', message: 'message',
+  answer: 'answered', withdraw: 'withdrawn' })
 /**
  * #83: the states the dashboard's Edit text… may set on a node — what a report could set there: a plan item any state; another
  * context any but todo / skipped (plan states); an agent / the session running | blocked | idle | done | failed, + abandoned only
@@ -1716,6 +1929,8 @@ export function firstWords(s, words = 6, chars = 40) {
   return ws.length > words ? cut(out) : out
 }
 const identOf = s => ({ realm: s.realm, project: s.project, user: s.user, session: s.session })
+/** #85: the path of the AGENT a node belongs to (its nearest agent ancestor; null = the session itself). */
+const ownerPath = (sess, n) => { const o = ownerOf(sess, n); return o && o.key ? o.path : null }
 /** #82: an action's position args (before / after / position) as message fields. */
 const posArgs = a => { const o = {}; for (const k of ['before', 'after', 'position']) if (a && typeof a[k] === 'string' && a[k].trim()) o[k] = a[k]; return o }
 const lineAddr = n => (n.path ? n.path + '/@~root' : '@~root')
@@ -1894,6 +2109,42 @@ export function applyAction(state, q, now, opts = {}) {
       const st2 = stateOf(node)
       return { ...done(r.records, { state: st2 }), from_state: st2, message: full }
     }
+    case 'answer': {   // ---- #85: answer an OPEN question — args.choice (one of its choices) and / or args.text (when free text is allowed)
+      const q = isQuestion(node) ? node.current.question : null
+      if (!q) return bad('not-a-question', `"${node.path || '@root'}" is not a question`)
+      if (q.status !== 'asked') return bad('question-closed', `the question "${node.path}" is already ${q.status}`)
+      const ans = {}
+      if (args.choice != null && String(args.choice).trim()) {
+        if (!q.choices.length) return bad('bad-args', 'this question has no choices — answer it with args.text')
+        const want = lc(normText(String(args.choice)))
+        const hit = q.choices.find(c => lc(c) === want)
+        if (!hit) return bad('bad-choice', `"${cpSlice(String(args.choice), 60)}" is not one of its choices: ${q.choices.join(' | ')}`)
+        ans.choice = hit
+      }
+      const t = qAnswerText(args.text)
+      if (t) {
+        if (!q.free) return bad('bad-args', 'this question takes one of its choices, not free text')
+        if (cpLen(t) > QUESTION_LIMITS.answer) return bad('answer-too-long', `an answer is at most ${QUESTION_LIMITS.answer} characters (got ${cpLen(t)})`)
+        ans.text = t
+      }
+      if (!ans.choice && !ans.text) return bad('bad-args', q.choices.length ? `answer takes args.choice (${q.choices.join(' | ')})${q.free ? ' and / or args.text' : ''}` : 'answer takes args.text — the answer')
+      const pm = parseMessage({ path: lineAddr(node), state: 'done' }, { now })
+      if (!pm.ok) return pm
+      const qa = { ...q, status: 'answered', answer: ans, by, at: now }
+      const r = apply(state, identOf(sess), pm.msg, now, { by, act: action, entryText: cpSlice(`answered ${byText(by)}: ${answerText(ans, 200)}`, ACTIVITY_LIMITS.text), question: qa, cascade: false })
+      if (!r.ok) return r
+      return { ...done(r.records, { state: 'done' }), question: questionView(node.current.question), answer: ans, agent: ownerPath(sess, node) }
+    }
+    case 'withdraw': {   // ---- #85: withdraw an OPEN question from the dashboard (it won't be answered)
+      const q = isQuestion(node) ? node.current.question : null
+      if (!q) return bad('not-a-question', `"${node.path || '@root'}" is not a question`)
+      if (q.status !== 'asked') return bad('question-closed', `the question "${node.path}" is already ${q.status}`)
+      const pm = parseMessage({ path: lineAddr(node), state: 'abandoned' }, { now })
+      if (!pm.ok) return pm
+      const r = apply(state, identOf(sess), pm.msg, now, { by, act: action, entryText: actText(ACTION_LABEL.withdraw, by), question: { ...q, status: 'withdrawn', by, at: now }, cascade: false })
+      if (!r.ok) return r
+      return { ...done(r.records, { state: 'abandoned' }), question: questionView(node.current.question), agent: ownerPath(sess, node) }
+    }
     case 'complete': {   // ---- a PLAN NODE: ends its plan (a context: its line done; an agent / the session: the marker)
       if (!plan) return bad('not-a-plan', `"${node.path || '@root'}" holds no plan items`)
       if (planEndAt(sess, node, plan) != null) return bad('already-ended', `the plan of "${node.path || '@root'}" has already ended`)
@@ -1985,6 +2236,7 @@ export function displayPath(path, session) { return path ? String(path).replace(
  */
 export function actionNotice(r, opts = {}) {
   if (r && r.action === 'message') return messageNotice(r, opts)   // #84
+  if (r && (r.action === 'answer' || r.action === 'withdraw' || r.action === 'expire')) return answerNotice(r, opts)   // #85
   const b = normBy(opts.by), by = b && typeof b === 'object' ? { user: b.user, host: b.host } : { user: typeof b === 'string' ? b : 'dashboard', host: opts.host || '?' }
   const id = r.ident || {}, action = r.action
   const p = displayPath(action === 'move' && r.moved_from != null ? r.moved_from : r.path, id.session)   // #82: "moved @A/@x to @B" names the OLD path
@@ -2011,6 +2263,72 @@ export function messageNotice(r, opts = {}) {
   const id = r.ident || {}, text = typeof r.message === 'string' ? r.message : ''
   const subject = cpSlice(`${by.user} about ${displayPath(r.path, id.session)}: ${firstWords(text)}`, NOTICE_SUBJECT_MAX)
   return { verb: MESSAGE_NOTICE_VERB, subject, body: { action: 'message', path: r.path || '', host: opts.host || null, text, by, entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, ts: opts.ts || null } }
+}
+/**
+ * #85: the session's OWN question was answered (the dashboard's `answer`), withdrawn (the dashboard's `withdraw`) or expired (the
+ * bridge) → { verb:"activity_answer", subject, body } — sent at once (now:true), to the session (an agent's question too: its
+ * orchestrator relays it — body.agent names the agent). The SUBJECT is public: who, the path and the question's first few words —
+ * "robin answered @Next release/@?1: Postgres or SQLite for the…" — NEVER the answer. The BODY (encrypted) = { action (answer |
+ * withdraw | expire), status, path, host (the owner), question (its text), choices, free, answer? { choice?, text? }, by { user,
+ * host } (or "bridge"), entry_id, session, project, agent (the asking agent's path; null = the session), asked_at, ts }.
+ * r = applyAction's answer / withdraw result, or { action:"expire", ident, path, text, question, entry_id, agent }.
+ * @param {any} r @param {{ by?: any, host?: string, ts?: number }} [opts]
+ */
+export function answerNotice(r, opts = {}) {
+  const id = r.ident || {}, q = /** @type {any} */ (questionView(r.question)) || { status: r.action === 'answer' ? 'answered' : r.action === 'withdraw' ? 'withdrawn' : 'expired', choices: [], free: true }
+  const b = normBy(opts.by != null ? opts.by : q.by), by = b && typeof b === 'object' ? { user: b.user, host: b.host } : (typeof b === 'string' ? b : 'dashboard')
+  const who = typeof by === 'object' ? by.user : by
+  const p = displayPath(r.path, id.session), fw = firstWords(r.text || '')
+  const subject = cpSlice(r.action === 'expire' ? `question expired ${p}: ${fw}` : `${who} ${r.action === 'withdraw' ? 'withdrew' : 'answered'} ${p}: ${fw}`, NOTICE_SUBJECT_MAX)
+  const body = { action: r.action, status: q.status, path: r.path || '', host: opts.host || null, question: r.text || null, choices: q.choices, free: q.free,
+    ...(q.answer ? { answer: q.answer } : {}), by, entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, agent: r.agent != null ? r.agent : null,
+    asked_at: q.asked_at || null, ts: opts.ts || null }
+  return { verb: ANSWER_NOTICE_VERB, subject, body }
+}
+/**
+ * #85: EXPIRY — every LOCAL open question whose expires_at has passed becomes `expired` (unanswered): a SYSTEM line by the bridge
+ * (state abandoned, the question kept with status expired; no activity), logged "expired — nobody answered within <dur>".
+ * Returns { records (persist in order), expired:[{ ident, path, text, question, entry_id, agent, action:"expire" }] } (each one
+ * is also what answerNotice takes).
+ * @param {ActivityState} state @param {number} now
+ */
+export function expireQuestions(state, now) {
+  const out = { records: [], expired: [] }
+  if (!state || !state.config.enabled || !Number.isFinite(now)) return out
+  for (const s of [...state.local.values()].sort((a, b) => cmp(a.key, b.key))) {
+    for (const n of [...s.nodes.values()].sort((a, b) => cmp(a.key, b.key))) {
+      if (s.nodes.get(n.key) !== n || !isOpenQuestion(n)) continue
+      const q = n.current.question
+      if (!(q.expires_at > 0) || now < q.expires_at) continue
+      const pm = parseMessage({ path: lineAddr(n), state: 'abandoned' }, { now })
+      if (!pm.ok) continue
+      const text = n.current.text, dur = q.asked_at ? ` within ${fmtEta(q.expires_at - q.asked_at).replace(/^~/, '')}` : ''
+      const r = apply(state, identOf(s), pm.msg, now, { by: 'bridge', entryText: `expired — nobody answered${dur}`, question: { ...q, status: 'expired', by: 'bridge', at: now }, cascade: false })
+      if (!r.ok) continue
+      out.records.push(...r.records)
+      out.expired.push({ action: 'expire', ident: identOf(s), path: n.path, text, question: questionView(n.current.question), entry_id: r.records.length ? r.records[r.records.length - 1].id : null, agent: ownerPath(s, n) })
+    }
+  }
+  return out
+}
+/** #85: when the next LOCAL open question expires (ms), or null — the gateway's expiry timer. @param {ActivityState} state */
+export function nextQuestionExpiry(state) {
+  let at = null
+  for (const s of state.local.values()) for (const n of s.nodes.values()) if (isOpenQuestion(n) && n.current.question.expires_at > 0 && (at === null || n.current.question.expires_at < at)) at = n.current.question.expires_at
+  return at
+}
+/**
+ * #85: a WAITER's view of a question node (the script's --wait): { outcome, status, path, question (text), choices, free, answer?,
+ * by?, at?, asked_at, expires_at?, entry_id } — outcome = the status once closed ("answered" | "expired" | "withdrawn"), "open"
+ * while asked, "gone" when the node (or its session) left the board or is no longer a question.
+ * @param {ActivityState} state @param {any} sess @param {any} node
+ */
+export function questionOutcome(state, sess, node) {
+  const alive = !!sess && state.local.get(sess.key) === sess && !!node && sess.nodes.get(node.key) === node
+  if (!alive || !isQuestion(node)) return { outcome: 'gone', path: node ? node.path : null }
+  const q = questionView(node.current.question)
+  return { outcome: q.status === 'asked' ? 'open' : q.status, status: q.status, path: node.path, question: node.current.text, choices: q.choices, free: q.free,
+    ...(q.answer ? { answer: q.answer } : {}), ...(q.by ? { by: q.by } : {}), ...(q.at ? { at: q.at } : {}), asked_at: q.asked_at, ...(q.expires_at ? { expires_at: q.expires_at } : {}), entry_id: node.current.id }
 }
 /**
  * Several notices for ONE session (bodies from actionNotice) → ONE { subject, body }: "robin skipped 2 items and abandoned 1 in
@@ -2170,7 +2488,7 @@ export function rollup(sess, node, memo) {
   if (node.progress) r = { ...node.progress, skipped: skOf(node.progress), pct: progressPct(node.progress), rollup: false, n: 1 }
   else {
     const kids = childrenOf(sess, node).sort((a, b) => cmp(a.key, b.key))
-    const bars = kids.filter(c => !c.plan).map(c => rollup(sess, c, memo)).filter(Boolean), items = kids.filter(c => c.plan)
+    const bars = kids.filter(c => !c.plan && !isQuestion(c)).map(c => rollup(sess, c, memo)).filter(Boolean), items = kids.filter(c => c.plan || isQuestion(c))   // #85: a question counts as an item (open = remaining, answered = done, expired / withdrawn = skipped)
     if (bars.length || items.length) for (const f of rollupStrategies) { r = f(bars, items); if (r) break }
   }
   r = forceBar(node, r)
@@ -2486,8 +2804,9 @@ export function createReplay(state, { now }) {
   function lineOf(r) {
     const data = r.data != null && typeof r.data === 'object' ? r.data : null
     const lb = r.line_by && typeof r.line_by === 'object' ? normBy(r.line_by) : null   // #83: who wrote its text (an entry's / a cp's current line_by; never the entry's own `by`)
+    const qn = normQuestion(r.question)   // #85: the line's question (an entry's / a cp's / a cf's current.question)
     return { id: String(r.id || ''), ts: finite(r.ts) ? r.ts : 0, text: typeof r.line_text === 'string' && r.line_text ? r.line_text : String(r.text), state: ACTIVITY_STATES.includes(r.state) ? r.state : 'running',   // 6d: line_text = the line's own text (the entry's says what a dashboard did)
-      details: typeof r.details === 'string' && r.details ? r.details : null, data, data_bytes: data != null ? utf8(JSON.stringify(data)) : 0, ...(lb && typeof lb === 'object' ? { by: lb } : {}) }
+      details: typeof r.details === 'string' && r.details ? r.details : null, data, data_bytes: data != null ? utf8(JSON.stringify(data)) : 0, ...(lb && typeof lb === 'object' ? { by: lb } : {}), ...(qn ? { question: qn } : {}) }
   }
   /** Nodes seen so far whose phase-1 fields are not all resolved yet. */
   function pending() { let n = 0; for (const s of sessions.values()) for (const x of s.nodes.values()) if (!nodeDone(x)) n++; return n }
@@ -2641,8 +2960,9 @@ export function renderText(template, progress, eta_at, now) {
 // #83: `by` = who wrote the line's text when not its session ({ user, host } — a dashboard edit)
 const lineByView = l => (l && l.by && typeof l.by === 'object' ? { user: l.by.user, host: l.by.host } : null)
 const lineView = (l, p, eta, now) => (l ? compact({ id: l.id, ts: l.ts, text: l.text, rendered: renderText(l.text, p, eta, now), state: l.state,
-  has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data), by: lineByView(l) }) : null)
-const rawLine = l => (l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data), by: lineByView(l) }) : null)
+  has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data), by: lineByView(l), question: l.question ? questionView(l.question) : null }) : null)   // #85: + question
+const rawLine = l => (l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data), by: lineByView(l),
+  question: l.question ? questionView(l.question) : null }) : null)   // #85: + question
 /** Is `key` inside `k`'s subtree (or `k` itself)? '' = everything. */
 const under = (key, k) => !k || key === k || key.startsWith(k + '/')
 /**
@@ -2751,7 +3071,7 @@ function activeHidden(sess, list) {
   for (const n of [sess.nodes.get(''), ...list]) { const p = n && planOf(sess, n); if (p && planEndAt(sess, n, p) != null) ended.add(n.key) }
   for (const n of list) {
     if (open.has(n.key)) continue
-    if (hide.has(n.parent) || (n.kind === 'agent' && !isActive(n)) || (n.plan && ended.has(n.parent))) hide.add(n.key)
+    if (hide.has(n.parent) || (n.kind === 'agent' && !isActive(n)) || ((n.plan || (isQuestion(n) && !isOpenQuestion(n))) && ended.has(n.parent))) hide.add(n.key)   // #85: + a closed question of an ended plan
   }
   for (const k of ended) {
     const n = sess.nodes.get(k)
@@ -3072,7 +3392,7 @@ export function findEntry(state, id, now = Date.now()) {
       if (n.current && n.current.id === id) {
         const l = n.current
         const r = renderText(l.text, rollup(s, n), n.eta_at, now)
-        return { where: 'current', complete: true, entry: { id: l.id, ts: l.ts, ...who, path: n.path, kind: n.kind, current: true, text: l.text, rendered: r, state: l.state, details: l.details || null, data: l.data != null ? l.data : null } }
+        return { where: 'current', complete: true, entry: { id: l.id, ts: l.ts, ...who, path: n.path, kind: n.kind, current: true, text: l.text, rendered: r, state: l.state, details: l.details || null, data: l.data != null ? l.data : null, ...(l.question ? { question: questionView(l.question) } : {}) } }
       }
       if (!hit) { const x = n.log.find(y => y.id === id); if (x) hit = { where: 'log', complete: !x.has_details && !x.has_data, entry: { ...x, ...who, path: x.path != null ? x.path : n.path, kind: n.kind, current: !!x.current, rendered: renderText(x.text, x.progress, x.eta_at, now), details: null, data: null } } }
     }
@@ -3085,7 +3405,8 @@ export function findEntry(state, id, now = Date.now()) {
 
 function snapLine(l) {
   return l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data),
-    by: l.by && typeof l.by === 'object' ? { kind: 'dashboard', user: l.by.user, host: l.by.host } : null }) : null   // #83: who wrote its text (a ≤1.69 receiver ignores it)
+    by: l.by && typeof l.by === 'object' ? { kind: 'dashboard', user: l.by.user, host: l.by.host } : null,   // #83: who wrote its text (a ≤1.69 receiver ignores it)
+    question: l.question ? qOut(l.question) : null }) : null   // #85: the line's question (a ≤1.70 receiver ignores it: a blocked / done / abandoned context)
 }
 /** A node's replicated form: its OWN fields (never children, rollup, log, details/data). 6b: + plan_item / plan_ix. 6c: + log_n
  * (its OWN entry count: memory + dropped; a remote node re-gossips what it was told) and log_partial (the count understates). */
@@ -3131,8 +3452,9 @@ function wLine(l) {
   const text = wText(l.text)
   if (!text) return null
   const by = l.by && typeof l.by === 'object' ? normBy({ ...l.by, kind: 'dashboard' }) : null   // #83
+  const question = normQuestion(l.question)   // #85: bounded (untrusted)
   return { id: typeof l.id === 'string' ? l.id.slice(0, 100) : '', ts: wTime(l.ts) || 0, text, state: ACTIVITY_STATES.includes(l.state) ? l.state : 'running',
-    has_details: !!l.has_details, has_data: !!l.has_data, ...(by && typeof by === 'object' ? { by } : {}) }
+    has_details: !!l.has_details, has_data: !!l.has_data, ...(by && typeof by === 'object' ? { by } : {}), ...(question ? { question } : {}) }
 }
 /** A node from the wire (validated path → canonical key), or null. */
 function wNode(r) {
@@ -3150,6 +3472,7 @@ function wNode(r) {
   if (n.kind === 'agent') {
     n.finished_at = wPos(r.finished_at); n.gone_at = wPos(r.gone_at)
     if (n.current && PLAN_STATES.has(n.current.state)) n.current.state = 'running'   // 6b: an agent can't be todo / skipped
+    if (n.current) delete n.current.question   // #85: an agent is never a question
   } else if (r.plan_item === true) { n.plan = true; n.plan_ix = Number.isInteger(r.plan_ix) && r.plan_ix >= 0 && r.plan_ix < ACTIVITY_LIMITS.planItems ? r.plan_ix : null }
   n.log_n = Number.isInteger(r.log_n) && r.log_n > 0 ? Math.min(r.log_n, 1e9) : 0   // 6c: the owner's own-entry count
   n.partial = n.cpartial = r.log_partial === true
@@ -3375,7 +3698,8 @@ export function remoteInfo(state) {
 const OBJ = 64, MAPE = 48, NUMS = 48
 const sB = s => (typeof s === 'string' ? 16 + 2 * s.length : 0)
 const progB = p => (p ? OBJ + sB(p.unit) + 16 : 0)
-const lineB = l => (l ? OBJ + sB(l.id) + sB(l.text) + sB(l.state) + 16 + (l.details ? sB(l.details) : 0) + (l.data != null ? OBJ + 2 * (l.data_bytes || 0) : 0) : 0)
+const lineB = l => (l ? OBJ + sB(l.id) + sB(l.text) + sB(l.state) + 16 + (l.details ? sB(l.details) : 0) + (l.data != null ? OBJ + 2 * (l.data_bytes || 0) : 0) + (l.question ? qB(l.question) : 0) : 0)
+const qB = q => OBJ * 2 + NUMS + (q.choices || []).reduce((n, c) => n + sB(c), 0) + (q.answer ? sB(q.answer.choice) + sB(q.answer.text) : 0)   // #85
 const entryB = e => 16 + OBJ + sB(e.id) + sB(e.text) + sB(e.state) + NUMS + progB(e.progress)
 function nodeB(n) {
   let b = OBJ + 2 * MAPE + sB(n.path) + sB(n.key) + sB(n.name) + sB(n.parent) + NUMS + lineB(n.current) + progB(n.progress)

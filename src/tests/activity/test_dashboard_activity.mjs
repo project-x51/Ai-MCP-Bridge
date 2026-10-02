@@ -282,7 +282,7 @@ check('Expand all opens every session and every node down to depth 6 (no log is 
 sec.querySelector('.sech').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
 check('leaving (collapsing the section) unsubscribes', sentOf('activity_unsub').length === 2)
 const legend = doc.getElementById('actlegend')
-check('legend: the 7 agent glyphs + the context mark + (6b) the 4 plan-item marks + (6c) abandoned + (#79) the 4 session glyphs + the ring / hover hint', legend.querySelectorAll('svg').length === 17 && /skipped · abandoned/.test(legend.textContent) && /plan item: to do · in progress · done · skipped/.test(legend.textContent) && /ring is the time left before an agent goes stale/.test(legend.textContent) && /hover the icons/.test(legend.textContent) && /context \(no ring/.test(legend.textContent))
+check('legend: the 7 agent glyphs + the context mark + (6b) the 4 plan-item marks + (6c) abandoned + (#79) the 4 session glyphs + (#85) the 3 question bubbles + the ring / hover hint', legend.querySelectorAll('svg').length === 20 && /question: awaiting an answer/.test(legend.textContent) && /skipped · abandoned/.test(legend.textContent) && /plan item: to do · in progress · done · skipped/.test(legend.textContent) && /ring is the time left before an agent goes stale/.test(legend.textContent) && /hover the icons/.test(legend.textContent) && /context \(no ring/.test(legend.textContent))
 
 try {   // a crash (an older dashboard without the 6b helpers) counts as one failure
 // ================================================================= 6b (v1.63.0): plan items, the plan bar, active only, host tags, per-host headlines
@@ -965,6 +965,125 @@ try {   // ================================================================= #83
   const css83 = [...doc.querySelectorAll('style')].map(s => s.textContent).join('\n')
   check('#83 / #84 CSS: the form dialog (inputs, the reason in --bad, the counter), the primary Send / Save button and the amber warning use theme tokens', /\.act-dlg \.act-in \{[^}]*var\(--bg\)[^}]*var\(--fg\)/.test(css83) && /\.act-btn\.primary \{[^}]*var\(--info\)/.test(css83) && /\.ar \.fb\.wn \{[^}]*var\(--warn\)/.test(css83) && /\.act-dlg \.dlg-why \{[^}]*var\(--bad\)/.test(css83))
 } catch (e) { fail++; console.log('FAIL #83/#84 block crashed:', (e && e.stack) || e) }
+
+try {   // ================================================================= #85 (v1.71.0): QUESTIONS — the "?" bubble, the awaiting-answer row, the answer
+  // after the question, the "? N" attention badge (collapsed ancestors, the session / project headers, the section tag), the menu (Answer… /
+  // Withdraw question… only for a 1.71 owner; no Edit text… / Abandon… on a question), the Answer… dialog (choices + free text), withdraw
+  // ---- the pure part
+  const qn = (status, extra = {}) => ({ nkind: 'context', current: { id: 'q', ts: NOW, text: 'Postgres or SQLite?', state: status === 'asked' ? 'blocked' : status === 'answered' ? 'done' : 'abandoned', question: { status, choices: ['Postgres', 'SQLite'], free: false, asked_at: NOW - MIN, ...extra } } })
+  check('#85 qOf / isQuestion / isOpenQuestion: a context whose line carries question; never an agent; open only while asked',
+    X.isQuestion(qn('asked')) && X.isOpenQuestion(qn('asked')) && X.isQuestion(qn('answered')) && !X.isOpenQuestion(qn('answered')) && !X.isQuestion({ nkind: 'agent', current: qn('asked').current }) && !X.isQuestion(cx('blocked')) && X.qOf(qn('expired')).status === 'expired')
+  const ga = X.questionGlyph('asked'), gb = X.questionGlyph('answered'), gc = X.questionGlyph('expired'), gw = X.questionGlyph('withdrawn')
+  check('#85 glyph: a speech bubble — asked: filled, "?" (s-asked); answered: a tick (s-answered); expired / withdrawn: dashed (greyed classes)',
+    /class="gl ctx q s-asked"/.test(ga) && />\?<\/text>/.test(ga) && /fill="currentColor"/.test(ga) && /s-answered/.test(gb) && /<path d="M5\.2 7\.1/.test(gb) && !/<text/.test(gb) && /s-expired/.test(gc) && /stroke-dasharray/.test(gc) && /s-withdrawn/.test(gw)
+    && X.glyphSvg({ qstatus: 'answered' }, NOW, 'question') === gb && X.effState(qn('asked'), null, NOW, 15).qstatus === 'asked')
+  const qq = { choices: ['Postgres', 'SQLite'], free: false }, qf = { choices: ['Postgres', 'SQLite'], free: true }, qt = { choices: [], free: true }
+  check('#85 checkAnswer: a choice is needed ("Pick a choice."); one of its choices (exact); free text only when allowed; with free text: a choice OR text; ≤ 1000 characters',
+    /Pick a choice/.test(X.checkAnswer(null, '', qq).why) && X.checkAnswer('SQLite', '', qq).ok && !X.checkAnswer('MySQL', '', qq).ok && /takes one of its choices/.test(X.checkAnswer('SQLite', 'because', qq).why)
+    && /Pick a choice or write an answer/.test(X.checkAnswer(null, ' ', qf).why) && X.checkAnswer(null, 'smaller', qf).ok && X.checkAnswer('SQLite', 'smaller', qf).ok
+    && /Write an answer/.test(X.checkAnswer(null, '', qt).why) && X.checkAnswer(null, 'x'.repeat(1000), qt).ok && (c => !c.ok && /Too long: 1001 of 1000/.test(c.why))(X.checkAnswer(null, 'x'.repeat(1001), qt)))
+  check('#85 answerText: "choice — text" on one line, cut with "…"', X.answerText({ choice: 'SQLite', text: 'smaller\nto ship' }) === 'SQLite — smaller to ship' && X.answerText({ text: 'x'.repeat(200) }, 10) === 'xxxxxxxxx…' && X.answerText({ choice: 'A' }) === 'A')
+  const roll = X.rollKids([{ u: { key: 'a', plan_item: true, current: { state: 'done' } } }, { u: { key: 'b', ...qn('asked') } }, { u: { key: 'c', ...qn('answered') } }, { u: { key: 'd', ...qn('withdrawn') } }])
+  check('#85 rollup (as the bridge): a question counts as an item — open = remaining, answered = done, withdrawn / expired = skipped', roll && roll.items && roll.total === 4 && roll.done === 2 && roll.skipped === 1, J(roll))
+  const mq = X.menuFor({ kind: 'node', nkind: 'context', question: { status: 'asked' }, can_ask: true, can_msg: true, can_plan: true })
+  const mq2 = X.menuFor({ kind: 'node', nkind: 'context', question: { status: 'asked' }, can_ask: false, can_msg: true, can_plan: true })
+  const mq3 = X.menuFor({ kind: 'node', nkind: 'context', question: { status: 'answered' }, can_ask: true, can_msg: true, can_plan: true })
+  const lab = m => m.filter(i => !i.sep).map(i => i.label)
+  check('#85 menu (pure): an OPEN question on a 1.71 host → Answer… + Withdraw question… (asked first); never Edit text… or Abandon… on a question; Message session… stays',
+    lab(mq)[0] === 'Answer…' && lab(mq)[1] === 'Withdraw question…' && mq[1].confirm === true && !lab(mq).includes('Edit text…') && !lab(mq).includes('Abandon…') && lab(mq).includes('Message session…') && lab(mq).includes('Move to…'), J(lab(mq)))
+  check('#85 menu (pure): an older owner (no ask) → no Answer… / Withdraw; an answered question → neither either', !lab(mq2).includes('Answer…') && !lab(mq2).includes('Withdraw question…') && !lab(mq3).includes('Answer…') && !lab(mq3).includes('Edit text…'), J([lab(mq2), lab(mq3)]))
+  // ---- the board: Ask85 on HOST-A (agent lead: an open question with choices, an answered one; @Rel: a free-text question) + a question on HOST-C (≤1.70: no ask)
+  const n85 = (p, nk, extra = {}) => node('k-a85', p, nk, extra.host || 'HOST-A', extra)
+  const qline = (id, text, status, q = {}) => ({ id, ts: NOW - MIN, text, state: status === 'asked' ? 'blocked' : status === 'answered' ? 'done' : 'abandoned', question: { status, choices: [], free: true, asked_at: NOW - 5 * MIN, ...q } })
+  const u85 = [
+    sess('k-a85', 'Ask85', 'A85', { hosts: ['HOST-A', 'HOST-C'], multi_host: true, self: root('HOST-A', { current: { id: 'sa', ts: NOW - MIN, text: 'asking', state: 'running' } }), selves: [root('HOST-A', { current: { id: 'sa', ts: NOW - MIN, text: 'asking', state: 'running' } }), root('HOST-C', { current: { id: 'sc', ts: NOW - MIN, text: 'on C', state: 'running' } })] }),
+    n85('lead', 'agent', { current: { id: 'l', ts: NOW - MIN, text: 'deciding', state: 'running' } }),
+    n85('lead/@?1', 'context', { state: 'blocked', current: qline('q1', 'Postgres or SQLite for the cache?', 'asked', { choices: ['Postgres', 'SQLite'], free: false, expires_at: NOW + 60 * MIN }) }),
+    n85('lead/@?2', 'context', { state: 'done', current: qline('q2', 'Ship on Friday?', 'answered', { choices: ['Yes', 'No'], free: true, answer: { choice: 'Yes', text: 'after the review' }, by: { user: 'robin', host: 'HOST-A' }, at: NOW - MIN }) }),
+    n85('@Rel', 'context', { current: { id: 'r', ts: NOW - MIN, text: 'release', state: 'running' } }),
+    n85('@Rel/@?1', 'context', { state: 'blocked', current: qline('q3', 'Which changelog wording?', 'asked') }),
+    n85('@Rel/@?2', 'context', { state: 'abandoned', current: qline('q4', 'Old question', 'withdrawn', { at: NOW - MIN }) }),
+    n85('wc', 'agent', { host: 'HOST-C', current: { id: 'wc', ts: NOW - MIN, text: 'on C', state: 'running' }, log: { remote: true, total: 1 } }),
+    n85('wc/@?1', 'context', { host: 'HOST-C', state: 'blocked', current: qline('q5', 'Question on an older host?', 'asked') }),
+  ]
+  recv({ type: 'activity_board', full: true, epoch: 'E85', seq: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15, finished_plan_open_min: 120, user: 'robin', log_cmd: null, remote_hosts: [{ host: 'HOST-C', plan: true, msg: true }] }, upsert: u85 })
+  const in85 = pth => { const rs = rowsT(), i = rs.indexOf(nmRow('Ask85')); if (i < 0) return null; for (let j = i + 1; j < rs.length && dOf(rs[j]) > 1; j++) if (rs[j].querySelector('.nm')?.getAttribute('title') === pth && (rs[j].getAttribute('data-host') || '') === (pth.startsWith('wc') ? 'HOST-C' : 'HOST-A')) return rs[j]; return null }
+  for (const pth of ['lead', '@Rel', 'wc']) if (in85(pth) && in85(pth).getAttribute('aria-expanded') === 'false') tog(in85(pth))
+  const rq1 = in85('lead/@?1'), rq2 = in85('lead/@?2'), rq4 = in85('@Rel/@?2')
+  check('#85 tree: an OPEN question — the fuchsia "?" bubble, a tinted "awaiting answer" row (class qopen), the pill "awaiting answer" (not "blocked"), the question as its line, its short name ?1',
+    !!rq1 && rq1.classList.contains('qopen') && !!rq1.querySelector('svg.gl.q.s-asked') && /awaiting answer/.test(rq1.querySelector('.pills')?.textContent || '') && !/blocked/.test(rq1.querySelector('.pills')?.textContent || '')
+    && rq1.querySelector('.ln')?.textContent === 'Postgres or SQLite for the cache?' && rq1.querySelector('.nm')?.textContent === '?1', rq1?.innerHTML.slice(0, 700))
+  check('#85 tree: an ANSWERED question shows its answer after the question ("→ Yes — after the review", green), a ticked bubble, no pill; a withdrawn one a dashed bubble + "withdrawn"',
+    !!rq2 && !rq2.classList.contains('qopen') && !!rq2.querySelector('svg.s-answered') && rq2.querySelector('.qa')?.textContent === '→ Yes — after the review' && !rq2.querySelector('.pill')
+    && !!rq4 && !!rq4.querySelector('svg.s-withdrawn') && /withdrawn/.test(rq4.querySelector('.pills')?.textContent || ''), rq2?.innerHTML.slice(0, 600))
+  check('#85 tree: the question\'s tooltip names its choices and when it expires', (() => { const el = rq1.querySelector('.ln[data-tip]'); if (!el) return false; el.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true })); const t = el.getAttribute('title') || ''; return /choices: Postgres · SQLite/.test(t) && /expires/.test(t) && /click \(or right-click → Answer…\)/.test(t) })())
+  // the badge: collapse lead → "? 1"; the session header "? 3" (lead/@?1 + @Rel/@?1 + wc/@?1); the project header too; the section tag
+  tog(in85('lead'))
+  const rl = in85('lead')
+  check('#85 badge: a COLLAPSED ancestor of an open question shows "? 1" (the answered one does not count); expanded it shows none', rl?.getAttribute('aria-expanded') === 'false' && rl.querySelector('.qbadge')?.textContent === '? 1' && !in85('@Rel')?.querySelector('.qbadge'), rl?.innerHTML.slice(0, 400))
+  check('#85 badge: the SESSION header counts every open question in it ("? 3", the older host\'s too), the PROJECT header too, and the section tag "? N open questions"',
+    nmRow('Ask85')?.querySelector('.qbadge')?.textContent === '? 3' && /\? 3/.test(rowsT().find(r => r.classList.contains('proj') && /A85/i.test(r.textContent))?.querySelector('.qbadge')?.textContent || '') && /\? \d+ open questions?/.test(doc.getElementById('acttag').textContent), doc.getElementById('acttag').textContent)
+  const ord = rowsT().map(r => r.querySelector('.nm')?.getAttribute('title')).filter(Boolean)
+  check('#85 rows keep their order (a question is a context: after plan items, by rank — nothing jumps to the top)', ord.indexOf('@Rel/@?1') < ord.indexOf('@Rel/@?2'), J(ord))
+  tog(in85('lead'))
+  // the menu
+  const mEl = () => doc.querySelector('.act-menu'), mLab = () => [...(mEl()?.querySelectorAll('.mi') || [])].map(b => b.textContent)
+  const rc = el => el.dispatchEvent(new win.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))
+  const pick = label => { const b = [...(mEl()?.querySelectorAll('.mi') || [])].find(x => x.textContent === label); if (b) click(b); return !!b }
+  const escK = el => (el || doc).dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  const dlg = () => doc.querySelector('.act-dlg')
+  const typeIn = (el, v) => { el.value = v; el.dispatchEvent(new win.Event('input', { bubbles: true })) }
+  rc(in85('lead/@?1')); const l1 = mLab(); escK()
+  rc(in85('wc/@?1')); const l5 = mLab(); escK()
+  rc(in85('lead/@?2')); const l2 = mLab(); escK()
+  check('#85 menu: an open question on this host → Answer… + Withdraw question… (no Edit text…, no Abandon…); on an OLDER host (no remote_hosts[].ask) → hidden; an answered one → neither',
+    l1[0] === 'Answer…' && l1[1] === 'Withdraw question…' && !l1.includes('Edit text…') && !l1.includes('Abandon…') && !l5.includes('Answer…') && !l5.includes('Withdraw question…') && !l2.includes('Answer…'), J([l1, l5, l2]))
+  // the ANSWER dialog — from the menu
+  const nA = sentOf('activity_action').length
+  rc(in85('lead/@?1')); pick('Answer…')
+  const ad = dlg(), okA = ad?.querySelector('[data-dlg="ok"]'), cbs = [...(ad?.querySelectorAll('[data-qc]') || [])]
+  check('#85 Answer…: a dialog with the question, its CHOICES as buttons (a radio group, none picked), no text box (choices only); Answer disabled ("Pick a choice."); it says the subject carries only the path + first words',
+    !!ad && /Answer Ask85 — lead\/@\?1/.test(ad.querySelector('h3').textContent) && ad.querySelector('.qtext')?.textContent === 'Postgres or SQLite for the cache?' && cbs.length === 2 && cbs.every(b => b.getAttribute('aria-checked') === 'false' && b.getAttribute('role') === 'radio')
+    && !!ad.querySelector('[role="radiogroup"]') && !ad.querySelector('textarea') && okA.disabled && /Pick a choice/.test(ad.querySelector('.dlg-why').textContent) && /first words/.test(ad.textContent) && /expires/.test(ad.textContent), ad?.outerHTML.slice(0, 800))
+  click(cbs[1])
+  check('#85 picking a choice: it is checked (aria-checked), the others not; Answer enabled', cbs[1].getAttribute('aria-checked') === 'true' && cbs[0].getAttribute('aria-checked') === 'false' && !okA.disabled)
+  click(cbs[1])
+  const unp = cbs[1].getAttribute('aria-checked') === 'false' && okA.disabled
+  click(cbs[0]); click(okA)
+  const sa = sentOf('activity_action').at(-1)
+  check('#85 clicking it again un-picks it; Answer sends {action:"answer", host HOST-A, session, path, args:{choice:"Postgres"}} (no text) and closes', unp && sentOf('activity_action').length === nA + 1 && sa.action === 'answer' && sa.host === 'HOST-A' && sa.session === 'Ask85' && sa.path === 'lead/@?1' && sa.args.choice === 'Postgres' && !('text' in sa.args) && !dlg(), J(sa))
+  recv({ type: 'activity_action', ref: sa.ref, result: { ok: true, host: 'HOST-A', action: 'answer', path: 'lead/@?1', applied: [{ path: 'lead/@?1', state: 'done' }], delivered: true, delivery: 'live', released: 1 } })
+  check('#85 the result: ✓ answered on the row + a toast "Answer sent — a waiting script got it and Ask85 was told"', /✓ answered/.test(in85('lead/@?1')?.querySelector('.fb')?.textContent || '') && [...doc.querySelectorAll('.act-toast')].some(t => t.textContent === 'Answer sent — a waiting script got it and Ask85 was told'), [...doc.querySelectorAll('.act-toast')].map(t => t.textContent).join(' | '))
+  // a CLICK on an open free-text question opens the dialog (and selects it)
+  click(in85('@Rel/@?1'))
+  const fd = dlg(), ta = fd?.querySelector('textarea#actAnsT'), okF = fd?.querySelector('[data-dlg="ok"]')
+  check('#85 a click on an OPEN question opens Answer… (a free-text one: a focused text box, no choice buttons; "Write an answer.")', !!fd && !!ta && !fd.querySelector('[data-qc]') && doc.activeElement === ta && okF.disabled && /Write an answer/.test(fd.querySelector('.dlg-why').textContent) && fd.querySelector('.dlg-n').textContent === '0 / 1000', fd?.outerHTML.slice(0, 500))
+  typeIn(ta, 'x'.repeat(1001))
+  const tooLong = okF.disabled && /Too long: 1001 of 1000/.test(fd.querySelector('.dlg-why').textContent)
+  typeIn(ta, 'Use "Fixed" and "Added".\nKeep it short.')
+  ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))
+  const sf = sentOf('activity_action').at(-1)
+  check('#85 free text: 1001 characters → disabled; Ctrl+Enter sends {action:"answer", args:{text} — newlines kept, no choice}', tooLong && sf.action === 'answer' && sf.path === '@Rel/@?1' && sf.args.text === 'Use "Fixed" and "Added".\nKeep it short.' && !('choice' in sf.args) && !dlg(), J(sf))
+  recv({ type: 'activity_action', ref: sf.ref, result: { ok: true, host: 'HOST-A', action: 'answer', path: '@Rel/@?1', applied: [], delivered: false, delivery: 'none', released: 0, warnings: ['not-delivered'] } })
+  check('#85 an answer nobody received (no inbox, no waiting script): an amber "⚠ answered · nobody was waiting" and a toast saying it is on the board', /⚠ answered · nobody was waiting/.test(in85('@Rel/@?1')?.querySelector('.fb')?.textContent || '') && [...doc.querySelectorAll('.act-toast')].some(t => /on the board/.test(t.textContent)))
+  // a click on an older host's open question: selected, no dialog
+  click(in85('wc/@?1'))
+  check('#85 a click on an open question on an OLDER host only selects it (no dialog)', !dlg() && V.sel && V.sel.path === 'wc/@?1')
+  // WITHDRAW
+  rc(in85('lead/@?1')); pick('Withdraw question…')
+  const wd = dlg()
+  check('#85 Withdraw question… asks first (Cancel focused), naming the question', !!wd && /Withdraw this question/.test(wd.querySelector('h3').textContent) && /Postgres or SQLite for the cache\?/.test(wd.textContent) && doc.activeElement === wd.querySelector('[data-dlg="cancel"]'))
+  click(wd.querySelector('[data-dlg="ok"]'))
+  const sw = sentOf('activity_action').at(-1)
+  check('#85 confirming sends {action:"withdraw", path}', sw.action === 'withdraw' && sw.path === 'lead/@?1' && sw.host === 'HOST-A', J(sw))
+  // the answered question after a delta: the row turns green, the badge drops
+  recv({ type: 'activity_delta', epoch: 'E85', seq: 2, base: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15, finished_plan_open_min: 120, user: 'robin', log_cmd: null, remote_hosts: [{ host: 'HOST-C', plan: true, msg: true }] },
+    upsert: [n85('lead/@?1', 'context', { state: 'done', current: qline('q1b', 'Postgres or SQLite for the cache?', 'answered', { choices: ['Postgres', 'SQLite'], free: false, answer: { choice: 'Postgres' }, by: { user: 'robin', host: 'HOST-A' }, at: NOW }) })], remove: [] })
+  const r1b = in85('lead/@?1')
+  check('#85 a delta: the answered question turns green (no "awaiting answer"), the session badge drops to "? 2"', !!r1b && !r1b.classList.contains('qopen') && r1b.querySelector('.qa')?.textContent === '→ Postgres' && nmRow('Ask85')?.querySelector('.qbadge')?.textContent === '? 2', r1b?.innerHTML.slice(0, 300))
+  const css85 = [...doc.querySelectorAll('style')].map(s => s.textContent).join('\n')
+  check('#85 CSS: the question colours are theme tokens (--ask, --ask-bg) defined for light AND dark', /--ask:#[0-9A-F]{6}; --ask-bg:#[0-9A-F]{6}/.test(css85) && (css85.match(/--ask:#/g) || []).length === 3 && /\.qbadge \{[^}]*var\(--ask\)/.test(css85) && /\.ar\.qopen \{[^}]*var\(--ask-bg\)/.test(css85))
+} catch (e) { fail++; console.log('FAIL #85 block crashed:', (e && e.stack) || e) }
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close()
 process.exit(fail ? 1 : 0)

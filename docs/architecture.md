@@ -1200,6 +1200,74 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.71.0):** *#85 — questions as a type of context, answerable from the dashboard.* **Wire-compatible with 1.66 –
+  1.70** (format stays v5; hosts upgrade one at a time). **The model (`lib/activity.js`):** a question is a CONTEXT whose current
+  LINE carries `question` = `{status, choices, free, asked_at, expires_at?, answer?{choice?, text?}, by?, at?}` (`normQuestion`:
+  bounded — ≤ 8 distinct choices of ≤ 60, an answer only when answered, its text ≤ 1000, `by` / `at` only once closed); the
+  line's text is the question. It rides the line exactly as #83's `line_by` does — the entry record's `question` (+ `line_text`
+  when a status change logs another text), a cp's / cf's `current.question` (`fullLine`), gossip `current.question`
+  (`snapLine` / `wLine`; never on an agent), `lineView` / `rawLine` (`questionView`: `by` as `{user, host}` or `"bridge"`), the
+  replay's `lineOf` — so nothing new on the wire or in the files. **Status → line state** (`QUESTION_LINE_STATE`): asked =
+  `blocked`, answered = `done`, expired / withdrawn = `abandoned` — what a 1.70 host (which drops `question`) shows.
+  **Asking:** `parseMessage` hands `ask` / `choices` / `free` / `expires` to `parseAsk` (the question literal, ≤ 240 code points
+  or `question-too-long` — never cut; ≤ 8 choices × 60, distinct, `bad-choices`; `free` defaults to "no choices"; `expires` >
+  0 and ≤ 7 d → `expires_at`; no text / state / bar / plan / move / position / log:false — `bad-ask`; the address + details /
+  data / stale_after parsed the usual way) → `msg.ask`; `apply` → `applyAsk` picks the node — the addressed CONTEXT when it is
+  new, line-less with no children and not a plan item, or already a question (an open one → `question-open`); else a new child
+  `?<n>` (1 + the highest `?<digits>` sibling; `path-too-deep` past 6) — then applies a logged `@~` line (blocked) with
+  `opts.question`. **Closing:** `apply` takes the line's new question from `opts.question` (an answer, the expiry, applyAsk);
+  `state:"withdrawn"` (`parseWithdraw`: a keepText tick, state abandoned, `msg.withdraw {note}`, `not-a-question` /
+  `question-closed`) withdraws it ("withdrawn: <note>"); a keepText `abandoned` tick on an OPEN question (an ancestor's
+  cascade, `abandonPlans`, the 6d `abandon` — i.e. a 1.70 dashboard) withdraws it too, attributed; any other line on a
+  question node → `question-node` (a log-only message is fine). A status change keeps the line's details / data.
+  **Actions:** `ACTIVITY_ACTIONS` + `answer` (`args {choice?, text?}`: a choice matched case-insensitively to its canonical
+  spelling, `bad-choice`; text only when `free`, ≤ 1000, newlines kept; `bad-args` when neither / not allowed; `not-a-question`,
+  `question-closed`; an `@~` done tick with `opts.question` answered + `by` + `at`, entry "answered by <user> via dashboard
+  (<host>): <answerText>", `act:"answer"`, no cascade, no activity) and `withdraw` (→ withdrawn, "withdrawn by …");
+  `ASK_ACTIONS` = those two. `edit_text` on a question is `question-node`. **Expiry:** `expireQuestions(state, now)` closes every
+  local open question past `expires_at` as a SYSTEM line by the bridge ("expired — nobody answered within 10m") → `{records,
+  expired:[{ident, path, text, question, entry_id, agent}]}`; `nextQuestionExpiry(state)` for the timer. **Rollup / plans:**
+  `rollup` counts question children as ITEMS (open = remaining, answered = done, closed unanswered = skipped); `planOf` adds
+  them to a node's plan only when it already holds plan items (an open question keeps that plan open; `openPlanKeys` then
+  protects it); `activeHidden` hides closed questions of an ended plan. **Notices:** `answerNotice` (via `actionNotice` for
+  answer / withdraw, directly for an expiry) → verb `activity_answer` (`ANSWER_NOTICE_VERB`), PUBLIC subject "robin answered
+  <path>: <firstWords(question)>" / "robin withdrew …" / "question expired …" — never the answer; body `{action, status,
+  path, host, question, choices, free, answer?, by, entry_id, session, project, agent (the asking agent's path, null = the
+  session), asked_at, ts}`. **The waiter's view:** `questionOutcome(state, sess, node)` → `{outcome open | answered | expired |
+  withdrawn | gone, …}` (gone = the node or its session left the board, or it is no longer a question). **Bridge:** PEER_HELLO
+  **`activity_ask:1`** (`p.act.ask`; `AI_BRIDGE_TEST_NO_ACTIVITY_ASK=1` omits it), `actRemoteInfo` `ask:true`; `activityAction`
+  forwards `ASK_ACTIONS` only to an owner that declared it (else `owner-unsupported`, before queueing); `actActionQuery` passes
+  `args.choice`; `actApplyAction` settles the waiters FIRST (`released`), then sends an `activity_answer` with `{now:true}`
+  (like #84's message: `delivery`; `not-delivered` only when no inbox AND no waiter) and returns `released` + `question`.
+  **Waiting:** a logger link's `{type:"wait_answer", ref, path, timeout_ms ≤ 24 h}` → one `{type:"answer", ref, result}`
+  (`loggerWait`: the logger's own session; `bad-path` / `unknown-node` / `not-a-question` / `busy` — 16 per link, 1024 per
+  gateway); the waiter holds the node object and `actSettleWaiters` (called from `actChanged` — every local board change —
+  and before an action's notice) releases it as soon as its outcome isn't open; its timer answers `timeout`; a closed link drops
+  its waits. **Expiry timer:** `actScheduleExpiry` (re-armed by `actChanged`) fires at the next `expires_at`;
+  `actExpireQuestions` persists the records, notifies each session at once and calls `actChanged` (the GC tick is a safety
+  net; a restart past an expiry closes it after the replay). The follower refuses `usesAsk` input against a ≤1.70 gateway
+  (`gateway-unsupported`). The server instructions and the `log` tool's description: an `activity_answer` is the viewer's answer
+  to a question the session itself asked — it may proceed on it within what its user already approved. **Script
+  (`tools/aimb-log.mjs`):** `--ask` / `--choice "A"` (ONE choice per flag, repeatable — like `--item`, so no argument is positional; status text or a flag as its value is refused) / `--free` / `--expires`; `--wait <dur>` (≤ 24h)
+  turns a one-shot ask into ask-then-wait on the SAME link; `--wait-answer --path <q> [--wait 30m]`; a dropped link is
+  re-dialled and the wait resumed; exit 0 answered · 10 timeout · 11 expired · 12 withdrawn · 13 gone; ≤1.70 gateway →
+  `gateway-unsupported`. **Snippet:** a seventh guidance line in `{log_snippet}` (`--ask "…" --choice "A" --choice "B" --wait 30m waits
+  for the answer (exit 0 = answered).`) and `{log_tool_hint}` (`ask:"…", choices:[…] … activity_answer`), ≤ 110 characters
+  each. **Dashboard:** `questionGlyph` (a speech bubble: "?" filled fuchsia — `--ask` / `--ask-bg` tokens, light + dark —
+  answered ✓ green, expired / withdrawn dashed grey), `qOf` / `isQuestion` / `isOpenQuestion`, an open question's row tinted
+  with an accent edge + "awaiting answer" pill, an answered one "→ <answer>" after the question; `buildTree` counts open
+  questions under every node on the whole tree (`t.nq`, the session's / project's `nq`) → the **"? N" badge** on a collapsed
+  row and always on session / project rows, and "? N open questions" in the section tag; `rollKids` counts questions as items;
+  `menuFor` `question` + `can_ask` (`hostAsk`: this gateway or `remote_hosts[].ask`) → Answer… / Withdraw question… (asks
+  first), and no Edit text… / Abandon… on a question; a click on an open question opens `actAnswerDlg` (`actFormDlg`: the
+  question, choice buttons as a radio group, a text box when free, `checkAnswer`, ≤ 1000) → `answer {choice?, text?}`; `actDo`
+  toasts who got it (a waiting script, the session, parked) or "⚠ answered · nobody was waiting"; the legend. **Mixed versions
+  (live, loopback):** a 1.70 (`git archive HEAD`) and 1.71 bridges — the 1.70 board shows a question as a blocked context with
+  its text (no `question`), answer on the 1.70 owner `owner-unsupported`, the 1.70 dashboard's Abandon… withdraws a 1.71
+  question, a 1.71 script's `--ask` against the 1.70 gateway `gateway-unsupported`: 41/41 with `AIMB_TEST_OLD_BRIDGE` (4 checks;
+  37 without). **Tests:** `test_activity_unit` 849 (+51, incl. 4 seeded replay == apply runs with asks, answers, withdrawals,
+  cascades, expiry and moves), `test_dashboard_activity` 285 (+26; the legend now has 20 glyphs), `test_activity_6c_live` 34
+  (+1: the seventh snippet line), new `test_activity_ask_live` 37 (+1 after review: `--choice`, one choice per flag, replaced `--choices`). Full parallel `npm test` (typecheck included): 2684 checks in 58 files, all green (5m04s) — the run before it had one load failure in `mesh/test_mesh` (a bridge child closed mid-test, "Connection closed"; 22/22 alone three times, untouched by #85).
 - **Built (v1.70.0):** *#83 + #84 — Edit text… and Message session… from the dashboard.* **Wire-compatible with 1.66 – 1.69**
   (format stays v5; hosts upgrade one at a time). **Actions (`lib/activity.js`):** `ACTIVITY_ACTIONS` + `edit_text` and
   `message`; `MSG_ACTIONS` = those two (a ≤1.69 owner answers `bad-action`). **`edit_text`** (`args:{text, state?}`) on any node
