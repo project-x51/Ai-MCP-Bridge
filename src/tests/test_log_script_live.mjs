@@ -190,10 +190,27 @@ check('6b --plan: text BEFORE --plan (and a flag after the names) — the target
 const sd = await runLog([...ID, '--path', '@#70/@~Spec', '--done'])
 const sd2 = await runLog([...ID, '--path', '@#70/@~Build', '--state', 'skipped'])
 b = await board(G)
-check('6b --done: = --state done; ticks an item with no text (its line keeps its text); --state skipped on an item', sd.code === 0 && res1(sd).state === 'done' && nodeOf(b, 'Scripty', '@#70/@Spec')?.state === 'done' && nodeOf(b, 'Scripty', '@#70/@Spec')?.current?.text === 'Spec'
-  && sd2.code === 0 && nodeOf(b, 'Scripty', '@#70/@Build')?.state === 'skipped' && (p => p && p.todos && p.done === 1 && p.total === 3 && p.skipped === 1)(nodeOf(b, 'Scripty', '@#70')?.progress), J([sd.out, sd2.out, nodeOf(b, 'Scripty', '@#70')?.progress]))
+check('6b --done: = --state done; ticks an item with no text (its line keeps its text); --state skipped on an item (#79: it stays in M as the skipped part: 1 of 4 done · 1 skipped)', sd.code === 0 && res1(sd).state === 'done' && nodeOf(b, 'Scripty', '@#70/@Spec')?.state === 'done' && nodeOf(b, 'Scripty', '@#70/@Spec')?.current?.text === 'Spec'
+  && sd2.code === 0 && nodeOf(b, 'Scripty', '@#70/@Build')?.state === 'skipped' && (p => p && p.todos && p.done === 1 && p.total === 4 && p.skipped === 1)(nodeOf(b, 'Scripty', '@#70')?.progress), J([sd.out, sd2.out, nodeOf(b, 'Scripty', '@#70')?.progress]))
 const sbad = await Promise.all([runLog([...ID, '--path', '@#70', '--plan']), runLog([...ID, '--path', '@#70/@~X', '--done', '--state', 'done']), runLog([...ID, '--path', '@#70', '--plan', 'a/b']), runLog([...ID, '--agent', 'w', '--state', 'todo', 'x'])])
 check('6b script codes (exit 64, refused locally): --plan with no name; --done + --state; a bad plan name (bad-plan); todo on an agent (bad-agent-state)', sbad.every(r => r.code === 64) && J(sbad.map(r => res1(r).code)) === J(['usage', 'usage', 'bad-plan', 'bad-agent-state']), J(sbad.map(r => [r.code, res1(r).code])))
+// #79 (v1.66.0): --plan swallows every following argument — a name that LOOKS LIKE STATUS TEXT is refused with bad-plan saying so
+const txt79 = await Promise.all([runLog([...ID, '--path', '@#79', '--plan', 'A', 'B', '@~root headline']), runLog([...ID, '--path', '@#79', '--plan', 'A', '@ctx some words'])])
+check('#79 --plan: a trailing "@~root headline", or an "@ctx words" message → exit 64, bad-plan: "… looks like status text — put text before --plan"', txt79.every(r => r.code === 64 && res1(r).code === 'bad-plan' && /looks like status text — put text before --plan/.test(res1(r).what))
+  && res1(txt79[0]).what.startsWith('"@~root headline" looks like status text — put text before --plan') && !nodeOf(await board(G), 'Scripty', '@#79/@A'), J(txt79.map(r => [r.code, res1(r)])))
+// #79 (v1.66.0, the call signature): --text names the text and --item adds ONE plan item per flag, so order no longer matters
+const sig = await runLog([...ID, '--item', 'One', '--path', '@~#79s', '--item', 'a long plan item name with several words in it', '--text', 'the sig plan', '--plan', 'Three'])
+b = await board(G)
+check('#79 --text + repeatable --item (any order, mixed with --plan): items in command-line order, a long name with spaces accepted, the text sets the line', sig.code === 0 && J((res1(sig).plan || []).map(p => p.name)) === J(['One', 'a long plan item name with several words in it', 'Three']) && nodeOf(b, 'Scripty', '@#79s')?.current?.text === 'the sig plan', J([sig.code, sig.out, sig.err.slice(0, 300)]))
+const sigBad = await Promise.all([runLog([...ID, '--text', 'x', 'positional too']), runLog([...ID, '--path', '@#79s', '--item', '@~root headline']), runLog([...ID, '--path', '@#79s', '--item']), runLog([...ID, '--stream', '--text', 'x'])])
+check('#79 refused locally (exit 64): --text plus positional text; an --item that looks like status text (bad-plan, "pass text with --text"); --item with no name; --text with --stream', sigBad.every(r => r.code === 64) && J(sigBad.map(r => res1(r).code)) === J(['usage', 'bad-plan', 'usage', 'usage']) && /pass text with --text/.test(res1(sigBad[1]).what), J(sigBad.map(r => [r.code, res1(r)])))
+const ok79 = await runLog([...ID, '--path', '@~#79', 'text goes first', '--plan', '@Spec', 'Write docs', 'Ship'])
+b = await board(G)
+check('#79 --plan: text BEFORE --plan works; a plain "@Spec" (one leading @ is dropped) and a short name with a space stay valid names', ok79.code === 0 && nodeOf(b, 'Scripty', '@#79')?.current?.text === 'text goes first' && ['@#79/@Spec', '@#79/@"Write docs"', '@#79/@Ship'].every(p => nodeOf(b, 'Scripty', p)?.plan_item === true), J([ok79.code, ok79.out, (sess(b, 'Scripty')?.nodes || []).filter(n => /#79/.test(n.path)).map(n => n.path)]))
+const pr79 = await runLog([...ID, '--path', '@#79/@~Ship', '--progress', '3/6 1 skipped'])
+b = await board(G)
+check('#79 --progress "3/6 1 skipped": the script sends a three-part progress; the board shows it (done 3, skipped 1, total 6) and the plan rolls up "0 of 3 done"', pr79.code === 0 && (p => p && p.done === 3 && p.skipped === 1 && p.total === 6)(nodeOf(b, 'Scripty', '@#79/@Ship')?.progress)
+  && (p => p && p.done === 0 && p.total === 3 && p.skipped === 0 && p.items === true)(nodeOf(b, 'Scripty', '@#79')?.progress), J([pr79.out, nodeOf(b, 'Scripty', '@#79/@Ship')?.progress, nodeOf(b, 'Scripty', '@#79')?.progress]))
 
 // ---- 6a: --batch <file|-> — ONE call, one result line; per-item results; exit 0 / 4 / 64
 const batchFile = path.join(cfgDir, 'batch.json')

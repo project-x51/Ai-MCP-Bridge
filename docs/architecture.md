@@ -1194,6 +1194,44 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.66.0):** *#79 — the `--plan` text footgun, THREE-PART progress (done / skipped / total), a done node = 100%;
+  plus (same change set) the live-checklist snippet + orchestrator briefing, cyan = in progress, and a session glyph.*
+  **Wire-compatible with 1.65** (format stays v5; hosts upgrade one at a time). **Model (`lib/activity.js`):** a progress
+  value is `{done, total, unit, skipped?}` — `parseProgress` takes an object's `skipped` or a string's trailing "N skipped"
+  ("3/6 1 skipped", "4812/12000 tiles · 100 skipped"; done + skipped > total clamps skipped, `progress-clamped`) and carries
+  `skipped` only when > 0, so records, cp / cf and gossip units without it are byte-identical to 1.65 and a 1.65 reader (which
+  takes done / total / unit) ignores it; a missing one is 0 (`skOf`). **Rollups carry all three** (`rollupStrategies`): a
+  common unit SUMS done, skipped and total; mixed units AVERAGE each child's done fraction and skipped fraction (each child
+  weighted 1; skipped ≤ 100 − done); "N of M done" now counts EVERY item in M (replaces 6b/6c's "skipped left out of M"):
+  done items → done, skipped AND abandoned items → skipped (`abandoned` = how many of them), todo / running / blocked / idle /
+  FAILED items → remaining (failed may be retried); the items bar is marked `items:true`. Every bar carries `skipped` (0 when
+  none). **`forceBar`**: a node whose own state is DONE shows done = total, skipped 0 (`forced:"done"`) whatever its reported
+  or rolled-up bar said — so it contributes its whole weight to its parent (the live case: a plan marked complete with 1 of
+  3 items done showed a partial bar); an ABANDONED node's remainder becomes skipped (`forced:"abandoned"`); failed keeps
+  its bar. Reported progress still wins over a rollup (6a's precedence), except for that override. The plan-END rule is
+  unchanged (skipped items keep a plan open). **Text:** `{progress}` → "1 of 5 done · 1 skipped" ("61% · 10% skipped";
+  unchanged without skipped), `{pct}` = the done %, new `{skipped}`. **Dashboard:** bars draw done (blue; a plan's green),
+  then a SKIPPED segment (`b.sk`, a grey hatch from `--bar-skip` / `--bar-skip-2`, light + dark), then the track; a done
+  node's bar is full; striped stays the rollup marker; tooltip "1 of 5 done · 2 skipped (20%) · incl. 1 abandoned — its plan:
+  5 items". The client rollup (filters on, 6c) mirrors the bridge (`ownBar` / `rollKids` / `force`), and `norm3` widens a
+  1.65 bridge's items bar (skipped outside M — `n = total + skipped` gives it away) so the page reads either bridge.
+  **`aimb-log --plan`:** a name that looks like status text (`@~…` or "@ctx words") →
+  `bad-plan` "… looks like status text — put text before --plan" (exit 64, locally). `--progress` takes the skipped part.
+  **Call signature:** `--text "<text>"` (explicit text; exclusive with positional text) and a repeatable `--item "A"` (one plan
+  item per flag, joins `--plan`'s names in command-line order); positional text and `--plan` stay for 1.65 snippets.
+  **Snippet (`lib/log-snippet.js`):** uses `--text` and `--item` throughout (no `--plan`); the checklist stays live (start an
+  item with `--state running --text "<what>"`, tick it with `--done` the moment it is done; keep "@~root …" current); the tool
+  form likewise. **Reminders (`config.example.json` `behaviors.realm`, `updated_at` 2026-10-02T12:00Z):** the code one
+  briefs an orchestrator (the block into each agent's prompt with `--path` = its unique name + its checklist, or `--plan`
+  one first; its own `@~root` current; its agents tracked as its own plan, ticked as they report back); the cowork one the
+  same for the `log` tool. Both stay within the 365-char reminder cap so a 1.65 host shows them whole (no new placeholder).
+  **Colours / glyphs (dashboard):** green means DONE only — in progress is cyan through one token, `--act-running` (the
+  running ring + dot, a context's running mark, the in-progress plan item, running log dots); a SESSION has its own glyph
+  (`sessGlyph`: a rounded window whose border is the stale countdown, `rect.ring` pathLength 100; face by client kind — code
+  ">_", cowork a bubble, page a globe, else a plain window), one builder for the Activity session rows + host lines, the
+  legend, the Sessions table and the mesh map. The bridge adds `client_kind` to each dashboard session unit from the mesh
+  roster (`actRosterKinds`, remembered per realm + project + user + name; dashboards only, not the gossip).
+  Tests: `test_activity_unit` 684 (+20 #79), `test_dashboard_activity` 205 (+19: three-part bars, labels, done = full, the 1.65 bar widened, client == bridge on one fixture, cyan, session glyphs), `test_log_script_live` 57 (+3: --plan text refusal, text-first plan, --progress skipped), `test_activity_6c_live` 33 (+2: live snippet, orchestrator briefing), `test_activity_dashboard_live` 44 (+1: client_kind); 4 live tests updated for M = every item. Pre-change: 20 lib checks fail against the 1.65 library, 6 dashboard checks (+ the #79 block crashing) against the 1.65 page. Full suite 2313 checks in 54 files (typecheck clean): 2311 passed; the 2 failures were the pre-existing midnight flake in test_dashboard_activity (a fixture "started 1 h ago" gets a date prefix before 01:00 local), which passes when rerun after 01:00. Live check: a 1.65 and a 1.66 bridge exchanged activity both ways, 8/8, no errors.
 - **Built (v1.65.0):** *the agent activity board, step 6d — the dashboard's right-click ACTIONS (its first write path), the
   log panel, pin / hide; plus the agent-finish rule, abandon_plan on agents and the exact carried-forward entry count (#70).*
   Decisions of 2026-10-02 ("Decisions before 6c and 6d" + "Decisions after 6c, for 6d"). Nothing of #70 was deployed.

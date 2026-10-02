@@ -51,7 +51,7 @@
 //   unit, else the MEAN % of its children that have a bar — recursively, through any depth (`rollupStrategies` is the hook
 //   where 6b adds "N of M todos done").
 // - THE `log` FLAG (default true): log:false takes full effect on the board but is not appended to the log or the JSONL.
-//   TEXT IS A TEMPLATE ({progress} {pct} {done} {total} {unit} {eta}) rendered at READ time (renderText).
+//   TEXT IS A TEMPLATE ({progress} {pct} {done} {total} {unit} {eta}; #79: + {skipped}) rendered at READ time (renderText).
 // - BATCH (splitBatch): `items:[…]` (≤64 items, ≤64 KB) applied in order, one result each; one bad item doesn't abort the
 //   rest. Top-level path / agent / context / log are DEFAULTS for every item (6b: an item's own path / agent is RELATIVE to
 //   the default path, like a folder; a leading "/" makes it absolute — withDefaults).
@@ -122,6 +122,13 @@
 // (<host>)" while an item's own line keeps its text — `line_text` on the record). The carry-forward `cf` record now carries
 // the node's own entry count (`log_n`, + `log_partial`), so a count stays exact across restarts. Records + slices are
 // FORMAT v5 (+ plan_end, dismiss, line_text, act, cf log_n; v2–v4 records still read).
+//
+// #79 (v1.66.0): THREE-PART PROGRESS — { done, skipped, total, unit }: skipped is resolved without being done (neither done
+// nor remaining). Rollups carry all three (rollupStrategies): a common unit sums them, mixed units average the done and skipped
+// fractions, a plan's "N of M done" counts EVERY item in M (skipped and abandoned items → skipped; failed / open → remaining).
+// A DONE node is 100% done whatever its bar says, an ABANDONED one has its remainder skipped (forceBar). WIRE-COMPATIBLE with
+// 1.65: `skipped` is an optional field on a progress object (records, cp / cf, gossip), present only when > 0 — a 1.65 reader
+// ignores it and a missing one is 0 — so the format stays v5 and hosts can upgrade one at a time.
 import { lc, projKey } from './keys.js'
 
 /** The locked #70 limits (6a: depth/nodes replace "agent path depth 3" + "32 contexts per agent"). text/context in code
@@ -333,16 +340,24 @@ export function parseDuration(v) {
  * "4812/12000:tiles", "3/6" (unit ''), "61%" (→ {done:61,total:100,unit:'%'}), a bare number (a percent) or an object
  * {done,total,unit}. total must be > 0 and done ≥ 0; done > total (or a percent > 100) is CLAMPED to total with a
  * 'progress-clamped' warning. The unit is ≤ ACTIVITY_LIMITS.unit code points.
+ * #79 (v1.66.0): progress has THREE parts — { done, skipped, total, unit } (skipped = resolved without being done; it is
+ * neither done nor remaining). `skipped` is optional everywhere and defaults to 0: an object's `skipped`, or a string's
+ * trailing "N skipped" ("3/6 1 skipped", "4812/12000 tiles · 100 skipped"); done + skipped > total clamps skipped
+ * ('progress-clamped'). The value carries `skipped` only when > 0, so a 1.65 record / slice is byte-identical and a 1.65
+ * reader (which takes done / total / unit) simply ignores it.
  * @param {any} v
  */
 export function parseProgress(v) {
-  let done, total, unit = ''
+  let done, total, unit = '', skipped = 0
   if (typeof v === 'number') { done = v; total = 100; unit = '%' }
   else if (v && typeof v === 'object' && !Array.isArray(v)) {
     done = Number(v.done); total = Number(v.total); unit = typeof v.unit === 'string' ? v.unit : ''
     if (v.done === null || v.done === '' || v.total === null || v.total === '') return { ok: false, what: 'progress {done,total} must be numbers' }
+    if (v.skipped != null && v.skipped !== '') skipped = Number(v.skipped)   // #79: optional (a 1.65 peer never sends it → 0)
   } else if (typeof v === 'string') {
-    const s = v.trim()
+    let s = v.trim()
+    const sk = s.match(/^(.+?)(?:\s*[,;·]\s*|\s+)(\d+(?:\.\d+)?)\s+skipped$/i)   // #79: a trailing "N skipped" (only after a done/total form)
+    if (sk && /^\d+(?:\.\d+)?\s*\/\s*\d/.test(sk[1])) { s = sk[1]; skipped = Number(sk[2]) }
     let m = s.match(/^(\d+(?:\.\d+)?)\s*%$/)
     if (m) { done = Number(m[1]); total = 100; unit = '%' }
     else if ((m = s.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)(?:\s*:\s*|\s+|$)(.*)$/s))) { done = Number(m[1]); total = Number(m[2]); unit = m[3] }
@@ -350,13 +365,15 @@ export function parseProgress(v) {
   } else return { ok: false, what: 'progress must be a string like "3/6", "4812/12000 tiles" or "61%"' }
   unit = normText(String(unit)).replace(/\s+/g, ' ')
   if (!Number.isFinite(done) || !Number.isFinite(total)) return { ok: false, what: 'progress done/total must be numbers' }
+  if (!Number.isFinite(skipped) || skipped < 0) return { ok: false, what: 'progress skipped must be a number ≥ 0' }
   if (total <= 0) return { ok: false, what: 'progress total must be > 0' }
   if (done < 0) return { ok: false, what: 'progress done must be ≥ 0' }
   if (total > 1e15) return { ok: false, what: 'progress total is too large' }
   if (cpLen(unit) > ACTIVITY_LIMITS.unit) return { ok: false, what: `progress unit is longer than ${ACTIVITY_LIMITS.unit} chars` }
   let warning
   if (done > total) { done = total; warning = 'progress-clamped' }
-  return { ok: true, value: { done, total, unit }, warning }
+  if (done + skipped > total) { skipped = total - done; warning = 'progress-clamped' }
+  return { ok: true, value: { done, total, unit, ...(skipped > 0 ? { skipped } : {}) }, warning }
 }
 
 /**
@@ -569,7 +586,7 @@ export function resolveAddress(input, o = {}) {
 const ownerIndex = segs => { for (let i = segs.length - 1; i >= 0; i--) if (segs[i].kind === 'agent') return i + 1; return 0 }   // index into the chain [root, …segs]
 
 /**
- * @typedef {{ done:number, total:number, unit:string }} ActivityProgress
+ * @typedef {{ done:number, total:number, unit:string, skipped?:number }} ActivityProgress
  * @typedef {{
  *   segs: PathSeg[], path: string, key: string, agent: string|null, context: string, root: boolean, current: boolean,
  *   text: string, state: string|null, progress?: ActivityProgress|null, eta_at?: number|null, stale_after_ms: number|null,
@@ -1558,41 +1575,69 @@ export const progressPct = p => (p && p.total > 0 ? Math.min(100, (p.done / p.to
 // null. 6b ("Decisions before 6b"; the build's choice for MIXED children): a plan item counts ONLY as a todo of its parent
 // (its own bar — e.g. an agent working under it — shows on its own row, never in the parent's sum / mean), so a plan node
 // shows "N of M done" unless it also has ordinary children with bars, which win by 6a's precedence (sum, then mean %).
+// #79 (v1.66.0): every bar has THREE parts — done, skipped (resolved, not done: never counted as remaining), total — and
+// each strategy carries all three: a common unit SUMS done, skipped and total; mixed units AVERAGE each child's done
+// fraction and skipped fraction (each child weighted 1); "N of M done" counts ALL items in M (replaces 6b/6c's "skipped
+// left out of M"): done items → done; skipped AND abandoned items → skipped (they won't be done); todo / running / blocked /
+// idle / failed items → remaining (failed counts as not done — it may be retried).
+const skOf = p => (p && p.skipped > 0 ? p.skipped : 0)   // #79: a progress without `skipped` (a 1.65 peer, any old record) = 0
 const rollupStrategies = [
   (bars) => {   // the SUM of the children's bars when they all share a unit (case-insensitive; '' counts, '%' doesn't sum)
     if (!bars.length) return null
     const u = lc(bars[0].unit)
     if (u === '%' || !bars.every(p => lc(p.unit) === u)) return null
-    const done = bars.reduce((s, p) => s + p.done, 0), total = bars.reduce((s, p) => s + p.total, 0)
-    return { done, total, unit: bars[0].unit, pct: progressPct({ done, total }), rollup: true, n: bars.length, ...(bars.every(p => p.todos) ? { todos: true } : {}) }
+    const done = bars.reduce((s, p) => s + p.done, 0), skipped = bars.reduce((s, p) => s + skOf(p), 0), total = bars.reduce((s, p) => s + p.total, 0)
+    return { done, skipped, total, unit: bars[0].unit, pct: progressPct({ done, total }), rollup: true, n: bars.length, ...(bars.every(p => p.todos) ? { todos: true } : {}) }
   },
-  (bars) => { if (!bars.length) return null; const mean = Math.round((bars.reduce((s, p) => s + progressPct(p), 0) / bars.length) * 10) / 10; return { done: mean, total: 100, unit: '%', pct: mean, rollup: true, n: bars.length } },
-  (bars, items) => {   // 6b: "N of M done" over the plan items — skipped ones are left out of M (none left → no bar); failed / idle — and (6c) abandoned — count as not done
+  (bars) => {   // the MEAN of the children's done % and skipped % (each child weighted 1; #79: skipped averaged like done)
+    if (!bars.length) return null
+    const r1 = x => Math.round(x * 10) / 10
+    const mean = r1(bars.reduce((s, p) => s + progressPct(p), 0) / bars.length)
+    const skipped = Math.min(r1(bars.reduce((s, p) => s + (p.total > 0 ? Math.min(100, (skOf(p) / p.total) * 100) : 0), 0) / bars.length), r1(100 - mean))
+    return { done: mean, skipped, total: 100, unit: '%', pct: mean, rollup: true, n: bars.length }
+  },
+  (bars, items) => {   // "N of M done" over the plan items (#79: M = every item; skipped + abandoned → the skipped part; failed / idle / open → remaining)
     if (!items.length) return null
     let done = 0, skipped = 0, abandoned = 0
-    for (const it of items) { const s = stateOf(it); if (s === 'done') done++; else if (s === 'skipped') skipped++; else if (s === 'abandoned') abandoned++ }
-    const total = items.length - skipped
-    return total > 0 ? { done, total, unit: 'done', pct: progressPct({ done, total }), rollup: true, todos: true, skipped, n: items.length, ...(abandoned ? { abandoned } : {}) } : null
+    for (const it of items) { const s = stateOf(it); if (s === 'done') done++; else if (s === 'skipped') skipped++; else if (s === 'abandoned') { skipped++; abandoned++ } }
+    const total = items.length
+    return { done, skipped, total, unit: 'done', pct: progressPct({ done, total }), rollup: true, todos: true, items: true, n: items.length, ...(abandoned ? { abandoned } : {}) }
   },
 ]
 /**
+ * #79: a node's OWN state overrides what its bar says. DONE = 100% done (done = total, skipped 0, `forced:'done'`) — so a
+ * done node shows a full bar and contributes its whole weight as done to its parent, whatever its reported or rolled-up bar
+ * said (seen live: a plan marked complete showed a partial striped bar); ABANDONED = it won't be done: whatever is not done
+ * becomes skipped (`forced:'abandoned'`). Anything else (failed included) keeps its bar. A node with no bar stays without one.
+ * @param {any} node @param {any} r
+ */
+export function forceBar(node, r) {
+  if (!r) return r
+  const s = stateOf(node)
+  if (s === 'done') { const { abandoned, ...rest } = r; return { ...rest, done: r.total, skipped: 0, pct: 100, forced: 'done' } }   // nothing left skipped (or abandoned) in a full bar
+  if (s === 'abandoned') return { ...r, skipped: Math.max(0, r.total - r.done), forced: 'abandoned' }
+  return r
+}
+/**
  * A node's BAR (recursive): its REPORTED progress (rollup:false), else its children rolled up (rollup:true): the sum of its
  * ordinary children's bars when they share a unit, else their mean percent — through any depth — else (6b) "N of M done"
- * over its plan items (`todos:true`, unit "done", `skipped` = how many were left out). null when nothing applies.
- * `memo` (a Map) caches per call when walking a whole board.
+ * over its plan items (`todos:true` + `items:true`, unit "done"). #79: every bar is { done, skipped, total } (skipped 0 when
+ * none; `abandoned` = how many of an items bar's skipped were abandoned), and a done / abandoned node's own state overrides
+ * it (forceBar). null when nothing applies. `memo` (a Map) caches per call when walking a whole board.
  * @param {ActivitySession} sess @param {ActivityNode} node @param {Map<string, any>} [memo]
- * @returns {null | { done:number, total:number, unit:string, pct:number, rollup:boolean, n:number, todos?:boolean, skipped?:number, abandoned?:number }}
+ * @returns {null | { done:number, skipped:number, total:number, unit:string, pct:number, rollup:boolean, n:number, todos?:boolean, items?:boolean, abandoned?:number, forced?:string }}
  */
 export function rollup(sess, node, memo) {
   if (!sess || !node) return null
   if (memo && memo.has(node.key)) return memo.get(node.key)
   let r = null
-  if (node.progress) r = { ...node.progress, pct: progressPct(node.progress), rollup: false, n: 1 }
+  if (node.progress) r = { ...node.progress, skipped: skOf(node.progress), pct: progressPct(node.progress), rollup: false, n: 1 }
   else {
     const kids = childrenOf(sess, node).sort((a, b) => cmp(a.key, b.key))
     const bars = kids.filter(c => !c.plan).map(c => rollup(sess, c, memo)).filter(Boolean), items = kids.filter(c => c.plan)
     if (bars.length || items.length) for (const f of rollupStrategies) { r = f(bars, items); if (r) break }
   }
+  r = forceBar(node, r)
   if (memo) memo.set(node.key, r)
   return r
 }
@@ -1897,12 +1942,19 @@ export function fmtEta(ms) {
   if (h) return `~${h}h${mm ? ` ${mm}m` : ''}`
   return `~${mm}m`
 }
+/** #79: the {progress} wording — "4,812 of 12,000 tiles", "1 of 5 done · 1 skipped", "61% · 10% skipped" (the dashboard's barText mirrors it). @param {any} p */
+export function progressText(p) {
+  const unit = p && typeof p.unit === 'string' ? p.unit : '', sk = skOf(p)
+  return (unit === '%' ? `${fmtNum(p.done)}%` : `${fmtNum(p.done)} of ${fmtNum(p.total)}${unit ? ' ' + unit : ''}`) + (sk ? ` · ${fmtNum(sk)}${unit === '%' ? '%' : ''} skipped` : '')
+}
 /**
  * Render a status-text TEMPLATE. Placeholders: {progress} → "4,812 of 12,000 tiles" ("61%" for a % bar, "3 of 6" without a
  * unit); {pct} → "40%" (floored); {done}, {total}, {unit}; {eta} → "~1h 25m" from eta_at vs now ("now" once due, "?" when
  * there is no ETA). `{{` and `}}` are literal braces. An unknown {word} is left untouched, and so is a bar placeholder
- * with no bar to fill it (or {unit} with no unit).
- * @param {string} template @param {any} progress  {done,total,unit} (or a rollup) or null
+ * with no bar to fill it (or {unit} with no unit). #79: three-part progress — {progress} adds " · N skipped" when skipped > 0
+ * ("1 of 5 done · 1 skipped", "61% · 10% skipped"; unchanged without skipped), {pct} stays the DONE percent, and
+ * {skipped} → the skipped count ("0" when none).
+ * @param {string} template @param {any} progress  {done,total,unit,skipped?} (or a rollup) or null
  * @param {number|null|undefined} eta_at @param {number} now
  */
 export function renderText(template, progress, eta_at, now) {
@@ -1914,8 +1966,9 @@ export function renderText(template, progress, eta_at, now) {
     if (m === '{{') return '{'
     if (m === '}}') return '}'
     switch (k) {
-      case 'progress': return !p ? m : unit === '%' ? `${fmtNum(p.done)}%` : `${fmtNum(p.done)} of ${fmtNum(p.total)}${unit ? ' ' + unit : ''}`
+      case 'progress': return !p ? m : progressText(p)
       case 'pct': return p ? `${Math.floor(progressPct(p) + 1e-9)}%` : m
+      case 'skipped': return p ? fmtNum(skOf(p)) : m   // #79
       case 'done': return p ? fmtNum(p.done) : m
       case 'total': return p ? fmtNum(p.total) : m
       case 'unit': return unit || m
@@ -2326,7 +2379,7 @@ function snapLine(l) {
  * (its OWN entry count: memory + dropped; a remote node re-gossips what it was told) and log_partial (the count understates). */
 function snapNode(n) {
   return compact({ path: n.path, created_at: n.created_at, last_activity: n.last_activity, finished_at: n.finished_at, gone_at: n.kind === 'agent' ? n.gone_at : null,
-    stale_after_ms: n.stale_after_ms, implicit: n.implicit, progress: n.progress ? { done: n.progress.done, total: n.progress.total, unit: n.progress.unit } : null,
+    stale_after_ms: n.stale_after_ms, implicit: n.implicit, progress: n.progress ? { done: n.progress.done, total: n.progress.total, unit: n.progress.unit, ...(n.progress.skipped > 0 ? { skipped: n.progress.skipped } : {}) } : null,   // #79: + skipped, only when > 0 (a 1.65 reader ignores it)
     eta_at: n.eta_at, current: snapLine(n.current), plan_item: !!n.plan, plan_ix: n.plan && Number.isInteger(n.plan_ix) ? n.plan_ix : null,
     log_n: (n.log_n != null ? n.log_n : n.log.length + n.log_dropped) || null, log_partial: !!n.cpartial,   // 6d: partial = the COUNT understates (a cf's count makes it exact)
     plan_end: n.kind === 'agent' && n.plan_end ? { state: n.plan_end.state, ts: n.plan_end.ts } : null })   // 6d: the plan-end marker (receivers compute plan_end_at)

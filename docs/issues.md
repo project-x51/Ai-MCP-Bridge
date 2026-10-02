@@ -31,7 +31,7 @@ only, a session glyph (window; face by client kind) shared by the Activity tree,
 brief orchestrators and keep checklists live (`updated_at` 2026-10-02T12:00Z in config.example.json; the live
 `src/config.json` was NOT touched — Robin republishes). **Deploy:** compatible with 1.65; hosts can upgrade one at a time
 (a 1.65 host shows no skipped segment and keeps the old "skipped left out of M" bar for its own board). Live-checked: a
-1.65 and a 1.66 bridge exchanged activity both ways (full slices + deltas) with no errors. Tests: TESTS79.
+1.65 and a 1.66 bridge exchanged activity both ways (full slices + deltas) with no errors. Tests: `test_activity_unit` 684 (+20 #79), `test_dashboard_activity` 205 (+19: three-part bars, labels, done = full, the 1.65 bar widened, client == bridge on one fixture, cyan, session glyphs), `test_log_script_live` 57 (+3: --plan text refusal, text-first plan, --progress skipped), `test_activity_6c_live` 33 (+2: live snippet, orchestrator briefing), `test_activity_dashboard_live` 44 (+1: client_kind); 4 live tests updated for M = every item. Pre-change: 20 lib checks fail against the 1.65 library, 6 dashboard checks (+ the #79 block crashing) against the 1.65 page. Full suite 2313 checks in 54 files (typecheck clean): 2311 passed; the 2 failures were the pre-existing midnight flake in test_dashboard_activity (a fixture "started 1 h ago" gets a date prefix before 01:00 local), which passes when rerun after 01:00. Live check: a 1.65 and a 1.66 bridge exchanged activity both ways, 8/8, no errors.
 
 **2026-10-02 (v1.65.0):** Built **#70 step 6d** ("Decisions before 6c and 6d" + "Decisions after 6c, for 6d") — **the #70
 build plan is COMPLETE**; next is the deploy (checklist below). The dashboard's first WRITE path: a **right-click menu** on
@@ -313,6 +313,47 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
+## #87 — log panel order: oldest first, auto-scroll to the bottom  ·  **OPEN (next release)**
+Robin, 2026-10-03, asking whether the log panel should run the other way.
+- **Today:** the log panel (6d) lists newest first; older pages load at the bottom.
+- **Proposal:** chat-style. The oldest entry is at the top and the newest at the bottom. The panel opens scrolled to
+  the bottom and follows new entries while the reader is at the bottom; scrolling up pauses following and shows an
+  "N new ↓" chip. "Load older" moves to the top and keeps the scroll position when older entries are added.
+- **Open question:** whether to keep a toggle for newest-first.
+
+## #86 — click an item or log entry to see its details and data  ·  **OPEN (next release)**
+Robin, 2026-10-03.
+- Entries already carry `details` (≤ 4 KB) and `data` (≤ 16 KB JSON); the dashboard doesn't show them.
+- **Proposal:** clicking a node row or a log-panel entry opens a details pane: its text, state, progress, ETA, who and
+  when, `details` as plain text, and `data` as a collapsible JSON tree with a copy button. A small marker on rows that
+  have details or data.
+- Remote entries fetch `details`/`data` on demand (`ACTIVITY_REQ`), not in gossip, to keep slices small.
+
+## #85 — questions as a type of context, answerable from the dashboard  ·  **OPEN (next release)**
+Robin, 2026-10-03.
+- **Proposal:** a session or agent can post a QUESTION node (`--ask "<question>"`, optionally `--choices "A" "B"`,
+  the tool's `ask`). It shows with a distinct glyph and an "awaiting answer" state, and counts as blocked for its plan.
+- Robin answers on the dashboard (pick a choice or type free text). The answer is logged, attributed, and delivered to
+  the asking session as a message (uses #80's notice path, or #78's channels when there).
+- The asker reads the answer from the tool result or inbox; the node moves to answered.
+- **To decide:** timeouts, who may answer (any viewer, or only the project's user), and whether an agent's question
+  goes to its orchestrator first.
+
+## #84 — message the owning session about a context from the dashboard  ·  **OPEN (next release)**
+Robin, 2026-10-03.
+- **Proposal:** right-click a node → **Message session…** opens a short text box. The bridge sends it to the owning
+  session as a directed message whose subject names the node path, so the session knows what it is about.
+- Attributed to the dashboard viewer; logged on the node ("Robin: …").
+- Shares delivery with #80 (notices) and #85 (answers). Peer-relayed text is not authorization; the session still
+  treats it as a request from the user.
+
+## #83 — edit a context's text from the dashboard  ·  **OPEN (next release)**
+Robin, 2026-10-03.
+- **Proposal:** right-click a node → **Edit text…** sets its current line (and optionally its state) from the dashboard.
+- Goes through the 6d action path (`ACTIVITY_ACT`, routed to the owning host), is attributed ("edited by Robin"),
+  logged, and notifies the owning session (#80).
+- The session's next report overwrites the line as usual.
+
 ## #82 — plan workflow: move nodes between contexts, agents shown on the item they work on, live item lines  ·  **OPEN (next release)**
 Robin, 2026-10-03, from using the live board.
 1. **Move / re-parent.**
@@ -339,6 +380,24 @@ Robin, 2026-10-03, from using the live board.
      - on finish: `@~<item> Finished …` with `--done`.
    - The line shows what's happening now; the item's log keeps the history.
    - Applies to `{log_snippet}`, `{log_tool_hint}`, the orchestrator briefing and the README.
+4. **Abandon any context, not just plans** (Robin, 2026-10-03). Bridget logged to a wrong path (`@#79` instead of the
+   plan item `@#79 three-part progress`), which made a stray context. It could only be marked done (`not-a-plan` refused
+   abandoned), so the board said it was finished when it really was abandoned. Allow `abandoned` on any context; it
+   greys out the context and everything under it (with the cascade below).
+5. **Cascade abandon:** abandoning a plan or context by the tool or script abandons its open descendants too (today only
+   the dashboard does), and the dashboard greys every descendant of an abandoned node.
+6. **Ordering** (Robin, 2026-10-03: "the plan lacks ordering"; agreed as proposed). Today siblings sort by creation time
+   and `plan_ix` only breaks ties inside one call, so a context created later lands in the middle of a plan.
+   - **A stored position per node within its parent:** a fractional rank, so a reorder writes ONE record and nothing is
+     renumbered. It is persisted in checkpoints and carried in gossip.
+   - **Default order:** plan items by position, then other contexts, then agents. Rows never jump on a state change.
+   - **Insert anywhere** (Robin: an agent must be able to insert steps into a plan at any position): `aimb-log --item "X"
+     --before "Y"` / `--after "Y"` / `--first` / `--last` (default: the end), and the tool's `plan` takes the same
+     (`before` / `after` / `position`). Several new items in one call keep their given order at that spot.
+   - **Reorder:** the same flags on an existing node (`--path "@Plan/@~X" --before "Y"`); the dashboard gets right-click
+     **Move up / Move down / Move to…** and drag-and-drop, attributed like the other actions (and #80-notified).
+   - **Attention without reordering:** open questions (#85) and blocked items keep their place; a badge bubbles up to
+     collapsed parents. An optional "needs attention first" filter may come later.
 
 ## #81 — move the test suite to Node's built-in test runner (node:test), with live dashboard progress  ·  **OPEN (starts after #79)**
 Robin, 2026-10-03. No runner script and no CI for now: go straight to `node:test`, incrementally.
@@ -417,10 +476,16 @@ Found by Bridget and Robin, 2026-10-02, on the first live use after the v1.65.0 
 
 **#79 as built (v1.66.0, 2026-10-03):**
 - **`--plan`:** `aimb-log` refuses a plan name that looks like status text — it starts with `@~`, or is "@ctx words"
-  (an `@` plus a space), or has spaces and is longer than 40 chars — with `bad-plan` (exit 64, locally): `"<name>" looks like
+  (an `@` plus a space) — with `bad-plan` (exit 64, locally): `"<name>" looks like
   status text — put text before --plan: "<text>" --plan "A" "B"`. "@Spec" alone stays a valid name. The snippet line reads
   `- "<text>" --plan "A" "B" creates ☐ plan items under --path, in that order; text goes BEFORE --plan.`; the README and
   the `log` tool description say the same (for the tool: text goes in `text`, never in `plan`).
+- **Call signature (Robin, 2026-10-03: "do it ASAP, it improves reliability"):** `aimb-log --text "<text>"` and a repeatable
+  `--item "A"` (one plan item per flag). No argument depends on its position any more. JSON on the command line was rejected
+  (shell quoting differs across bash / PowerShell / cmd); programs use `--batch` / `--stream`. Positional text and `--plan`
+  still work. The snippet now reads `--path <agent-path> --text "<text>"`, `--item "A" --item "B" …`, `--state running --text
+  "<what>"`, `--text "@~root <summary>" --state done`. The 40-char "long phrase" rule was dropped at review (it refused real
+  item names). The dashboard's copy-command keeps positional text: it may target a 1.65 host's script.
 - **Decisions taken (the pending ones):** ABANDONED items count in the skipped part (they won't be done), and an abandoned
   NODE has its remainder skipped; FAILED counts as remaining (it may be retried), and a failed node keeps its bar.
 - **Model:** `{done, skipped, total, unit}`; `skipped` defaults to 0. `parseProgress` also takes `{skipped}` and a trailing
@@ -556,6 +621,10 @@ Reported by Architect (Marz, Robins-Mac, 2026-10-02).
 - v1.65.0 (#70 6d): the full suite passed first time (2268 / 54 files); of 5 standalone `test_federation_heal_live` runs one
   ended without its summary line (output not kept), the other 4 passed 19/19; `test_grants_federate_live` 3/3.
 - Both pass reliably when run alone (7/7 each), and neither touches the code that changed.
+- v1.66.0 (#79): both federation tests passed in the full run. A DIFFERENT, time-of-day flake showed instead:
+  `test_dashboard_activity` fails 2 tooltip checks when run between 00:00 and 01:00 local (its fixture "started 1 h ago"
+  falls on yesterday, so the clock gets a date prefix the regex does not expect); it passes after 01:00. Fix: pin the
+  fixture times to midday, or let the regex accept the date prefix.
 
 **Suspicion:** a timing race around bridge restart/re-link under CPU load, or a test-harness port/timeout
 assumption. **Wanted:** reproduce under load (e.g. run each in a loop alongside a CPU hog), then find whether a

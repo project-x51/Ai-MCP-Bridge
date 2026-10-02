@@ -10,16 +10,16 @@
      badges keep their own colours (legible on both). */
   :root { --bg:#FFFFFF; --fg:#222222; --fg-strong:#0F172A; --muted:#6B7280; --faint:#9CA3AF; --line:#E5E7EB; --line-soft:#F3F4F6;
     --head:#F9FAFB; --head-fg:#374151; --surface:#F8FAFC; --surface-2:#F1F5F9; --hover:#F8FAFC; --det:#FAFAFA; --first:#FEFCE8;
-    --ok:#16A34A; --warn:#D97706; --bad:#DC2626; --info:#2563EB; --idle:#64748B; --down:#7C3AED; --down-fg:#FFFFFF; --track:#E5E7EB; --bar:#3B82F6; --bar-roll:#93C5FD;
+    --ok:#16A34A; --warn:#D97706; --bad:#DC2626; --info:#2563EB; --idle:#64748B; --down:#7C3AED; --down-fg:#FFFFFF; --track:#E5E7EB; --bar:#3B82F6; --bar-roll:#93C5FD; --bar-skip:#97A0AE; --bar-skip-2:#CDD3DC; --act-running:#0891B2;
     --sel:#EFF6FF; --abandon:#8A94A6; --bad-fg:#FFFFFF;
     color-scheme: light; }
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#111418; --fg:#E2E8F0; --fg-strong:#F8FAFC; --muted:#9CA3AF; --faint:#6B7280;
     --line:#2B323B; --line-soft:#1E242B; --head:#1A2028; --head-fg:#CBD5E1; --surface:#161B22; --surface-2:#1C232C; --hover:#1A2129; --det:#151A20; --first:#2A2714;
-    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C;
+    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C; --bar-skip:#7E8899; --bar-skip-2:#454E5B; --act-running:#22D3EE;
     --sel:#172554; --abandon:#B8C2D0; --bad-fg:#2A0A0A; color-scheme: dark; } }
   :root[data-theme="dark"] { --bg:#111418; --fg:#E2E8F0; --fg-strong:#F8FAFC; --muted:#9CA3AF; --faint:#6B7280;
     --line:#2B323B; --line-soft:#1E242B; --head:#1A2028; --head-fg:#CBD5E1; --surface:#161B22; --surface-2:#1C232C; --hover:#1A2129; --det:#151A20; --first:#2A2714;
-    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C;
+    --ok:#22C55E; --warn:#F59E0B; --bad:#F87171; --info:#60A5FA; --idle:#94A3B8; --down:#A78BFA; --down-fg:#1B1530; --track:#2B323B; --bar:#3B82F6; --bar-roll:#1E4E8C; --bar-skip:#7E8899; --bar-skip-2:#454E5B; --act-running:#22D3EE;
     --sel:#172554; --abandon:#B8C2D0; --bad-fg:#2A0A0A; color-scheme: dark; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1240px; margin: 10px auto; padding: 0 10px; color: var(--fg); background: var(--bg); }
   h1 { font-size: 20px; margin: 8px 0; }
@@ -131,8 +131,12 @@
   .ar .nm .pre { color:var(--faint); font-weight:400; }
   .ar .ln { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .ar .ln.none { color:var(--faint); font-style:italic; }
-  .ar .pb { flex:none; width:120px; height:6px; border-radius:3px; background:var(--track); overflow:hidden; }
-  .ar .pb > i { display:block; height:100%; background:var(--bar); border-radius:3px; }
+  .ar .pb { flex:none; display:flex; width:120px; height:6px; border-radius:3px; background:var(--track); overflow:hidden; }
+  .ar .pb > i { flex:none; display:block; height:100%; background:var(--bar); border-radius:3px; }
+  /* #79 (v1.66.0): three-part bars — done (blue / plan green), then SKIPPED as a grey hatch (neutral, never green; its own light +
+     dark tokens), then the remainder (the track) */
+  .ar .pb > b.sk { flex:none; display:block; height:100%; background:repeating-linear-gradient(135deg, var(--bar-skip) 0 2px, var(--bar-skip-2) 2px 4px); border-radius:0 3px 3px 0; }
+  .ar .pb.sk2 > i { border-radius:3px 0 0 3px; }
   .ar .pb.roll > i { background:repeating-linear-gradient(135deg, var(--bar) 0 5px, var(--bar-roll) 5px 8px); }
   .ar .pb.nil { visibility:hidden; }
   .ar .ic { flex:none; width:16px; text-align:center; font-size:12px; line-height:16px; }
@@ -165,8 +169,12 @@
   .act-legend { display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px; font-size:11.5px; color:var(--faint); margin:8px 0 0 2px; }
   .act-legend span { display:inline-flex; align-items:center; gap:5px; }
   .act-legend svg { flex:none; width:14px; height:14px; }
-  .s-running { color:var(--ok); } .s-blocked { color:var(--warn); } .s-idle { color:var(--idle); } .s-done { color:var(--ok); } .s-failed { color:var(--bad); } .s-stale, .s-gone { color:var(--faint); }
-  .bg-running, .bg-done { background:var(--ok) !important; } .bg-blocked { background:var(--warn) !important; } .bg-idle { background:var(--idle) !important; } .bg-failed { background:var(--bad) !important; }
+  /* #79: the SESSION glyph outside the Activity tree (Sessions table rows, the mesh map) */
+  svg.sg.inl { width:15px; height:15px; vertical-align:-3px; margin-right:4px; display:inline-block; }
+  /* #79 (v1.66.0): GREEN MEANS DONE ONLY — in progress (the running ring + dot, a context's running mark, the in-progress plan item, a
+     running log dot, the session glyph) is cyan, one token (--act-running) per theme */
+  .s-running { color:var(--act-running); } .s-blocked { color:var(--warn); } .s-idle { color:var(--idle); } .s-done { color:var(--ok); } .s-failed { color:var(--bad); } .s-stale, .s-gone { color:var(--faint); }
+  .bg-running { background:var(--act-running) !important; } .bg-done { background:var(--ok) !important; } .bg-blocked { background:var(--warn) !important; } .bg-idle { background:var(--idle) !important; } .bg-failed { background:var(--bad) !important; }
   /* #70 6b (v1.63.0): plan items — ☐ todo, the in-progress mark, ☑ done, struck-through skipped — and the "N of M done" bar */
   .s-todo { color:var(--muted); } .s-skipped { color:var(--faint); }
   .bg-todo { background:transparent !important; box-shadow:inset 0 0 0 1.5px var(--muted); border-radius:2px !important; } .bg-skipped { background:var(--faint) !important; border-radius:2px !important; }
@@ -410,6 +418,8 @@
   // rides along on hover/expand. Never collapsed: gateways; non-code (agent/cowork/tray) bridges; a bare code session
   // with NO sub-peer (a standalone connection); a bridge hosting 2+ sub-peers (shown as today, like the desktop's
   // shared bridge); one that itself OWNS a topic (collapsing would hide the claim). Returns the sub-peer, or null.
+  // #79: the session glyph inside a mesh-map node (the same builder as the Activity tree + the Sessions table)
+  function mapGlyph(g,x,y,kind){ var gg=document.createElementNS('http://www.w3.org/2000/svg','g'); gg.setAttribute('class','n-glyph'); gg.setAttribute('transform','translate('+(x-8)+','+(y-8)+')'); gg.innerHTML=AimbAct.sessGlyph(kind,{state:'running'},0,{cls:'map'}); g.appendChild(gg); return gg; }
   function soloSub(s){
     var sps=s.subpeers||[];
     if(s.is_gateway || s.client_kind!=='code' || sps.length!==1) return null;
@@ -450,7 +460,7 @@
     // --- row renderers (flat vs nested via the `flat` flag) ---
     var renderPage=function(p,flat){
       expandable(sb,[
-        (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub b-page">'+esc(nm(p.title||p.page_kind))+'</span>',
+        (flat?'':'<span style="padding-left:18px">↳</span> ')+AimbAct.sessGlyph('page',{state:'running'},0,{cls:'inl'})+'<span class="bub b-page">'+esc(nm(p.title||p.page_kind))+'</span>',   // #79: the session glyph (globe)
         '<span class="mono">page:'+esc(p.instance)+'</span>',
         '<span class="mono">'+esc(p.page_kind)+' (web)</span>',
         pu(p.project,p.user),
@@ -464,7 +474,7 @@
     // br = the hosting bridge when it was collapsed into this sub-peer (#58): its detail goes on hover + in the expander
     var renderSub=function(sp,tops,flat,br){
       expandable(sb,[
-        (flat?'':'<span style="padding-left:18px">↳</span> ')+'<span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'"'+(br?' title="'+esc(bridgeNote(br)).replace(/"/g,'&quot;')+'"':'')+'>'+esc(nm(sp.name))+'</span>'+waitBadge(sp.unread_direct||0),
+        (flat?'':'<span style="padding-left:18px">↳</span> ')+AimbAct.sessGlyph(sp.client_kind,{state:'running'},0,{cls:'inl'})+'<span class="bub '+(sp.client_kind==='code'?'b-code':'b-subp')+'"'+(br?' title="'+esc(bridgeNote(br)).replace(/"/g,'&quot;')+'"':'')+'>'+esc(nm(sp.name))+'</span>'+waitBadge(sp.unread_direct||0),
         '<span class="mono">'+esc(sp.id)+'</span>',
         '<span class="mono">'+esc((sp.client_kind||sp.client||'')+((sp.channel_capable&&sp.mode==='push')?' · push':''))+'</span>',
         pu(sp.project,sp.user),
@@ -481,7 +491,7 @@
     };
     var renderSess=function(s){ var tops=s.topics||[]; var isGw=!!s.is_gateway;
       expandable(sb,[
-        '<span class="bub '+sessClass(s)+'">'+esc(nm(s.name))+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
+        (isGw?'':AimbAct.sessGlyph(s.client_kind,{state:'running'},0,{cls:'inl'}))+'<span class="bub '+sessClass(s)+'">'+esc(nm(s.name))+'</span>'+(isGw?' <span class="bub b-gw">GATEWAY</span>':''),
         '<span class="mono">'+esc(s.session)+'</span>',
         '<span class="mono">'+esc(s.client||'')+'</span>',
         pu(s.project,s.user),
@@ -690,7 +700,7 @@
           // (edge to the gateway); the bridge's session id / version / connected time go on the hover title.
           var g1=el('g',{'class':'n-subp solo'+(one.client_kind==='code'?' code':''),id:'n-'+one.id},gNode);
           el('title',{},g1).textContent=bridgeNote(s);
-          el('circle',{cx:x,cy:y1,r:16},g1);
+          el('circle',{cx:x,cy:y1,r:16},g1); mapGlyph(g1,x,y1,one.client_kind);   // #79
           var l1=el('text',{x:x,y:y1+40,'class':'n-label'},g1); l1.textContent=nm(one.name);
           var s1=el('text',{x:x,y:y1+52,'class':'n-sub'},g1); s1.textContent=one.id.split('/').pop();
           var t1=subTag(one); if(t1){ var c1=el('text',{x:x,y:y1+63,'class':'n-client'},g1); c1.textContent=t1; }
@@ -699,7 +709,7 @@
           return;
         }
         var g=el('g',{'class':'n-sess'+(isGw?' gw':'')+(s.client_kind==='code'?' code':''),id:'n-'+s.session},gNode);
-        el('circle',{cx:x,cy:y1,r:22},g);
+        el('circle',{cx:x,cy:y1,r:22},g); if(!isGw) mapGlyph(g,x,y1,s.client_kind);   // #79
         var lbl=el('text',{x:x,y:y1+40,'class':'n-label'},g); lbl.textContent=nm(s.name);
         var sub=el('text',{x:x,y:y1+52,'class':'n-sub'},g); sub.textContent=s.session.split('/')[1];
         var ptag=!unclass(s.project)?(pj(s.project)+(s.user?' · '+tc(s.user):'')):s.client;
@@ -736,7 +746,7 @@
             var anchor=nodePos[k]||sp0;
             var x=off+lx[sp.id];
             var g=el('g',{'class':'n-subp'+(sp.client_kind==='code'?' code':''),id:'n-'+sp.id},gNode);
-            el('circle',{cx:x,cy:ySub,r:14},g);
+            el('circle',{cx:x,cy:ySub,r:14},g); mapGlyph(g,x,ySub,sp.client_kind);   // #79
             var lbl=el('text',{x:x,y:ySub+30,'class':'n-label'},g); lbl.textContent=nm(sp.name);
             var hsub=el('text',{x:x,y:ySub+42,'class':'n-sub'},g); hsub.textContent=sp.id.split('/').pop();
             var sptag=subTag(sp);
@@ -833,14 +843,28 @@
       var m=Math.round(ms/MIN), d=Math.floor(m/1440), h=Math.floor((m%1440)/60), mm=m%60;
       if(d) return '~'+d+'d'+(h?' '+h+'h':''); if(h) return '~'+h+'h'+(mm?' '+mm+'m':''); return '~'+mm+'m'; }
     function pct(p){ return p&&p.total>0?Math.min(100,(p.done/p.total)*100):0; }
-    // {progress} {pct} {done} {total} {unit} {eta}; {{ }} literal; unknown / unfillable left as typed (lib/activity.js renderText)
+    // #79 (v1.66.0): THREE-PART bars {done, skipped, total} — the same rules as lib/activity.js (rollupStrategies / forceBar). skipped
+    // defaults to 0. norm3 widens a 1.65 bridge's "N of M done" bar (skipped LEFT OUT of total — n = total + skipped gives it away —
+    // abandoned items in total as not done) to the 1.66 form, so this page reads either bridge correctly. force = the node's own
+    // state wins: DONE → 100% done (a full bar), ABANDONED → its remainder skipped; failed and the rest keep their bar.
+    function skOf(p){ return p&&p.skipped>0?+p.skipped:0; }
+    function skPct(p){ return p&&p.total>0?Math.max(0,Math.min(100-pct(p),(skOf(p)/p.total)*100)):0; }
+    function cp(p){ var q={}, k; for(k in p) q[k]=p[k]; return q; }
+    function norm3(p){ if(!p) return null; var q=cp(p), sk=skOf(p), ab=p.abandoned>0?+p.abandoned:0;
+      if(p.todos&&!p.items&&p.skipped!=null&&p.n===p.total+sk&&(sk>0||ab>0)){ q.total=p.total+sk; sk+=ab; q.items=true; }   // a ≤1.65 items bar
+      q.skipped=Math.max(0,Math.min(sk,q.total-q.done)); q.pct=pct(q); return q; }
+    function force(u,p){ var s=u&&u.current&&u.current.state; if(!p||(s!=='done'&&s!=='abandoned')) return p; var q=cp(p);
+      if(s==='done'){ q.done=q.total; q.skipped=0; q.pct=100; q.forced='done'; delete q.abandoned; } else { q.skipped=Math.max(0,q.total-q.done); q.forced='abandoned'; } return q; }
+    function progressText(p){ var unit=typeof p.unit==='string'?p.unit:'', sk=skOf(p); return (unit==='%'?fmtNum(p.done)+'%':fmtNum(p.done)+' of '+fmtNum(p.total)+(unit?' '+unit:''))+(sk?' · '+fmtNum(sk)+(unit==='%'?'%':'')+' skipped':''); }
+    // {progress} {pct} {done} {total} {unit} {skipped} {eta}; {{ }} literal; unknown / unfillable left as typed (lib/activity.js renderText)
     function renderText(t,progress,eta,now){
       if(typeof t!=='string') return ''; if(t.indexOf('{')<0&&t.indexOf('}')<0) return t;
       var p=progress&&isFinite(progress.done)&&isFinite(progress.total)&&progress.total>0?progress:null, unit=p&&typeof p.unit==='string'?p.unit:'';
       return t.replace(/\{\{|\}\}|\{([a-z_]+)\}/g,function(m,k){
         if(m==='{{') return '{'; if(m==='}}') return '}';
         switch(k){
-          case 'progress': return !p?m:unit==='%'?fmtNum(p.done)+'%':fmtNum(p.done)+' of '+fmtNum(p.total)+(unit?' '+unit:'');
+          case 'progress': return !p?m:progressText(p);   // #79: "1 of 5 done · 1 skipped"
+          case 'skipped': return p?fmtNum(skOf(p)):m;
           case 'pct': return p?Math.floor(pct(p)+1e-9)+'%':m;
           case 'done': return p?fmtNum(p.done):m;
           case 'total': return p?fmtNum(p.total):m;
@@ -850,7 +874,7 @@
         } });
     }
     function isCtx(u){ return !!u&&u.nkind==='context'; }
-    function barOf(u){ return u?(u.bar||u.progress||null):null; }   // a node's bar: its own reported progress, else the bridge's rollup
+    function barOf(u){ return u?force(u,norm3(u.bar||u.progress||null)):null; }   // a node's bar: its own reported progress, else the bridge's rollup (#79: three parts; a done node full)
     // the state to SHOW. An AGENT (or the session): gone comes from the bridge (data); stale = running/blocked, not finished,
     // not implicit, quiet > its window. A CONTEXT (6a): its own reported state, but gone / stale / finished come from `owner`
     // (its nearest agent ancestor, or the session) — and only while it has a live current line of its own.
@@ -897,8 +921,8 @@
       return L.join('\n');
     }
     function etaTip(eta,now){ return !(eta>0)?'':(eta>now?'ETA '+fmtEta(eta-now)+' (estimated), about '+fmtHM(eta):'ETA due now (estimated) — was about '+fmtHM(eta)); }
-    function barText(p){ return p.unit==='%'?fmtNum(p.done)+'%':fmtNum(p.done)+' of '+fmtNum(p.total)+(p.unit?' '+p.unit:''); }
-    function barTip(p){ if(!p) return ''; return barText(p)+' ('+Math.floor(pct(p)+1e-9)+'%)'+(p.todos&&p.skipped?' · '+p.skipped+' skipped (left out)':'')+(p.todos&&p.abandoned?' · '+p.abandoned+' abandoned':'')+' — '+(p.todos&&p.skipped!=null?'its plan: '+p.n+' item'+(p.n===1?'':'s'):p.rollup?'rollup of '+p.n+' below it':'reported'); }
+    function barText(p){ return progressText(p); }   // #79: "1 of 5 done · 1 skipped"
+    function barTip(p){ if(!p) return ''; p=norm3(p); return barText(p)+' ('+Math.floor(pct(p)+1e-9)+'%)'+(p.items&&p.abandoned?' · incl. '+p.abandoned+' abandoned':'')+(p.forced==='done'?' · done: counts as 100%':p.forced==='abandoned'?' · abandoned: the rest counts as skipped':'')+' — '+(p.items?'its plan: '+p.n+' item'+(p.n===1?'':'s'):p.rollup?'rollup of '+p.n+' below it':'reported'); }   // #79
     // 16px status glyph. AGENTS: centre = state (dot running/blocked/idle, tick done, cross failed); a LIVE item's ring empties
     // as the time left before stale runs out (data-sa / data-win tick it without a re-render). CONTEXTS (kind 'ctx', 6a): no
     // ring (they have no staleness of their own) — a smaller state mark; 'none' = no status line of its own.
@@ -922,6 +946,23 @@
       if(st==='idle'||!e.live) return h+track+'<circle cx="8" cy="8" r="3" fill="currentColor"/></svg>';
       var f=ringFrac(e,now);
       return h+track+'<circle class="ring" cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="2" transform="rotate(-90 8 8)" stroke-dasharray="'+(C*f).toFixed(2)+' '+C.toFixed(2)+'" data-sa="'+e.staleAt+'" data-win="'+e.win+'"/><circle cx="8" cy="8" r="3" fill="currentColor"/></svg>';
+    }
+    // #79 (v1.66.0): the SESSION glyph — ONE builder for the Activity tree (session rows + host lines), its legend, the Sessions
+    // table and the mesh map, so they can't drift. A rounded WINDOW (a session is a client, not an agent — agents keep the ring)
+    // whose border empties towards stale like the ring (rect.ring, pathLength 100; data-sa / data-win tick it), coloured by its
+    // state (s-<state>: in progress cyan, done green, blocked orange, failed red, stale / gone grey; dashed when gone); its FACE is
+    // the client kind: code ">_", cowork a speech bubble, a page / browser a globe, anything else (or unknown) a plain window.
+    function sessKind(k){ k=String(k||'').toLowerCase(); return k==='code'?'code':k==='cowork'?'cowork':(k==='page'||k==='browser'||k==='web')?'page':'other'; }
+    function sessGlyph(kind,e,now,o){
+      o=o||{}; e=e||{state:'running'}; var k=sessKind(kind), st=(o.none||e.noLine)&&!e.gone?'none':(e.state||'running'), F=st==='none'?'var(--faint)':'currentColor';
+      var h='<svg class="gl sg k-'+k+' s-'+st+(o.cls?' '+o.cls:'')+'" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"'+(o.title?' role="img" aria-label="'+o.title+'"':'')+'>', R='x="1.75" y="2.25" width="12.5" height="11.5" rx="2.6"', b;
+      if(st!=='none'&&e.live&&!e.stale){ var fr=ringFrac(e,now); b='<rect '+R+' fill="none" stroke="var(--track)" stroke-width="1.6"/><rect class="ring" '+R+' fill="none" stroke="currentColor" stroke-width="1.6" pathLength="100" stroke-dasharray="'+(100*fr).toFixed(2)+' 100" data-sa="'+e.staleAt+'" data-win="'+e.win+'" data-len="100"/>'; }
+      else b='<rect '+R+' fill="none" stroke="'+F+'" stroke-width="1.6"'+(st==='gone'||st==='abandoned'?' stroke-dasharray="2.2 2.2"':'')+'/>';
+      var face=k==='code'?'<path d="M4.7 6.3 L6.9 8.2 L4.7 10.1" fill="none" stroke="'+F+'" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.3 10.3 H11.3" fill="none" stroke="'+F+'" stroke-width="1.4" stroke-linecap="round"/>'
+        :k==='cowork'?'<path d="M5 5.3 H11 Q12 5.3 12 6.3 V8.7 Q12 9.7 11 9.7 H7.7 L5.7 11.4 V9.7 H5 Q4 9.7 4 8.7 V6.3 Q4 5.3 5 5.3 Z" fill="'+F+'"/>'
+        :k==='page'?'<circle cx="8" cy="8.1" r="3.6" fill="none" stroke="'+F+'" stroke-width="1.2"/><path d="M4.4 8.1 H11.6 M8 4.5 Q6.1 8.1 8 11.7 M8 4.5 Q9.9 8.1 8 11.7" fill="none" stroke="'+F+'" stroke-width="1"/>'
+        :'<path d="M2 5.5 H14" fill="none" stroke="'+F+'" stroke-width="1.3"/>';
+      return h+b+face+'</svg>';
     }
     // 6b: a PLAN ITEM's glyph — ☐ todo, ☑ done, a struck box for skipped, ✗ in a box for failed; running / blocked / idle show
     // the usual in-progress mark (a context's: no ring — a plan item never goes stale)
@@ -953,19 +994,22 @@
     function hostTagOn(t,multi){ return !!multi&&!!t&&!!t.u&&String(t.parentHost==null?'':t.parentHost).toLowerCase()!==String(t.u.host).toLowerCase(); }
     // 6c: ROLLUPS FOLLOW THE FILTERS — with Active only / Plans on, a node without reported progress rolls up only the children
     // the filter shows (a port of lib/activity.js rollup: the SUM of ordinary children sharing a unit, else their MEAN %, else
-    // "N of M done" over its plan items — skipped left out of M); without a filter the bridge's own `bar` is shown as sent
-    function ownBar(p){ return {done:p.done,total:p.total,unit:p.unit,pct:pct(p),rollup:false,n:1}; }
+    // "N of M done" over its plan items — #79: three parts, M = every item, skipped + abandoned → skipped; a done node = 100%);
+    // without a filter the bridge's own `bar` is shown as sent
+    function ownBar(p){ return {done:p.done,skipped:skOf(p),total:p.total,unit:p.unit,pct:pct(p),rollup:false,n:1}; }
     function rollKids(kids){
       var ks=(kids||[]).slice().sort(function(a,b){ var x=String(a.u.key), y=String(b.u.key); return x<y?-1:x>y?1:0; }), bars=[], items=[];
       ks.forEach(function(t){ if(t.u.plan_item) items.push(t.u); else if(t.fbar) bars.push(t.fbar); });
       if(bars.length){
         var u0=String(bars[0].unit||'').toLowerCase();
-        if(u0!=='%'&&bars.every(function(p){ return String(p.unit||'').toLowerCase()===u0; })){ var d=0, tt=0; bars.forEach(function(p){ d+=p.done; tt+=p.total; });
-          var r={done:d,total:tt,unit:bars[0].unit,pct:pct({done:d,total:tt}),rollup:true,n:bars.length}; if(bars.every(function(p){ return p.todos; })) r.todos=true; return r; }
-        var m=Math.round((bars.reduce(function(s,p){ return s+pct(p); },0)/bars.length)*10)/10; return {done:m,total:100,unit:'%',pct:m,rollup:true,n:bars.length};
+        if(u0!=='%'&&bars.every(function(p){ return String(p.unit||'').toLowerCase()===u0; })){ var d=0, sk0=0, tt=0; bars.forEach(function(p){ d+=p.done; sk0+=skOf(p); tt+=p.total; });
+          var r={done:d,skipped:sk0,total:tt,unit:bars[0].unit,pct:pct({done:d,total:tt}),rollup:true,n:bars.length}; if(bars.every(function(p){ return p.todos; })) r.todos=true; return r; }
+        var r1=function(x){ return Math.round(x*10)/10; }, m=r1(bars.reduce(function(s,p){ return s+pct(p); },0)/bars.length);
+        var ms=Math.min(r1(bars.reduce(function(s,p){ return s+(p.total>0?Math.min(100,(skOf(p)/p.total)*100):0); },0)/bars.length),r1(100-m));
+        return {done:m,skipped:ms,total:100,unit:'%',pct:m,rollup:true,n:bars.length};
       }
-      if(items.length){ var dn=0, sk=0, ab=0; items.forEach(function(u){ var s=itemState(u); if(s==='done') dn++; else if(s==='skipped') sk++; else if(s==='abandoned') ab++; });
-        var tot=items.length-sk; if(tot>0){ var r2={done:dn,total:tot,unit:'done',pct:pct({done:dn,total:tot}),rollup:true,todos:true,skipped:sk,n:items.length}; if(ab) r2.abandoned=ab; return r2; } }
+      if(items.length){ var dn=0, sk=0, ab=0; items.forEach(function(u){ var s=itemState(u); if(s==='done') dn++; else if(s==='skipped') sk++; else if(s==='abandoned'){ sk++; ab++; } });
+        var r2={done:dn,skipped:sk,total:items.length,unit:'done',pct:pct({done:dn,total:items.length}),rollup:true,todos:true,items:true,n:items.length}; if(ab) r2.abandoned=ab; return r2; }
       return null;
     }
     // the delta store: a full board replaces it; a delta applies only on top of exactly the held (epoch, seq) → else resync
@@ -1039,8 +1083,8 @@
         if(opts.plansOnly&&!kids.length) return;
         var fbars=null;
         if(opts.activeOnly||opts.plansOnly){   // 6c: the rolled-up bars of what the filter shows (bottom-up), per host for the session row
-          var fb=function(t){ t.kids.forEach(fb); t.fbar=t.u.progress?ownBar(t.u.progress):rollKids(t.kids); }; kids.forEach(fb);
-          fbars={}; (g.s.selves||[g.s.self]).forEach(function(se){ if(se) fbars[lcs(se.host)]=se.progress?ownBar(se.progress):rollKids(kids.filter(function(t){ return lcs(t.u.host)===lcs(se.host); })); });
+          var fb=function(t){ t.kids.forEach(fb); t.fbar=force(t.u,t.u.progress?ownBar(t.u.progress):rollKids(t.kids)); }; kids.forEach(fb);   // #79: a done node = 100%
+          fbars={}; (g.s.selves||[g.s.self]).forEach(function(se){ if(se) fbars[lcs(se.host)]=force(se,se.progress?ownBar(se.progress):rollKids(kids.filter(function(t){ return lcs(t.u.host)===lcs(se.host); }))); });
         }
         var nAll=0; (function cnt(l){ l.forEach(function(t){ if(isActiveAgent(t.u)&&!t.u.implicit) nAll++; cnt(t.kids); }); })(kids);
         var pk=String(g.s.project||'').toLowerCase();
@@ -1121,10 +1165,10 @@
       return out;
     }
     var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed'};
-    return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg,
+    return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg, sessGlyph:sessGlyph, sessKind:sessKind,   // #79: sessGlyph
       applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, entryTag:entryTag, subtreeCount:subtreeCount, barOf:barOf,
       fmtDur:fmtDur, fmtClock:fmtClock, pct:pct, planGlyph:planGlyph, isOpenItem:isOpenItem, planEnded:planEnded, hostTagOn:hostTagOn, itemState:itemState, barText:barText,
-      planOpenDefault:planOpenDefault, rollKids:rollKids, subtreeLog:subtreeLog,
+      planOpenDefault:planOpenDefault, rollKids:rollKids, subtreeLog:subtreeLog, norm3:norm3, force:force, skOf:skOf, skPct:skPct, ownBar:ownBar, progressText:progressText,   // #79
       nodeOpenDefault:nodeOpenDefault, PLAN_OPEN_STEPS:PLAN_OPEN_STEPS, planOpenIndex:planOpenIndex, planOpenValue:planOpenValue, logCmd:logCmd, quietAgent:quietAgent, subtreeAgentsQuiet:subtreeAgentsQuiet,
       rootQuiet:rootQuiet, ownsOpenPlan:ownsOpenPlan, openItemsOwned:openItemsOwned, countNodes:countNodes, menuFor:menuFor, ACTION_DONE:ACTION_DONE, lcs:lcs };   // 6d
   })();
@@ -1200,7 +1244,8 @@
     actReq({entry:{id:id,host:host}},function(r){ E.loading=false; E.queued=null; if(!r||r.ok===false) E.err=r||{code:'no-answer'}; else E.entry=r.entry; actRender(); },function(info){ E.queued=info; actRender(); });
   }
   function hostTags(hosts,down){ return (hosts||[]).map(function(h){ var d=(down||[]).indexOf(h)>=0; return '<span class="htag'+(d?' down':'')+'">'+esc(h)+'</span>'; }).join(''); }
-  function barHtml(p,tipKey){ if(!p) return '<span class="pb nil"></span>'; return '<span class="pb'+(p.todos?' plan':p.rollup?' roll':'')+'" data-tip="'+tipKey+'"><i style="width:'+AimbAct.pct(p).toFixed(1)+'%"></i></span>'; }   // 6b: a plan's "N of M done" bar is solid green
+  function barHtml(p,tipKey){ if(!p) return '<span class="pb nil"></span>'; p=AimbAct.norm3(p); var dw=AimbAct.pct(p), sw=AimbAct.skPct(p);   // #79: done, then a skipped segment, then the track
+    return '<span class="pb'+(p.todos?' plan':p.rollup?' roll':'')+(sw>0?' sk2':'')+(p.forced==='done'?' full':'')+'" data-tip="'+tipKey+'"><i style="width:'+dw.toFixed(1)+'%"></i>'+(sw>0?'<b class="sk" style="width:'+sw.toFixed(1)+'%"></b>':'')+'</span>'; }   // 6b: a plan's "N of M done" bar is solid green
   // 6c (rough edge from 6b): pills sit right after the name (not at the row's end), so the bar column lines up on every row
   function pillsHtml(e,noLine,hostDown){
     var h='';
@@ -1257,7 +1302,7 @@
       var line=ent.current?'<span class="ln">'+esc(AimbAct.renderText(ent.current.text,bar,ent.eta_at,now))+'</span>':'<span class="ln none">no status line of its own</span>';
       var open=!!ACT.open[id], st=(ent.current&&ent.current.state)||'', can=!!ex.multi;
       row(id,cls+(e.stale&&!noLine?' stale':'')+(e.gone?' gone':'')+(st==='abandoned'?' abandoned':'')+(ex.sel?' sel':'')+(ex.hid?' hid':'')+(ex.pinned?' pinned':''),d,'<span class="chv">'+(can?(open?'▾':'▸'):'')+'</span>'+
-        '<span data-tip="'+tipK(id+'g',function(){ return noLine&&!e.gone?'No status line of its own (report @~root to set one)':AimbAct.statusTip(ent,null,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':null)+'</span>'+
+        '<span data-tip="'+tipK(id+'g',function(){ return noLine&&!e.gone?'No status line of its own (report @~root to set one)':AimbAct.statusTip(ent,null,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.sessGlyph(ex.kind,e,now,{none:noLine&&!e.gone})+'</span>'+   // #79: a session's own glyph (a window), not the agent ring
         nameHtml+(ex.pinned?'<span class="pin" title="pinned (this browser)">📌</span>':'')+tagsHtml+pillsHtml(e,noLine,parentDown)+line+fbHtml(id)+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
         (ent.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(ent.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+
         (bell?'<span class="ic" data-tip="'+tipK(id+'d','Doorbell armed')+'">🔔</span>':'<span class="ic nil"></span>'),
@@ -1319,11 +1364,11 @@
         var ssel=!!ACT.sel&&ACT.sel.kind==='session'&&ACT.sel.sid===s.id&&(!multi||lcs(ACT.sel.host)===lcs(self.host));
         var selS=function(h){ return function(){ actSelect({kind:'session',gk:s.key,sid:s.id,host:h,path:'',session:s.session,project:s.project,user:s.user||''}); }; };
         var sOpen=sessionRow(sid,'ar click',1,self,'<span class="nm">'+esc(nm(s.session))+'</span>',hostTags(hosts,s.hosts_down),!!(s.hosts_down&&s.hosts_down.length),!!s.bell,fb,
-          sInfo(s,{host:self.host||'',home:s.home||self.host||'',hosts:hosts.join(','),path:''}),{multi:multi,sel:ssel,hid:x.hid,pinned:x.pinned,select:selS(self.host),menu:sessMenu(s,self.host,sid,false)});
+          sInfo(s,{host:self.host||'',home:s.home||self.host||'',hosts:hosts.join(','),path:''}),{multi:multi,sel:ssel,hid:x.hid,pinned:x.pinned,select:selS(self.host),menu:sessMenu(s,self.host,sid,false),kind:s.client_kind});
         if(sOpen) (s.selves||[self]).forEach(function(se){   // 6b (#70 "Decisions before 6b" 6): each host's OWN line; the session row shows the host that most recently set one
           var hid='hself|'+s.key+'|'+se.host, he=AimbAct.effState(se,null,now,sm), hNo=!se.current, hd=lcs(se.host)===lcs(self.host);
           var sb=x.fbars?(x.fbars[lcs(se.host)]||null):AimbAct.barOf(se), isHome=s.home&&lcs(se.host)===lcs(s.home), hsel=!!ACT.sel&&ACT.sel.kind==='session'&&ACT.sel.sid===s.id&&lcs(ACT.sel.host)===lcs(se.host);
-          row(hid,'ar click'+(he.stale&&!hNo?' stale':'')+(he.gone?' gone':'')+(hsel?' sel':''),2,'<span class="chv"></span><span data-tip="'+tipK(hid+'g',function(){ return hNo&&!he.gone?'No headline from '+se.host:AimbAct.statusTip(se,null,anow(),actStaleMin(),se.host); })+'">'+AimbAct.glyphSvg(he,now,hNo&&!he.gone?'none':null)+'</span>'+
+          row(hid,'ar click'+(he.stale&&!hNo?' stale':'')+(he.gone?' gone':'')+(hsel?' sel':''),2,'<span class="chv"></span><span data-tip="'+tipK(hid+'g',function(){ return hNo&&!he.gone?'No headline from '+se.host:AimbAct.statusTip(se,null,anow(),actStaleMin(),se.host); })+'">'+AimbAct.sessGlyph(s.client_kind,he,now,{none:hNo&&!he.gone})+'</span>'+
             hostTags([se.host],se.host_down?[se.host]:[])+pillsHtml(he,hNo,false)+(se.current?'<span class="ln" data-tip="'+tipK(hid+'l',(hd?'the headline: this host set it most recently':'this host\'s own line (another host set a headline more recently)')+(isHome?' · the session\'s HOME host (where it first appeared): top-level rows from it carry no host tag':''))+'">'+esc(AimbAct.renderText(se.current.text,sb,se.eta_at,now))+'</span>':'<span class="ln none">no headline from this host</span>')+
             fbHtml(hid)+barHtml(sb,tipK(hid+'b',AimbAct.barTip(sb)))+'<span class="ic nil"></span><span class="ic nil"></span>',selS(se.host),sInfo(s,{kind:'host-line',host:se.host,path:''}),{menu:sessMenu(s,se.host,hid,true),sel:hsel});
         });
@@ -1412,9 +1457,9 @@
     for(var j=tree.children.length-1;j>=0;j--){ var c=tree.children[j], ck=c.getAttribute('data-k'); if(!ck||!want[ck]) tree.removeChild(c); }
   }
   function actRings(tree,now){   // the ring ticks without a re-render
-    var C=2*Math.PI*6.5, rs=tree.querySelectorAll('circle.ring');
-    for(var i=0;i<rs.length;i++){ var sa=Number(rs[i].getAttribute('data-sa')), win=Number(rs[i].getAttribute('data-win')), f=win>0?Math.max(0,Math.min(1,(sa-now)/win)):0;
-      rs[i].setAttribute('stroke-dasharray',(C*f).toFixed(2)+' '+C.toFixed(2)); }
+    var C=2*Math.PI*6.5, rs=tree.querySelectorAll('circle.ring, rect.ring');   // #79: + the session glyph's border (data-len = its pathLength)
+    for(var i=0;i<rs.length;i++){ var sa=Number(rs[i].getAttribute('data-sa')), win=Number(rs[i].getAttribute('data-win')), f=win>0?Math.max(0,Math.min(1,(sa-now)/win)):0, L=Number(rs[i].getAttribute('data-len'))||C;
+      rs[i].setAttribute('stroke-dasharray',(L*f).toFixed(2)+' '+L.toFixed(2)); }
   }
   // ---- 6d: the CONTEXT MENU (right-click; the Menu key / Shift+F10 on a focused row; a long-press on touch)
   function actMenuClose(refocus){ var m=ACT.menu; if(!m) return; ACT.menu=null; if(m.el.parentNode) m.el.parentNode.removeChild(m.el); if(m.row) m.row.classList.remove('mnu'); if(refocus&&m.row&&m.row.focus) try{ m.row.focus(); }catch(e){} }
@@ -1557,10 +1602,12 @@
     if(co) co.addEventListener('click',function(){ ACT.open={}; allNodeIds(AimbAct.buildTree(ACT.st.units||{},{})).forEach(function(id){ ACT.open[id]=false; }); actRender(); });   // 6c: closed for good (plan nodes too — not back to their default)
     var lg=document.getElementById('actlegend');
     if(lg){ var t=Date.now(), mk=function(st,label){ var e=st==='running'||st==='blocked'?{state:st,live:true,staleAt:t+6*60000,win:10*60000}:{state:st,live:false,gone:st==='gone'}; return '<span>'+AimbAct.glyphSvg(e,t)+label+'</span>'; };
-      lg.innerHTML=mk('running','running')+mk('blocked','blocked')+mk('idle','idle')+mk('done','done')+mk('failed','failed')+mk('stale','stale')+mk('gone','gone')+
+      var sk=function(k,label){ return AimbAct.sessGlyph(k,{state:'running',live:true,staleAt:t+6*60000,win:10*60000},t,{title:label}); };   // #79
+      lg.innerHTML='<span>'+sk('code','code')+sk('cowork','cowork')+sk('page','page')+sk('other','other')+'session: code · cowork · page · other (the border empties towards stale, like the ring)</span>'+mk('running','running')+mk('blocked','blocked')+mk('idle','idle')+mk('done','done')+mk('failed','failed')+mk('stale','stale')+mk('gone','gone')+
         '<span>'+AimbAct.glyphSvg({state:'running'},t,'ctx')+'context (no ring: it follows its agent\'s staleness)</span>'+
         '<span>'+AimbAct.planGlyph('todo')+AimbAct.planGlyph('running')+AimbAct.planGlyph('done')+AimbAct.planGlyph('skipped')+AimbAct.planGlyph('abandoned')+'plan item: to do · in progress · done · skipped · abandoned (never stale; a plan ends only when every item is done, or when marked complete / abandoned)</span>'+
-        '<span>· the ring is the time left before an agent goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of what is below it · green bar = a plan\'s N of M done · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'+
+        '<span>· green = done only, cyan = in progress</span>'+
+        '<span>· the ring is the time left before an agent goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of what is below it · green bar = a plan\'s N of M done · <span class="pb plan sk2 lgb"><i style="width:40%"></i><b class="sk" style="width:20%"></b></span> grey hatch = skipped (or abandoned) · a done node\'s bar is full · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'+
         '<span>· click a row to see its log · right-click (Menu key / Shift+F10; long-press on touch) for its actions · 📌 pinned · “N hidden — show” under a parent (pin / hide stay in this browser)</span>'; }
     document.addEventListener('visibilitychange',actSync);
   }

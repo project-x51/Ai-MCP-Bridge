@@ -88,8 +88,8 @@ check('harness: a gateway on ≥ 1.63.0', id.role === 'gateway' && (v => v[0] > 
 // ---- 1. the startup replay rebuilds the weeks-old plan from the window alone
 const b1 = await until(() => board(G), b => !!nodeOf(b, '@#70/@Docs'), 8000)
 check('startup: the plan created 12 days ago is back — every item a plan item with its state, in the given order', J(itemsOf(b1)) === WANT, J(itemsOf(b1)))
-check('startup: its lines, bar and created_at as written; the plan bar "1 of 4 done"; the finished agent stays gone', nodeOf(b1, '@#70/@Build')?.current?.text === 'compiling' && nodeOf(b1, '@#70/@Build')?.progress?.done === 3
-  && nodeOf(b1, '@#70/@Ship')?.created_at === at(12, 10, 1) && nodeOf(b1, '@#70')?.current?.text === 'the #70 plan' && (p => p && p.todos && p.done === 1 && p.total === 4)(nodeOf(b1, '@#70')?.progress) && !nodeOf(b1, 'oldtimer'), J(nodeOf(b1, '@#70')))
+check('startup: its lines, bar and created_at as written; the plan bar "1 of 5 done · 1 skipped" (#79); the finished agent stays gone', nodeOf(b1, '@#70/@Build')?.current?.text === 'compiling' && nodeOf(b1, '@#70/@Build')?.progress?.done === 3
+  && nodeOf(b1, '@#70/@Ship')?.created_at === at(12, 10, 1) && nodeOf(b1, '@#70')?.current?.text === 'the #70 plan' && (p => p && p.todos && p.done === 1 && p.total === 5 && p.skipped === 1)(nodeOf(b1, '@#70')?.progress) && !nodeOf(b1, 'oldtimer'), J(nodeOf(b1, '@#70')))
 const t1 = await tap(G)
 check('startup: the replay read only the window — fewer records than were seeded, carry-forwards among them, and today\'s cf seen (no second one written)', t1.replay && t1.replay.fed < totalSeeded && t1.replay.cfs > 0 && t1.replay.cf_today === true && t1.cf_day === D && !t1.carry_forward, J([t1.replay, t1.cf_day, t1.carry_forward, totalSeeded]))
 
@@ -118,7 +118,7 @@ check('restart: the replay used ONLY the rollover\'s records (every seeded file 
 await call(G2, 'register_self', { name: 'Lead', secret: 'ld', project: 'AIMB' })
 const tick = await call(G2, 'log', { as: 'Lead', secret: 'ld', path: '@#70/@~Ship', state: 'done' })
 const b3 = await until(() => board(G2), b => nodeOf(b, '@#70/@Ship')?.state === 'done', 4000)
-check('restart: the restored plan takes ticks as before (Ship ☑, the bar 2 of 4)', tick.ok && nodeOf(b3, '@#70/@Ship')?.state === 'done' && (p => p && p.done === 2 && p.total === 4)(nodeOf(b3, '@#70')?.progress), J([tick, nodeOf(b3, '@#70')?.progress]))
+check('restart: the restored plan takes ticks as before (Ship ☑, the bar 2 of 5 · 1 skipped, #79)', tick.ok && nodeOf(b3, '@#70/@Ship')?.state === 'done' && (p => p && p.done === 2 && p.total === 5)(nodeOf(b3, '@#70')?.progress), J([tick, nodeOf(b3, '@#70')?.progress]))
 
 console.log(`\n${pass} passed, ${fail} failed`)
 for (const b of all) { try { await b.transport.close() } catch { } }

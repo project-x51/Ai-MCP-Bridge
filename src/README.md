@@ -484,7 +484,7 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
@@ -536,7 +536,9 @@ agent) — exactly as the session row always has.
 
 **Rollup** recurses through any depth: a node's bar is its reported progress, else the sum of its children's bars when
 they share a unit, else the mean % of its children that have a bar, else (6b) "N of M done" over its plan items — see
-"Todos and plans" for how plan items and other children combine.
+"Todos and plans" for how plan items and other children combine. **v1.66.0 (#79): progress has three parts — done,
+skipped, total** (see "Three-part progress" below): every rollup carries all three, and a **done** node always counts as
+100% done.
 
 **Logs.** Every node keeps its **own** bounded log (`log_entries_per_agent` per node). A node's **Log** is the merged log
 of its whole **subtree**, newest first (`own:true` for the node's own entries); each entry carries its `path` and `rel`
@@ -605,9 +607,11 @@ Opt-in: nothing becomes a todo unless it is created as one, and ordinary context
   tick it (the session or any agent).
 - **Never stale:** a plan item never goes stale, in any state, and its own staleness is never shown (nor gone: it shows its
   own state). An agent working under an item still shows its OWN staleness on its row.
-- **Rollup — "N of M done":** a node with plan items and no reported progress gets an automatic bar: **N = done items, M =
-  items − skipped** (skipped items are resolved and left out; a failed item counts as not done; all skipped → no bar),
-  unit `done` (`{progress}` → "2 of 4 done"), `todos:true`, `skipped:k`, `n` = all items. **Mixed children:** a plan item
+- **Rollup — "N of M done":** a node with plan items and no reported progress gets an automatic bar, unit `done`,
+  `todos:true`, `n` = all items. **v1.66.0 (#79): M = EVERY item; N = done items; skipped AND abandoned items form the
+  bar's skipped part; todo / in-progress / idle / failed items are what remains** (`{progress}` → "2 of 5 done · 1
+  skipped"; `items:true`, `skipped`, `abandoned` = how many of the skipped were abandoned). (6b–6c left skipped items out
+  of M and drew no bar when every item was skipped.) **Mixed children:** a plan item
   counts ONLY as a todo of its parent — its own bar (e.g. an agent under it reporting files) shows on its own row, never in
   the parent's sum. The precedence stays 6a's: the node's reported progress, then the SUM of its ordinary children's bars
   when they share a unit, then their MEAN %, then the plan's N of M — so ordinary children with bars win over the plan.
@@ -633,8 +637,8 @@ Opt-in: nothing becomes a todo unless it is created as one, and ordinary context
 - **Headline** of a session on several hosts: the host that **most recently SET** a headline (its root line's own time),
   with each host's own line shown when the row is expanded (`selves`); none has one → the most recently active host.
 - **Dashboard:** plan items render ☐ / the in-progress mark / ☑ / struck-through skipped, as a checklist (their line shows
-  once it says more than the item's name), in creation order; a plan node shows a solid green "N of M done" bar (hover:
-  "2 of 4 done (50%) · 1 skipped (left out) — its plan: 5 items"). **Active only** keeps open items visible (even under a
+  once it says more than the item's name), in creation order; a plan node shows a solid green "N of M done" bar (hover,
+  v1.66.0: "2 of 5 done · 1 skipped (40%) — its plan: 5 items"). **Active only** keeps open items visible (even under a
   finished agent) and hides ended plans. **Host tags** appear only where a node's host differs from its parent's (a
   top-level node: from the session's headline host — v1.64.0: its HOME host); the session row shows all its hosts and,
   expanded, each host's own line above its Log.
@@ -653,10 +657,10 @@ leaves its old host's entries to go stale or gone).
   (`@~`) line; done/failed on an **agent's** own line **finishes** it. Stale is computed for agents (quiet longer than `stale_after_min`, or the message's own
   `stale_after`, ≤24h; a context follows its agent); gone = the session left this host's roster (deregister / TTL / its
   process exited), cleared when it comes back.
-- **Progress / ETA** (`"4812/12000 tiles"`, `"3/6"`, `"61%"` / `"15m"`, `"1h25m"`, `"19:27"`) move the node's bar from
+- **Progress / ETA** (`"4812/12000 tiles"`, `"3/6"`, `"61%"`, v1.66.0 also `"3/6 1 skipped"` / `{done, skipped, total}` / `"15m"`, `"1h25m"`, `"19:27"`) move the node's bar from
   **any** message, stick until changed (`"none"` clears) and the ETA is dropped while the node is done/failed.
 - **Text is a template**, rendered when read: `{progress}` → "4,812 of 12,000 tiles" ("61%" for a % bar, "3 of 6"
-  without a unit), `{pct}` → "40%" (floored), `{done}` `{total}` `{unit}`, `{eta}` → "~1h 25m" ("now" once due, "?"
+  without a unit; v1.66.0: "1 of 5 done · 1 skipped" when the bar has a skipped part), `{skipped}` (v1.66.0), `{pct}` → "40%" (floored), `{done}` `{total}` `{unit}`, `{eta}` → "~1h 25m" ("now" once due, "?"
   with no ETA). `{{` / `}}` are literal braces; an unknown `{word}`, or a bar placeholder with no bar, stays as typed. A
   current line renders against the context's **live** bar (`"@~Tharsis Seeding {progress}"` keeps moving); a log entry
   against the progress recorded on it. The files and the gossip keep the raw template.
@@ -736,22 +740,22 @@ agent's prompt. Two new connect-reminder placeholders, expanded per session when
   session's `--session` / `--project`, `--token-file "<path>"` when the bridge read its token from a file (#75), and a
   `--path <agent-path>` placeholder for the orchestrator to fill in; then six short lines:
   ```
-  Report your status with: "<node>" "<…/src/tools/aimb-log.mjs>" --session "Orch" --project "AIMB" [--token-file "<path>"] --path <agent-path> "<text>"
-  - Text "@ctx …" logs to a context; "@~ctx …" also sets its current line; "@~root …" sets your own headline.
+  Report your status with: "<node>" "<…/src/tools/aimb-log.mjs>" --session "Orch" --project "AIMB" [--token-file "<path>"] --path <agent-path> --text "<text>"
+  - --text "@ctx …" logs to a context; "@~ctx …" also sets its line; keep "@~root <what you're doing>" current.
   - Report at milestones only (every call costs tokens); a script reporting often adds --no-log.
   - Before a long silent step (a build, a test run) add --stale-after 60m so you don't show as stale.
-  - --plan "A" "B" creates ☐ plan items under --path, in that order.
-  - --done ticks one: --path "<agent-path>/@~A" --done (no text needed).
-  - Finish with "@~root <summary>" --state done (or --state failed). Never put secrets in status text.
+  - --item "A" --item "B" creates ☐ plan items under --path, in that order (one name per --item).
+  - Start item A: --path "<agent-path>/@~A" --state running --text "<what>"; when done: same --path + --done.
+  - Finish with --text "@~root <summary>" --state done (or failed). Never put secrets in status text.
   ```
+  (v1.66.0, #79: the lines as they read now — explicit `--text` and one `--item` per plan item, so no argument depends on its
+  position, and the checklist kept live.)
 - **`{log_tool_hint}`** — the same guidance for a session without a shell (Cowork), phrased for the `log` tool: `log({
   as:"<name>", secret, text })`, `path`, `log:false`, `stale_after:"60m"`, `plan:["A","B"]`, a tick with `path:"<path>/@~A",
   state:"done"`, the finish line, no secrets.
 
 `config.example.json`'s realm block (`behaviors.realm`, published once at deploy time) keeps the doorbell reminder and
-adds two connect reminders: `client:code` — "When you spawn agents, put this block in each agent's prompt (set --path to
-the agent's name): {log_snippet} Report your own status with the log tool: text "@~root <what you are doing>" (plan:[...]
-for a checklist)." — and `client:cowork` — "Show what you are working on on the activity board: {log_tool_hint}". Both
+adds two connect reminders: `client:code` and `client:cowork` (v1.66.0's text is in "Briefing agents" below). Both
 carry `"id":"activity"`: v1.64.0 lets a config default carry an optional `id` so several defaults share one
 (operation, scope, match) — a ≤1.63 host ignores the id and keeps only the last one, so publish the block once every host
 runs 1.64. The bridge's MCP server instructions now name the `log` / `activity` tools too.
@@ -905,6 +909,53 @@ restart — no "N+" from that cause.
 an object `by`, the cf `log_n`); v2–v4 records are still read; hubs declare `activity_gossip:5`. Deploy = restart every
 host's gateway on 1.65.0 together.
 
+### Three-part progress, colours and session glyphs (v1.66.0, #79)
+**Progress has three parts: done, skipped, total** (+ the unit). *Skipped* is resolved without being done — neither done
+nor remaining. Report it with `"3/6 1 skipped"` / `"4812/12000 tiles · 100 skipped"` or `{done, skipped, total, unit}`
+(done + skipped > total clamps skipped, `progress-clamped`); it defaults to 0.
+- **Rollups carry all three:** a common unit sums done, skipped and total; mixed units average each child's done fraction
+  and skipped fraction (each child weighted 1); a plan's "N of M done" counts every item — done items are done, **skipped
+  and abandoned** items are skipped (they won't be done), todo / in-progress / idle / **failed** items remain (failed may be
+  retried).
+- **A done node counts as 100% done** — a full bar, and its whole weight to its parent — whatever its reported or rolled-up
+  bar says; an **abandoned** node's remainder counts as skipped; a failed node keeps its bar. Otherwise reported progress
+  wins over a rollup, as before. The plan-end rule is unchanged (skipped items keep a plan open).
+- **Text:** `{progress}` → "1 of 5 done · 1 skipped" ("4,812 of 12,000 tiles" when nothing is skipped), `{pct}` = the
+  done %, `{skipped}`.
+- **Dashboard bars:** done (blue; a plan's green), then the **skipped segment** (a grey hatch, light and dark), then the
+  track; striped = a rollup; the tooltip reads "1 of 5 done · 2 skipped (20%) · incl. 1 abandoned — its plan: 5 items".
+- **Colours:** green means **done** only. **In progress is cyan** everywhere — the running ring and dot, a context's running
+  mark, the in-progress plan item, running log dots (one token, `--act-running`). Blocked stays orange, failed red, stale /
+  gone / skipped / abandoned grey.
+- **Session glyph:** a session row (and each host line of a multi-host session) shows a small rounded **window** instead of
+  the agent ring — its border empties towards stale like the ring, its colour is its state, and its face says the client:
+  code `>_`, cowork a speech bubble, a page a globe, anything else a plain window. The Sessions table and the mesh map use
+  the same glyph. The bridge takes the client kind from the mesh roster (`client_kind` on the dashboard's session units).
+- **Compatibility:** `skipped` is an optional field (only when > 0) on progress in records, carry-forwards and gossip; a
+  1.65 host ignores it (and shows no skipped segment), a 1.66 host reads a missing one as 0. The format stays v5, so hosts
+  can upgrade one at a time.
+
+### Briefing agents (v1.66.0)
+An orchestrating session keeps its agents' work visible:
+- Paste `{log_snippet}` (the code reminder hands it out) into **each agent's prompt with `--path` set to that agent's own,
+  unique name**, and give it its checklist up front — or tell it to make one with `--plan` as its first report.
+- The agent keeps its checklist live: `--path "<agent>/@~<item>" --state running "<what>"` when it starts an item,
+  `--path "<agent>/@~<item>" --done` the moment it's done, `"@~root <what it's doing>"` current, and it finishes with
+  `"@~root <summary>" --state done` (or `--state failed`).
+- The orchestrator keeps its own `@~root` headline current and tracks its agents' work as **its own plan** (one item per
+  agent or task, `plan:["<agent>", …]`), ticking each item as its agent reports back.
+
+The realm reminders (`config.example.json`, `behaviors.realm`, `updated_at` 2026-10-02T12:00Z) say exactly this, within the
+365-char reminder cap so a 1.65 host shows them whole:
+- `client:code`: "When you spawn agents, paste this block into each one's prompt with --path set to its own unique name and
+  its checklist (or have it --plan one first): {log_snippet} Report your own status with the log tool: keep text "@~root
+  <what you are doing>" current; track your agents as your own plan (plan:["<agent>", …]), ticking each item as its agent
+  reports back."
+- `client:cowork`: "Show what you are working on on the activity board: {log_tool_hint} Handing work to agents? Give each
+  its own path (its unique name) and a checklist (or have it make one with plan first); it ticks items and ends with
+  "@~root <summary>", state:"done". Track their work as your own plan (one item per agent or task), ticking each as its
+  agent reports back."
+
 ### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
 Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
 (one-hop, like the roster slices; followers hold no board and forward their reads to the gateway as before, so a
@@ -954,7 +1005,7 @@ right-click menu — see "Step 6d" above; the "Log" rows described below are gon
   grouping node) shows a hollow mark and "no current line".
 - **A session row:** its name, a **host tag** per host (a session on several hosts is ONE row; its headline is the most
   recently active host's; its agents are tagged by host), the `@root` line with its placeholders filled, the status
-  glyph, the progress bar, ⌛ when there is an ETA, 🔔 when a doorbell is armed for it, and pills.
+  glyph (v1.66.0: the SESSION glyph, a window — see "Three-part progress, colours and session glyphs"), the progress bar, ⌛ when there is an ETA, 🔔 when a doorbell is armed for it, and pills.
 - **A node row:** the glyph / mark, its name, a host tag when the session spans hosts, its line with the placeholders
   filled, the bar (striped = a rollup of what is below it), ⌛, pills. The **Log** pages newest first (time, a state dot,
   the relative tag, the text; "load older…" at the end pages on). An entry with details / data expands into the text and
@@ -1030,12 +1081,18 @@ node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agen
 ```
 
 `--session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles]
-[--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json] [--no-log] ["<text>"] [--plan "A" "B" …]` — the
+[--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …]` — the
 `log` tool's fields as flags (v1.62.0: `--path` addresses any node — `--path "@#70/@step4/spec-70"`, `--path
 "spec-70/@~Tharsis"` — and combines with `--agent` / `--ctx` / a text prefix exactly as the tool's fields do).
 **`--plan "A" "B" …`** (v1.63.0) creates ☐ plan items under the node `--path` / `--agent` names, in that order — every
 argument after `--plan` up to the next `--flag` is a name, so put text BEFORE `--plan` (or after `--`): `--path "@~#70"
-"the 6b plan" --plan Spec Build Test`. **`--done`** = `--state done`, and a tick needs no text: `--path "@#70/@~Build"
+"the 6b plan" --plan Spec Build Test`. v1.66.0 (#79): a `--plan` name that looks like status text (`@~…` or "@ctx
+words") is refused locally with `bad-plan`: `"@~root headline" looks like
+status text — put text before --plan`. **v1.66.0 (#79, the call signature):** `--text "<text>"` names the text explicitly and
+`--item "A"` adds ONE plan item per flag (repeatable, in command-line order, mixable with `--plan`), so no argument's meaning
+depends on where it sits: `--path "@~#70" --text "the 6b plan" --item Spec --item Build --item Test`. Positional text and
+`--plan "A" "B"` still work (1.65 snippets use them); `--text` plus positional text is refused, and an `--item` that looks
+like status text is `bad-plan` ("pass text with --text"). Programs keep using JSON via `--batch` / `--stream`. **`--done`** = `--state done`, and a tick needs no text: `--path "@#70/@~Build"
 --done`. **`--batch <items.json|->`** (v1.62.0) sends a JSON array of items (the tool's item fields + `ref`; ≤64, ≤64 KB) in ONE
 call — `--agent` / `--path` / `--ctx` / `--no-log` are the defaults (v1.63.0: an item's own path is relative to them; a
 leading `/` = absolute) — and prints ONE line `{ok, results, applied,

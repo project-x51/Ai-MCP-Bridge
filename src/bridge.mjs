@@ -114,7 +114,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.65.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.66.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -1599,7 +1599,21 @@ function actDashHead() {
   return { host: HOSTNAME, now: actNow(), stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
     remote_hosts: activity && activity.remote.size ? actRemoteInfo() : [], log_cmd: actLogCmd(), user: ACT_DASH_USER }   // v1.65.0 (#70 6d): our aimb-log paths (never a token) + who actions are attributed to
 }
-const actDashUnits = () => Act.dashUnits(Act.boardView(activity, actNow(), { raw: true }).map(actShow))
+// #79 (v1.66.0): each session group's CLIENT KIND for the dashboard's session glyph (code ">_", cowork a bubble, a page a
+// globe, else a plain window) — from the mesh ROSTER (sub-peers and project-bearing bare sessions carry client_kind),
+// remembered per realm + project + user + name so a session that left the roster keeps its icon. One optional field on the
+// session unit (dashboards only — not the gossip, not the records): an older page ignores it.
+const actKinds = new Map()
+const actKindKey = (realm, project, user, name) => [lc(realm || REALM), projKey(project || ''), lc(user || ''), lc(name || '')].join('\u0001')
+function actRosterKinds() {
+  for (const s of roster.values()) {
+    if (s.project && s.user && s.client_kind && s.name) actKinds.set(actKindKey(s.realm, s.project, s.user, s.name), s.client_kind)
+    for (const sp of (s.subpeers || [])) if (sp.client_kind && sp.name) actKinds.set(actKindKey(sp.realm || s.realm, sp.project, sp.user, sp.name), sp.client_kind)
+  }
+  if (actKinds.size > 4096) actKinds.delete(actKinds.keys().next().value)   // bounded (oldest first)
+}
+const actWithKind = g => { const k = actKinds.get(actKindKey(g.realm, g.project, g.user, g.session)); return k ? { ...g, client_kind: k } : g }
+const actDashUnits = () => { actRosterKinds(); return Act.dashUnits(Act.boardView(activity, actNow(), { raw: true }).map(actShow).map(actWithKind)) }
 function actDashSubscribe(ws) {   // a full board now (not throttled): the page's view starts from it
   ws.actSub = { pub: new Map(), seq: 1, head: '' }
   const plan = Act.planDashDelta(ws.actSub.pub, actDashUnits(), { full: true }), head = actDashHead()
@@ -2118,6 +2132,7 @@ function rosterFor(ws) {
 }
 function broadcastRoster() {
   syncActivityGone()     // #70: a session that left this host's roster shows as gone (cleared when it returns)
+  try { actDashKick() } catch { }   // #79: a roster change can change a session's client kind (its dashboard glyph); throttled, no-op without subscribers
   noteRosterProjects()   // #71: give every roster project a canonical spelling before it goes out
   const frame = { type: 'ROSTER', ...rosterPayload(), grants: consent.grantSet(), realm_defaults: realmDefaults.current(), project_names: projectNames.list() }   // #62: followers merge the grant set (consent is checked in the process hosting the target); #66b: and the realm defaults
   // #66c: the retained set rides a follower's ROSTER only when that follower hasn't had the current version (a new

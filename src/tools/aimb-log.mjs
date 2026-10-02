@@ -21,10 +21,18 @@
 // items only. Batch / stream paths are RELATIVE to --path / --agent (a leading "/" = from the session root): --path @#70
 // with an item {path:"@B/@~x"} reports to @#70/@B/@x.
 //
+// v1.66.0 (#79): --plan "A" "B" "@~root headline" used to make the headline a third item (and fail as a plan name); a --plan
+// name that looks like status text (@~… or "@ctx words") is now refused locally with bad-plan saying
+// "… looks like status text — put text before --plan". --progress also takes a skipped part: "3/6 1 skipped".
+// v1.66.0 (#79, the call signature): --text "<text>" names the text explicitly and --item "A" adds ONE plan item per flag
+// (repeatable, in order), so nothing depends on argument position: --text "the plan" --item "A" --item "B". Positional text
+// and --plan "A" "B" still work (1.65 snippets); --text with positional text is refused. JSON stays for --batch / --stream.
+//
 // Usage (one report):
 //   node tools/aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path p] [--ctx "@~Ctx"] [--state S | --done]
 //        [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."]
-//        [--data '{...}' | --data-file f.json] [--no-log] ["<text>"] [--plan "A" "B" …]
+//        [--data '{...}' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …]
+//   (older forms still accepted: positional "<text>", and --plan "A" "B" … — every argument after --plan is a name)
 //   The text is optional when --progress/--eta is given (it defaults to "{progress}" / "{eta}", rendered when read).
 //   --no-log = log:false (update the board only; not appended to the log or the daily file). Flags after `--` are text.
 // Usage (a script reporting often — e.g. every second — over ONE connection):
@@ -69,9 +77,9 @@ import WebSocket from 'ws'
 import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS } from '../lib/activity.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] ["<text>"] [--plan "A" "B" …]\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
+const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …]\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
 const LOG_FIELDS = MESSAGE_FIELDS   // v1.62.0: + path
-const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url', 'token-file'])   // v1.64.0: + token-file (#75)
+const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url', 'token-file', 'text'])   // v1.64.0: + token-file (#75); v1.66.0: + text (#79)
 const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done'])   // v1.63.0: + done (= --state done)
 const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'stream', 'ws-port', 'url', 'token-file'])
 const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'batch', 'ws-port', 'url', 'token-file'])
@@ -91,6 +99,10 @@ function finish(code, obj) {   // print ONE JSON line (if any), then exit once s
 function usage(code, what, extra) { console.error(USAGE); finish(64, { ok: false, code, what, ...(extra || {}) }) }
 
 // ---- argv
+// #79 (v1.66.0): a --plan name that looks like STATUS TEXT — "@~…" (a current line), "@ctx words" (a context message), or a
+// — is refused with bad-plan saying so ("@Spec" alone stays a valid name: one leading @ is dropped)
+const looksLikeText = n => { const s = String(n).trim(); return s.startsWith('@~') || (s.startsWith('@') && /\s/.test(s)) }
+const isFlag = s => { const m = /^--([A-Za-z-]+)(=|$)/.exec(s); return !!m && (VALUE_FLAGS.has(m[1].toLowerCase()) || BOOL_FLAGS.has(m[1].toLowerCase()) || ['plan', 'item', 'token'].includes(m[1].toLowerCase())) }
 const flags = {}, words = []
 {
   const argv = process.argv.slice(2)
@@ -102,16 +114,26 @@ const flags = {}, words = []
     const eq = a.indexOf('=')
     const name = (eq > 0 ? a.slice(2, eq) : a.slice(2)).toLowerCase()
     if (name === 'token') { err = ['token-in-argv', '--token is refused: a token on the command line is visible in the process list. Pass --token-file <path>, set AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE), or let it read the bridge\'s config.json'] ; break }
+    if (name === 'item') {   // v1.66.0 (#79): ONE plan item per --item, repeatable; joins --plan's names in command-line order
+      const v = eq > 0 ? a.slice(eq + 1) : argv[i + 1]
+      if (eq < 0) { if (v === undefined || v.startsWith('--')) { err = ['usage', '--item needs a name: --item "A" --item "B"']; break } i++ }
+      if (looksLikeText(v)) { err = ['bad-plan', `--item "${v.length > 60 ? v.slice(0, 57) + '…' : v}" looks like status text — pass text with --text "<text>"`]; break }
+      flags.plan = (flags.plan || []).concat([v]); continue
+    }
     if (name === 'plan') {   // v1.63.0 (#70 6b): every following argument up to the next --flag (or `--`) is a plan name
       const names = eq > 0 ? [a.slice(eq + 1)] : []
       if (eq < 0) while (i + 1 < argv.length && !argv[i + 1].startsWith('--')) names.push(argv[++i])
       if (!names.length) { err = ['usage', '--plan needs at least one name: --plan "A" "B" …']; break }
+      const txt = names.find(looksLikeText)   // #79: --plan swallows every following argument, so trailing status text became an item
+      if (txt) { err = ['bad-plan', `"${txt.length > 60 ? txt.slice(0, 57) + '…' : txt}" looks like status text — put text before --plan: "<text>" --plan "A" "B"`]; break }
       flags.plan = (flags.plan || []).concat(names); continue
     }
     if (BOOL_FLAGS.has(name)) { if (eq > 0) err = ['usage', `--${name} takes no value`]; else flags[name] = true; continue }
     if (!VALUE_FLAGS.has(name)) { err = ['usage', `unknown flag --${name}`]; break }
     const v = eq > 0 ? a.slice(eq + 1) : argv[i + 1]
-    if (eq < 0) { if (v === undefined || v.startsWith('--')) { err = ['usage', `--${name} needs a value`]; break } i++ }
+    // #79: --text is explicit, so its value may itself start with "--" ("--text/--item built"); only a real flag name counts as missing
+    const missing = v === undefined || (v.startsWith('--') && (name !== 'text' || isFlag(v)))
+    if (eq < 0) { if (missing) { err = ['usage', `--${name} needs a value`]; break } i++ }
     flags[name] = v
   }
   if (err) usage(err[0], err[1])
@@ -173,7 +195,9 @@ if (!exiting) {
     else if (words.length) usage('usage', '--stream reads its reports from stdin; no positional text')
   } else {
     const input = { ...defaults }
-    if (words.length) input.text = words.join(' ')
+    if (flags.text != null && words.length) usage('usage', `--text and positional text are exclusive (got --text plus "${words.join(' ').slice(0, 40)}")`)
+    else if (flags.text != null) input.text = flags.text                       // v1.66.0 (#79)
+    else if (words.length) input.text = words.join(' ')
     for (const [f, k] of [['state', 'state'], ['progress', 'progress'], ['eta', 'eta'], ['stale-after', 'stale_after'], ['details', 'details']]) if (flags[f] != null) input[k] = flags[f]
     if (flags.plan) input.plan = flags.plan                                   // v1.63.0 (#70 6b)
     if (flags.done && flags.state != null) usage('usage', '--done and --state are exclusive (--done = --state done)')

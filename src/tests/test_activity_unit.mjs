@@ -1570,9 +1570,9 @@ await section(async () => {
   const st = mk(), I = S1, S = () => A.getSession(st, I), R = p => A.rollup(S(), N(st, I, p))
   sayC(st, I, { path: '@p', plan: ['A', 'B', 'C', 'D', 'E'] }, T0)
   sayC(st, I, { path: '@p/@~A', state: 'done' }, T0); sayC(st, I, { path: '@p/@~B', state: 'done' }, T0); sayC(st, I, { path: '@p/@~C', state: 'skipped' }, T0); sayC(st, I, { path: '@p/@~D', text: 'oops', state: 'failed' }, T0)
-  check('6b rollup: "N of M done" — skipped left out of M, failed counts as not done (2 of 4, 1 skipped, 5 items)', (b => b.done === 2 && b.total === 4 && b.skipped === 1 && b.n === 5 && b.unit === 'done' && b.todos === true && b.pct === 50)(R('@p')), J(R('@p')))
+  check('#79 rollup: "N of M done" — M = EVERY item (skipped now in M, as its own part), failed counts as remaining (2 of 5 done, 1 skipped)', (b => b.done === 2 && b.total === 5 && b.skipped === 1 && b.n === 5 && b.unit === 'done' && b.todos === true && b.items === true && b.pct === 40)(R('@p')), J(R('@p')))
   sayC(st, I, { path: '@all', plan: ['X', 'Y'] }, T0); sayC(st, I, { path: '@all/@~X', state: 'skipped' }, T0); sayC(st, I, { path: '@all/@~Y', state: 'skipped' }, T0)
-  check('6b rollup: every item skipped → no bar (nothing left to count)', R('@all') === null)
+  check('#79 rollup: every item skipped → a bar that is ALL skipped (0 of 2 done · 2 skipped; was: no bar)', (b => b && b.done === 0 && b.skipped === 2 && b.total === 2 && b.pct === 0)(R('@all')), J(R('@all')))
   sayC(st, I, { path: '@rep', plan: ['A', 'B'] }, T0); sayC(st, I, { path: '@rep', text: 'own bar', progress: '7/10' }, T0)
   check('6b rollup: the node\'s own reported progress wins over its plan', (b => b.done === 7 && b.total === 10 && b.rollup === false)(R('@rep')))
   sayC(st, I, { path: '@mix', plan: ['A', 'B'] }, T0); sayC(st, I, { path: '@mix/@~A', state: 'done' }, T0); sayC(st, I, { path: '@mix/@other', text: 'x', progress: '3/6 files' }, T0); sayC(st, I, { path: '@mix/@more', text: 'x', progress: '1/2 files' }, T0)
@@ -1585,7 +1585,7 @@ await section(async () => {
   check('6b rollup: recursion — a grandparent SUMS its plans\' "done" bars (2 of 5 done, still a plan bar)', (b => b.done === 2 && b.total === 5 && b.unit === 'done' && b.todos === true && b.rollup === true)(R('@g')), J(R('@g')))
   sayC(st, I, { path: '@g/@pct', text: 'x', progress: '50%' }, T0)
   check('6b rollup: ... a % sibling turns it into the mean % (6a)', (b => b.unit === '%' && !b.todos)(R('@g')))
-  check('6b rollup: renderText of a plan bar — "{progress}" → "2 of 4 done"', A.renderText('{progress}', R('@p'), null, T0) === '2 of 4 done')
+  check('#79 rollup: renderText of a plan bar — "{progress}" → "2 of 5 done · 1 skipped", {pct} = the done % (40%), {skipped} = 1', A.renderText('{progress}|{pct}|{skipped}', R('@p'), null, T0) === '2 of 5 done · 1 skipped|40%|1', A.renderText('{progress}|{pct}|{skipped}', R('@p'), null, T0))
 })
 await section(async () => {
   // ---- lifetime: the 7-day default; open items never expire; ended plans expire a window after they ended
@@ -1782,7 +1782,7 @@ await section(async () => {
   check('6c abandoned: an AGENT holding a plan may be abandoned — it finishes like done / failed (no ETA, never gone)', ag.ok && N(st, I, 'lead').finished_at === T0 + 3 * MIN && stOf(st, I, 'lead') === 'abandoned' && ag.entry.finished_at === T0 + 3 * MIN)
   const R = p => A.rollup(S(), N(st, I, p))
   sayC(st, I, { path: '@#70/@~A', state: 'done' }, T0 + 4 * MIN)
-  check('6c rollup: an abandoned item counts as NOT done and stays in M (skipped stays out): "1 of 3 done · 1 abandoned"', (b => b.done === 1 && b.total === 3 && b.abandoned === 1 && b.todos)(R('@#70')), J(R('@#70')))
+  check('6c rollup: an abandoned item stays in M and (#79) counts in the skipped part; the plan node itself abandoned → its whole remainder is skipped (1 of 3 done · 2 skipped)', (b => b.done === 1 && b.total === 3 && b.abandoned === 1 && b.skipped === 2 && b.forced === 'abandoned' && b.todos)(R('@#70')), J(R('@#70')))
   check('6c render: the dashboard units carry the abandoned state of items and of the plan node', (u => u.some(x => x.obj.path === '@#70/@B' && x.obj.state === 'abandoned') && u.some(x => x.obj.path === '@#70' && x.obj.plan_node === true))([...A.dashUnits(A.boardView(st, T0 + 5 * MIN, { raw: true })).values()]))
 })
 await section(async () => {
@@ -2082,5 +2082,67 @@ await section(async () => {
     && A.byText('bridge') === 'by bridge' && A.normBy({ kind: 'evil' }) === null && A.normBy(42) === null)
 })
 
+// ================================================================= #79 (v1.66.0): THREE-PART PROGRESS (done / skipped / total), a done node = 100%
+await section(async () => {
+  const PP = v => A.parseProgress(v)
+  check('#79 parseProgress: skipped from an object or a trailing "N skipped" ("3/6 1 skipped", "4812/12000 tiles · 100 skipped", "3/6:tiles, 1 skipped"); "3/6 skipped" is still a unit', J(PP({ done: 3, skipped: 1, total: 6, unit: 'x' }).value) === J({ done: 3, total: 6, unit: 'x', skipped: 1 })
+    && J(PP('3/6 1 skipped').value) === J({ done: 3, total: 6, unit: '', skipped: 1 }) && J(PP('4812/12000 tiles · 100 skipped').value) === J({ done: 4812, total: 12000, unit: 'tiles', skipped: 100 })
+    && J(PP('3/6:tiles, 1 skipped').value) === J({ done: 3, total: 6, unit: 'tiles', skipped: 1 }) && J(PP('3/6 skipped').value) === J({ done: 3, total: 6, unit: 'skipped' }), J([PP('3/6 1 skipped'), PP('4812/12000 tiles · 100 skipped'), PP('3/6 skipped')]))
+  check('#79 parseProgress: WITHOUT skipped the value is exactly the 1.65 one (no key — records / slices byte-identical); skipped 0 is dropped too', J(PP('4812/12000 tiles').value) === J({ done: 4812, total: 12000, unit: 'tiles' }) && J(PP({ done: 1, total: 2, unit: '', skipped: 0 }).value) === J({ done: 1, total: 2, unit: '' }) && J(PP('61%').value) === J({ done: 61, total: 100, unit: '%' }))
+  check('#79 parseProgress: done + skipped > total clamps skipped (progress-clamped); a negative / non-numeric skipped is refused', (r => r.ok && r.value.skipped === 2 && r.warning === 'progress-clamped')(PP({ done: 4, skipped: 5, total: 6 })) && !PP({ done: 1, skipped: -1, total: 6 }).ok && !PP({ done: 1, skipped: 'x', total: 6 }).ok
+    && P({ path: '@x/@~y', text: 't', progress: '2/6 1 skipped' }, { now: T0 }).msg.progress.skipped === 1 && C({ path: '@x/@~y', text: 't', progress: { done: 1, total: 3, skipped: -2 } }) === 'bad-progress')
+  check('#79 format: NOT bumped (still v5) — skipped is an optional field a 1.65 reader ignores', A.ACTIVITY_FORMAT === 5)
+})
+await section(async () => {
+  const st = mk(), I = S1, S = () => A.getSession(st, I), R = p => A.rollup(S(), N(st, I, p))
+  // plan items in EVERY state
+  say(st, I, { path: '@p', plan: ['todo', 'run', 'blk', 'idle', 'fail', 'done', 'skip', 'aban'] }, T0)
+  say(st, I, { path: '@p/@~run', text: 'r' }, T0); say(st, I, { path: '@p/@~blk', text: 'b', state: 'blocked' }, T0); say(st, I, { path: '@p/@~idle', text: 'i', state: 'idle' }, T0)
+  say(st, I, { path: '@p/@~fail', text: 'f', state: 'failed' }, T0); say(st, I, { path: '@p/@~done', state: 'done' }, T0); say(st, I, { path: '@p/@~skip', state: 'skipped' }, T0); say(st, I, { path: '@p/@~aban', state: 'abandoned' }, T0)
+  check('#79 plan rollup: M = EVERY item (8); done 1; skipped 2 = the skipped + the abandoned item; todo / running / blocked / idle / FAILED are remaining (5); {progress} "1 of 8 done · 2 skipped", {pct} 12%',
+    (b => b.done === 1 && b.skipped === 2 && b.total === 8 && b.abandoned === 1 && b.items === true && b.todos === true && b.n === 8 && b.pct === 12.5 && !b.forced)(R('@p')) && A.renderText('{progress} · {pct} · {skipped}', R('@p'), null, T0) === '1 of 8 done · 2 skipped · 12% · 2', J(R('@p')))
+  check('#79 plan end UNCHANGED: skipped / abandoned / failed / open items keep the plan open (no plan_end_at)', (n => n.plan_node === true && n.plan_end_at == null)(nodeOf(A.boardView(st, T0 + MIN, { raw: true })[0], '@p')))
+  // common unit: summed (done, skipped, total)
+  say(st, I, { path: '@sum/@~a', text: 'a', progress: '3/10 tiles 1 skipped' }, T0); say(st, I, { path: '@sum/@~b', text: 'b', progress: '2/10 Tiles' }, T0)
+  check('#79 rollup, common unit: done, skipped AND total are summed (5 of 20 tiles · 1 skipped); a child without skipped counts 0', (b => b.done === 5 && b.skipped === 1 && b.total === 20 && b.unit === 'tiles' && b.rollup && b.pct === 25)(R('@sum')) && A.renderText('{progress}', R('@sum'), null, T0) === '5 of 20 tiles · 1 skipped', J(R('@sum')))
+  // mixed units: mean of the fractions, each child weighted 1
+  say(st, I, { path: '@mix/@~p', text: 'p', progress: '50%' }, T0); say(st, I, { path: '@mix/@~q', text: 'q', progress: '2/8 files 2 skipped' }, T0); say(st, I, { path: '@mix/@~r', text: 'r', progress: '1/2 tasks 1 skipped' }, T0)
+  check('#79 rollup, mixed units: the MEAN of each child\'s done fraction (50, 25, 50 → 41.7%) and skipped fraction (0, 25, 50 → 25%), each child weighted 1', (b => b.unit === '%' && b.total === 100 && b.done === 41.7 && b.skipped === 25 && b.n === 3)(R('@mix')) && A.renderText('{progress}', R('@mix'), null, T0) === '41.7% · 25% skipped', J(R('@mix')))
+  // done = 100%: over a partial REPORTED bar and over a partial ROLLED-UP bar; it contributes its whole weight up the tree
+  say(st, I, { path: '@up/@~rep', text: 'reported 3 of 10', progress: '3/10 tiles' }, T0); say(st, I, { path: '@up/@roll/@~x', text: 'x', progress: '1/10 tiles' }, T0); say(st, I, { path: '@up/@roll/@~y', text: 'y', progress: '2/10 tiles' }, T0)
+  check('#79 control: before "done", the partial bars are what they say (3 of 10; 3 of 20 rolled up; the parent 6 of 30)', R('@up/@rep').done === 3 && R('@up/@roll').done === 3 && R('@up/@roll').total === 20 && R('@up').done === 6 && R('@up').total === 30)
+  say(st, I, { path: '@up/@~rep', text: 'finished', state: 'done' }, T0 + MIN); say(st, I, { path: '@up/@~roll', text: 'all rolled', state: 'done' }, T0 + MIN)
+  check('#79 done = 100%: a DONE node\'s bar is full whatever it reported (3 of 10 → 10 of 10) or rolled up (3 of 20 → 20 of 20; still a rollup), skipped 0, forced:"done"', (b => b.done === 10 && b.total === 10 && b.skipped === 0 && b.pct === 100 && b.forced === 'done' && b.rollup === false)(R('@up/@rep'))
+    && (b => b.done === 20 && b.total === 20 && b.pct === 100 && b.forced === 'done' && b.rollup === true)(R('@up/@roll')), J([R('@up/@rep'), R('@up/@roll')]))
+  check('#79 done = 100%: ... and contributes its WHOLE weight to its parent (30 of 30 tiles); {progress} on its own line renders the full bar', (b => b.done === 30 && b.total === 30 && !b.forced)(R('@up')) && nodeOf(A.boardView(st, T0 + 2 * MIN)[0], '@up/@rep').current.rendered === 'finished'
+    && A.renderText('{progress}', R('@up/@rep'), null, T0) === '10 of 10 tiles', J(R('@up')))
+  say(st, I, { path: '@~Test plan', text: 'testing', plan: ['X', 'Y', 'Z'] }, T0); say(st, I, { path: '@"Test plan"/@~X', state: 'done' }, T0); say(st, I, { path: '@~Test plan', text: 'signed off', state: 'done' }, T0 + MIN)
+  check('#79 done = 100% (the live case): a plan marked complete with 1 of 3 items done shows a FULL bar (3 of 3), while its plan stays honest on the items', (b => b.done === 3 && b.total === 3 && b.forced === 'done' && b.todos)(R('@"Test plan"')) && stOf(st, I, '@"Test plan"/@Y') === 'todo', J(R('@"Test plan"')))
+  say(st, I, { path: '@cmp', plan: ['A', 'B'] }, T0); say(st, I, { path: '@cmp/@~A', state: 'abandoned' }, T0); say(st, I, { path: '@~cmp', text: 'complete anyway', state: 'done' }, T0 + MIN)
+  check('#79 done = 100%: a complete plan holding an abandoned item shows nothing skipped or abandoned in its full bar (2 of 2)', (b => b.done === 2 && b.total === 2 && b.skipped === 0 && !('abandoned' in b))(R('@cmp')), J(R('@cmp')))
+  // abandoned node: remainder → skipped; failed node: unchanged
+  say(st, I, { path: '@ab', plan: ['A', 'B', 'C'] }, T0); say(st, I, { path: '@ab/@~A', state: 'done' }, T0); say(st, I, { path: '@~ab', text: 'dropped', state: 'abandoned' }, T0 + MIN)
+  say(st, I, { path: '@fl/@~w', text: 'w', progress: '4/10' }, T0); say(st, I, { path: '@~fl', text: 'broke', state: 'failed' }, T0 + MIN)
+  check('#79 abandoned node: its remainder counts as SKIPPED (1 of 3 done · 2 skipped, forced:"abandoned"); a FAILED node keeps its bar (remaining, not done)', (b => b.done === 1 && b.skipped === 2 && b.total === 3 && b.forced === 'abandoned')(R('@ab')) && (b => b.done === 4 && b.skipped === 0 && !b.forced)(R('@fl')), J([R('@ab'), R('@fl')]))
+  check('#79 every bar carries skipped (0 when none): a reported one, a sum, a mean, an items bar', [R('@up/@roll/@x'), R('@sum'), R('@mix'), R('@p'), R('@fl')].every(b => typeof b.skipped === 'number'))
+})
+await section(async () => {
+  // backward compatibility + the wire: a 1.65 progress (no skipped) is read as skipped 0; skipped rides the slice, the records, cp / cf
+  const there = mk({}, 'HOST-B'), here = mk({}, 'HOST-A'), I = S1
+  const r1 = say(there, I, { path: '@~sk', text: 'with skipped', progress: '3/10 tiles 2 skipped' }, T0)
+  say(there, I, { path: '@~old', text: 'no skipped', progress: '3/10 tiles' }, T0)
+  const snap = A.snapshot(there), un = p => snap.sessions[0].nodes.find(n => n.path === p)
+  check('#79 gossip: a node\'s progress carries skipped ONLY when > 0 (a node without it serialises exactly as on 1.65); format v5', J(un('@sk').progress) === J({ done: 3, total: 10, unit: 'tiles', skipped: 2 }) && J(un('@old').progress) === J({ done: 3, total: 10, unit: 'tiles' }) && snap.v === 5)
+  A.mergeSnapshot(here, 'HOST-B', snap)
+  const bv = A.boardView(here, T0 + MIN, { raw: true })[0]
+  check('#79 gossip: the receiver reads skipped; a 1.65-style progress (no skipped) is skipped 0 in its bar', (n => n.progress.skipped === 2 && n.bar.skipped === 2 && n.bar.done === 3)(nodeOf(bv, '@sk')) && (n => n.progress.skipped === undefined && n.bar.skipped === 0)(nodeOf(bv, '@old')), J([nodeOf(bv, '@sk'), nodeOf(bv, '@old')]))
+  const legacy = { v: 5, origin: 'HOST-C', sessions: [{ session: 'Legacy', project: 'AIMB', user: 'robin', realm: 'default', host: 'HOST-C', created_at: T0, last_activity: T0, nodes: [{ path: '', created_at: T0, last_activity: T0 }, { path: '@#70', created_at: T0, last_activity: T0, implicit: true }, { path: '@#70/@A', created_at: T0, last_activity: T0, plan_item: true, plan_ix: 0, current: { id: 'x1', ts: T0, text: 'A', state: 'done' } }, { path: '@#70/@B', created_at: T0, last_activity: T0, plan_item: true, plan_ix: 1, current: { id: 'x2', ts: T0, text: 'B', state: 'skipped' } }, { path: '@w', created_at: T0, last_activity: T0, progress: { done: 2, total: 4, unit: 'x' }, current: { id: 'x3', ts: T0, text: 'w', state: 'running' } }] }] }
+  const mg = A.mergeSnapshot(here, 'HOST-C', legacy), lg = A.boardView(here, T0 + MIN, { raw: true, session: 'Legacy' })[0]
+  check('#79 a 1.65 slice merges unchanged (no skipped anywhere): its plan rolls up 1 of 2 done · 1 skipped here, its bar skipped 0', mg && mg.ok !== false && (b => b.done === 1 && b.skipped === 1 && b.total === 2)(nodeOf(lg, '@#70').bar) && nodeOf(lg, '@w').bar.skipped === 0, J([mg, nodeOf(lg, '@#70')?.bar]))
+  const rec = JSON.parse(J(r1.records[0]))
+  check('#79 records: the entry record keeps skipped (absent when 0); the replay restores it', J(rec.progress) === J({ done: 3, total: 10, unit: 'tiles', skipped: 2 }) && (B => { A.replayNewestFirst(B, [rec], T0 + MIN); return J(A.getNode(B, I, '@sk').progress) === J({ done: 3, total: 10, unit: 'tiles', skipped: 2 }) })(mk({}, 'HOST-B')))
+  const cf = A.planCarryForward(there, T0 + 9 * DAY).map(w => w.rec).find(r => r.path === '@sk')
+  check('#79 carry-forward: a cf snapshot carries skipped too', cf && J(cf.progress) === J({ done: 3, total: 10, unit: 'tiles', skipped: 2 }), J(cf))
+})
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

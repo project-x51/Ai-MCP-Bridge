@@ -38,11 +38,11 @@
       { "operation": "send", "scope": "all", "behavior": "Report each send as: 📨 to <recipient> · <verb> — <subject>. The subject is NOT encrypted — put private detail in the body. Prefer a topic over a stored peer id (ids rotate; sends park for offline owners)." }
     ],
     "realm": {
-      "updated_at": "2026-10-02T00:00:00Z",
+      "updated_at": "2026-10-02T12:00:00Z",
       "default": [
         { "operation": "connect", "scope": "client", "match": "code", "behavior": "To receive messages while idle without polling, run this backgrounded: {doorbell_cmd} — it blocks on a socket at ~zero cost and wakes you when mail waits, and chimes hourly (show the user the time, then re-arm; at 00/06/12/18:00 call your inbox tool first even if empty: it keeps the bridge loaded). set_wake is unimplemented; the doorbell is the fallback." },
-        { "operation": "connect", "scope": "client", "match": "code", "id": "activity", "behavior": "When you spawn agents, put this block in each agent's prompt (set --path to the agent's name):\n{log_snippet}\nReport your own status with the log tool: text \"@~root <what you are doing>\" (plan:[...] for a checklist)." },
-        { "operation": "connect", "scope": "client", "match": "cowork", "id": "activity", "behavior": "Show what you are working on on the activity board:\n{log_tool_hint}" }
+        { "operation": "connect", "scope": "client", "match": "code", "id": "activity", "behavior": "When you spawn agents, paste this block into each one's prompt with --path set to its own unique name and its checklist (or have it --plan one first):\n{log_snippet}\nReport your own status with the log tool: keep text \"@~root <what you are doing>\" current; track your agents as your own plan (plan:[\"<agent>\", …]), ticking each item as its agent reports back." },
+        { "operation": "connect", "scope": "client", "match": "cowork", "id": "activity", "behavior": "Show what you are working on on the activity board:\n{log_tool_hint}\nHanding work to agents? Give each its own path (its unique name) and a checklist (or have it make one with plan first); it ticks items and ends with \"@~root <summary>\", state:\"done\". Track their work as your own plan (one item per agent or task), ticking each as its agent reports back." }
       ]
     }
   },

@@ -311,8 +311,8 @@ await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#73', plan: ['slow']
 await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#73/@~slow', text: 'quiet for a while', stale_after: '1s' })
 await sleep(1500)
 let pb = await board(G)
-check('6b board: plan items (plan_item, plan_ix, their own states) + the "N of M done" bar (skipped left out)', J(['Spec', 'Build', 'Test', 'Ship', 'Docs'].map(n => [nodeOf(pb, 'Bridget', `@#71/@${n}`)?.state, nodeOf(pb, 'Bridget', `@#71/@${n}`)?.plan_item])) === J([['done', true], ['running', true], ['skipped', true], ['todo', true], ['todo', true]])
-  && nodeOf(pb, 'Bridget', '@#71/@Docs')?.plan_ix === 1 && (b => b && b.todos && b.done === 1 && b.total === 4 && b.skipped === 1)(nodeOf(pb, 'Bridget', '@#71')?.progress) && nodeOf(pb, 'Bridget', '@#72/@a')?.state === 'done', J(nodeOf(pb, 'Bridget', '@#71')))
+check('6b board: plan items (plan_item, plan_ix, their own states) + the "N of M done" bar (#79: skipped stays in M, as its own part: 1 of 5 · 1 skipped)', J(['Spec', 'Build', 'Test', 'Ship', 'Docs'].map(n => [nodeOf(pb, 'Bridget', `@#71/@${n}`)?.state, nodeOf(pb, 'Bridget', `@#71/@${n}`)?.plan_item])) === J([['done', true], ['running', true], ['skipped', true], ['todo', true], ['todo', true]])
+  && nodeOf(pb, 'Bridget', '@#71/@Docs')?.plan_ix === 1 && (b => b && b.todos && b.done === 1 && b.total === 5 && b.skipped === 1)(nodeOf(pb, 'Bridget', '@#71')?.progress) && nodeOf(pb, 'Bridget', '@#72/@a')?.state === 'done', J(nodeOf(pb, 'Bridget', '@#71')))
 check('6b stale: a plan item never goes stale (quiet past its stale_after: still running)', nodeOf(pb, 'Bridget', '@#73/@slow')?.state === 'running' && !nodeOf(pb, 'Bridget', '@#73/@slow')?.stale_at, J(nodeOf(pb, 'Bridget', '@#73/@slow')))
 const prec = records().filter(r => r.session === 'Bridget' && String(r.path).startsWith('@#71/'))
 check('6b JSONL: v4 entries — one ☐ creation record per item (plan_item, plan_ix) and each tick, in order', prec.filter(r => r.state === 'todo' && r.plan_item).map(r => r.path).join() === '@#71/@Spec,@#71/@Build,@#71/@Test,@#71/@Ship,@#71/@Docs'

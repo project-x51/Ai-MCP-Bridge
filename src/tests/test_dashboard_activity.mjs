@@ -281,7 +281,7 @@ check('Expand all opens every session and every node down to depth 6 (no log is 
 sec.querySelector('.sech').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
 check('leaving (collapsing the section) unsubscribes', sentOf('activity_unsub').length === 2)
 const legend = doc.getElementById('actlegend')
-check('legend: the 7 agent glyphs + the context mark + (6b) the 4 plan-item marks + (6c) abandoned + the ring / hover hint', legend.querySelectorAll('svg').length === 13 && /skipped · abandoned/.test(legend.textContent) && /plan item: to do · in progress · done · skipped/.test(legend.textContent) && /ring is the time left before an agent goes stale/.test(legend.textContent) && /hover the icons/.test(legend.textContent) && /context \(no ring/.test(legend.textContent))
+check('legend: the 7 agent glyphs + the context mark + (6b) the 4 plan-item marks + (6c) abandoned + (#79) the 4 session glyphs + the ring / hover hint', legend.querySelectorAll('svg').length === 17 && /skipped · abandoned/.test(legend.textContent) && /plan item: to do · in progress · done · skipped/.test(legend.textContent) && /ring is the time left before an agent goes stale/.test(legend.textContent) && /hover the icons/.test(legend.textContent) && /context \(no ring/.test(legend.textContent))
 
 try {   // a crash (an older dashboard without the 6b helpers) counts as one failure
 // ================================================================= 6b (v1.63.0): plan items, the plan bar, active only, host tags, per-host headlines
@@ -292,14 +292,15 @@ const quietAgent = run(600)
 check('6b stale: a plan item never goes stale (any state), even under a stale or gone agent — its own state shows', ['todo', 'running', 'blocked'].every(s => (e => e.state === s && !e.stale && e.staleAt === null && e.plan)(X.effState(pi('k', '@p/@x', 'H', s, { last_activity: NOW - 600 * MIN }), quietAgent, NOW, 15)))
   && X.effState(pi('k', '@p/@x', 'H', 'todo'), { state: 'gone' }, NOW, 15).state === 'todo' && X.effState(quietAgent, null, NOW, 15).state === 'stale')
 check('6b tooltip: a plan item says so (never goes stale), not "staleness follows"', (t => /^Plan item — To do/.test(t) && /never goes stale/.test(t) && !/staleness follows/.test(t))(X.statusTip(pi('k', '@p/@x', 'H', 'todo'), quietAgent, NOW, 15)))
-check('6b bar tooltip: "2 of 4 done (50%) · 1 skipped (left out) — its plan: 5 items"', X.barTip({ done: 2, total: 4, unit: 'done', rollup: true, todos: true, skipped: 1, n: 5 }) === '2 of 4 done (50%) · 1 skipped (left out) — its plan: 5 items', X.barTip({ done: 2, total: 4, unit: 'done', rollup: true, todos: true, skipped: 1, n: 5 }))
+check('#79 bar tooltip: "2 of 5 done · 1 skipped (40%) — its plan: 5 items" (skipped inside M); a 1.65 bridge\'s bar (skipped left OUT of M: n = total + skipped) reads the same', X.barTip({ done: 2, skipped: 1, total: 5, unit: 'done', rollup: true, todos: true, items: true, n: 5 }) === '2 of 5 done · 1 skipped (40%) — its plan: 5 items'
+  && X.barTip({ done: 2, total: 4, unit: 'done', rollup: true, todos: true, skipped: 1, n: 5 }) === '2 of 5 done · 1 skipped (40%) — its plan: 5 items', X.barTip({ done: 2, total: 4, unit: 'done', rollup: true, todos: true, skipped: 1, n: 5 }))
 // a plan fixture: session-level plan @#70 with items in every state (created in one call: equal created_at, plan_ix decides), an agent under one item, a nested plan,
 // a finished agent holding an open item, an ended plan, a multi-host session (HOST-A headline; HOST-B nodes)
 const T7 = NOW - 30 * MIN, at7 = { created_at: T7 }
 const pselfA = root('HOST-A', { current: { id: 'pa', ts: NOW - 2 * MIN, text: 'planning #70', state: 'running' } }), pselfB = root('HOST-B', { current: { id: 'pb', ts: NOW - 20 * MIN, text: 'older headline on B', state: 'running' }, log: { remote: true } })
 const plan = [
   sess('k-plan', 'Planner', 'AIMB', { hosts: ['HOST-A', 'HOST-B'], multi_host: true, self: pselfA, selves: [pselfA, pselfB] }),
-  node('k-plan', '@#70', 'context', 'HOST-A', { implicit: true, bar: { done: 2, total: 5, unit: 'done', pct: 40, rollup: true, todos: true, skipped: 1, n: 6 }, created_at: T7 - 1000 }),
+  node('k-plan', '@#70', 'context', 'HOST-A', { implicit: true, bar: { done: 2, skipped: 1, total: 6, unit: 'done', pct: 33.3, rollup: true, todos: true, items: true, n: 6 }, created_at: T7 - 1000 }),   // #79: M = every item
   pi('k-plan', '@#70/@Ship', 'HOST-A', 'todo', { ...at7, plan_ix: 5 }), pi('k-plan', '@#70/@Spec', 'HOST-A', 'done', { ...at7, plan_ix: 0 }), pi('k-plan', '@#70/@Build', 'HOST-A', 'running', { ...at7, plan_ix: 1 }),
   pi('k-plan', '@#70/@Test', 'HOST-A', 'blocked', { ...at7, plan_ix: 2 }), pi('k-plan', '@#70/@Docs', 'HOST-A', 'skipped', { ...at7, plan_ix: 3 }), pi('k-plan', '@#70/@Review', 'HOST-A', 'done', { ...at7, plan_ix: 4, current: { id: 'rv', ts: NOW - MIN, text: 'approved by Robin', state: 'done' } }),
   node('k-plan', '@#70/@Build/builder', 'agent', 'HOST-A', { current: { id: 'bd', ts: NOW - 40 * MIN, text: 'compiling', state: 'running' }, last_activity: NOW - 40 * MIN }),
@@ -330,7 +331,7 @@ sec.querySelector('.sech').dispatchEvent(new win.MouseEvent('click', { bubbles: 
 recv({ type: 'activity_board', full: true, epoch: 'E2', seq: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15, remote_hosts: [] }, upsert: [...units, ...plan] })
 doc.getElementById('actCollapse').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
 const p70 = inPlanner('@#70')
-check('6b view: the plan node shows its "N of M done" bar (solid, class plan) with the plan tooltip', !!p70?.querySelector('.pb.plan') && (b => { b.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true })); return b.getAttribute('title') === '2 of 5 done (40%) · 1 skipped (left out) — its plan: 6 items' })(p70.querySelector('.pb')), p70 && p70.innerHTML)
+check('6b view: the plan node shows its "N of M done" bar (solid, class plan) with the plan tooltip', !!p70?.querySelector('.pb.plan') && (b => { b.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true })); return b.getAttribute('title') === '2 of 6 done · 1 skipped (33%) — its plan: 6 items' })(p70.querySelector('.pb')), p70 && p70.innerHTML)
 tog(p70)
 const itemRows = () => rowsT().filter(r => r.classList.contains('pi') && dOf(r) === 3)
 check('6b view: the items render in creation order with ☐ / the in-progress mark / ☑ / struck-through skipped', J(itemRows().map(r => r.querySelector('.nm').textContent)) === J(['Spec', 'Build', 'Test', 'Docs', 'Review', 'Ship'])
@@ -351,7 +352,7 @@ ao.checked = true; ao.dispatchEvent(new win.Event('change'))
 check('6b view (active only): the open item under a finished agent stays visible; the ended plan is gone; the open plan stays complete', !!inPlanner('retired') && !inPlanner('@shipped') && !!inPlanner('@#70/@Spec') && !!inPlanner('@#70/@Docs'))
 ao.checked = false; ao.dispatchEvent(new win.Event('change'))
 recv({ type: 'activity_delta', epoch: 'E2', seq: 2, base: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15 }, upsert: [pi('k-plan', '@#70/@Ship', 'HOST-A', 'done', { ...at7, plan_ix: 5 }), { ...plan[1], bar: { ...plan[1].bar, done: 3 } }], remove: [] })
-check('6b view: a delta ticks an item in place (☐ → ☑) and moves the plan bar', !!inPlanner('@#70/@Ship')?.querySelector('svg.s-done') && inPlanner('@#70/@Ship').classList.contains('pdone') && inPlanner('@#70').querySelector('.pb.plan > i')?.style.width === '60%', J([inPlanner('@#70/@Ship')?.outerHTML, inPlanner('@#70')?.querySelector('.pb')?.outerHTML]))
+check('6b view: a delta ticks an item in place (☐ → ☑) and moves the plan bar', !!inPlanner('@#70/@Ship')?.querySelector('svg.s-done') && inPlanner('@#70/@Ship').classList.contains('pdone') && inPlanner('@#70').querySelector('.pb.plan > i')?.style.width === '50%', J([inPlanner('@#70/@Ship')?.outerHTML, inPlanner('@#70')?.querySelector('.pb')?.outerHTML]))
 try {   // a crash (an older dashboard without the 6c helpers) counts as one failure
 const HOUR = 60 * MIN
 // ================================================================= 6c (v1.64.0): open plans expanded, the finished-plan window + slider, abandoned, home-host tags,
@@ -435,9 +436,9 @@ const unf = tipOf(rollRow().querySelector('.pb'))
 ao.checked = true; ao.dispatchEvent(new win.Event('change'))
 const fil = tipOf(rollRow().querySelector('.pb'))
 check('6c rollup vs filter: with Active only the session\'s rolled-up bar counts only what is shown (the finished worker\'s 6/6 drops out: 8 of 12 → 2 of 6 files); its line renders against it', unf === '8 of 12 files (66%) — rollup of 2 below it' && fil === '2 of 6 files (33%) — rollup of 1 below it' && rollRow().querySelector('.ln').textContent === 'rolling 2 of 6 files', J([unf, fil]))
-check('6c rollKids: the same strategies as the bridge — sum, mean %, then N of M done (skipped out, abandoned counted)', J(X.rollKids([{ u: { key: 'a' }, fbar: { done: 1, total: 4, unit: 'x' } }, { u: { key: 'b' }, fbar: { done: 1, total: 4, unit: 'x' } }])) === J({ done: 2, total: 8, unit: 'x', pct: 25, rollup: true, n: 2 })
+check('6c rollKids: the same strategies as the bridge — sum, mean %, then N of M done (#79: three parts; M = every item, skipped + abandoned → skipped)', J(X.rollKids([{ u: { key: 'a' }, fbar: { done: 1, total: 4, unit: 'x' } }, { u: { key: 'b' }, fbar: { done: 1, total: 4, unit: 'x' } }])) === J({ done: 2, skipped: 0, total: 8, unit: 'x', pct: 25, rollup: true, n: 2 })
   && X.rollKids([{ u: { key: 'a' }, fbar: { done: 50, total: 100, unit: '%' } }, { u: { key: 'b' }, fbar: { done: 1, total: 4, unit: 'x' } }]).pct === 37.5
-  && (r => r.todos && r.done === 1 && r.total === 2 && r.abandoned === 1)(X.rollKids([{ u: { key: 'a', plan_item: true, current: { state: 'done' } } }, { u: { key: 'b', plan_item: true, current: { state: 'skipped' } } }, { u: { key: 'c', plan_item: true, current: { state: 'abandoned' } } }])))
+  && (r => r.todos && r.done === 1 && r.total === 3 && r.skipped === 2 && r.abandoned === 1)(X.rollKids([{ u: { key: 'a', plan_item: true, current: { state: 'done' } } }, { u: { key: 'b', plan_item: true, current: { state: 'skipped' } } }, { u: { key: 'c', plan_item: true, current: { state: 'abandoned' } } }])))
 check('6c active only (6c plan rule): the ended plans are hidden, the open one (skipped + abandoned items) stays', !inS('Sixc', '@recent') && !inS('Sixc', '@old') && !!inS('Sixc', '@open/@b'))
 // the Plans filter
 const pf = doc.getElementById('actPlans')
@@ -631,6 +632,108 @@ check('6d counts: pin / hide never change the header counts', tagT() === t0, J([
 } catch (e) { fail++; console.log('FAIL 6d block crashed:', (e && e.stack) || e) }
 } catch (e) { fail++; console.log('FAIL 6c block crashed:', (e && e.stack) || e) }
 } catch (e) { fail++; console.log('FAIL 6b block crashed:', (e && e.message) || e) }
+
+try {   // a crash (a dashboard without the #79 helpers) counts as one failure
+// ================================================================= #79 (v1.66.0): THREE-PART bars (done / skipped / total), a done node = 100%,
+// the 1.65 bar form widened, and the client rollup == the bridge's (the same fixture through lib/activity.js and through this page)
+const A = await import('../lib/activity.js')
+check('#79 render: {progress} → "1 of 5 done · 1 skipped"; unchanged without skipped; {pct} = the done %; {skipped}; a % bar', X.renderText('{progress}|{pct}|{skipped}', { done: 1, skipped: 1, total: 5, unit: 'done' }, null, NOW) === '1 of 5 done · 1 skipped|20%|1'
+  && X.renderText('{progress}|{skipped}', P, null, NOW) === '4,812 of 12,000 tiles|0' && X.renderText('{progress}', { done: 37.5, skipped: 12.5, total: 100, unit: '%' }, null, NOW) === '37.5% · 12.5% skipped'
+  && ['1 of 5 done · 1 skipped', '4,812 of 12,000 tiles', '37.5% · 12.5% skipped'].every((t, i) => A.renderText('{progress}', [{ done: 1, skipped: 1, total: 5, unit: 'done' }, P, { done: 37.5, skipped: 12.5, total: 100, unit: '%' }][i], null, NOW) === t))
+check('#79 norm3: a bar without skipped (a 1.65 bridge, any old progress) has skipped 0; a 1.65 "N of M" bar (skipped OUT of M, abandoned in M) is widened: 1 of 2 · 1 skipped · 1 abandoned → 1 of 3 · 2 skipped', (q => q.skipped === 0 && q.total === 12000)(X.norm3(P))
+  && (q => q.done === 1 && q.total === 3 && q.skipped === 2 && q.items === true)(X.norm3({ done: 1, total: 2, unit: 'done', rollup: true, todos: true, skipped: 1, n: 3, abandoned: 1 }))
+  && (q => q.done === 2 && q.skipped === 1 && q.total === 6 && q.items === true && Math.abs(q.pct - 100 / 3) < 1e-9)(X.norm3({ done: 2, skipped: 1, total: 6, unit: 'done', pct: 33.3, rollup: true, todos: true, items: true, n: 6 }))
+  && (q => q.total === 5 && q.skipped === 1)(X.norm3({ done: 2, skipped: 1, total: 5, unit: 'done', rollup: true, todos: true, n: 2 })))   // a 1.66 SUM of two plans is never mistaken for the 1.65 form
+check('#79 force: a DONE node shows a FULL bar whatever its own / rolled-up bar says; ABANDONED → its remainder skipped; failed keeps its bar', (q => q.done === 10 && q.skipped === 0 && q.pct === 100 && q.forced === 'done')(X.barOf({ current: { state: 'done' }, bar: { done: 3, total: 10, unit: 'tiles', rollup: true, n: 2 } }))
+  && (q => q.done === 1 && q.skipped === 3 && q.forced === 'abandoned')(X.barOf({ current: { state: 'abandoned' }, bar: { done: 1, skipped: 1, total: 4, unit: 'done', todos: true, items: true, n: 4 } }))
+  && (q => q.done === 3 && !q.forced)(X.barOf({ current: { state: 'failed' }, progress: { done: 3, total: 10, unit: '' } })))
+// the fixture, built by the BRIDGE's own library (what a 1.66 gateway sends)
+const st79 = A.createActivity({ config: {}, origin: 'HOST-A' }), I79 = { session: 'Bars79', project: 'Bars79', user: 'robin', host: 'HOST-A' }, t79 = NOW - 20 * MIN
+const say79 = (input, dt = 0) => { const p = A.parseMessage(input, { now: t79 + dt, tzOffsetMin: 0 }); if (!p.ok) throw new Error(`fixture: ${J(input)} → ${p.code} ${p.what}`); const r = A.apply(st79, I79, p.msg, t79 + dt); if (!r.ok) throw new Error(`fixture apply: ${J(input)} → ${r.code}`); return r }
+say79({ text: '@~root bars for #79' })
+say79({ path: '@~Release', text: 'release {progress}', plan: ['Spec', 'Docs', 'Port', 'Build', 'Ship'] }, 1000)
+say79({ path: '@Release/@~Spec', state: 'done' }, 2000); say79({ path: '@Release/@~Docs', state: 'skipped' }, 3000); say79({ path: '@Release/@~Port', state: 'abandoned' }, 4000); say79({ path: '@Release/@~Build', text: 'compiling' }, 5000)
+say79({ path: '@~Test plan', text: 'testing', plan: ['X', 'Y', 'Z'] }, 6000); say79({ path: '@"Test plan"/@~X', state: 'done' }, 7000); say79({ path: '@~Test plan', text: 'tests signed off', state: 'done' }, 8000)
+say79({ path: '@Tiles/@~a', text: 'a', progress: '3/10 tiles' }, 9000); say79({ path: '@Tiles/@~b', text: 'b', progress: '5/10 tiles' }, 9500); say79({ path: '@~Tiles', text: 'tiles done', state: 'done' }, 10000)
+say79({ path: 'worker/@sum/@~s1', text: 's1', progress: '3/10 tiles 1 skipped' }, 11000); say79({ path: 'worker/@sum/@~s2', text: 's2', progress: '2/10 tiles' }, 11500)
+say79({ path: 'worker/@mixed/@~p', text: 'p', progress: '50%' }, 12000); say79({ path: 'worker/@mixed/@~q', text: 'q', progress: '2/8 files 2 skipped' }, 12500)
+say79({ path: '@~aband', text: 'maybe later', plan: ['A', 'B'] }, 13000); say79({ path: '@aband/@~A', state: 'done' }, 13500); say79({ path: '@~aband', text: 'dropped', state: 'abandoned' }, 14000)
+say79({ path: '@~Lint', text: 'lint', plan: ['L1', 'L2'] }, 15000); say79({ path: '@Lint/@~L1', text: 'broke', state: 'failed' }, 15500)
+const U79 = Object.fromEntries([...A.dashUnits(A.boardView(st79, NOW, { raw: true })).values()].map(u => [u.obj.id, u.obj]))
+const tree79 = X.buildTree(U79, {}).find(p => p.key === 'bars79').sessions[0]
+const all79 = []; (function walk(l) { l.forEach(t => { all79.push(t); walk(t.kids) }) })(tree79.kids)
+const cbar = t => { t.kids.forEach(cbar); t.cb = X.force(t.u, t.u.progress ? X.ownBar(t.u.progress) : X.rollKids(t.kids.map(k => ({ u: k.u, fbar: k.cb })))); return t.cb }
+tree79.kids.forEach(cbar)
+const same = (a, b) => (!a && !b) || (!!a && !!b && ['done', 'skipped', 'total', 'unit', 'forced', 'todos', 'items', 'abandoned'].every(k => (a[k] ?? null) === (b[k] ?? null)) && Math.abs((a.pct ?? 0) - (b.pct ?? 0)) < 1e-9)
+const bridgeBar = p => A.rollup(A.getSession(st79, I79), A.getNode(st79, I79, p))
+check('#79 client == bridge: the dashboard\'s own rollup (force + ownBar + rollKids, used when a filter is on) equals the bridge\'s bar for EVERY node of the fixture (plan items in every state, common + mixed units, done / abandoned overrides)',
+  all79.length >= 20 && all79.every(t => same(t.cb, t.u.bar)) && all79.every(t => same(X.barOf(t.u), bridgeBar(t.u.path))), J(all79.filter(t => !same(t.cb, t.u.bar)).map(t => [t.u.path, t.cb, t.u.bar])))
+const selfU = tree79.s.self, selfC = X.force(selfU, X.rollKids(tree79.kids.map(k => ({ u: k.u, fbar: k.cb }))))
+check('#79 client == bridge: ... and for the session root (mixed units → the mean of the done and skipped fractions)', same(selfC, selfU.bar) && selfU.bar.unit === '%' && selfU.bar.skipped > 0, J([selfC, selfU.bar]))
+const ft79 = X.buildTree(U79, { plansOnly: true }).find(p => p.key === 'bars79').sessions[0], fall = []; (function walk(l) { l.forEach(t => { fall.push(t); walk(t.kids) }) })(ft79.kids)
+const nDesc = (list, id) => { const f = (l) => l.reduce((n, t) => n + 1 + f(t.kids), 0); const find = l => { for (const t of l) { if (t.u.id === id) return t; const x = find(t.kids); if (x) return x } return null }; const t = find(list); return t ? f(t.kids) : -1 }
+const whole = fall.filter(t => nDesc(ft79.kids, t.u.id) === nDesc(tree79.kids, t.u.id))
+check('#79 client == bridge (buildTree, Plans filter): every node whose subtree the filter left whole shows the bridge\'s bar — @Release 1 of 5 · 2 skipped, the done @Test plan full', whole.length >= 8 && whole.every(t => same(t.fbar, t.u.bar))
+  && (b => b.done === 1 && b.skipped === 2 && b.total === 5 && b.abandoned === 1)(fall.find(t => t.u.path === '@Release').fbar) && (b => b.done === 3 && b.total === 3 && b.forced === 'done')(fall.find(t => t.u.path === '@"Test plan"').fbar), J(whole.filter(t => !same(t.fbar, t.u.bar)).map(t => [t.u.path, t.fbar, t.u.bar])))
+// rendered
+doc.getElementById('actPlans').checked = false; doc.getElementById('actPlans').dispatchEvent(new win.Event('change'))
+ao.checked = false; ao.dispatchEvent(new win.Event('change'))
+recv({ type: 'activity_board', full: true, epoch: 'E79', seq: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15, finished_plan_open_min: 120, user: 'robin', remote_hosts: [] }, upsert: Object.values(U79) })
+const tipOf = el => { el.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true })); return el.getAttribute('title') }
+const r79 = p => { const rs = rowsT(), i = rs.indexOf(nmRow('Bars79')); if (i < 0) return null; for (let j = i + 1; j < rs.length && dOf(rs[j]) > 1; j++) if (rs[j].querySelector('.nm')?.getAttribute('title') === p) return rs[j]; return null }, pb79 = p => r79(p)?.querySelector('.pb'), wI = p => pb79(p)?.querySelector(':scope > i')?.style.width, wS = p => pb79(p)?.querySelector(':scope > b.sk')?.style.width ?? null
+check('#79 bar: a plan with done, skipped, abandoned, running and todo items draws THREE parts — done 20% (green, class plan), then a skipped segment 40% (b.sk; skipped + abandoned), then the track',
+  pb79('@Release')?.classList.contains('plan') && pb79('@Release').classList.contains('sk2') && wI('@Release') === '20%' && wS('@Release') === '40%' && [...pb79('@Release').children].map(c => c.tagName).join() === 'I,B', pb79('@Release')?.outerHTML)
+check('#79 label: the plan line renders "release 1 of 5 done · 2 skipped"; the bar tooltip "1 of 5 done · 2 skipped (20%) · incl. 1 abandoned — its plan: 5 items"', r79('@Release').querySelector('.ln').textContent === 'release 1 of 5 done · 2 skipped' && tipOf(pb79('@Release')) === '1 of 5 done · 2 skipped (20%) · incl. 1 abandoned — its plan: 5 items', J([r79('@Release')?.querySelector('.ln')?.textContent, tipOf(pb79('@Release'))]))
+check('#79 done = full: the done plan (1 of 3 items done) and the done context whose children roll up 8 of 20 tiles both show a FULL bar (no skipped segment); striped stays the rollup marker',
+  wI('@"Test plan"') === '100%' && wS('@"Test plan"') === null && pb79('@"Test plan"').classList.contains('full') && wI('@Tiles') === '100%' && pb79('@Tiles').classList.contains('roll') && pb79('@Tiles').classList.contains('full') && /20 of 20 tiles \(100%\) · done: counts as 100% — rollup of 2 below it/.test(tipOf(pb79('@Tiles'))), J([wI('@"Test plan"'), wI('@Tiles'), tipOf(pb79('@Tiles'))]))
+tog(r79('worker'))
+check('#79 bar: common unit sums skipped (5 of 20 tiles · 1 skipped: 25% + 5%); mixed units average it (37.5% + 12.5%); an abandoned plan\'s remainder is skipped; a failed item is remaining (no skipped segment)', wI('worker/@sum') === '25%' && wS('worker/@sum') === '5%' && wI('worker/@mixed') === '37.5%' && wS('worker/@mixed') === '12.5%'
+  && wI('@aband') === '50%' && wS('@aband') === '50%' && wI('@Lint') === '0%' && wS('@Lint') === null, J(['worker/@sum', 'worker/@mixed', '@aband', '@Lint'].map(p => [p, wI(p), wS(p)])))
+const css79 = [...doc.querySelectorAll('style')].map(s => s.textContent).join('\n'), tok = (blk, k) => (blk.match(new RegExp(`--${k}:(#[0-9A-Fa-f]{6})`)) || [])[1]
+const blocks79 = [css79.match(/:root \{[^}]*\}/)?.[0] || '', css79.match(/@media \(prefers-color-scheme: dark\) \{ :root:not\(\[data-theme="light"\]\) \{[^}]*\}/)?.[0] || '', css79.match(/:root\[data-theme="dark"\] \{[^}]*\}/)?.[0] || '']
+check('#79 CSS: the skipped segment is a hatch of its own tokens (light, dark, dark forced), neutral — never the plan green (--ok) nor the bar blue', /\.ar \.pb > b\.sk \{[^}]*repeating-linear-gradient\([^)]*var\(--bar-skip\)[^)]*var\(--bar-skip-2\)/.test(css79)
+  && blocks79.every(b => tok(b, 'bar-skip') && tok(b, 'bar-skip-2') && tok(b, 'bar-skip') !== tok(b, 'ok') && tok(b, 'bar-skip') !== tok(b, 'bar')) && tok(blocks79[0], 'bar-skip') !== tok(blocks79[1], 'bar-skip') && tok(blocks79[1], 'bar-skip') === tok(blocks79[2], 'bar-skip'), J(blocks79.map(b => [tok(b, 'bar-skip'), tok(b, 'bar-skip-2'), tok(b, 'ok')])))
+// ---- #79 (v1.66.0): GREEN = DONE ONLY (in progress is cyan: one token per theme), and SESSIONS get their own glyph
+check('#79 colours: in progress is CYAN everywhere (the running ring / dot, a context\'s running mark, the in-progress plan item, a running log dot) through ONE token, --act-running; done stays green (--ok); the cyan differs from the green and the bar blue in light and dark',
+  /\.s-running \{ color:var\(--act-running\); \}/.test(css79) && /\.bg-running \{ background:var\(--act-running\) !important; \}/.test(css79) && /\.bg-done \{ background:var\(--ok\) !important; \}/.test(css79) && /\.s-done \{ color:var\(--ok\); \}/.test(css79)
+  && blocks79.every(b => tok(b, 'act-running') && tok(b, 'act-running') !== tok(b, 'ok') && tok(b, 'act-running') !== tok(b, 'bar')) && tok(blocks79[0], 'act-running') !== tok(blocks79[1], 'act-running')
+  && /class="gl ctx s-running"/.test(X.planGlyph('running')) && /s-running/.test(X.glyphSvg({ state: 'running', live: true, staleAt: NOW + 5 * MIN, win: 10 * MIN }, NOW)) && /s-done/.test(X.planGlyph('done')), J(blocks79.map(b => [tok(b, 'act-running'), tok(b, 'ok'), tok(b, 'bar')])))
+const SG = (k, e, o) => X.sessGlyph(k, e, NOW, o)
+const liveE = { state: 'running', live: true, staleAt: NOW + 6 * MIN, win: 10 * MIN }
+check('#79 sessGlyph: a rounded WINDOW (rect), never the agent ring (circle); the face by client kind — code ">_", cowork a speech bubble, page / browser a globe, unknown / other a plain window; four distinct faces',
+  ['code', 'cowork', 'page', 'other'].every(k => (g => /<rect /.test(g) && !/<circle class="ring"/.test(g) && new RegExp(`class="gl sg k-${k} `).test(g))(SG(k, liveE))) && X.sessKind('browser') === 'page' && X.sessKind(null) === 'other' && X.sessKind('agent') === 'other'
+  && new Set(['code', 'cowork', 'page', 'other'].map(k => SG(k, { state: 'done' }).replace(/k-\w+/, ''))).size === 4)
+check('#79 sessGlyph: live → the border EMPTIES towards stale like the ring (rect.ring, pathLength 100, data-sa / data-win, 60 of 100 left); done green / blocked / failed / stale / gone by class (gone dashed); no line → faint',
+  (g => /<rect class="ring"[^>]*pathLength="100"[^>]*stroke-dasharray="60\.00 100"[^>]*data-sa="\d+"[^>]*data-win="600000"/.test(g) && /s-running/.test(g))(SG('code', liveE))
+  && ['done', 'blocked', 'failed', 'stale'].every(st => new RegExp(`s-${st}`).test(SG('code', { state: st })) && !/class="ring"/.test(SG('code', { state: st }))) && /stroke-dasharray="2\.2 2\.2"/.test(SG('cowork', { state: 'gone', gone: true }))
+  && /s-none/.test(SG('code', liveE, { none: true })) && /var\(--faint\)/.test(SG('code', liveE, { none: true })), SG('code', liveE))
+// the Activity tree: session rows + host lines use the session glyph (with the bridge's client_kind); agents keep the ring
+const U79k = Object.fromEntries(Object.entries(U79).map(([id, u]) => [id, u.kind === 'session' ? { ...u, client_kind: 'code' } : u]))
+const mselfA = root('HOST-A', { current: { id: 'mA', ts: NOW - MIN, text: 'from A', state: 'running' }, last_activity: NOW - MIN }), mselfB = root('HOST-B', { current: { id: 'mB', ts: NOW - 30 * MIN, text: 'from B', state: 'running' }, last_activity: NOW - 30 * MIN })
+const multi79 = [sess('k-m79', 'Multi79', 'Bars79', { hosts: ['HOST-A', 'HOST-B'], multi_host: true, client_kind: 'cowork', self: mselfA, selves: [mselfA, mselfB] })]
+recv({ type: 'activity_board', full: true, epoch: 'E79b', seq: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15, finished_plan_open_min: 120, user: 'robin', remote_hosts: [] }, upsert: [...Object.values(U79k), ...multi79] })
+const sRow = nmRow('Bars79'), mRow = nmRow('Multi79')
+tog(r79('worker'))
+check('#79 tree: a SESSION row shows the session glyph (a window; client kind code → ">_"; this one is quiet → stale, grey); an AGENT row keeps the ring glyph (a circle)', !!sRow?.querySelector('svg.sg.k-code.s-stale rect') && !sRow.querySelector('svg.sg circle')
+  && !!r79('worker')?.querySelector('svg.gl circle') && !r79('worker').querySelector('svg.sg'), J([sRow?.innerHTML.slice(0, 300), r79('worker')?.innerHTML.slice(0, 200)]))
+tog(mRow)
+const hl79 = rowsT().filter(r => r.getAttribute('data-kind') === 'host-line' && r.getAttribute('data-session') === 'Multi79')
+check('#79 tree: a multi-host session (cowork) — its row AND each host line use the same session glyph (speech bubble); B\'s quiet line shows stale (grey, no countdown)', !!mRow?.querySelector('svg.sg.k-cowork') && hl79.length === 2 && hl79.every(r => !!r.querySelector('svg.sg.k-cowork'))
+  && !!hl79.find(r => r.getAttribute('data-host') === 'HOST-B')?.querySelector('svg.sg.s-stale') && !!hl79.find(r => r.getAttribute('data-host') === 'HOST-A')?.querySelector('svg.sg.s-running rect.ring'), J(hl79.map(r => r.querySelector('svg')?.getAttribute('class'))))
+const lgd = doc.getElementById('actlegend')
+check('#79 legend: the session glyph in its four variants (code · cowork · page · other) + "green = done only, cyan = in progress" + the skipped hatch', lgd.querySelectorAll('svg.sg').length === 4 && ['k-code', 'k-cowork', 'k-page', 'k-other'].every(k => !!lgd.querySelector(`svg.sg.${k}`))
+  && /session: code · cowork · page · other/.test(lgd.textContent) && /green = done only, cyan = in progress/.test(lgd.textContent) && !!lgd.querySelector('.pb b.sk') && /grey hatch = skipped/.test(lgd.textContent))
+// the Sessions section + the mesh map: the SAME builder (live roster entries = in progress)
+recv({ type: 'roster', gateway: 'HOST-A/gw1', hosts: {}, sessions: [
+  { session: 'HOST-A/gw1', name: 'gw1', is_gateway: true, client_kind: 'host', realm: 'default', subpeers: [{ id: 'HOST-A/gw1/Orch-1', name: 'Orch', client_kind: 'code', project: 'AIMB', user: 'robin', realm: 'default' }, { id: 'HOST-A/gw1/Cow-1', name: 'Cow', client_kind: 'cowork', project: 'AIMB', user: 'robin', realm: 'default' }], topics: [] },
+  { session: 'HOST-A/c1', name: 'c1', client_kind: 'code', project: 'AIMB', user: 'robin', realm: 'default', subpeers: [], topics: [] }],
+  pages: [{ instance: 'p79', page_kind: 'chat', title: 'Chat79', project: 'AIMB', user: 'robin', host_label: 'HOST-A' }] })
+const sTb = doc.getElementById('sessions'), sgIn = sTb.querySelectorAll('svg.sg.inl')
+check('#79 Sessions section: each sub-peer / session / page row carries the SAME session glyph (code ">_", cowork bubble, page globe) — byte-identical to the builder\'s output', sgIn.length >= 3 && !!sTb.querySelector('svg.sg.k-code') && !!sTb.querySelector('svg.sg.k-cowork') && !!sTb.querySelector('svg.sg.k-page')
+  && [...sgIn].some(g => g.outerHTML === (() => { const d = doc.createElement('div'); d.innerHTML = X.sessGlyph('code', { state: 'running' }, 0, { cls: 'inl' }); return d.firstChild.outerHTML })()), J([...sgIn].map(g => g.getAttribute('class'))))
+const mapG = doc.querySelectorAll('g.n-glyph svg.sg')
+check('#79 mesh map: session / sub-peer nodes carry the same glyph at their centre (none on the gateway, which keeps its GATEWAY tag)', mapG.length >= 3 && [...mapG].some(g => g.classList.contains('k-code')) && [...mapG].some(g => g.classList.contains('k-cowork')) && !doc.querySelector('g.n-sess.gw g.n-glyph'), J([...mapG].map(g => g.getAttribute('class'))))
+} catch (e) { fail++; console.log('FAIL #79 block crashed:', (e && e.stack) || e) }
 
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close()

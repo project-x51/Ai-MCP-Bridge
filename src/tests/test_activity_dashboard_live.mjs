@@ -144,6 +144,11 @@ check('subscribe: a FULL board first (full, epoch, seq 1, head with the stale de
 check('subscribe: the full board holds the mesh — A\'s agent (tagged A) and B\'s, as units', agt(d1, 'Orch', 'research')?.host === HA && agt(d1, 'Local', 'builder')?.host === HB && grp(d1, 'Orch')?.kind === 'session', J(units(d1).map(u => [u.kind, u.session || u.agent, u.host])))
 check('subscribe: units are RAW — the reported state, the line\'s template and no rendered / stale_at', agt(d1, 'Orch', 'research')?.state === 'running' && agt(d1, 'Orch', 'research')?.current?.text === 'reading the spec'
   && !('rendered' in (agt(d1, 'Orch', 'research')?.current || {})) && !('stale_at' in (agt(d1, 'Orch', 'research') || {})) && agt(d1, 'Orch', 'research')?.last_activity > 0, J(agt(d1, 'Orch', 'research')))
+// #79 (v1.66.0): the session unit carries client_kind from the MESH ROSTER (the dashboard's session glyph): Orch registers on A as a
+// claude-code sub-peer → B's dashboard shows Orch as code; Local (a script only) has none (a plain window)
+const kreg = await call(A, 'register_self', { name: 'Orch', secret: 'k79', project: 'AIMB', user: 'robin', client: 'claude-code' })
+const gk = await until(async () => grp(d1, 'Orch'), g => g && g.client_kind === 'code', 8000)
+check('#79 client_kind: a session unit takes its client kind from the mesh roster (Orch registered on A as claude-code → "code" on B\'s dashboard; one optional field); a script-only session has none', kreg.ok && gk?.client_kind === 'code' && !('client_kind' in (grp(d1, 'Local') || {})), J([kreg.ok, gk, grp(d1, 'Local')]))
 
 // ---- 2. a burst → deltas only, ≤1 per second, each carrying only what changed
 const pump = await logger('127.0.0.1', WSB, { session: 'Pump', project: 'Tools', user: 'robin' })
