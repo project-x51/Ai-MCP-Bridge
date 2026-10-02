@@ -21,6 +21,15 @@ tags only where they differ; record / slice format v3; code done, NOT yet deploy
 before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
 Everything below is durable; nothing important is only in chat.
 
+**2026-10-03 (v1.67.0, tests only — `BRIDGE_VERSION` stays 1.66.0, nothing to deploy):** Built **#81 step 1 + "test
+groups"** (see "#81 as built" and architecture.md §13 "Tests (v1.67.0)"). The 54 scripts moved into nine group folders
+(`tests/<group>/`) and run under node:test — `npm test` runs the groups in parallel (concurrency 4) in **~3m50s instead of
+~12m** serially; `test:group` / `test:file` / `test:serial` / `test:legacy`; `TEST_ONLY` for one check; a disjoint
+100-port block per script; the `aimb-dashboard` reporter shows a run live on the board (`AIMB_TEST_LOG_*`). Full parallel
+run: 2315 checks, 54/54 green. Found on the way: `test_grant_notice_live` inherited `stableIds` from the operator's
+config.json (it failed 2 checks anywhere without one, e.g. a worktree) — now pinned; `test_dashboard` wrote host aliases
+into `src/config.json` and `test_page_e2e` read the live token from it — both now use a temp config.
+
 **2026-10-03 (v1.66.0):** Built **#79** (see "#79 as built" and architecture.md §13 "Built (v1.66.0)"). Progress is
 {done, skipped, total} (`skipped` optional on the wire, only when > 0 — a 1.65 reader ignores it, a missing one is 0);
 rollups sum the three parts for a common unit, average the done / skipped fractions for mixed units, and "N of M done"
@@ -173,7 +182,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #82 plan workflow (move + agent-on-item + live item lines), #81 node:test migration + dashboard test reporter (after #79), #80 dashboard-change notices to the owning session, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #82 plan workflow (move + agent-on-item + live item lines), #81 node:test migration (step 1 + test groups + the dashboard reporter built, v1.67.0; next: convert files to native describe/it one by one), #80 dashboard-change notices to the owning session, #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -399,7 +408,7 @@ Robin, 2026-10-03, from using the live board.
    - **Attention without reordering:** open questions (#85) and blocked items keep their place; a badge bubbles up to
      collapsed parents. An optional "needs attention first" filter may come later.
 
-## #81 — move the test suite to Node's built-in test runner (node:test), with live dashboard progress  ·  **OPEN (starts after #79)**
+## #81 — move the test suite to Node's built-in test runner (node:test), with live dashboard progress  ·  **OPEN — step 1 + "test groups" DONE (v1.67.0, tests only); later: native conversion**
 Robin, 2026-10-03. No runner script and no CI for now: go straight to `node:test`, incrementally.
 
 **Today:** `npm test` is `typecheck` plus 54 plain Node scripts chained with `&&`. Each script has its own `check()`
@@ -427,6 +436,51 @@ and has no timing or summary.
 **Later:** convert files to native node:test one by one (describe/it, before/after cleanup, `mock.timers` instead
 of the clock env hooks, per-test timeouts). Turn on `--test-concurrency` once the ports are audited. The reporter
 gets per-test detail as files convert.
+
+**"Test groups" (Robin, 2026-10-03):** split the tests into functional node:test groups, runnable all together, by group,
+by file or by single check, and run them in parallel — ports first (a disjoint range per file), temp dirs per file.
+
+### #81 as built (v1.67.0 — step 1 + test groups; tests only, `BRIDGE_VERSION` unchanged)
+- **Layout:** nine group folders, `tests/<group>/test_*.mjs` (a `git mv`; only the relative paths changed):
+  `unit` (lib, persistence facet, activity core — no sockets) · `mesh` (10) · `security` (9: consent, grants, vault,
+  token file, roster secrets, cap keys, facet probes, egress, grant notices) · `persistence` (4) · `federation` (9) ·
+  `behaviors` (3) · `doorbell` (2) · `dashboard` (6) · `activity` (8). `tests/helpers/manifest.mjs` holds the groups and
+  `ORDER` (the old chain order — also the port-block order, so append-only).
+- **Drivers:** `tests/helpers/suite.mjs` runs a script as one node:test test (id `mesh/test_mesh`; spawn, pass on exit 0,
+  counts + FAIL lines as diagnostics, a 15-min kill timeout). `tests/<group>/<group>.test.mjs` = that group, one script
+  at a time (plus a guard that fails a script in the folder but not in the manifest); `tests/suite.test.mjs` = every
+  script, serially, in ORDER (step 1 as specified).
+- **Commands:** `npm test` = typecheck + `node tests/run.mjs` → `node --test --test-concurrency=4` over the nine drivers,
+  longest group first, `spec` + the dashboard reporter. `npm run test:group -- <g…>`, `npm run test:file -- <name…>`
+  (name, id or a part), `npm run test:serial`, `npm run test:legacy` (the old `&&` chain, new paths). One check:
+  `TEST_ONLY=<text>` / `--only <text>` — the shared `tests/helpers/check.mjs` filter every script's `check()` calls first
+  (the script still runs; only matching checks are printed and counted). No file is native yet, so `--test-name-pattern`
+  has nothing to select below the script level.
+- **Ports:** audited every literal; 12 pairs of files shared ports (harmless serially). Now script *i* of ORDER owns
+  `20000 + 100·i … +99` (`tests/helpers/ports.mjs`, `AIMB_TEST_PORT_BASE` to move it); each file maps its old numbers
+  with `tp(n)` (throws outside its block). Temp dirs were already `mkdtemp` per file.
+- **Reporter:** `tests/reporters/aimb-dashboard.mjs` as specified — one `aimb-log --stream` child, a plan item per
+  script (reset to ☐ each run), a 10 s `log:false` progress line with the three-part bar (done = passed checks; totals
+  from a check-count cache in the temp dir; a crashed script's unreached checks count as skipped), a logged entry per
+  failing script, a final summary; `AIMB_TEST_LOG_SESSION` / `_PROJECT` / `_PATH` / `_USER` / `_SCRIPT` / `_CONFIG`
+  (config handed only to the logger child as `AI_BRIDGE_CONFIG`). Silent without a session; with no token it stops at
+  once, with no bridge it costs ≤ 3 s at the end; never fails the run. **Deviation:** node:test replays each test file's
+  events only after the files before it have reported, so in a parallel run only one group would show live; the
+  reporter creates `AIMB_TEST_STATUS_DIR` and the drivers append start / end lines there (per process), with the
+  node:test events as the fallback.
+- **Fixes found on the way:** `test_grant_notice_live` inherited `stableIds` from the operator's `config.json` — without
+  one (a worktree, CI) a re-register minted a new id, step 3's deregister missed it and 2 checks failed (4 announced, not
+  3); now pinned `AI_BRIDGE_STABLE_IDS=1`. `test_dashboard` WROTE host aliases into `src/config.json` and `test_page_e2e`
+  read the live realm token from it; both now use a temp config + a test token.
+- **Proof:** serial, the old chain: 12m07s pre-move, 12m11s post-move (`test:legacy`, 2315 / 2315 green);
+  `test:serial` 12m07s. Parallel `npm test` (typecheck included): **3m55s, 3m50s, 3m49s** — run 1 before the
+  grant-notice fix (53/54), runs 2 and 3 all green (2315 checks, 54/54). Per group (s): activity 205, federation 151,
+  security 112, persistence 90, mesh 90, dashboard 46, doorbell 26, behaviors 10, unit 1 — the same as serially, so no
+  file slowed down under 4-way parallelism. Flakes: none in the three parallel runs; `test_retain_federate_live` died
+  once in the `test:serial` run ("Not connected" after a restart — the #74 family), 3/3 standalone afterwards. No serial
+  lane was needed.
+- **Later:** native describe/it per file (then `--test-name-pattern`, per-test reporter detail); `mock.timers` for the
+  clock hooks; the activity group is the critical path (~3.5 min of the ~3m50s) — split it if the suite grows.
 
 ## #80 — tell the owning session when the dashboard changes its activity  ·  **OPEN (next, after #79)**
 Robin, 2026-10-03.
@@ -625,6 +679,14 @@ Reported by Architect (Marz, Robins-Mac, 2026-10-02).
   `test_dashboard_activity` fails 2 tooltip checks when run between 00:00 and 01:00 local (its fixture "started 1 h ago"
   falls on yesterday, so the clock gets a date prefix the regex does not expect); it passes after 01:00. Fix: pin the
   fixture times to midday, or let the regex accept the date prefix.
+- v1.67.0 (#81, parallel groups): three parallel full runs, heal + grants_federate green every time. A third member of
+  the family: `test_retain_federate_live` lost its MCP connection ("Not connected") in a restart phase once, in the
+  SERIAL `test:serial` run (near the end, after the oversized-value checks); 3/3 standalone right after. Parallelism did not make any of them
+  worse, so none has a serial lane.
+- Bridget's review run of v1.67.0 (parallel, 2026-10-03 ~03:00): `test_federation_heal_live` died with a NATIVE crash
+  of the test process — exit 3221226505 = 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN, i.e. a Windows fail-fast abort) —
+  after 8 of 19 checks, all passed. 3/3 standalone straight after. A native abort is a new symptom: worth capturing
+  stderr and a crash dump next time.
 
 **Suspicion:** a timing race around bridge restart/re-link under CPU load, or a test-harness port/timeout
 assumption. **Wanted:** reproduce under load (e.g. run each in a loop alongside a CPU hog), then find whether a

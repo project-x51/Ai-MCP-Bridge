@@ -1194,6 +1194,39 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Tests (v1.67.0, tests only — `BRIDGE_VERSION` unchanged):** *#81 step 1 + "test groups" — the suite runs under
+  Node's built-in runner (node:test), in parallel, with live progress on the activity board.* The 54 test scripts are
+  unchanged plain Node scripts (own `check()`, PASS/FAIL lines, exit code); **node:test drives them**: each script is
+  one test (named by its id, `mesh/test_mesh`) that spawns `node <script>`, passes on exit 0 and carries the script's
+  counts + FAIL lines as diagnostics; a failing script fails only its own test (the old `&&` chain stopped at the first).
+  **Groups = folders:** `tests/<group>/` for `unit` (pure, no sockets), `mesh`, `security`, `persistence`, `federation`,
+  `behaviors`, `doorbell`, `dashboard`, `activity`; `tests/helpers/manifest.mjs` holds the groups and the historical
+  order (ORDER, append-only). A group's driver (`tests/<group>/<group>.test.mjs`) runs its scripts one at a time;
+  `npm test` (= `node tests/run.mjs`) runs the nine drivers under `node --test --test-concurrency=4`, longest group
+  first; `test:group` / `test:file` (by name, id or part of one) / `test:serial` (`tests/suite.test.mjs`: every script,
+  one at a time, in ORDER) / `test:legacy` (the old chain). **One check:** `TEST_ONLY=<text>` (`--only`) — every
+  script's `check()` calls the shared filter `tests/helpers/check.mjs` first, so only checks whose name contains the
+  text are printed and counted (the script still runs end to end). **Ports:** the prerequisite for parallel runs — every
+  script owns a disjoint 100-port block, `20000 + 100·i` for script *i* of ORDER (`tests/helpers/ports.mjs`;
+  `AIMB_TEST_PORT_BASE` moves the space; the live 12317/12318 can never fall in it); a script maps its historical
+  numbers into its block with `tp(n)` (which throws outside the block). The audit found 12 pairs of files sharing ports
+  (e.g. test_mesh / test_dashboard on 7100, test_persist_live / test_offline_park_live on 7982–7985, test_realm_defaults /
+  test_log_script on 14000, test_project_case / test_federation_heal on 13800, test_roster_secrets / test_activity_actions
+  on 14300) — harmless serially, collisions in parallel. Temp dirs were already per script
+  (`mkdtemp`); `test_dashboard` (which WROTE host aliases into `src/config.json`) and `test_page_e2e` (which read the
+  live realm token from it) now use a temp config and a test token. **Dashboard reporter**
+  (`tests/reporters/aimb-dashboard.mjs`, beside `spec`): with `AIMB_TEST_LOG_SESSION` set it keeps ONE
+  `aimb-log --stream` child for the run and reports to `AIMB_TEST_LOG_PATH` (default `@tests`): a plan of one item per
+  script (☐ → running → done / failed), a `log:false` progress line every ~10 s ("checks N · file i/T · <running>", the
+  #79 three-part bar: done = passed checks; total from a per-script check-count cache; checks a crashed script never
+  reached count as skipped), a logged entry per failing script (FAIL lines in `details`), and a final summary.
+  `AIMB_TEST_LOG_CONFIG` reaches only the logger child (as its `AI_BRIDGE_CONFIG`); silent without a session, a token or
+  a bridge, and never fails the run. Because node:test replays each test file's events only after the earlier files
+  have reported, live state comes from a side channel: the reporter creates `AIMB_TEST_STATUS_DIR`, the drivers append
+  start / end lines to a per-process file there. **Timings (this 32-thread dev PC):** serial, the old chain: 12m07s before
+  the move, 12m11s after (`test:legacy`, 2315 / 2315); `test:serial` 12m07s; parallel `npm test` 3m55s / 3m50s / 3m49s
+  (typecheck included; runs 2 and 3: 2315 checks, 54/54 green). The activity group (~205 s) is the critical path;
+  scripts did not slow down measurably under 4-way parallelism.
 - **Built (v1.66.0):** *#79 — the `--plan` text footgun, THREE-PART progress (done / skipped / total), a done node = 100%;
   plus (same change set) the live-checklist snippet + orchestrator briefing, cyan = in progress, and a session glyph.*
   **Wire-compatible with 1.65** (format stays v5; hosts upgrade one at a time). **Model (`lib/activity.js`):** a progress

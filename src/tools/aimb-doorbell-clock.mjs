@@ -1,6 +1,6 @@
 // Doorbell clock helpers (#67 hourly chime, #69 6-hour inbox check-in) — pure functions, no I/O, so the
 // boundary / label / check-in-mark maths is unit-testable without waiting for a real hour to pass.
-// Imported by tools/aimb-doorbell.mjs (keep the two files side by side) and by tests/test_doorbell_live.mjs.
+// Imported by tools/aimb-doorbell.mjs (keep the two files side by side) and by tests/doorbell/test_doorbell_live.mjs.
 
 // #67: the next chime boundary, strictly after `now` — the top of the next LOCAL hour (setHours handles DST and
 // non-whole-hour offsets), or with a test period the next multiple of periodSec on the local clock.

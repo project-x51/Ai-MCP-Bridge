@@ -20,7 +20,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 ## Files
 - `bridge.mjs` — the mesh node + gateway/WS/trace roles + MCP stdio server (realm-agnostic core).
 - `lib/` — logic factored out of `bridge.mjs` so it's reasoned-about + unit-tested in isolation (no spawn —
-  `tests/test_lib_unit.mjs`). **Pure** helpers: `topics.js` (path matching / `parseTopicRef`), `envelope.js`
+  `tests/unit/test_lib_unit.mjs`). **Pure** helpers: `topics.js` (path matching / `parseTopicRef`), `envelope.js`
   (`envelopeId`), `keys.js` (`lc` / `projKey` canonicalisers), `tool-schemas.js` (the `tools/list` payload),
   and `secret-resolver.js` (expand `${scheme:key}` secret references — `${env:…}` today, `${vault:…}` /
   `${service:…}` as explicit seams). **Encapsulated stateful modules** that OWN their data behind an API
@@ -36,7 +36,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   the read views (`boardView`/`logView`/`findEntry`), the derived views (stale/gone, rollup, visibility), the
   per-origin gossip `snapshot`/`mergeSnapshot` and (v1.60.0) the wire — `planSlice` (per-link deltas, byte cap, newest
   first) / `applySlice` (epoch + seq) / `markOriginDown` / `locateSessions`, the memory budget and `resolveConfig` (the `activity` block +
-  `AI_BRIDGE_ACTIVITY_*`); unit-tested in `tests/test_activity_unit.mjs`. `win-env.js`
+  `AI_BRIDGE_ACTIVITY_*`); unit-tested in `tests/unit/test_activity_unit.mjs`. `win-env.js`
   rehydrates environment variables that an MCP host stripped at launch (Windows registry) so `${env:…}` secret
   refs resolve. The bridge core (handlers, routing, delivery, gateway) deliberately stays in `bridge.mjs`.
 - `types.d.ts` — shared shapes for JSDoc + `checkJs` (see Type-checking below).
@@ -158,8 +158,48 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
-  The suites live in **`tests/`** and spawn `../bridge.mjs` with absolute paths, so `npm test` (run
-  from `src/`) or `node tests/test_*.mjs` works from anywhere.
+  The suites live in **`tests/<group>/`** (v1.67.0, #81) and spawn `../../bridge.mjs` with absolute paths, so
+  `npm test` (run from `src/`) or `node tests/<group>/test_*.mjs` works from anywhere.
+- **Running the tests (#81, v1.67.0).** Each `test_*.mjs` is still a plain Node script (its own `check()`, PASS/FAIL
+  lines, "N passed, M failed", exit 1 on a failure); **node:test** drives them, one script = one test named by its id
+  (`mesh/test_mesh`), passing on exit 0, with the counts + FAIL lines attached as diagnostics. A failing script fails only
+  its own test; the rest still run. Nine **groups** = nine folders (`tests/helpers/manifest.mjs` lists them, and the
+  historical order): `unit` (pure, no sockets: lib, persistence facet, activity core) · `mesh` · `security` (consent,
+  grants, vault, token file, roster secrets, cap keys, facet probes, egress) · `persistence` · `federation` · `behaviors` ·
+  `doorbell` · `dashboard` · `activity`. Each group's driver is `tests/<group>/<group>.test.mjs` (its scripts one at a
+  time); groups run in parallel.
+  - `npm test` — typecheck, then every group in parallel (`node tests/run.mjs` → `node --test --test-concurrency=4` with
+    the `spec` and dashboard reporters, longest group first). ~4 min instead of ~12 serially.
+  - `npm run test:group -- mesh` (or several: `-- mesh federation`) — one group. `npm run test:file -- test_mesh` — one
+    script (a name, an id `mesh/test_mesh`, or any part of one: `activity_6c`, `federat`). `npm run test:serial` — every
+    script one at a time in the historical order (`tests/suite.test.mjs`). `npm run test:legacy` — the old `&&` chain
+    (stops at the first failure). `node tests/run.mjs --list` prints the groups.
+  - **One check:** `TEST_ONLY=<text>` (or `--only <text>` on `test:file` / `test:group`) keeps only the checks whose
+    NAME contains the text (case-insensitive) — the shared filter in `tests/helpers/check.mjs` that every script's
+    `check()` calls. The script still runs end to end (its checks are steps of one scenario); TEST_ONLY narrows what is
+    reported and counted: `npm run test:file -- test_dashboard --only "host alias"`, or
+    `TEST_ONLY="host alias" node tests/dashboard/test_dashboard.mjs`. (`--test-name-pattern` applies only once a file is
+    converted to native describe/it — none is yet.)
+  - **Ports:** every script owns a disjoint block of 100 ports — script *i* of the manifest order gets `20000 + 100·i …`
+    (`tests/helpers/ports.mjs`; `AIMB_TEST_PORT_BASE` moves the whole space, e.g. a second worktree at 30000). A script
+    keeps its historical port numbers as names: `const tp = testPorts(import.meta.url, 7950)` → `tp(7952)` = its block
+    + 2; `tp()` throws outside the block. Temp dirs are per script (`mkdtemp`), and no test reads or writes
+    `src/config.json` (the dashboard and page E2E suites now use a temp config). A new test: append it to `ORDER` and
+    to one group in the manifest (a driver fails a script that is in a group folder but not in the manifest).
+  - **Live dashboard progress:** the `tests/reporters/aimb-dashboard.mjs` reporter shows a run on the activity board,
+    over ONE `tools/aimb-log.mjs --stream` child: a plan with one ☐ item per script (running → done / failed), a
+    `log:false` progress line about every 10 s ("checks N · file i/T · <running scripts>", bar = {done: passed checks,
+    skipped, total}), a logged entry per failing script (FAIL lines in `details`) and a final summary. Env:
+    `AIMB_TEST_LOG_SESSION` (without it the reporter does nothing), `AIMB_TEST_LOG_PROJECT` (default AIMB),
+    `AIMB_TEST_LOG_PATH` (default `@tests`; an agent passes its own path, e.g. `…/tests-81/@run`), `AIMB_TEST_LOG_USER`,
+    `AIMB_TEST_LOG_SCRIPT` (another `aimb-log.mjs`, e.g. the main checkout's, which finds the live config itself) and
+    `AIMB_TEST_LOG_CONFIG` (a config file given ONLY to the aimb-log child as its `AI_BRIDGE_CONFIG` — never set
+    `AI_BRIDGE_CONFIG` / `AI_BRIDGE_TOKEN*` in the test run's own env: the live tests' bridges would inherit it).
+    `AIMB_TEST_LOG_TICK_MS` / `AIMB_TEST_LOG_DEBUG=<file>` (a transcript of the stream) are for tuning. It is silent and
+    never fails the run (no token, no bridge: it stops reporting). Live state comes from a side channel: the reporter
+    creates `AIMB_TEST_STATUS_DIR`, each driver appends start / end lines there (node:test replays a test file's events
+    only after the earlier files have reported). Other knobs: `AIMB_TEST_FILE_TIMEOUT_MS` (default 15 min) kills a hung
+    script and its bridges.
 - **Type-checking (zero build).** The bridge ships as plain `node bridge.mjs` — no compile step. Types are
   applied via **JSDoc + `checkJs`** (`tsconfig.json` + shared shapes in `types.d.ts`), so `npm run typecheck`
   (`tsc --noEmit`) catches missing/renamed fields without emitting anything or adding a runtime dependency.

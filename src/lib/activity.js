@@ -1,5 +1,5 @@
 // #70 agent activity board — the PURE core. No I/O, no timers, no clock: every function that needs the time takes `now`
-// (ms epoch) as a parameter, so the whole model is exercised directly by tests/test_activity_unit. Step 1 built the model;
+// (ms epoch) as a parameter, so the whole model is exercised directly by tests/unit/test_activity_unit. Step 1 built the model;
 // step 2 (v1.58.0) wired it into bridge.mjs (the `log` + `activity` tools, the gateway-owned state, the daily JSONL); steps
 // 3–5 added the script, the gossip and the dashboard. Step 6a (v1.62.0, #70 "Step 6 redesign") REPLACED the fixed
 // session → agent → context shape with ONE TREE OF NODES per session, and added batch logging.
