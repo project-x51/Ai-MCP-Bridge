@@ -404,6 +404,42 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
+## #88 — stable node identity: creator-chosen keys, internal ids, paths as a shorthand (v2.0)  ·  **OPEN (next release)**
+Robin, 2026-10-03: "moving a context is extremely messy … decoupling names/labels from what we log so the logs are more
+agile". Today a node's PATH is its identity, so every move or rename has to rewrite history (#82's `moved_from` aliases,
+replay rewriting older records through later moves, re-keying day files). Agreed design (Robin + Bridget):
+
+- **Identity = creator + key.** The creator (an agent, or the session) names a node with a short KEY it chooses (`docs`,
+  `review`, `fix-79`), unique within that creator: full identity `fix-79:docs`. The key never changes.
+- **Label and location are attributes.** A node's label (what is shown), parent and rank are set by small node records
+  and change at any time, from the tool, the script or the dashboard. A move or rename is ONE record; nothing is
+  rewritten.
+- **Create once, then address by key.** Location is given only at creation: `--key docs --under "@Next release" --label
+  "Write the docs"`; afterwards `--key docs --state running --text "…"`, `--key docs --done`. Creating is IDEMPOTENT
+  (registering an existing key updates it), so a retry after a lost response never duplicates, and there is no round trip.
+  Plan items get keys too (`--item docs "Write the docs"`); insert/reorder/tick use keys.
+- **Why not server-issued GUIDs:** an LLM agent must carry an opaque id across many calls and compactions (typos, lost
+  ids), and a lost create response makes a retry duplicate. Readable keys can be reconstructed.
+- **Paths become a shorthand.** `--path "@Next release/@Docs"` still works (old snippets, quick logging): it resolves
+  against the CURRENT tree, or creates a node whose key is the last segment. After a move or rename the old path stays an
+  ALIAS for that session, so an agent still writing it lands in the moved node.
+- **Internal ids.** Each node has an internal id = a hash of (owner host, session, creator, key). Log entries, day files,
+  a per-host index (id → day files) and gossip use it. A node's log is "entries whose node is in this subtree", computed
+  from the current tree, so history follows moves for free. An entry may keep the label it had when written (an "at the
+  time" tooltip).
+- **Merge:** pointing node A at node B shows A's entries under B — the fix for a mistyped path like Bridget's stray `@#79`.
+- **The dashboard acts on ids, never paths** (ends quoting trouble with `:`, `/`, `+` in names). Cross-session moves
+  become possible later.
+- **Migration:** on first start, existing path-keyed history converts; each legacy path gets the deterministic id
+  hash(host, session, path) so every host derives the same ids and replay is reproducible.
+- **Compatibility:** a v2 host can still feed v5 (path-based) slices, projected from its current tree, to ≤1.72 hosts;
+  they see a move as remove + add, as today. The break is mainly inside `activity.js` and the dashboard tree.
+- **Reusing a finished key** reopens that node; new work needs a new key (`docs-2`). The snippet says so.
+- Complements #77 (topic tags): ids give the structure, tags the cross-cutting views.
+
+**Plan:** spec first (record formats, the key/path/alias resolution rules, migration, wire projection, the API and
+snippet, the dashboard changes, a build in steps), reviewed by Robin; then build step by step as v2.0.0.
+
 ## #87 — log panel order: oldest first, auto-scroll to the bottom  ·  **DONE (v1.72.0)**
 Robin, 2026-10-03, asking whether the log panel should run the other way.
 - **Today:** the log panel (6d) lists newest first; older pages load at the bottom.
