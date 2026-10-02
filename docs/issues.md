@@ -524,6 +524,87 @@ silent steps such as builds and downloads.
 7. **Who may read activity:** dashboards and registered sessions only, not page leaves.
 8. **Duplicate hostnames:** accepted. A warning is logged when one is detected.
 
+### Step 6 redesign: unified tree, todos and plans, batch logging (Robin, 2026-10-02)
+None of this is deployed yet, so it reworks the internals of steps 1–5 rather than migrating live data.
+
+**Unified tree.** One tree of NODES per session. Each node is one of two kinds, and keeps that kind's rules:
+- **Agent** (an actor): it starts, finishes (when its `@~root` is set to done/failed), and can go stale or gone.
+  Staleness belongs to agents.
+- **Context** (a piece of work): it has a current line, progress and an ETA.
+
+Any node may contain either kind, so agents can be grouped under the task they serve, and contexts can nest.
+
+**Path notation.** One `/`-separated path; a segment starting with `@` is a context, anything else an agent.
+
+| Path | Means |
+|---|---|
+| `spec-70` | an agent |
+| `spec-70/research` | a sub-agent |
+| `spec-70/@Tharsis` | a context of that agent |
+| `spec-70/@Tharsis/@z12` | a nested context |
+| `@#70/spec-70` | agent spec-70 grouped under the session's context #70 |
+| `@#70/@step4/spec-70` | an agent under a nested task context |
+
+- `@~` on the LAST segment sets that node's current line.
+- Quote segments with spaces: `@"CTX strip 17"`.
+- The old notation is a special case and stays valid: `--agent a/b` plus `@~Ctx` text means the path `a/b/@~Ctx`.
+
+**Limits:** depth ≤ 6 segments, replacing "agent path depth 3" and "32 contexts per agent". Per session, 128 agents
+(as before) and a total budget of 4096 nodes. Text, details and data limits are unchanged.
+
+**Rollup** recurses through any depth. The order of precedence is:
+1. the node's reported progress;
+2. else the sum of its children with a common unit, else their mean %;
+3. else, for a node with todo children, "N of M done".
+
+**Todos and plans** (opt-in; ordinary contexts are unchanged and nothing becomes a todo unless created as one):
+
+| State | Shown as | Meaning |
+|---|---|---|
+| `todo` | ☐ | planned, not started |
+| `running` / `blocked` | the usual ring | in progress |
+| `done` | ☑ | finished |
+| `skipped` | ~~struck through~~ | dropped from the plan but kept visible, so the plan stays honest |
+
+`skipped` is a new state, valid only for todos.
+
+- **Creating a plan:** `--plan "A" "B" "C"` (the tool takes `plan:[...]`) creates ☐ children under the target
+  context in the GIVEN order. Plans are shown in creation order, never sorted A→Z.
+- **Ticking off:** `@~#70/@B` with `--state done`, or the `--done` shortcut. A todo may be ticked by the session
+  itself or by **any agent under it**.
+- **Stale:** a todo never goes stale in ANY state. Staleness belongs to agents.
+- **Lifetime:**
+  - Open todos never expire while their session exists.
+  - A plan expires 24h after its last item is done or skipped, or when its parent finishes.
+  - **Carry-forward:** at each local day rollover the gateway writes a checkpoint of every open plan (and other
+    long-lived nodes) into the new day's JSONL. A plan open for weeks then survives the 24h replay window and the
+    7-day file retention.
+
+**Batch logging.** One call may log several items.
+- The tool takes `items:[...]`. Each item has the same fields as a single message (path/context, text, state,
+  progress, eta, stale_after, details, data, log, plan), plus an optional `ref` echoed in its result.
+- Items are applied in order. The result is `{ok, results:[...]}` with one result per item; one bad item does not
+  abort the others.
+- Bounds: at most 64 items and 64 KB per call.
+- Script: `--batch <file.json|->` reads a JSON array from a file or stdin. `--plan` is shorthand for a batch of
+  todos.
+- Each batch is gossiped as one coalesced update, as usual.
+
+**Step 6 answers (Robin, 2026-10-02):**
+1. No separate dashboard credential for now; revisit when the realm has outside users.
+2. `{log_snippet}` teaches `--stale-after` for long silent steps (builds, test runs). No per-session default.
+3. The Activity section opens by default.
+4. The gossip carries each node's log entry count, so remote Log rows can say "N entries".
+5. The history view stops at the start of the node's current run (the `new_entity` marker), with a "show earlier
+   runs" link.
+6. The connect reminder goes to Cowork too; its version points at the `log` tool instead of the script.
+
+**Revised step 6:**
+- **6a:** the unified tree (core, wire, JSONL, dashboard) plus batch logging.
+- **6b:** todos and plans (states, `--plan`, rollup, lifetime and carry-forward, the ☐/☑ display).
+- **6c:** `{log_snippet}` plus the connect reminder (`client:code` with the script; Cowork with the tool), the
+  default-open section, gossiped entry counts, and the run-boundary history view.
+
 ### Build plan
 Each step is its own version.
 1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible. **BUILT (2026-09-30)** — `src/lib/activity.js`
