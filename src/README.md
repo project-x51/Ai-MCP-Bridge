@@ -60,7 +60,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   - `tools/aimb-log.mjs` — **the activity reporter (#70 step 3)**: a node CLI that reports an agent's or a script's
     status to this host's activity board without registering (one report, or `--stream` NDJSON). It imports
     `lib/activity.js` to validate locally, so it runs from inside the bridge's `src/`. v1.62.0: `--path` (the node
-    tree) and `--batch <file|->`. See "Log / activity" below.
+    tree) and `--batch <file|->`; v1.63.0: `--plan "A" "B" …` and `--done`. See "Log / activity" below.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -130,14 +130,17 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   containment, header filter + server-side inject (#33, 9); and `test_lib_unit.mjs` — the fast pure-`lib/` +
   services units (topics/envelope/refs/consent/reminders/traces, egress incl. server-side auth mint/refresh/
   inject and the secret-resolver, `win-env` reg-parsing, tailscale `hostOf`) (#31/#35/#36, 88); and
-  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 448); `test_activity_gossip_live.mjs`
+  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 588 — v1.63.0: todos, plans, the
+  rollup variants, lifetime, eviction, carry-forward across rollovers + a restart); `test_activity_gossip_live.mjs`
   — four loopback "hosts" + a follower: the mesh board, deltas ≤1/s per link, truncation, remote paging / entries /
-  queued fetches, going-down, owner down, forged slices, a legacy hub, dashboards (#70 step 4, 44);
+  queued fetches, going-down, owner down, forged slices, a legacy hub, dashboards, plans (#70 step 4 / 6b, 51);
   `test_dashboard_activity.mjs` — the dashboard's Activity view in jsdom: client-side stale, the status glyph + ring,
   hover times, placeholders, the delta store, the tree, pills / host down / bell, the project cycle, active only, logs
-  (#70 step 5, 62); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
+  (#70 step 5 / 6b — plan items, the plan bar, host tags, per-host headlines; 105); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
   board → deltas ≤1/s, seq-gap resync, page leaves refused, paging into the day files (local + remote), queued fetches
-  + `busy`, gone vs host down, the doorbell flag, the duplicate-hostname warning (#70 step 5, 36). Tests run in
+  + `busy`, gone vs host down, the doorbell flag, the duplicate-hostname warning, plan units + ticks (#70 step 5 / 6b, 43);
+  `test_activity_carry_live.mjs` — the #70 6b carry-forward under the test clock hook: 13 days of seeded files, a real
+  day rollover, a restart a week later rebuilt from the rollover's records alone (11). Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -184,7 +187,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 • `set_behavior {behavior, operation?, scope, match?, as?, secret?}` • `list_behaviors {as?, secret?}` • `clear_behavior {operation?, scope?, match?, as?, secret?}` (#29/#32/#44 per-operation behaviour reminders)
 • `allow_project {project, mode?, as?, secret?}` • `revoke_project {project, as?, secret?}` • `request_project_access {to, reason?, as?, secret?}`
 • `http_request {backend, method?, path?, query?, headers?, body?, json?, as?, secret?}` (#33/#36 egress — present only when a backend is configured)
-• `log {as, secret, path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?, items?}` • `activity {project?, session?, path?, agent?, host?, active_only?, log?, entry?}` (#70 the mesh-wide activity board — see "Log / activity")
+• `log {as, secret, path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?, plan?, items?}` • `activity {project?, session?, path?, agent?, host?, active_only?, log?, entry?}` (#70 the mesh-wide activity board — see "Log / activity")
 • `set_wake {…}` (reserved — unsupported).
 
 **Feature detection (#41):** `profile.names` says which facet the operator CONFIGURED; `capabilities` says
@@ -460,13 +463,13 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
 remote history (step 4, "Mesh-wide" below), the dashboard's **Activity** tree (step 5, "The Activity page" below), and
-the **unified node tree + batch logging** (step 6a, v1.62.0, "The node tree" below). Todos / plans (6b) and the agent
-snippet (6c) follow.
+the **unified node tree + batch logging** (step 6a, v1.62.0, "The node tree" below) and **todos and plans** (step 6b,
+v1.63.0, "Todos and plans" below). The agent snippet (6c) follows.
 
 ### The node tree (v1.62.0, step 6a)
 A session holds ONE TREE of **nodes**. The session itself is the root. Every other node is one of two kinds:
@@ -509,7 +512,8 @@ session follows the **session's own** reports (any message whose owner is the se
 agent) — exactly as the session row always has.
 
 **Rollup** recurses through any depth: a node's bar is its reported progress, else the sum of its children's bars when
-they share a unit, else the mean % of its children that have a bar (6b adds "N of M todos done").
+they share a unit, else the mean % of its children that have a bar, else (6b) "N of M done" over its plan items — see
+"Todos and plans" for how plan items and other children combine.
 
 **Logs.** Every node keeps its **own** bounded log (`log_entries_per_agent` per node). A node's **Log** is the merged log
 of its whole **subtree**, newest first (`own:true` for the node's own entries); each entry carries its `path` and `rel`
@@ -519,25 +523,99 @@ files.
 
 **Limits** (locked): depth ≤ **6** segments; per session **128 agents** and **4096 nodes** of either kind (the root not
 counted); text 240, context name 60, `details` 4 KB, `data` 16 KB (unchanged). A message that needs room **evicts the
-oldest finished agent with its whole subtree** (never an ancestor of its own target; reported in `evicted`) and is
-refused (`too-many-agents` / `too-many-nodes`) only when that can't make room — or when it is `log:false`.
+oldest finished agent with its whole subtree** — v1.63.0: or the oldest ENDED plan (every item done / skipped), and never
+a subtree that still holds an OPEN plan item; never an ancestor of its own target; reported in `evicted` — and is refused
+(`too-many-agents` / `too-many-nodes`) only when that can't make room — or when it writes no record (`log:false`).
 
 **Batch.** `log {…, items:[{ path?, agent?, text, context?, state?, progress?, eta?, stale_after?, details?, data?, log?,
 ref? }, …]}` logs several messages in **one call**, applied **in order**: `{ok:true, results:[one per item, its ref
 echoed], applied, failed}` — a bad item fails alone. Bounds: ≤ **64 items** and ≤ **64 KB** of items JSON; over either,
 the whole call is refused (`too-many-items` / `batch-too-large`; `bad-batch` for an empty / non-array batch or another
-message field beside `items`). Beside `items`, `log` is a default for every item and `path` / `agent` / `context` are
-**address defaults** for the items that name no `path` / `agent` of their own (an item with only a `context` keeps the
-default path / agent). A follower forwards a batch to its gateway in ONE `ACTIVITY` frame; the `logger` WS accepts
-`{type:"log", ref, input:{items:[…]}}`; the script takes `--batch <file.json|->` and, in `--stream`, a line that is a JSON
-array. A batch is gossiped and pushed to dashboards as one coalesced update. An item with `plan` answers `not-yet` (6b).
+message field beside `items`). Beside `items`, `log` is a default for every item and `path` / `agent` are the batch's
+**default address**. **v1.63.0: an item's own `path` / `agent` is RELATIVE to it, like a folder** — `path:"@#70"` +
+item `path:"@B/@~x"` = `@#70/@B/@x`; the default agent stays in front (`agent:"w"` + item `path:"y"` = `w/y`) — and a
+**leading `/`** on the item's first address field makes it absolute from the session root (`"/@other/@~y"`). (6a's rule
+was "an item's own path replaces the default".) The default `context` (a trailing marker) applies only to items naming no
+path / agent; an item with only a `context` keeps the default path / agent and replaces the default context. A follower
+forwards a batch to its gateway in ONE `ACTIVITY` frame; the `logger` WS accepts `{type:"log", ref, input:{items:[…]}}`;
+the script takes `--batch <file.json|->` and, in `--stream`, a line that is a JSON array (both with the same relative
+rule against `--agent` / `--path`). A batch is gossiped and pushed to dashboards as one coalesced update. An item may
+carry a `plan` (v1.63.0).
 
-**Formats (v1.62.0).** Day-file records are **v2** (`{"v":2, …, "path":"spec-70/@Tharsis", …}`; `new_from` marks the first
-persisted record of each node on its chain); 1.58–1.61 records (v1: `agent` / `context`) are **skipped**, never
-misread. Gossip slices are v2 (one unit per node) and hubs declare `activity_gossip:2` — a 1.60/1.61 hub (format 1)
-exchanges no activity with a 1.62 hub (its frames are ignored; remote fetches to it answer `owner-unsupported`).
+**Formats (v1.63.0).** Day-file records are **v3** (`{"v":3, …, "path":"spec-70/@Tharsis", …}`; `new_from` marks the first
+persisted record of each node on its chain); v3 only ADDS to v2 (the `todo` / `skipped` states, `plan_item` + `plan_ix`
+on a plan item's records, `created_at` on a cp, the `cf` carry-forward record), so a 1.62 (v2) record is still read;
+1.58–1.61 records (v1: `agent` / `context`) are **skipped**, never misread. Gossip slices are v3 (one unit per node, a
+plan item with `plan_item` / `plan_ix`) and hubs declare `activity_gossip:3` — a 1.62 hub (format 2, which would misread
+a todo) exchanges no activity with a 1.63 hub (its frames are ignored; remote fetches to it answer `owner-unsupported`).
 
-**Reporting — `log {as, secret, path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?, items?}`.**
+### Todos and plans (v1.63.0, step 6b)
+Opt-in: nothing becomes a todo unless it is created as one, and ordinary contexts are unchanged.
+
+| State | Shown as | Meaning |
+|---|---|---|
+| `todo` | ☐ | planned, not started |
+| `running` / `blocked` | the in-progress mark | being worked on |
+| `done` | ☑ | finished |
+| `skipped` | ~~struck through~~ | dropped from the plan, kept visible so the plan stays honest |
+| `failed` / `idle` | ✗ in a box / the idle mark | as for any context |
+
+- **A todo is a context with a todo status.** A context created by a **plan**, or whose FIRST current line has state
+  `todo`, is remembered as a **plan item** (`plan_item:true` on the board; there is no flag to pass). It stays one after
+  it is ticked: done shows ☑, not ✓, and it keeps the plan lifetime rules below.
+- **Who can be what:** `todo` / `skipped` are context states — an agent or the session gets `bad-agent-state`. `skipped`
+  on an ordinary context, or `todo` on a context that already has a line of its own, is `not-a-plan-item`.
+- **Plans:** `log {path:"@#70", plan:["Spec", "Build", "Test"]}` (script: `--path @#70 --plan "Spec" "Build" "Test"`)
+  creates `@#70/@Spec`, `@#70/@Build`, `@#70/@Test` as ☐ items, in the **given** order (never A→Z); each name is one
+  context segment (≤60 chars, no `/`, a leading `@` is dropped, `root` is reserved; ≤64 names; a repeated name is kept
+  once with a `plan-duplicates` warning; else `bad-plan`). Text is optional with a plan; with text, the target gets its own
+  message first. Each new item is **logged** (a ☐ line whose text is its name, persisted at once) even with `log:false`,
+  and the result lists them: `plan:[{name, path, created?, adopted?, plan_item, state}]`. A plan counts toward the 4096-node
+  budget. A batch item may carry a plan.
+- **Re-planning (the merge rule):** re-sending a plan **never duplicates or resets** an item — an existing item stays
+  exactly as it is (its state, its place); a **new** name is added at the **end**, in the order given; a name **left out**
+  stays where it is. Re-ordering the names moves nothing. An existing context with **no line of its own** (e.g. one a
+  deeper path created) is **adopted** as a ☐ item; one that already has a line is left alone (`plan_item:false`).
+- **Ticking:** `path:"@#70/@~Build", state:"done"` (script: `--path "@#70/@~Build" --done`; `--done` = `--state done`). An
+  `@~` line that carries a state may omit its text: the item keeps its line (its name, or what was last said). An `@~`
+  line with no state on a ☐ item **starts** it (running); `todo` again re-opens an item. Any report naming the path may
+  tick it (the session or any agent).
+- **Never stale:** a plan item never goes stale, in any state, and its own staleness is never shown (nor gone: it shows its
+  own state). An agent working under an item still shows its OWN staleness on its row.
+- **Rollup — "N of M done":** a node with plan items and no reported progress gets an automatic bar: **N = done items, M =
+  items − skipped** (skipped items are resolved and left out; a failed item counts as not done; all skipped → no bar),
+  unit `done` (`{progress}` → "2 of 4 done"), `todos:true`, `skipped:k`, `n` = all items. **Mixed children:** a plan item
+  counts ONLY as a todo of its parent — its own bar (e.g. an agent under it reporting files) shows on its own row, never in
+  the parent's sum. The precedence stays 6a's: the node's reported progress, then the SUM of its ordinary children's bars
+  when they share a unit, then their MEAN %, then the plan's N of M — so ordinary children with bars win over the plan.
+  Up the tree, plan bars sum like any shared unit (two plans → "3 of 9 done").
+- **Lifetime:** `finished_visible_hours` now defaults to **168 (7 days)** (per host as before). **Open** items (todo /
+  running / blocked) **never expire** while their session exists — not in a finished agent's subtree (the agent stays),
+  not in a session that went gone. A **plan** (a node with plan items) **ends** when its last item became done / skipped,
+  or when its owner (the plan node itself if it is an agent, else its nearest agent / the session) finishes, and expires
+  `finished_visible_hours` after that: its items go, and the plan node too when it is a plain context with nothing else
+  under it and no live line. **Eviction** under the hard limits (128 agents / 4096 nodes, the memory budget) takes the
+  oldest finished agents and ended plans first and **never** a subtree that holds an open item; when nothing else can go,
+  the call is refused (`too-many-nodes` / `too-many-agents`).
+- **Carry-forward:** at each **local day rollover** (the gateway checks every 30 s) — and once after a restart's replay
+  when today's file has none yet — the gateway appends a `cf` record of every long-lived node to the NEW day's file:
+  every open plan item **and its ancestors**, and every node whose own state (line, bar, ETA, or its reported activity)
+  would otherwise fall out of the replay window before the next rollover. `{"v":3,"kind":"cf","ts":…,"path":"@#70/@Build",
+  …identity, "current":{…line incl. details/data}, "state", "progress", "eta_at", "created_at", "last_activity",
+  "stale_after_ms", "implicit", "plan_item", "plan_ix", "finished_at"? }` — a full snapshot of that node only (it refreshes
+  nobody's activity, so a quiet agent is as stale after a restart as before). The replay reads only its window, so a plan
+  open for weeks comes back with every item's ☐ / ☑ / skipped / in-progress state, its order and its created_at; older
+  history stays in the older day files and pages as before (a `cf` is never a log entry).
+- **Headline** of a session on several hosts: the host that **most recently SET** a headline (its root line's own time),
+  with each host's own line shown when the row is expanded (`selves`); none has one → the most recently active host.
+- **Dashboard:** plan items render ☐ / the in-progress mark / ☑ / struck-through skipped, as a checklist (their line shows
+  once it says more than the item's name), in creation order; a plan node shows a solid green "N of M done" bar (hover:
+  "2 of 4 done (50%) · 1 skipped (left out) — its plan: 5 items"). **Active only** keeps open items visible (even under a
+  finished agent) and hides ended plans. **Host tags** appear only where a node's host differs from its parent's (a
+  top-level node: from the session's headline host); the session row shows all its hosts and, expanded, each host's own
+  line above its Log.
+
+**Reporting — `log {as, secret, path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?, plan?, items?}`.**
 You report as a registered session (`as` + `secret`). Address a node with `path` (above; omit it for the session itself)
 or the old `agent` + `context` / text prefix — agents never register. The identity is **realm + project + user + session
 name + host** (v1.60.0; + the node path): each host only ever writes its own entities, so the same session or node
@@ -547,8 +625,8 @@ leaves its old host's entries to go stale or gone).
   compiling"`) appends to the build context's log; `@~` on the last segment (`"w/@~build"`, `"@~build compiling"`)
   also makes it that node's **current line**; `"@~root …"` sets your own headline; no address = the session itself, log
   only. `context:"@~build"` does the same as a text prefix (the text is then literal). Quote spaces: `@~"strip 17"`.
-- **State** (`running|blocked|failed|done|idle`) changes only with a current (`@~`) line; done/failed on an **agent's**
-  own line **finishes** it. Stale is computed for agents (quiet longer than `stale_after_min`, or the message's own
+- **State** (`running|blocked|failed|done|idle`, + `todo|skipped` for plan items — v1.63.0) changes only with a current
+  (`@~`) line; done/failed on an **agent's** own line **finishes** it. Stale is computed for agents (quiet longer than `stale_after_min`, or the message's own
   `stale_after`, ≤24h; a context follows its agent); gone = the session left this host's roster (deregister / TTL / its
   process exited), cleared when it comes back.
 - **Progress / ETA** (`"4812/12000 tiles"`, `"3/6"`, `"61%"` / `"15m"`, `"1h25m"`, `"19:27"`) move the node's bar from
@@ -564,12 +642,14 @@ leaves its old host's entries to go stale or gone).
   `log:false` (e.g. every second) and occasionally `log:true`. The bridge checkpoints that progress every
   `progress_checkpoint_sec` so the bar survives a restart.
 - Limits (locked; a change is a version bump): text 240 chars (longer is truncated + `warnings`), context name 60, depth
-  6, 128 agents and 4096 nodes per session (room is made by evicting the oldest *finished* agent with its subtree),
+  6, 128 agents and 4096 nodes per session (room is made by evicting the oldest *finished* agent with its subtree, or an
+  ended plan — never an open plan item),
   `details` 4 KB, `data` 16 KB JSON — keep both small. **Status text is plaintext, realm-wide: never put secrets in it.**
 - Returns `{ ok, id, ts, session, path, agent, context, current, state, stale_at, logged }` (`agent` = the owner agent's
   path, `context` = the target's name when it is a context; + `warnings`, `evicted`; codes like `bad-path`,
-  `path-too-deep`, `context-too-long`, `too-many-agents`, `too-many-nodes`, `activity-disabled`, `activity-loading`,
-  `no-gateway`). A batch returns `{ ok, results, applied, failed }`.
+  `path-too-deep`, `context-too-long`, `too-many-agents`, `too-many-nodes`, `bad-plan`, `bad-agent-state`,
+  `not-a-plan-item`, `activity-disabled`, `activity-loading`, `no-gateway`; + `plan:[…]` with a plan). A batch returns
+  `{ ok, results, applied, failed }`.
 
 **Reading — `activity {project?, session?, path?, agent?, host?, active_only?, log?, entry?}`.** The mesh board: sessions,
 each with `self` (its root node) and `nodes` — every node of its tree, FLAT, with `path`, `kind` (agent | context),
@@ -577,9 +657,9 @@ each with `self` (its root node) and `nodes` — every node of its tree, FLAT, w
 `was` = the reported one — computed by the READER with its own `stale_after_min`; contexts by their agent), `progress` =
 its bar (reported, or the recursive rollup), ETA, `implicit`, visibility and log counts. Sessions are **grouped** by realm
 + project + user + name across hosts: every node (and the root) carries its `host`; a group on one host has `host`, one
-on several has `hosts:[…]`, `multi_host:true`, `self` (the most recently active host's root that has a line of its own)
+on several has `hosts:[…]`, `multi_host:true`, `self` (v1.63.0: the root of the host that most recently SET a headline)
 and `selves` (one per host). `path` (or `agent`) keeps a node and its subtree; `active_only` drops finished / gone agents
-with what is under them. `remote_hosts` lists each remote host held (`sessions`, `seq`, `linked`, `down_at`, `truncated`).
+with what is under them (unless it holds an open plan item) and ended plans. A plan item has `plan_item:true` + `plan_ix`. `remote_hosts` lists each remote host held (`sessions`, `seq`, `linked`, `down_at`, `truncated`).
 `log:{session, project?, user?, host?, path?, agent?, context?, own?, limit?, cursor?}` is a node's log — its SUBTREE
 merged (each entry with `path` + `rel`), or `own:true` for its own entries — newest first, paged: `next_cursor` → pass it
 as `cursor` for the older page; a name on several hosts is `ambiguous-session` (with each candidate's host) unless the
@@ -607,17 +687,20 @@ Ids are `act_<boot nonce>_<ms base36>-<seq>` (the time names the day file). Rete
 phase 1 fills current lines, bars, states and finished status from the newest record carrying them (a cp counts), and
 publishes the board as soon as everything seen is resolved (or after 300 ms); phase 2 fills each agent's history. It
 covers `finished_visible_hours`; a context's `last_activity` also takes the `last` of any repeat line listing it, so it
-isn't stale after a restart. A garbled final line (a crash mid-write) is skipped. A clean shutdown flushes pending
+isn't stale after a restart; a `cf` carry-forward (v1.63.0, "Todos and plans") restores a long-lived node whose own
+records are older than the window. A garbled final line (a crash mid-write) is skipped. A clean shutdown flushes pending
 checkpoints, and so does the Task Tray before it kills the bridges (`POST /admin/prepare-shutdown`, below).
 
 **Config** — an `activity` block in `config.json` (live-reloaded), each key with an `AI_BRIDGE_ACTIVITY_<KEY>` env override:
-`log_retention_days` 7 · `log_entries_per_agent` 200 (in memory) · `stale_after_min` 15 · `finished_visible_hours` 24 ·
+`log_retention_days` 7 · `log_entries_per_agent` 200 (in memory) · `stale_after_min` 15 · `finished_visible_hours` 168 (v1.63.0; was 24; also the replay window) ·
 `memory_budget_mb` 64 (over it, the oldest finished agents, then the oldest log entries, are evicted) ·
 `progress_checkpoint_sec` 60 (10–3600, 0 = off) · `enabled` true. Test-only env: `AI_BRIDGE_ACTIVITY_CHECKPOINT_MS`,
 `_FWD_MS`, `_LOAD_WAIT_MS`, `_GC_MS`, `_RETENTION_MS`, `_INDEX_MAX`, `_PHASE1_MS`; step 4 (env only, every host should
 agree): `_GOSSIP_MS` (1000), `_SLICE_MAX_BYTES` (262144), `_PAGE_ENTRIES` (50), `_PAGE_BYTES` (32768), `_FETCH_RATE` (4/s),
-`_REMOTE_MS` (4000), `_DOWN_HOLD_MS` (30000); `AI_BRIDGE_TEST_ACTIVITY_TAP=1` (`activity {tap:true}` returns the recent
-frames) and `AI_BRIDGE_TEST_HOSTNAME` (two loopback "hosts" on one machine) are for tests.
+`_REMOTE_MS` (4000), `_DOWN_HOLD_MS` (30000); v1.63.0: `_ROLLOVER_CHECK_MS` (30000, the day-rollover check);
+`AI_BRIDGE_TEST_ACTIVITY_TAP=1` (`activity {tap:true}` returns the recent frames, the replay stats and the last
+carry-forward), `AI_BRIDGE_TEST_HOSTNAME` (two loopback "hosts" on one machine) and `AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS`
+(v1.63.0: shifts the activity clock — report times, day files, the window, the rollover) are for tests.
 
 ### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
 Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
@@ -741,12 +824,16 @@ node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agen
 node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agent tiles --ctx "@~Tharsis" --progress 4812/12000:tiles --eta 1h25m
 ```
 
-`--session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S] [--progress 4812/12000:tiles]
-[--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json] [--no-log] ["<text>"]` — the
+`--session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles]
+[--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json] [--no-log] ["<text>"] [--plan "A" "B" …]` — the
 `log` tool's fields as flags (v1.62.0: `--path` addresses any node — `--path "@#70/@step4/spec-70"`, `--path
 "spec-70/@~Tharsis"` — and combines with `--agent` / `--ctx` / a text prefix exactly as the tool's fields do).
-**`--batch <items.json|->`** (v1.62.0) sends a JSON array of items (the tool's item fields + `ref`; ≤64, ≤64 KB) in ONE
-call — `--agent` / `--path` / `--ctx` / `--no-log` are the defaults — and prints ONE line `{ok, results, applied,
+**`--plan "A" "B" …`** (v1.63.0) creates ☐ plan items under the node `--path` / `--agent` names, in that order — every
+argument after `--plan` up to the next `--flag` is a name, so put text BEFORE `--plan` (or after `--`): `--path "@~#70"
+"the 6b plan" --plan Spec Build Test`. **`--done`** = `--state done`, and a tick needs no text: `--path "@#70/@~Build"
+--done`. **`--batch <items.json|->`** (v1.62.0) sends a JSON array of items (the tool's item fields + `ref`; ≤64, ≤64 KB) in ONE
+call — `--agent` / `--path` / `--ctx` / `--no-log` are the defaults (v1.63.0: an item's own path is relative to them; a
+leading `/` = absolute) — and prints ONE line `{ok, results, applied,
 failed}`: exit 0 when every item applied, 4 when the bridge refused the call or any item failed, 64 for a bad file or
 the bounds. The text is the positional argument (several words are joined; anything after `--` is
 text); it is optional when `--progress`/`--eta` is given (default `"{progress}"` / `"{eta}"`). `--ctx` sets the context

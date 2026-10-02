@@ -1183,6 +1183,70 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.63.0):** *the agent activity board, step 6b — TODOS AND PLANS, their lifetime and the day-rollover
+  carry-forward, plus three agreed 6a adjustments (#70).* Decisions of 2026-10-02 ("Decisions before 6b"). Nothing of #70
+  was deployed. **States:** `ACTIVITY_STATES` gains `todo` (☐) and `skipped` (struck through) — context states only
+  (`bad-agent-state` for an agent or the session, at parse time). **Plan items** (`node.plan` + `plan_ix`, never cleared,
+  no caller-visible flag): a context created by `plan:[…]`, adopted by one (an existing context with no line of its own),
+  or whose FIRST current line is `todo`. `skipped` on an ordinary context, `todo` on one that already has a line, or a
+  plain (non-`@~`) todo on a new one → `not-a-plan-item`. An `@~` line without a state on a ☐ item starts it (running); an
+  `@~` line WITH a state may omit text (`keepText`: the line keeps its text — else the node's name) — the "tick", which
+  the script spells `--done` (= `--state done`). A plan item never goes stale and never shows gone (`staleAt` null,
+  `effectiveState` = its own state); its owner agent still shows its own. **Plans** (`parsePlan`; `log {plan:[…]}`, a
+  batch item's `plan`, the script's `--plan A B …` — every argument up to the next `--flag`): 1..64 names, one context
+  segment each (a leading `@` dropped, repeats folded + `plan-duplicates`, else `bad-plan`; depth checked); text optional
+  (`planOnly`: no message of the target's own; with text the target's message goes first). Each new / adopted item gets a
+  LOGGED ☐ entry (text = its name, `plan_item` + `plan_ix`) even under `log:false`, so a plan always reaches the files;
+  `apply` returns `records:[…]` (the target's entry, then the items — the bridge persists them in order) and
+  `plan:[{name, path, created?, adopted?, plan_item, state}]`. **Re-plan merge:** an existing item is never duplicated or
+  reset (state and place kept); new names are appended at the END in the given order; missing names stay; re-ordering
+  moves nothing; a context with a line of its own is left alone (`plan_item:false`). Children keep CREATION order
+  (created_at, then `plan_ix`, then key) live, on the dashboard and after a replay (which now rebuilds siblings from
+  created_at + plan_ix + the record order instead of A→Z). **Rollup:** `rollupStrategies` get `(bars of the ORDINARY
+  children, the PLAN-ITEM children)` — sum (shared unit), then mean %, then "N of M done" (`{done, total: items −
+  skipped, unit:'done', todos:true, skipped, n}`; all skipped → no bar; failed = not done). So a plan item counts only as a
+  todo of its parent (its own bar — e.g. from an agent under it — stays on its row) and ordinary children with bars win on
+  a mixed node (6a's precedence); plan bars sum up the tree (`todos` kept). **Lifetime:** `finished_visible_hours`
+  defaults to **168** (also the replay window). `expire` never removes anything holding an OPEN item (todo / running /
+  blocked: `openPlanKeys` = the open items and all their ancestors) — a finished agent or a GONE session with one stays;
+  a plan ENDS when its last item became done / skipped or its owner (the plan node if an agent, else its nearest agent /
+  the session) finished (`planEndAt`) and expires a window later (`planRemoval`: its items, plus the plan node when it is
+  a plain context left with nothing else and no live line). **Eviction** (`evictionCandidates`, now shared by `apply` and
+  `enforceBudget`): finished agents and ENDED plans, oldest first, never a subtree holding an open item, never one on the
+  target's path; else `too-many-nodes` / `too-many-agents` (the message says open items are never evicted). **Carry-
+  forward** (`planCarryForward`): `cf` records `{v:3, kind:"cf", ts, path, …identity, current (full line incl. details /
+  data), state, progress, eta_at, created_at, last_activity, stale_after_ms, implicit, plan_item?, plan_ix?, finished_at?,
+  new_from?}` for every open plan item + all its ancestors and every node whose own state (line / bar / ETA / reported
+  activity) last reached the files before now − window + 25 h — each node tracks it in `pt {a, l, p, e}` (set by entries,
+  cps and cfs; rebuilt by the replay from what the window held) — parents first, children in creation order. The replay
+  takes a `cf` as a full snapshot of its TARGET only (its own created_at / last_activity / implicit; nobody's activity is
+  refreshed, so a quiet agent stays exactly as stale), reports `cfs` and `cf_today`. **The bridge:** `actNow()` = the wall
+  clock + the test-only `AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS` drives every activity time; a timer
+  (`AI_BRIDGE_ACTIVITY_ROLLOVER_CHECK_MS`, 30 s) calls `actRollover`, which writes the carry-forward into the new day's
+  file when the local day changed (serialised with the checkpoint writer); after a replay without a cf in today's file it
+  writes one at once ("startup"). `activity {tap:true}` (test-only) shows the replay stats and the last carry-forward.
+  **6a adjustments:** batch item paths are RELATIVE to the batch's default agent + path (`withDefaults`: path = default
+  path / item agent / item path, the default agent kept; a leading `/` on the item's first address field = absolute; the
+  default context only for items without an address of their own) — the tool, the logger WS (both via `splitBatch`), the
+  script's `--batch` and `--stream`; the multi-host headline (`self`) = the root with the newest CURRENT-LINE time (6a
+  took the most recently ACTIVE host among those with a line — different when a host set its headline earlier but kept
+  reporting later; tie → most recently active; no line anywhere → most recently active); host tags only where a node's
+  host differs from its parent's (a top-level node compares with the headline host; `AimbAct.hostTagOn`), and an expanded
+  multi-host session shows each host's own line above its Log. **Formats:** records + slices v3 (`ACTIVITY_FORMAT` 3);
+  `recordKind` reads v2 and v3 (v3 only adds) and the new `cf` kind; slices must be v3 and hubs declare
+  `activity_gossip:3` (a 1.62 hub would misread a todo, so its frames are ignored and fetches to it answer
+  `owner-unsupported`). Gossip nodes and dashboard units carry `plan_item` + `plan_ix`; a wire agent can't be todo /
+  skipped (coerced to running). **The dashboard:** plan items render as a checklist — ☐ / the in-progress mark / ☑ / a
+  struck-through skipped row (failed: ✗ in a box), the line only once it says more than the item's name — in creation
+  order; a plan node's "N of M done" bar is solid green (tooltip "2 of 4 done (50%) · 1 skipped (left out) — its plan: 5
+  items"); "Active only" keeps open items (even under a finished agent) and hides ended plans; the legend adds the plan
+  marks. **Tests:** `test_activity_unit` 516 → **588**; `test_log_live` 66 → **75**; `test_log_script_live` 50 → **54**;
+  `test_activity_gossip_live` 48 → **51**; `test_activity_dashboard_live` 41 → **43**; `test_dashboard_activity` 85 →
+  **105**; new `test_activity_carry_live` **11** (13 days of seeded files, a real rollover under the clock hook, a restart
+  a week later whose window holds only the rollover's records). Against the 1.62 library / bridge / page / script:
+  `test_activity_unit` 52 FAIL (crashed sections count once), `test_log_live` 16, `test_log_script_live` 9,
+  `test_activity_gossip_live` 5, `test_activity_dashboard_live` 2, `test_dashboard_activity` 4 (the 6b block crashes:
+  no `planGlyph`), `test_activity_carry_live` 10 of 11. Full suite **2037 passed, 0 failed** (52 files, typecheck clean, first run; no #74 flakes).
 - **Built (v1.62.0):** *the agent activity board, step 6a of the revised step 6 — the UNIFIED NODE TREE plus batch
   logging (#70).* Decisions of 2026-10-02 ("Step 6 redesign"). Nothing of #70 was deployed, so record and wire formats
   changed freely (no converters; old-format data is skipped). **The model (`lib/activity.js`):** a session holds ONE tree

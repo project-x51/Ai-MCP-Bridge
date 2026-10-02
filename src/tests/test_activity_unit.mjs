@@ -39,12 +39,12 @@ check('limits: the locked #70 values (6a: depth 6, 128 agents, 4096 nodes, batch
   && A.ACTIVITY_LIMITS.agentsPerSession === 128 && A.ACTIVITY_LIMITS.nodesPerSession === 4096 && A.ACTIVITY_LIMITS.detailsBytes === 4096
   && A.ACTIVITY_LIMITS.dataBytes === 16384 && A.ACTIVITY_LIMITS.staleAfterMaxMs === 24 * HOUR && A.ACTIVITY_LIMITS.batchItems === 64 && A.ACTIVITY_LIMITS.batchBytes === 65536
   && !('contextsPerAgent' in A.ACTIVITY_LIMITS) && !('pathDepth' in A.ACTIVITY_LIMITS))
-check('format: records + slices are v2 (6a)', A.ACTIVITY_FORMAT === 2 && mk().v === 2)
+check('format: records + slices are v3 (6b)', A.ACTIVITY_FORMAT === 3 && mk().v === 3)
 check('limits + defaults are frozen', Object.isFrozen(A.ACTIVITY_LIMITS) && Object.isFrozen(A.ACTIVITY_DEFAULTS) && Object.isFrozen(A.ACTIVITY_STATES))
-check('defaults: the #70 per-host config (+ step 2 progress_checkpoint_sec)', J(A.ACTIVITY_DEFAULTS) === J({ log_retention_days: 7, log_entries_per_agent: 200, stale_after_min: 15, finished_visible_hours: 24, memory_budget_mb: 64, progress_checkpoint_sec: 60, enabled: true }))
-check('states: running|blocked|failed|done|idle', J(A.ACTIVITY_STATES) === J(['running', 'blocked', 'failed', 'done', 'idle']))
+check('defaults: the #70 per-host config (+ step 2 progress_checkpoint_sec; 6b: finished_visible_hours 168 = 7 days)', J(A.ACTIVITY_DEFAULTS) === J({ log_retention_days: 7, log_entries_per_agent: 200, stale_after_min: 15, finished_visible_hours: 168, memory_budget_mb: 64, progress_checkpoint_sec: 60, enabled: true }))
+check('states: running|blocked|failed|done|idle + (6b) todo|skipped', J(A.ACTIVITY_STATES) === J(['running', 'blocked', 'failed', 'done', 'idle', 'todo', 'skipped']))
 check('env names: AI_BRIDGE_ACTIVITY_<KEY>', A.ACTIVITY_ENV.stale_after_min === 'AI_BRIDGE_ACTIVITY_STALE_AFTER_MIN' && A.ACTIVITY_ENV.enabled === 'AI_BRIDGE_ACTIVITY_ENABLED' && A.ACTIVITY_ENV.progress_checkpoint_sec === 'AI_BRIDGE_ACTIVITY_PROGRESS_CHECKPOINT_SEC' && Object.keys(A.ACTIVITY_ENV).length === 7)
-check('message fields: + path (6a)', J(A.MESSAGE_FIELDS) === J(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log']))
+check('message fields: + path (6a), + plan (6b)', J(A.MESSAGE_FIELDS) === J(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan']))
 
 // ================================================================= resolveConfig
 await section(async () => {
@@ -205,11 +205,11 @@ await section(async () => {
   check('agent: allowed punctuation + unicode letters', M({ text: 'x', agent: 'w_1.a:b#2+c-d' }) !== null && M({ text: 'x', agent: 'agënt/分析' }) !== null)
   check('agent: segment 48 OK, 49 rejected', M({ text: 'x', agent: rep('a', 48) }) !== null && C({ text: 'x', agent: rep('a', 49) }) === 'bad-agent')
   check('agent: non-string -> bad-agent', C({ text: 'x', agent: 7 }) === 'bad-agent')
-  check('state: each reported state accepted (case-insensitive)', A.ACTIVITY_STATES.every(s => M({ text: 'x', state: s.toUpperCase() }).state === s))
+  check('state: each reported state accepted (case-insensitive; 6b: todo / skipped on a context)', A.ACTIVITY_STATES.every(s => M({ text: 'x', path: '@c', state: s.toUpperCase() }).state === s))
   check('state: absent -> null (apply picks the default)', M({ text: 'x' }).state === null && M({ text: 'x', state: '' }).state === null)
   check('state: derived/unknown states rejected', C({ text: 'x', state: 'stale' }) === 'bad-state' && C({ text: 'x', state: 'gone' }) === 'bad-state' && C({ text: 'x', state: 'ok' }) === 'bad-state' && C({ text: 'x', state: 3 }) === 'bad-state')
   check('input: non-object -> bad-input', C(null) === 'bad-input' && C([]) === 'bad-input' && C('text') === 'bad-input')
-  check('input: plan (6b) -> not-yet', C({ text: 'x', plan: ['A', 'B'] }) === 'not-yet')
+  check('input: plan (6b) is parsed (no longer not-yet)', J(M({ text: 'x', plan: ['A', 'B'] }).plan) === J(['A', 'B']))
   const r = P({ text: 'x', state: 'nope' })
   check('input: a failure carries code + a human "what"', r.ok === false && r.code === 'bad-state' && typeof r.what === 'string' && r.what.length > 5)
 })
@@ -297,7 +297,7 @@ await section(async () => {
     && sess.nodes.has('') && sess.nodes.size === 1 && sess.origin === 'HOST-A' && root(st, S1).kind === 'agent')
   check('apply: a plain message logs to the root without setting the current line', root(st, S1).log.length === 1 && root(st, S1).current === null)
   check('apply: in-memory entry is small (no details/data/path keys; current:false omitted)', J(Object.keys(root(st, S1).log[0])) === J(['id', 'ts', 'text', 'state']))
-  check('apply: the returned entry carries identity + path for the JSONL (v2)', r.entry.v === 2 && r.entry.session === 'Bridget' && r.entry.project === 'AIMB' && r.entry.path === '' && r.entry.origin === 'HOST-A'
+  check('apply: the returned entry carries identity + path for the JSONL (v3)', r.entry.v === 3 && r.entry.session === 'Bridget' && r.entry.project === 'AIMB' && r.entry.path === '' && r.entry.origin === 'HOST-A'
     && r.entry.host === 'HOST-A' && r.entry.user === 'robin' && r.entry.current === false && r.entry.details === null && r.entry.data === null && !('agent' in r.entry) && !('context' in r.entry))
   const r2 = say(st, S1, { text: 'second' }, T0 + 1)
   check('apply: entry ids unique + ordered', r2.id !== r.id && r2.id > r.id)
@@ -630,7 +630,7 @@ await section(async () => {
 
 // ================================================================= views: isActive / visible / expire (subtrees)
 await section(async () => {
-  const st = mk(), I = S1
+  const st = mk({ finished_visible_hours: 24 }), I = S1
   say(st, I, { agent: 'live', text: 'x' }, T0)
   say(st, I, { agent: 'fin', text: '@~root done', state: 'done' }, T0)
   say(st, I, { path: 'fin/@notes', text: 'note' }, T0)
@@ -660,7 +660,7 @@ await section(async () => {
   say(st, I, { agent: 'w', text: '@~build compiling', progress: '2/4 files', eta: '10m', details: 'SECRET-DETAILS-TEXT', data: { marker: 'SECRET-DATA-VALUE' } }, T0)
   say(st, I, { agent: 'w', text: 'LOG-ONLY-ENTRY-TEXT' }, T0 + 1)
   const snap = A.snapshot(st), js = J(snap)
-  check('snapshot: shape { v:2, origin, sessions:[{ …, nodes:[…] }] }', snap.v === 2 && snap.origin === 'HOST-A' && snap.sessions.length === 1 && Array.isArray(snap.sessions[0].nodes) && !('agents' in snap.sessions[0]) && !('self' in snap.sessions[0]))
+  check('snapshot: shape { v:3, origin, sessions:[{ …, nodes:[…] }] }', snap.v === 3 && snap.origin === 'HOST-A' && snap.sessions.length === 1 && Array.isArray(snap.sessions[0].nodes) && !('agents' in snap.sessions[0]) && !('self' in snap.sessions[0]))
   check('snapshot: NO details / data / log entries', !js.includes('SECRET-DETAILS-TEXT') && !js.includes('SECRET-DATA-VALUE') && !js.includes('LOG-ONLY-ENTRY-TEXT') && !js.includes('"log"') && !js.includes('"details"') && !js.includes('"data"'))
   const c = snap.sessions[0].nodes.find(x => x.path === 'w/@build')
   check('snapshot: a node carries its current line (has_details/has_data flags) + progress + eta', c.current.text === 'compiling' && c.current.has_details === true && c.current.has_data === true
@@ -721,7 +721,7 @@ await section(async () => {
     && A.getSession(here, { session: 'Linux', project: 'X' }, 'HOST-D').origin === 'HOST-D')
   check('merge: bad origin / bad snapshot rejected', A.mergeSnapshot(here, '', snapB).code === 'bad-origin' && A.mergeSnapshot(here, 'HOST-E', null).code === 'bad-snapshot' && A.mergeSnapshot(here, 'HOST-E', { v: 2, sessions: 'x' }).code === 'bad-snapshot' && !here.remote.has('HOST-E'))
   check('merge (6a): a v1 (1.61) snapshot is refused bad-version, nothing held', A.mergeSnapshot(here, 'HOST-E', { v: 1, origin: 'HOST-E', sessions: [{ session: 'Old', project: 'P', self: {}, agents: [{ path: 'a' }] }] }).code === 'bad-version' && !here.remote.has('HOST-E'))
-  const empty = A.mergeSnapshot(here, 'HOST-D', { v: 2, origin: 'HOST-D', sessions: [] })
+  const empty = A.mergeSnapshot(here, 'HOST-D', { v: 3, origin: 'HOST-D', sessions: [] })
   check('merge: an empty slice clears that origin\'s sessions', empty.changed && A.getSession(here, { session: 'Linux', project: 'X' }, 'HOST-D') === null)
   check('dropOrigin: forgets a host; false when unknown', A.dropOrigin(here, 'HOST-D') === true && !here.remote.has('HOST-D') && A.dropOrigin(here, 'HOST-D') === false && here.remote.has('HOST-C'))
   const lin = root(here, { session: 'Linux', project: 'X' }, 'HOST-C')
@@ -731,7 +731,7 @@ await section(async () => {
   const all = A.allSessions(here)
   check('allSessions: local first, then origins sorted', all.length === 3 && all[0].origin === 'HOST-A' && all[1].origin === 'HOST-B' && all[2].origin === 'HOST-C')
   // defensive normalisation of a hostile/junk slice
-  const junk = { v: 2, origin: 'EVIL', sessions: [
+  const junk = { v: 3, origin: 'EVIL', sessions: [
     null, 'x', { project: 'no-session-name' },
     { session: 'Big', project: 'P', nodes: Array.from({ length: 200 }, (_, i) => ({ path: `a${i}`, created_at: T0, last_activity: T0, current: { id: 'i', ts: T0, text: rep('t', 500), state: 'weird', details: 'LEAKED-DETAILS', data: { leak: 1 } } })) },
     { session: 'Paths', project: 'P', nodes: [{ path: 'a/b/c/d/e/f/g' }, { path: 'has space' }, { path: 'ok' }, { path: 'OK' }, { path: 'x/@~y' }, { path: 5 }] },
@@ -877,7 +877,7 @@ await section(async () => {
 await section(async () => {
   const st = mk(), I = S1
   const a = say(st, I, { agent: 'w', text: '@~build go' }, T0).entry
-  check('markers: the first record of a session carries new_from 0 (everything on its chain is new); v2', a.new_from === 0 && a.v === 2 && !('new_session' in a))
+  check('markers: the first record of a session carries new_from 0 (everything on its chain is new); v3', a.new_from === 0 && a.v === 3 && !('new_session' in a))
   const b = say(st, I, { agent: 'w', text: '@build more' }, T0 + 1).entry
   check('markers: later records of the same nodes carry none', !('new_from' in b))
   const c2 = say(st, I, { agent: 'w', text: 'agent note' }, T0 + 2).entry
@@ -1003,14 +1003,14 @@ await section(async () => {
   const write = ws => { for (const w of ws) { if (w.rewrite) { check('rep rewrite: the open repeat line IS the file\'s last line', file.length && file.at(-1).rep !== undefined); file[file.length - 1] = w.rec } else file.push(w.rec) } return ws }
   say(st, I, { agent: 'w', context: '@~scan', progress: '1/100', log: false }, T0)
   const w1 = write(tick(T0 + MIN))
-  check('cp: a node changed by log:false -> one full v2 cp line (path) with a per-file key', w1.length === 1 && w1[0].kind === 'cp' && w1[0].rec.kind === 'cp' && w1[0].rec.v === 2 && w1[0].rec.k === 1 && w1[0].rec.progress.done === 1
+  check('cp: a node changed by log:false -> one full v3 cp line (path) with a per-file key', w1.length === 1 && w1[0].kind === 'cp' && w1[0].rec.kind === 'cp' && w1[0].rec.v === 3 && w1[0].rec.k === 1 && w1[0].rec.progress.done === 1
     && w1[0].rec.current.text === '{progress}' && w1[0].rec.path === 'w/@scan' && w1[0].rec.new_from === 0)
   check('cp: nothing live -> nothing written', tick(T0 + 2 * MIN).length === 0)
   for (let i = 0; i < 3; i++) {
     say(st, I, { agent: 'w', context: '@~scan', progress: '1/100', log: false }, T0 + (2 + i) * MIN + 1000)
     write(tick(T0 + (3 + i) * MIN))
   }
-  check('rep: unchanged-but-alive intervals -> ONE v2 repeat line whose n increments (rewritten in place)', file.length === 2 && file[1].v === 2 && J(file[1].rep) === '[1]' && file[1].n === 3 && file[1].since === T0 + 3 * MIN && file[1].last === T0 + 5 * MIN)
+  check('rep: unchanged-but-alive intervals -> ONE v3 repeat line whose n increments (rewritten in place)', file.length === 2 && file[1].v === 3 && J(file[1].rep) === '[1]' && file[1].n === 3 && file[1].since === T0 + 3 * MIN && file[1].last === T0 + 5 * MIN)
   say(st, I, { agent: 'w', context: '@~scan', progress: '50/100', log: false }, T0 + 5 * MIN + 1000)
   say(st, I, { path: 'w/@other/@~root', text: 'x', log: false }, T0 + 5 * MIN + 2000)
   const w2 = write(tick(T0 + 6 * MIN))
@@ -1082,7 +1082,7 @@ function genMessages(seed, n, { unlogged = 0 } = {}) {
   for (let i = 0; i < n; i++) {
     t += 1000 + Math.floor(r() * 90000)
     const input = { ...pick(addrs), text: pick(ctxs) + `m${i} {progress}` }
-    if (r() < 0.3) input.state = pick(A.ACTIVITY_STATES)
+    if (r() < 0.3) input.state = pick(['running', 'blocked', 'failed', 'done', 'idle'])   // the agent / ordinary-context states (6b's todo/skipped have their own tests)
     if (r() < 0.25) input.progress = r() < 0.15 ? 'none' : `${Math.floor(r() * 50)}/${50 + Math.floor(r() * 50)} ${pick(['tiles', 'Tiles', '', 'files'])}`
     if (r() < 0.2) input.eta = r() < 0.2 ? 'none' : `${1 + Math.floor(r() * 90)}m`
     if (r() < 0.1) input.stale_after = `${5 + Math.floor(r() * 120)}m`
@@ -1237,7 +1237,7 @@ await section(async () => {
 
 // ================================================================= the mesh board — grouped by session across hosts
 await section(async () => {
-  const a = mk({}, 'HOST-A'), b = mk({}, 'HOST-B'), here = mk({}, 'HOST-A')
+  const a = mk({}, 'HOST-A'), b = mk({}, 'HOST-B'), here = mk({ finished_visible_hours: 24 }, 'HOST-A')
   const ID = { session: 'Twin', project: 'AIMB', user: 'robin' }
   say(a, ID, { agent: 'worker', text: '@~root on A' }, T0)
   say(b, { ...ID, session: 'TWIN' }, { agent: 'worker', text: '@~root on B' }, T0 + MIN)
@@ -1282,14 +1282,14 @@ await section(async () => {
   for (let i = 1; i <= 5; i++) say(src, ID, { agent: `a${i}`, text: `@~root agent ${i}` }, T0 + i * 1000)
   const send = (opts, seq, base) => { const p = A.planSlice(src, pub, opts); return p.body ? { p, frame: { epoch: 'E1', seq, ...(base != null ? { base } : {}), ...JSON.parse(J(p.body)) } } : { p, frame: null } }
   let { p, frame } = send({ full: true }, 1)
-  check('planSlice full: v2, every node (root + 5), no remove, not truncated', frame.v === 2 && frame.full === true && frame.sessions.length === 1 && frame.sessions[0].nodes.length === 6 && !frame.remove && !frame.truncated && p.entities === 6)
+  check('planSlice full: v3, every node (root + 5), no remove, not truncated', frame.v === 3 && frame.full === true && frame.sessions.length === 1 && frame.sessions[0].nodes.length === 6 && !frame.remove && !frame.truncated && p.entities === 6)
   check('planSlice full: NO details/data/log on the wire', !J(frame).includes('"details"') && !J(frame).includes('"log"'))
   const m1 = A.applySlice(dst, 'HOST-B', frame)
   check('applySlice full: replaces the origin\'s slice, records epoch/seq', m1.ok && m1.full && dst.remote.get('HOST-B').seq === 1 && dst.remote.get('HOST-B').epoch === 'E1' && agentCount(A.getSession(dst, ID, 'HOST-B')) === 5)
   check('planSlice delta: nothing changed -> no frame', send({}, 2, 1).frame === null)
   say(src, ID, { agent: 'a2', text: '@~root agent 2 moved on' }, T0 + 10000)
   ;({ frame } = send({}, 2, 1))
-  check('planSlice delta: carries ONLY the changed node (+ its session header)', frame && !frame.full && frame.v === 2 && frame.sessions.length === 1 && J(frame.sessions[0].nodes.map(x => x.path)) === J(['a2']) && frame.sessions[0].session === 'S')
+  check('planSlice delta: carries ONLY the changed node (+ its session header)', frame && !frame.full && frame.v === 3 && frame.sessions.length === 1 && J(frame.sessions[0].nodes.map(x => x.path)) === J(['a2']) && frame.sessions[0].session === 'S')
   const m2 = A.applySlice(dst, 'HOST-B', frame)
   check('applySlice delta: patches that node only; seq advances', m2.ok && m2.changed && dst.remote.get('HOST-B').seq === 2 && N(dst, ID, 'a2', 'HOST-B').current.text === 'agent 2 moved on' && N(dst, ID, 'a1', 'HOST-B').current.text === 'agent 1')
   // 6a: a nested change — only the nodes that changed travel (the target + the agent whose last_activity moved), never the whole subtree
@@ -1303,8 +1303,8 @@ await section(async () => {
   A.applySlice(dst, 'HOST-B', frame)
   check('applySlice: the receiver rolls up through the nested nodes itself', A.rollup(A.getSession(dst, ID, 'HOST-B'), N(dst, ID, 'a3', 'HOST-B')).done === 2)
   check('applySlice delta: a replayed / skipped delta is refused out-of-sync', A.applySlice(dst, 'HOST-B', frame).code === 'out-of-sync' && A.applySlice(dst, 'HOST-B', { ...frame, base: 7, seq: 8 }).code === 'out-of-sync'
-    && A.applySlice(dst, 'HOST-B', { ...frame, epoch: 'OTHER', base: 4, seq: 5 }).code === 'out-of-sync' && A.applySlice(dst, 'HOST-C', { v: 2, epoch: 'E1', base: 0, seq: 1, sessions: [] }).code === 'out-of-sync')
-  check('applySlice: a sync beat (empty delta, base === seq) is accepted, unchanged', (r => r.ok && r.changed === false)(A.applySlice(dst, 'HOST-B', { v: 2, epoch: 'E1', base: 4, seq: 4, sessions: [] })))
+    && A.applySlice(dst, 'HOST-B', { ...frame, epoch: 'OTHER', base: 4, seq: 5 }).code === 'out-of-sync' && A.applySlice(dst, 'HOST-C', { v: 3, epoch: 'E1', base: 0, seq: 1, sessions: [] }).code === 'out-of-sync')
+  check('applySlice: a sync beat (empty delta, base === seq) is accepted, unchanged', (r => r.ok && r.changed === false)(A.applySlice(dst, 'HOST-B', { v: 3, epoch: 'E1', base: 4, seq: 4, sessions: [] })))
   check('applySlice (6a): a v1 (1.61) frame is refused bad-version — full or delta — and nothing changes', A.applySlice(dst, 'HOST-B', { v: 1, full: true, epoch: 'Z', seq: 1, sessions: [] }).code === 'bad-version'
     && A.applySlice(dst, 'HOST-B', { epoch: 'E1', base: 4, seq: 5, sessions: [] }).code === 'bad-version' && dst.remote.get('HOST-B').seq === 4 && agentCount(A.getSession(dst, ID, 'HOST-B')) === 5)
   // removals: a subtree evicted / expired + a whole session gone
@@ -1312,7 +1312,7 @@ await section(async () => {
   ;({ frame } = send({}, 5, 4)); A.applySlice(dst, 'HOST-B', frame)
   say(src, ID, { path: 'a3/@~root', text: 'a3 done', state: 'done' }, T0 + 14000)
   ;({ frame } = send({}, 6, 5)); A.applySlice(dst, 'HOST-B', frame)
-  A.expire(src, T0 + 14000 + 25 * HOUR)
+  A.expire(src, T0 + 14000 + 169 * HOUR)   // 6b: the 7-day default window
   src.local.delete(A.sessionKey({ session: 'T', project: 'P', user: 'u', host: 'HOST-B' }))
   ;({ frame } = send({}, 7, 6))
   check('planSlice delta: removals — every node of the expired subtree and the whole session, by identity', frame && J(frame.remove.map(x => [x.session, x.path || null]).sort()) === J([['S', 'a3'], ['S', 'a3/@Tharsis'], ['S', 'a3/@Tharsis/@z12'], ['T', null]]), J(frame && frame.remove))
@@ -1323,21 +1323,21 @@ await section(async () => {
   const rcv = mk({}, 'HOST-Z'), sp = A.createPub()
   say(src, ID, { path: 'p/@c/@d', text: 'x' }, T0 + 20000)
   A.applySlice(rcv, 'HOST-B', { epoch: 'q', seq: 1, ...JSON.parse(J(A.planSlice(src, sp, { full: true }).body)) })
-  A.applySlice(rcv, 'HOST-B', { v: 2, epoch: 'q', seq: 2, base: 1, sessions: [], remove: [{ session: 'S', project: 'P', user: 'u', path: 'p' }] })
+  A.applySlice(rcv, 'HOST-B', { v: 3, epoch: 'q', seq: 2, base: 1, sessions: [], remove: [{ session: 'S', project: 'P', user: 'u', path: 'p' }] })
   check('applySlice: a node removal on the receiver removes its subtree', !N(rcv, ID, 'p', 'HOST-B') && !N(rcv, ID, 'p/@c/@d', 'HOST-B') && !!N(rcv, ID, 'a1', 'HOST-B'))
   // a CHILD that arrives before its parent (a truncated frame) is held and linked once the parent arrives
   const r2 = mk({}, 'HOST-Y')
-  A.applySlice(r2, 'HOST-B', { v: 2, full: true, epoch: 'o', seq: 1, sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: '' }, { path: 'kid/@ctx', current: { id: 'k', ts: T0, text: 'orphan for now', state: 'running' } }] }] })
+  A.applySlice(r2, 'HOST-B', { v: 3, full: true, epoch: 'o', seq: 1, sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: '' }, { path: 'kid/@ctx', current: { id: 'k', ts: T0, text: 'orphan for now', state: 'running' } }] }] })
   const os2 = A.getSession(r2, ID, 'HOST-B')
   check('orphans: a node whose parent has not arrived is held (not linked under the root)', !!os2.nodes.get('kid/@ctx') && J(A.childrenOf(os2, os2.nodes.get('')).map(n => n.path)) === '[]')
-  A.applySlice(r2, 'HOST-B', { v: 2, epoch: 'o', seq: 2, base: 1, sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: 'kid' }] }] })
+  A.applySlice(r2, 'HOST-B', { v: 3, epoch: 'o', seq: 2, base: 1, sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: 'kid' }] }] })
   check('orphans: ... and linked once the parent arrives', J(A.childrenOf(os2, os2.nodes.get('kid')).map(n => n.path)) === J(['kid/@ctx']) && J(A.childrenOf(os2, os2.nodes.get('')).map(n => n.path)) === J(['kid']))
   const forged = JSON.parse(J(A.planSlice(src, A.createPub(), { full: true }).body)); forged.sessions[0].host = 'HOST-C'; forged.origin = 'HOST-C'
   A.applySlice(dst, 'HOST-D', { ...forged, epoch: 'X', seq: 1 })
   check('applySlice: ownership is the link\'s origin — the frame\'s origin/host fields never decide it', dst.remote.has('HOST-D') && !dst.remote.has('HOST-C') && A.getSession(dst, ID, 'HOST-D').host === 'HOST-D'
-    && A.applySlice(dst, 'host-a', { v: 2, full: true, sessions: [] }).code === 'own-origin' && A.applySlice(dst, 'HOST-E', { v: 2, sessions: 'x' }).code === 'bad-slice')
+    && A.applySlice(dst, 'host-a', { v: 3, full: true, sessions: [] }).code === 'own-origin' && A.applySlice(dst, 'HOST-E', { v: 3, sessions: 'x' }).code === 'bad-slice')
   A.markOriginDown(dst, 'HOST-B', T0 + 20000)
-  check('applySlice: a delta for a slice marked down is refused out-of-sync', A.applySlice(dst, 'HOST-B', { v: 2, epoch: 'E1', base: 7, seq: 7, sessions: [] }).code === 'out-of-sync')
+  check('applySlice: a delta for a slice marked down is refused out-of-sync', A.applySlice(dst, 'HOST-B', { v: 3, epoch: 'E1', base: 7, seq: 7, sessions: [] }).code === 'out-of-sync')
 })
 await section(async () => {
   const src = mk({}, 'HOST-B'), dst = mk({}, 'HOST-A'), pub = A.createPub()
@@ -1403,7 +1403,7 @@ await section(async () => {
   say(here, S1, { agent: 'w1', text: '@~root seeding {progress}', progress: '2/8 tiles', eta: '20m' }, T0)
   say(here, S1, { path: '@#70/@step4/spec-70', text: '@Tharsis/@~z12 deep {progress}', progress: '1/4 tiles' }, T0)
   say(there, { ...S1, session: 'Remote' }, { agent: 'r1', text: '@~root over there' }, T0)
-  A.applySlice(here, 'HOST-B', { v: 2, full: true, epoch: 'e', seq: 1, sessions: A.snapshot(there).sessions })
+  A.applySlice(here, 'HOST-B', { v: 3, full: true, epoch: 'e', seq: 1, sessions: A.snapshot(there).sessions })
   const raw = A.boardView(here, T0 + 40 * MIN, { raw: true }), g = raw.find(x => x.session === 'Bridget'), w1 = nodeOf(g, 'w1')
   check('raw board: the REPORTED state even past the stale window (the page computes stale), no rendered / stale_at / visible', w1.state === 'running' && !('stale_at' in w1) && !('visible' in w1) && w1.current.text === 'seeding {progress}' && !('rendered' in w1.current)
     && w1.last_activity === T0 && w1.progress.done === 2 && w1.eta_at === T0 + 20 * MIN, J(w1))
@@ -1425,7 +1425,7 @@ await section(async () => {
   A.dropOrigin(here, 'HOST-B')
   const d2 = A.planDashDelta(pub, A.dashUnits(A.boardView(here, T0 + MIN, { raw: true })))
   check('dash delta: a group that left → its session + node ids removed', d2.remove.length === 2 && !d2.upsert.length, J(d2))
-  A.applySlice(here, 'HOST-B', { v: 2, full: true, epoch: 'e2', seq: 1, sessions: A.snapshot(there).sessions })
+  A.applySlice(here, 'HOST-B', { v: 3, full: true, epoch: 'e2', seq: 1, sessions: A.snapshot(there).sessions })
   A.markSessionGone(here, S1, T0 + 2 * MIN)
   A.markOriginDown(here, 'HOST-B', T0 + 3 * MIN)
   const bd = A.boardView(here, T0 + 3 * MIN, { raw: true }), gL = bd.find(x => x.session === 'Bridget'), gR = bd.find(x => x.session === 'Remote')
@@ -1456,22 +1456,301 @@ await section(async () => {
   check('batch: items split in order, refs kept, top-level path/agent/context/log are DEFAULTS (the item wins)', okB.ok && okB.items.length === 2 && okB.items[0].ref === 1 && okB.items[0].input.agent === 'w' && okB.items[0].input.log === false && !('ref' in okB.items[0].input)
     && okB.items[1].input.path === 'x/@~y' && !('ref' in okB.items[1]))
   check('batch: an item overriding a default', sb({ items: [{ text: 'a', log: true }], log: false }).items[0].input.log === true)
-  check('batch: an item naming its own path / agent takes NONE of the address defaults (path, agent, context); one with only a context keeps agent / path', !('agent' in okB.items[1].input)
-    && (x => x.path === 'p' && !('context' in x) && !('agent' in x) && x.log === false)(A.withDefaults({ agent: 'w', context: '@~c', log: false }, { path: 'p', text: 't' }))
+  check('batch (6b): the own path / agent of an item is RELATIVE to the default address (agent kept, the default path prefixed; the default context dropped); one with only a context keeps agent / path', okB.items[1].input.agent === 'w'
+    && (x => x.path === 'p' && !('context' in x) && x.agent === 'w' && x.log === false)(A.withDefaults({ agent: 'w', context: '@~c', log: false }, { path: 'p', text: 't' }))
+    && (x => x.path === '@#70/@A' && !('agent' in x))(A.withDefaults({ path: '@#70' }, { path: '@A', text: 't' }))
+    && (x => x.path === '@#70/sub/@x' && !('agent' in x))(A.withDefaults({ path: '/@#70/' }, { agent: 'sub', path: '@x', text: 't' }))
     && (x => x.agent === 'w' && x.path === 'q' && x.context === '@~root')(A.withDefaults({ agent: 'w', path: 'q', context: '@~c' }, { context: '@~root', text: 't' })))
+  check('batch (6b): a LEADING "/" makes an item path absolute from the session root (no address defaults)', (x => x.path === '/@other/@~y' && !('agent' in x) && !('context' in x) && x.log === false)(A.withDefaults({ agent: 'w', path: '@#70', context: '@~c', log: false }, { path: '/@other/@~y', text: 't' }))
+    && (x => x.agent === '/abs' && !('path' in x))(A.withDefaults({ path: '@#70' }, { agent: '/abs', text: 't' })) && M(A.withDefaults({ path: '@#70' }, { path: '/', text: 't' })).path === ''
+    && M(A.withDefaults({ agent: 'w', path: '@#70' }, { path: '/@other/@~y', text: 't' })).path === '@other/@y' && M(A.withDefaults({ agent: 'w', path: '@#70' }, { path: '@B/@~y', text: 't' })).path === 'w/@#70/@B/@y')
+  check('batch (6b): a bad item agent is passed through unmerged (parseMessage reports it)', C(A.withDefaults({ path: '@#70' }, { agent: 'bad agent', text: 't' })) === 'bad-agent')
   check('batch: 64 items OK; 65 → too-many-items (the whole call)', sb({ items: Array.from({ length: 64 }, () => ({ text: 'x' })) }).ok && sb({ items: Array.from({ length: 65 }, () => ({ text: 'x' })) }).code === 'too-many-items')
   const big = Array.from({ length: 20 }, () => ({ text: 'x', details: rep('d', 4000) }))
   check('batch: > 64 KB of items JSON → batch-too-large (the whole call)', sb({ items: big }).code === 'batch-too-large' && sb({ items: big.slice(0, 15) }).ok)
   check('batch: not an array / empty / other top-level message fields → bad-batch', sb({ items: 'x' }).code === 'bad-batch' && sb({ items: [] }).code === 'bad-batch' && sb({ items: [{ text: 'x' }], text: 'top' }).code === 'bad-batch' && sb(null).code === 'bad-batch')
   const per = sb({ items: [{ text: 'ok' }, 'junk', { text: 'x', bogus: 1, ref: 'r3' }, { text: 'x', plan: ['A'], ref: 'p' }] })
-  check('batch: a bad item gets its OWN error (bad-item / bad-field / not-yet for plan), the rest stay applicable', per.ok && !!per.items[0].input && per.items[1].error.code === 'bad-item' && per.items[2].error.code === 'bad-field' && per.items[2].ref === 'r3'
-    && per.items[3].error.code === 'not-yet' && per.items[3].ref === 'p')
+  check('batch: a bad item gets its OWN error (bad-item / bad-field), the rest stay applicable; 6b: an item may carry a plan', per.ok && !!per.items[0].input && per.items[1].error.code === 'bad-item' && per.items[2].error.code === 'bad-field' && per.items[2].ref === 'r3'
+    && J(per.items[3].input.plan) === J(['A']) && per.items[3].ref === 'p')
   check('parseMessage refuses an items object (it is a batch)', C({ items: [{ text: 'x' }] }) === 'bad-input')
   // applied in order, one result each, partial failure
   const st = mk(), I = S1
   const sp = sb({ items: [{ path: 'a/@~t', text: 'first' }, { path: 'a/@~t', text: 'second', state: 'bogus' }, { path: 'a/@~t', text: 'third' }, { path: 'a/b/c/d/e/f/g', text: 'too deep' }] })
   const res = sp.items.map(it => { if (it.error) return it.error; const p = P(it.input, { now: T0 }); return p.ok ? A.apply(st, I, p.msg, T0) : p })
   check('batch (applied in order): per-item results; a bad item fails alone; the last good line wins', res[0].ok && res[1].code === 'bad-state' && res[2].ok && res[3].code === 'path-too-deep' && N(st, I, 'a/@t').current.text === 'third' && N(st, I, 'a/@t').log.length === 2)
+})
+
+// ================================================================= 6b: TODOS AND PLANS (v1.63.0)
+const DAY = 24 * HOUR
+/** parse + apply → the apply result, or the parse failure (codes for the validity checks) */
+function sayC(st, ident, input, now) { const p = A.parseMessage(input, { now, tzOffsetMin: 0 }); return p.ok ? A.apply(st, ident, p.msg, now) : p }
+const kidNames = (st, I, path) => { const s = A.getSession(st, I); return A.childrenOf(s, A.getNode(st, I, path)).map(n => n.name) }
+const stOf = (st, I, path) => A.stateOf(A.getNode(st, I, path))
+await section(async () => {
+  // ---- parsing: todo / skipped are context states; plan names
+  check('6b parse: todo / skipped on an AGENT or the session → bad-agent-state', C({ agent: 'a', text: '@~root x', state: 'todo' }) === 'bad-agent-state' && C({ path: 'a', text: 'x', state: 'skipped' }) === 'bad-agent-state'
+    && C({ text: '@~root x', state: 'todo' }) === 'bad-agent-state' && C({ path: '@c/@~x', text: 'y', state: 'todo' }) === 'OK' && C({ path: '@c', text: 'y', state: 'skipped' }) === 'OK')
+  const pl = P({ path: '@#70', plan: ['Spec', '@Build', 'spec', 'Test'] }, { now: T0 })
+  check('6b parse: plan → names in the GIVEN order; one leading @ dropped; a repeat (any case) kept once + a warning; no text needed (planOnly)', pl.ok && J(pl.msg.plan) === J(['Spec', 'Build', 'Test']) && pl.msg.planOnly === true && pl.msg.warnings.includes('plan-duplicates') && pl.msg.text === '', J(pl))
+  check('6b parse: bad plans → bad-plan (empty, not an array, a non-string, a "/" in a name, too long, "root", an @~ marker, > 64 names)', [[], 'A', [7], ['a/b'], ['x'.repeat(61)], ['root'], ['@~A'], Array.from({ length: 65 }, (_, i) => `n${i}`)].every(p => C({ path: '@c', plan: p }) === 'bad-plan')
+    && C({ path: '@c', plan: Array.from({ length: 64 }, (_, i) => `n${i}`) }) === 'OK')
+  check('6b parse: a plan under a depth-6 node would be depth 7 → path-too-deep', C({ path: 'a/b/c/d/e/@f', plan: ['A'] }) === 'path-too-deep' && C({ path: 'a/b/c/d/@e', plan: ['A'] }) === 'OK')
+  check('6b parse: an @~ line with a state may omit text (a tick keeps its text); without @~ a state alone is not a message', P({ path: '@#70/@~B', state: 'done' }, { now: T0 }).msg?.keepText === true && C({ path: '@#70/@B', state: 'done' }) === 'bad-text' && C({ path: '@#70/@~B' }) === 'bad-text')
+  check('6b parse: plan + text = a message to the target, then the plan', (m => m && m.text === 'the plan' && !m.planOnly && J(m.plan) === J(['A']))(M({ path: '@~#70', text: 'the plan', plan: ['A'] })))
+})
+await section(async () => {
+  // ---- plans: creation in the given order, records, re-plan merge, ticking
+  const st = mk({ log_entries_per_agent: 10 }), I = S1
+  const r1 = sayC(st, I, { path: '@#70', plan: ['Zeta', 'Alpha', 'Mid'], log: false }, T0)
+  check('6b plan: creates ☐ plan items under the target, in the GIVEN order (not A→Z)', r1.ok && J(kidNames(st, I, '@#70')) === J(['Zeta', 'Alpha', 'Mid']) && ['Zeta', 'Alpha', 'Mid'].every(n => stOf(st, I, `@#70/@${n}`) === 'todo' && N(st, I, `@#70/@${n}`).plan === true)
+    && J(['Zeta', 'Alpha', 'Mid'].map(n => N(st, I, `@#70/@${n}`).plan_ix)) === '[0,1,2]', J(kidNames(st, I, '@#70')))
+  check('6b plan: result.plan names each item (created, plan_item, state); a plan-only call logs nothing on the target', J(r1.plan.map(p => [p.name, p.path, p.created, p.plan_item, p.state])) === J([['Zeta', '@#70/@Zeta', true, true, 'todo'], ['Alpha', '@#70/@Alpha', true, true, 'todo'], ['Mid', '@#70/@Mid', true, true, 'todo']])
+    && r1.entry === null && r1.logged === false && N(st, I, '@#70').log.length === 0 && N(st, I, '@#70').implicit === true, J(r1))
+  check('6b plan: ONE logged record per new item, in order — even with log:false (a plan always reaches the files): plan_item, a ☐ current line named after it', r1.records.length === 3 && r1.records.every((x, i) => x.v === 3 && x.plan_item === true && x.plan_ix === i && x.current === true && x.state === 'todo' && x.text === ['Zeta', 'Alpha', 'Mid'][i])
+    && r1.records[0].new_from === 0 && r1.records[1].new_from === 2 && N(st, I, '@#70/@Zeta').log.length === 1, J(r1.records))
+  check('6b plan: the item line is its name; the bar of the plan node = "0 of 3 done"', N(st, I, '@#70/@Alpha').current.text === 'Alpha' && (b => b.done === 0 && b.total === 3 && b.unit === 'done' && b.todos === true && b.rollup === true)(A.rollup(A.getSession(st, I), N(st, I, '@#70'))))
+  // ticks
+  const tk = sayC(st, I, { path: '@#70/@~Zeta', state: 'done' }, T0 + MIN)
+  check('6b tick: "@~…/@Zeta" + state done, no text → ☑, the line keeps its text', tk.ok && tk.state === 'done' && stOf(st, I, '@#70/@Zeta') === 'done' && N(st, I, '@#70/@Zeta').current.text === 'Zeta' && N(st, I, '@#70/@Zeta').plan === true, J(tk))
+  const go = sayC(st, I, { path: '@#70/@~Alpha', text: 'writing the spec' }, T0 + 2 * MIN)
+  check('6b tick: an @~ line WITHOUT a state on a ☐ item starts it (running); an item stays a plan item whatever its state', go.ok && go.state === 'running' && N(st, I, '@#70/@Alpha').current.text === 'writing the spec' && N(st, I, '@#70/@Alpha').plan)
+  sayC(st, I, { path: '@#70/@Alpha', text: 'a note on a running item' }, T0 + 3 * MIN)
+  check('6b tick: a plain (non-@~) message to an item only logs (its state stays)', stOf(st, I, '@#70/@Alpha') === 'running' && N(st, I, '@#70/@Alpha').log.length === 3)
+  const sk = sayC(st, I, { path: '@#70/@~Mid', state: 'skipped' }, T0 + 4 * MIN)
+  const reopen = sayC(st, I, { path: '@#70/@~Zeta', text: 'reopened', state: 'todo' }, T0 + 5 * MIN)
+  check('6b tick: skipped on a plan item; todo again re-opens a done item', sk.ok && stOf(st, I, '@#70/@Mid') === 'skipped' && reopen.ok && stOf(st, I, '@#70/@Zeta') === 'todo')
+  sayC(st, I, { path: '@#70/@~Zeta', state: 'done' }, T0 + 6 * MIN)
+  // re-plan merge
+  const rp = sayC(st, I, { path: '@#70', plan: ['Mid', 'New1', 'Zeta', 'New2'] }, T0 + 7 * MIN)
+  check('6b re-plan: existing items are KEPT as they are (no duplicate, state not reset); new names are added at the END in their given order; names left out stay', rp.ok && J(kidNames(st, I, '@#70')) === J(['Zeta', 'Alpha', 'Mid', 'New1', 'New2'])
+    && stOf(st, I, '@#70/@Zeta') === 'done' && stOf(st, I, '@#70/@Mid') === 'skipped' && stOf(st, I, '@#70/@Alpha') === 'running' && J(rp.plan.map(p => [p.name, !!p.created])) === J([['Mid', false], ['New1', true], ['Zeta', false], ['New2', true]])
+    && rp.records.length === 2 && J(rp.records.map(x => x.path)) === J(['@#70/@New1', '@#70/@New2']), J([kidNames(st, I, '@#70'), rp.plan]))
+  // adopt / leave alone
+  sayC(st, I, { path: '@#70/@Ord/sub', text: 'an agent under a context named before the plan' }, T0 + 8 * MIN)
+  sayC(st, I, { path: '@#70/@~Lined', text: 'an ordinary context with a line' }, T0 + 8 * MIN)
+  const ad = sayC(st, I, { path: '@#70', plan: ['Ord', 'Lined'] }, T0 + 9 * MIN)
+  check('6b re-plan: an existing context with no line of its own is ADOPTED (☐); one with a line is left alone (plan_item:false)', ad.ok && N(st, I, '@#70/@Ord').plan === true && stOf(st, I, '@#70/@Ord') === 'todo' && ad.plan[0].adopted === true
+    && N(st, I, '@#70/@Lined').plan === false && ad.plan[1].plan_item === false && !('created' in ad.plan[1]) && N(st, I, '@#70/@Lined').current.text === 'an ordinary context with a line', J(ad.plan))
+  // validity
+  check('6b validity: skipped on an ordinary context → not-a-plan-item; todo on a context that already has a line → not-a-plan-item; a plain (non-@~) todo on a new context → not-a-plan-item',
+    sayC(st, I, { path: '@#70/@~Lined', text: 'x', state: 'skipped' }, T0 + 10 * MIN).code === 'not-a-plan-item' && sayC(st, I, { path: '@#70/@~Lined', text: 'x', state: 'todo' }, T0 + 10 * MIN).code === 'not-a-plan-item'
+    && sayC(st, I, { path: '@fresh', text: 'x', state: 'todo' }, T0 + 10 * MIN).code === 'not-a-plan-item' && !N(st, I, '@fresh'))
+  const first = sayC(st, I, { path: '@solo/@~item', text: 'a lone todo', state: 'todo' }, T0 + 11 * MIN)
+  check('6b validity: a context whose FIRST current line is todo becomes a plan item (no caller-visible flag); its record says so', first.ok && N(st, I, '@solo/@item').plan === true && first.entry.plan_item === true && stOf(st, I, '@solo/@item') === 'todo')
+  check('6b validity: an agent can never take todo / skipped (even via "a/@~root")', sayC(st, I, { path: 'ag/@~root', text: 'x', state: 'todo' }, T0).code === 'bad-agent-state' && sayC(st, I, { agent: 'ag', context: '@~root', text: 'x', state: 'skipped' }, T0).code === 'bad-agent-state')
+  // with text: the target first, then the items
+  const wt = sayC(st, I, { path: 'spec-70/@~root', text: 'planning', plan: ['Read', 'Write'] }, T0 + 12 * MIN)
+  check('6b plan + text: the target\'s own entry first, then each new item\'s (an agent may hold a plan)', wt.ok && wt.records.length === 3 && wt.records[0].path === 'spec-70' && wt.records[0].text === 'planning' && J(wt.records.slice(1).map(x => x.path)) === J(['spec-70/@Read', 'spec-70/@Write']) && wt.entry === wt.records[0])
+  // a batch item may carry a plan
+  const sb = A.splitBatch({ path: '@#71', items: [{ plan: ['A', 'B'], ref: 'p' }, { path: '@~A', state: 'done', ref: 't' }] })
+  const br = sb.items.map(it => sayC(st, I, it.input, T0 + 13 * MIN))
+  check('6b batch: an item may carry a plan; item paths are relative to the batch path ("@~A" → @#71/@A)', sb.ok && br.every(r => r.ok) && J(kidNames(st, I, '@#71')) === J(['A', 'B']) && stOf(st, I, '@#71/@A') === 'done', J(br))
+})
+await section(async () => {
+  // ---- staleness: a plan item never goes stale (any state); its agent's own staleness still shows
+  const st = mk(), I = S1
+  sayC(st, I, { path: 'worker/@~root', text: 'working' }, T0)
+  sayC(st, I, { path: 'worker', plan: ['A', 'B', 'C'] }, T0)
+  sayC(st, I, { path: 'worker/@~B', text: 'in progress' }, T0)
+  sayC(st, I, { path: 'worker/@~C', text: 'stuck', state: 'blocked' }, T0)
+  sayC(st, I, { path: '@#70', plan: ['S'] }, T0)
+  const late = T0 + 30 * DAY, w = N(st, I, 'worker')
+  check('6b stale: a plan item never goes stale in ANY state (todo / running / blocked), even a month quiet; staleAt null', ['A', 'B', 'C'].every(n => { const e = A.effectiveState(N(st, I, `worker/@${n}`), late, 15, w); return !e.stale && e.stale_at === null && A.staleAt(N(st, I, `worker/@${n}`), 15, w) === null })
+    && A.effectiveState(N(st, I, 'worker/@C'), late, 15, w).state === 'blocked')
+  check('6b stale: ... while the agent working under it IS stale (its own row)', A.effectiveState(w, late, 15).state === 'stale')
+  const bv = A.boardView(st, late)[0]
+  check('6b stale (board): items show their own state, the agent stale', nodeOf(bv, 'worker/@B').state === 'running' && nodeOf(bv, 'worker/@C').state === 'blocked' && nodeOf(bv, 'worker/@A').state === 'todo' && nodeOf(bv, 'worker').state === 'stale'
+    && nodeOf(bv, 'worker/@A').plan_item === true && nodeOf(bv, 'worker/@B').plan_ix === 1 && nodeOf(bv, '@#70/@S').state === 'todo', J(bv.nodes.map(n => [n.path, n.state])))
+  A.markSessionGone(st, I, late)
+  const gv = A.boardView(st, late)[0]
+  check('6b gone: when its agent is gone, a plan item still shows its own state (the agent row shows gone)', nodeOf(gv, 'worker').state === 'gone' && nodeOf(gv, 'worker/@B').state === 'running' && nodeOf(gv, 'worker/@A').state === 'todo')
+})
+await section(async () => {
+  // ---- rollup: every variant + how mixed children combine
+  const st = mk(), I = S1, S = () => A.getSession(st, I), R = p => A.rollup(S(), N(st, I, p))
+  sayC(st, I, { path: '@p', plan: ['A', 'B', 'C', 'D', 'E'] }, T0)
+  sayC(st, I, { path: '@p/@~A', state: 'done' }, T0); sayC(st, I, { path: '@p/@~B', state: 'done' }, T0); sayC(st, I, { path: '@p/@~C', state: 'skipped' }, T0); sayC(st, I, { path: '@p/@~D', text: 'oops', state: 'failed' }, T0)
+  check('6b rollup: "N of M done" — skipped left out of M, failed counts as not done (2 of 4, 1 skipped, 5 items)', (b => b.done === 2 && b.total === 4 && b.skipped === 1 && b.n === 5 && b.unit === 'done' && b.todos === true && b.pct === 50)(R('@p')), J(R('@p')))
+  sayC(st, I, { path: '@all', plan: ['X', 'Y'] }, T0); sayC(st, I, { path: '@all/@~X', state: 'skipped' }, T0); sayC(st, I, { path: '@all/@~Y', state: 'skipped' }, T0)
+  check('6b rollup: every item skipped → no bar (nothing left to count)', R('@all') === null)
+  sayC(st, I, { path: '@rep', plan: ['A', 'B'] }, T0); sayC(st, I, { path: '@rep', text: 'own bar', progress: '7/10' }, T0)
+  check('6b rollup: the node\'s own reported progress wins over its plan', (b => b.done === 7 && b.total === 10 && b.rollup === false)(R('@rep')))
+  sayC(st, I, { path: '@mix', plan: ['A', 'B'] }, T0); sayC(st, I, { path: '@mix/@~A', state: 'done' }, T0); sayC(st, I, { path: '@mix/@other', text: 'x', progress: '3/6 files' }, T0); sayC(st, I, { path: '@mix/@more', text: 'x', progress: '1/2 files' }, T0)
+  check('6b rollup MIXED: ordinary children with bars win by 6a\'s precedence (their sum: 4 of 8 files) — the plan\'s 1 of 2 is not mixed in', (b => b.done === 4 && b.total === 8 && b.unit === 'files' && !b.todos)(R('@mix')), J(R('@mix')))
+  sayC(st, I, { path: '@mix2', plan: ['A'] }, T0); sayC(st, I, { path: '@mix2/@o1', text: 'x', progress: '50%' }, T0); sayC(st, I, { path: '@mix2/@o2', text: 'x', progress: '1/4 files' }, T0)
+  check('6b rollup MIXED: ... different units → their mean % (37.5)', (b => b.unit === '%' && b.done === 37.5 && !b.todos)(R('@mix2')), J(R('@mix2')))
+  sayC(st, I, { path: '@own', plan: ['A', 'B'] }, T0); sayC(st, I, { path: '@own/@A/worker', text: 'x', progress: '9/10 tiles' }, T0)
+  check('6b rollup: a plan item counts ONLY as a todo of its parent — its own bar (an agent under it: 9 of 10 tiles) shows on its row, not in the parent\'s', (b => b.todos && b.done === 0 && b.total === 2)(R('@own')) && (b => b.done === 9 && b.unit === 'tiles')(R('@own/@A')))
+  sayC(st, I, { path: '@g/@p1', plan: ['A', 'B'] }, T0); sayC(st, I, { path: '@g/@p2', plan: ['C', 'D', 'E'] }, T0); sayC(st, I, { path: '@g/@p1/@~A', state: 'done' }, T0); sayC(st, I, { path: '@g/@p2/@~C', state: 'done' }, T0)
+  check('6b rollup: recursion — a grandparent SUMS its plans\' "done" bars (2 of 5 done, still a plan bar)', (b => b.done === 2 && b.total === 5 && b.unit === 'done' && b.todos === true && b.rollup === true)(R('@g')), J(R('@g')))
+  sayC(st, I, { path: '@g/@pct', text: 'x', progress: '50%' }, T0)
+  check('6b rollup: ... a % sibling turns it into the mean % (6a)', (b => b.unit === '%' && !b.todos)(R('@g')))
+  check('6b rollup: renderText of a plan bar — "{progress}" → "2 of 4 done"', A.renderText('{progress}', R('@p'), null, T0) === '2 of 4 done')
+})
+await section(async () => {
+  // ---- lifetime: the 7-day default; open items never expire; ended plans expire a window after they ended
+  check('6b default: finished_visible_hours = 168 (7 days), still per-host configurable', mk().config.finished_visible_hours === 168 && A.resolveConfig({ finished_visible_hours: 24 }).finished_visible_hours === 24
+    && A.resolveConfig({}, { AI_BRIDGE_ACTIVITY_FINISHED_VISIBLE_HOURS: '48' }).finished_visible_hours === 48)
+  const d = mk(), I = S1
+  sayC(d, I, { path: 'fin/@~root', text: 'done', state: 'done' }, T0)
+  A.expire(d, T0 + 167 * HOUR)
+  const at167 = !!N(d, I, 'fin')
+  A.expire(d, T0 + 169 * HOUR)
+  check('6b default: a finished agent stays 7 days with the default config (there at 167 h, gone at 169 h)', at167 && !N(d, I, 'fin'))
+  const st = mk(), win = 168 * HOUR
+  // an agent that finished holding an OPEN plan item; a gone session with one; a resolved plan; a plan with a failed item under a finished owner; a nested plan
+  sayC(st, I, { path: 'holder', plan: ['Open', 'Done'] }, T0); sayC(st, I, { path: 'holder/@~Done', state: 'done' }, T0); sayC(st, I, { path: 'holder/@~root', text: 'stopping', state: 'done' }, T0)
+  sayC(st, I, { path: '@shipped', plan: ['A', 'B'] }, T0); sayC(st, I, { path: '@shipped/@~A', state: 'done' }, T0 + HOUR); sayC(st, I, { path: '@shipped/@~B', state: 'skipped' }, T0 + 2 * HOUR)
+  sayC(st, I, { path: 'owner', plan: ['F'] }, T0); sayC(st, I, { path: 'owner/@~F', text: 'broke', state: 'failed' }, T0); sayC(st, I, { path: 'owner/@~root', text: 'gave up', state: 'failed' }, T0 + 3 * HOUR)
+  sayC(st, I, { path: '@outer', plan: ['N'] }, T0); sayC(st, I, { path: '@outer/@N', plan: ['n1', 'n2'] }, T0); sayC(st, I, { path: '@outer/@N/@~n1', state: 'done' }, T0); sayC(st, I, { path: '@outer/@N/@~n2', state: 'done' }, T0 + 3 * HOUR)
+  const G = { session: 'Gone', project: 'AIMB', user: 'robin' }
+  sayC(st, G, { path: '@keep', plan: ['open'] }, T0); A.markSessionGone(st, G, T0)
+  const before = A.expire(st, T0 + 2 * HOUR + win - MIN)
+  check('6b expire: nothing ended yet is removed before its window ends', before.length === 0 && !!N(st, I, '@shipped/@A'), J(before))
+  const gone = A.expire(st, T0 + 30 * DAY)
+  check('6b expire: OPEN plan items never expire — not in a finished agent\'s subtree (the agent stays too), not in a gone session', !!N(st, I, 'holder') && stOf(st, I, 'holder/@Open') === 'todo' && !!N(st, I, 'holder/@Done') && !!A.getSession(st, G) && !!A.getNode(st, G, '@keep/@open'), J(gone))
+  check('6b expire: an ENDED plan (every item done / skipped) expires a window after its last item — its items, and its plain plan node left empty', !N(st, I, '@shipped') && !N(st, I, '@shipped/@A') && gone.some(x => x.agent === '@shipped' && x.plan))
+  check('6b expire: a plan whose owner FINISHED (a failed item: not "done or skipped") goes with the owner\'s window', !N(st, I, 'owner') && !N(st, I, 'owner/@F'))
+  check('6b expire: a nested plan that ended takes only its own items — the item holding it stays with ITS plan (still open)', !N(st, I, '@outer/@N/@n1') && !!N(st, I, '@outer/@N') && N(st, I, '@outer/@N').plan === true)
+})
+await section(async () => {
+  // ---- eviction under the hard limits never removes a subtree with an OPEN plan item
+  const st = mk(), I = S1
+  sayC(st, I, { path: '@big', plan: Array.from({ length: 64 }, (_, i) => `i${i}`) }, T0)
+  for (let k = 0; k < 62; k++) sayC(st, I, { path: `@big/@i${k}`, plan: Array.from({ length: 64 }, (_, i) => `s${i}`) }, T0)   // 1 + 64 + 62*64 = 4033 nodes, every one open
+  sayC(st, I, { path: 'fin/@~root', text: 'finished agent holding an open item', state: 'done', plan: ['still-open'] }, T0 + 1000)
+  sayC(st, I, { path: 'fin2/@~root', text: 'a plain finished agent', state: 'done' }, T0 + 2000)
+  sayC(st, I, { path: '@ended', plan: ['e1', 'e2'] }, T0 + 3000); sayC(st, I, { path: '@ended/@~e1', state: 'done' }, T0 + 3000); sayC(st, I, { path: '@ended/@~e2', state: 'done' }, T0 + 3000)
+  const s = A.getSession(st, I)
+  let n = 0
+  while (s.nodes.size - 1 < A.ACTIVITY_LIMITS.nodesPerSession) sayC(st, I, { path: `@pad${n++}`, text: 'filler', state: 'running' }, T0 + 4000)
+  const r1 = sayC(st, I, { path: '@new1', text: 'needs room' }, T0 + 5000)
+  check('6b evict: at the node cap a new node evicts the OLDEST evictable — a plain finished agent (fin2), never fin (it holds an open item)', r1.ok && J(r1.evicted) === J(['fin2']) && !!N(st, I, 'fin/@still-open') && r1.entry.evicted?.[0] === 'fin2', J(r1.evicted))
+  const r2 = sayC(st, I, { path: '@new2', text: 'needs room' }, T0 + 6000)
+  check('6b evict: an ENDED plan is evictable next (its items + its plain node)', r2.ok && J(r2.evicted) === J(['@ended']) && !N(st, I, '@ended'), J(r2.evicted))
+  while (s.nodes.size - 1 < A.ACTIVITY_LIMITS.nodesPerSession) sayC(st, I, { path: `@pad${n++}`, text: 'filler', state: 'running' }, T0 + 6500)
+  const r3 = sayC(st, I, { path: '@new3', text: 'needs room' }, T0 + 7000)
+  check('6b evict: when only open plans (and live nodes) are left → too-many-nodes; nothing removed', r3.ok === false && r3.code === 'too-many-nodes' && !!N(st, I, 'fin') && N(st, I, '@big/@i0/@s0').plan === true && /open plan items are never evicted/.test(r3.what), J(r3))
+  const b2 = mk(), J2 = { session: 'B', project: 'P', user: 'u' }
+  sayC(b2, J2, { path: 'keep/@~root', text: 'done', state: 'done', plan: ['open'] }, T0); sayC(b2, J2, { path: 'drop/@~root', text: 'done', state: 'done' }, T0 + 1)
+  for (let i = 0; i < 40; i++) sayC(b2, J2, { path: 'drop/@c', text: 'x'.repeat(200) }, T0 + 2 + i)
+  const eb = A.enforceBudget(b2, 1)
+  check('6b budget: enforceBudget evicts finished agents but never a subtree holding an open plan item', J(eb.evicted.map(x => x.agent)) === J(['drop']) && !!A.getNode(b2, J2, 'keep/@open'), J(eb.evicted))
+})
+await section(async () => {
+  // ---- the multi-host HEADLINE: the host that most recently SET one (6a differed in this edge case)
+  const a = mk({}, 'HOST-A'), b = mk({}, 'HOST-B'), here = mk({}, 'HOST-A'), ID = { session: 'Twin', project: 'AIMB', user: 'robin' }
+  say(here, ID, { text: '@~root headline set on A at +10s' }, T0 + 10000)
+  say(b, ID, { text: '@~root headline set on B at +5s' }, T0 + 5000)
+  say(b, ID, { path: 'busy', text: 'B keeps reporting through an agent' }, T0 + 60000)
+  A.mergeSnapshot(here, 'HOST-B', A.snapshot(b))
+  const g = A.boardView(here, T0 + 2 * MIN)[0]
+  check('6b headline: the host that most recently SET a headline (A at +10 s) wins — not the most recently ACTIVE one with a line (B, active at +60 s)', g.self.host === 'HOST-A' && g.self.current.text === 'headline set on A at +10s', J(g.self))
+  check('6b headline: each host\'s own line stays in selves', J(g.selves.map(x => [x.host, x.current.text])) === J([['HOST-A', 'headline set on A at +10s'], ['HOST-B', 'headline set on B at +5s']]))
+  say(b, ID, { text: '@~root B sets a newer one' }, T0 + 70000)
+  A.mergeSnapshot(here, 'HOST-B', A.snapshot(b))
+  check('6b headline: a newer headline from B takes over', A.boardView(here, T0 + 2 * MIN)[0].self.host === 'HOST-B')
+  const n2 = mk({}, 'HOST-A'), b3 = mk({}, 'HOST-B')
+  say(n2, ID, { path: 'x', text: 'A only through an agent' }, T0); say(b3, ID, { path: 'y', text: 'B only through an agent' }, T0 + 1000)
+  A.mergeSnapshot(n2, 'HOST-B', A.snapshot(b3))
+  check('6b headline: no host has a line → the most recently active host', A.boardView(n2, T0 + MIN)[0].self.host === 'HOST-B')
+})
+await section(async () => {
+  // ---- active_only (the tool's board): keeps open plan items, hides ended plans
+  const st = mk(), I = S1
+  sayC(st, I, { path: 'fin/@~root', text: 'stopped', state: 'done', plan: ['open', 'closed'] }, T0); sayC(st, I, { path: 'fin/@~closed', state: 'done' }, T0)
+  sayC(st, I, { path: '@ended', plan: ['a', 'b'] }, T0); sayC(st, I, { path: '@ended/@~a', state: 'done' }, T0); sayC(st, I, { path: '@ended/@~b', state: 'skipped' }, T0)
+  sayC(st, I, { path: '@live', plan: ['x', 'y'] }, T0); sayC(st, I, { path: '@live/@~x', state: 'done' }, T0)
+  sayC(st, I, { path: 'gone/@~root', text: 'finished', state: 'done' }, T0)
+  const ao = A.boardView(st, T0 + MIN, { active_only: true })[0], paths = ao.nodes.map(n => n.path)
+  check('6b active_only: a finished agent holding an OPEN item stays (with the open item and its plan\'s done item); a plain finished agent goes', paths.includes('fin') && paths.includes('fin/@open') && paths.includes('fin/@closed') && !paths.includes('gone'), J(paths))
+  check('6b active_only: an ENDED plan is hidden (its items and its plain node); an open plan keeps every item', !paths.some(p => p.startsWith('@ended')) && paths.includes('@live') && paths.includes('@live/@x') && paths.includes('@live/@y'), J(paths))
+})
+await section(async () => {
+  // ---- replay: plans come back with their states, in creation order; v2 records still read
+  const st = mk(), I = S1, recs = []
+  const sr = (input, t) => { const r = sayC(st, I, input, t); if (r.ok) for (const x of r.records) recs.push(JSON.parse(J(x))); return r }
+  sr({ path: '@#70', plan: ['Zeta', 'Alpha', 'Mid', 'Beta'] }, T0)
+  sr({ path: '@#70/@~Zeta', state: 'done' }, T0 + MIN); sr({ path: '@#70/@~Alpha', text: 'going' }, T0 + 2 * MIN); sr({ path: '@#70/@~Mid', state: 'skipped' }, T0 + 3 * MIN)
+  sr({ path: '@#70/@Alpha/w', text: '@~root an agent under an item' }, T0 + 4 * MIN)
+  sr({ path: '@#70', plan: ['Gamma'] }, T0 + 5 * MIN)
+  const B = mk(), stt = A.replayNewestFirst(B, recs.slice().reverse(), T0 + HOUR)
+  check('6b replay: every plan item comes back as a plan item with its state (☑ / in progress / skipped / ☐), in CREATION order (the given order, re-plans at the end)',
+    J(kidNames(B, I, '@#70')) === J(['Zeta', 'Alpha', 'Mid', 'Beta', 'Gamma']) && J(['Zeta', 'Alpha', 'Mid', 'Beta', 'Gamma'].map(n => stOf(B, I, `@#70/@${n}`))) === J(['done', 'running', 'skipped', 'todo', 'todo'])
+    && ['Zeta', 'Alpha', 'Mid', 'Beta', 'Gamma'].every(n => N(B, I, `@#70/@${n}`).plan === true) && N(B, I, '@#70/@Alpha/w').plan === false && dump(st) === dump(B), J([kidNames(B, I, '@#70'), stt, firstDiff(dump(st), dump(B))]))
+  check('6b replay: a v2 (1.62) JSONL record is still read (v3 only adds)', A.recordKind({ v: 2, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'running' }) === 'entry' && A.recordKind({ v: 3, kind: 'cf', ts: T0, session: 'S', path: '' }) === 'cf'
+    && A.recordKind({ v: 1, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'running' }) === null && A.recordKind({ v: 4, id: 'x', ts: T0, session: 'S', path: '', text: 't', state: 'running' }) === null)
+})
+await section(async () => {
+  // ---- CARRY-FORWARD across day rollovers + a restart whose files reach back further than the replay window
+  const W = 168 * HOUR, start = new Date(2026, 8, 1, 9, 0, 0).getTime()   // local 09:00, 1 Sep
+  const st = mk({ log_entries_per_agent: 10 }), I = S1, files = new Map()   // day → [records]
+  const put = rec => { const d = A.localDay(rec.ts); if (!files.has(d)) files.set(d, []); files.get(d).push(JSON.parse(J(rec))) }
+  const sr = (input, t) => { const r = sayC(st, I, input, t); if (!r.ok) throw new Error(`${J(input)} → ${r.code}`); for (const x of r.records) put(x); return r }
+  sr({ path: 'lead/@~root', text: 'leading the plan' }, start)
+  sr({ path: 'lead', plan: ['Spec', 'Build', 'Test', 'Ship'] }, start + MIN)
+  sr({ path: 'lead/@~Spec', state: 'done' }, start + 2 * HOUR)
+  sr({ path: 'lead/@~Build', text: 'compiling', progress: '3/10 files' }, start + 3 * HOUR)
+  sr({ path: 'lead/@~Test', state: 'skipped' }, start + 4 * HOUR)
+  sr({ path: '@notes/@~old', text: 'a context line set on day 0' }, start + 5 * HOUR)
+  sr({ path: 'short/@~root', text: 'a short-lived agent', state: 'done' }, start + 6 * HOUR)
+  // 20 local days: the gateway checkpoints every rollover (00:00:05 local) — a little activity on day 15 only
+  let cfTotal = 0, rolls = 0
+  for (let dd = 1; dd <= 20; dd++) {
+    const midnight = new Date(2026, 8, 1 + dd, 0, 0, 5).getTime()
+    A.expire(st, midnight)   // the gateway's minute sweep has run by then
+    for (const w of A.planCarryForward(st, midnight)) { put(w.rec); cfTotal++ }
+    rolls++
+    if (dd === 15) sr({ path: 'lead/@Build', text: 'a note on day 15' }, midnight + 2 * HOUR)
+  }
+  const now = new Date(2026, 8, 21, 12, 0, 0).getTime()
+  const days = [...files.keys()].sort()
+  check('6b carry-forward: the day files span ~21 days — far more than the 7-day replay window', days.length >= 20 && days[0] === A.localDay(start), J(days.length))
+  const cf1 = files.get(A.localDay(new Date(2026, 8, 2, 0, 0, 5).getTime())).filter(r => r.kind === 'cf')
+  check('6b carry-forward: the first rollover checkpoints every OPEN plan item AND its ancestors (session root, lead) — parents first, children in creation order', J(cf1.map(r => r.path)) === J(['', 'lead', 'lead/@Build', 'lead/@Ship']) && cf1.every(r => r.v === 3 && r.kind === 'cf'), J(cf1.map(r => r.path)))
+  const c = cf1.find(r => r.path === 'lead/@Build')
+  check('6b carry-forward: a cf record is a full snapshot — line, state, bar, plan marker + position, created_at, last_activity, implicit', c.current.text === 'compiling' && c.state === 'running' && c.progress.done === 3 && c.plan_item === true && c.plan_ix === 1 && c.created_at === start + MIN
+    && c.last_activity === start + 3 * HOUR && c.implicit === false && cf1.find(r => r.path === '').implicit === false, J(c))
+  const cf7 = files.get(A.localDay(new Date(2026, 8, 8, 0, 0, 5).getTime())).filter(r => r.kind === 'cf').map(r => r.path)
+  check('6b carry-forward: ~6 days later the nodes whose own state would leave the window are carried too (done / skipped items, the day-0 context line)', ['lead/@Spec', 'lead/@Test', '@notes/@old'].every(p => cf7.includes(p)) && !N(st, I, 'short'), J(cf7))
+  // the restart: feed the files NEWEST FIRST like the gateway (stop at the window), then compare with the live state
+  const B = mk({ log_entries_per_agent: 10 }), rp = A.createReplay(B, { now })
+  let fedRecs = 0, stoppedAt = null
+  outer: for (const d of days.slice().reverse()) for (const rec of files.get(d).slice().reverse()) { const res = rp.feed(rec, d); if (res === 'old' && !rp.wantsOlder(d)) { stoppedAt = d; break outer } fedRecs++ }
+  const fin = rp.finish()
+  check('6b restart: the replay stops at the window (≈ 7 days of files) — the day-0 creation records are never read', stoppedAt !== null && stoppedAt > days[0] && fedRecs < [...files.values()].reduce((s, x) => s + x.length, 0) && fin.cfs > 0, J({ stoppedAt, fedRecs, fin }))
+  check('6b restart: the weeks-old plan is rebuilt from the window alone — every item with its state (☑ / in progress / skipped / ☐), in the given order', J(kidNames(B, I, 'lead')) === J(['Spec', 'Build', 'Test', 'Ship'])
+    && J(['Spec', 'Build', 'Test', 'Ship'].map(n => stOf(B, I, `lead/@${n}`))) === J(['done', 'running', 'skipped', 'todo']) && ['Spec', 'Build', 'Test', 'Ship'].every(n => N(B, I, `lead/@${n}`).plan === true), J(kidNames(B, I, 'lead')))
+  check('6b restart: ... lines, bars, created_at, last_activity and implicit as they were (a quiet agent stays as stale as before; the agents-only session root stays implicit; an expired agent stays gone)', N(B, I, 'lead/@Build').current.text === 'compiling' && N(B, I, 'lead/@Build').progress.done === 3 && N(B, I, 'lead/@Build').created_at === start + MIN
+    && N(B, I, 'lead').last_activity === N(st, I, 'lead').last_activity && A.effectiveState(N(B, I, 'lead'), now, 15).state === 'stale' && N(B, I, '@notes/@old').current.text === 'a context line set on day 0' && root(B, I).current === null && root(B, I).implicit === false && !N(B, I, 'short'), J([N(B, I, 'lead/@Build'), N(B, I, 'lead').last_activity, N(st, I, 'lead').last_activity]))
+  check('6b restart: the current state equals the live one (dump without logs)', dump(st, false) === dump(B, false), firstDiff(dump(st, false), dump(B, false)))
+  check('6b restart: the in-window history is there (the day-15 note); older history stays in the files (log_floor = the window start)', N(B, I, 'lead/@Build').log.some(e => e.text === 'a note on day 15') && N(B, I, 'lead/@Build').log_floor === now - W)
+  const cfAt = t => { const C2 = mk(), r2 = A.createReplay(C2, { now: t }); for (const d of days.slice().reverse()) for (const rec of files.get(d).slice().reverse()) if (r2.feed(rec, A.localDay(rec.ts)) === 'old') return r2.finish().cf_today; return r2.finish().cf_today }
+  check('6b restart: finish() says whether TODAY\'s file holds a carry-forward (cf_today) — else the gateway writes one at once', fin.cf_today === true && cfAt(new Date(2026, 8, 22, 0, 0, 1).getTime()) === false)
+  // after the restart, the next rollover keeps it going
+  const next = A.planCarryForward(B, new Date(2026, 8, 22, 0, 0, 5).getTime())
+  check('6b carry-forward after a restart: the rebuilt plan is carried again at the next rollover (its open items + ancestors)', ['', 'lead', 'lead/@Build', 'lead/@Ship'].every(p => next.some(w => w.rec.path === p)), J(next.map(w => w.rec.path)))
+  check('6b carry-forward: nothing to carry for a board without long-lived nodes', A.planCarryForward(mk(), now).length === 0 && rolls === 20 && cfTotal > 20)
+})
+await section(async () => {
+  // ---- gossip + dashboard units carry plan items
+  const here = mk({}, 'HOST-A'), there = mk({}, 'HOST-B'), I = S1
+  sayC(there, I, { path: '@#70', plan: ['A', 'B'] }, T0); sayC(there, I, { path: '@#70/@~A', state: 'done' }, T0)
+  const snap = A.snapshot(there), na = snap.sessions[0].nodes.find(n => n.path === '@#70/@A')
+  check('6b gossip: a node carries plan_item + plan_ix and its todo/done line state; format v3', snap.v === 3 && na.plan_item === true && na.plan_ix === 0 && na.current.state === 'done' && snap.sessions[0].nodes.find(n => n.path === '@#70/@B').current.state === 'todo')
+  const m = A.mergeSnapshot(here, 'HOST-B', snap), rb = A.getNode(here, I, '@#70/@B', 'HOST-B')
+  check('6b gossip: the receiver holds them as plan items (never stale) and rolls up "1 of 2 done"', m.ok && rb.plan === true && rb.plan_ix === 1 && A.stateOf(rb) === 'todo' && A.effectiveState(rb, T0 + 30 * DAY, 15).state === 'todo'
+    && (b => b.done === 1 && b.total === 2 && b.todos)(A.rollup(A.getSession(here, I, 'HOST-B'), A.getNode(here, I, '@#70', 'HOST-B'))))
+  check('6b gossip: a v2 (1.62) slice is refused bad-version', A.mergeSnapshot(here, 'HOST-C', { ...snap, v: 2 }).code === 'bad-version' && A.applySlice(here, 'HOST-C', { v: 2, full: true, sessions: [] }).code === 'bad-version')
+  const forged = { v: 3, origin: 'HOST-D', sessions: [{ session: 'S', project: 'P', user: 'u', nodes: [{ path: '' }, { path: 'ag', current: { id: 'x', ts: T0, text: 'an agent claiming todo', state: 'todo' } }] }] }
+  A.mergeSnapshot(here, 'HOST-D', forged)
+  check('6b gossip: a wire agent can\'t be todo / skipped (coerced to running)', A.stateOf(A.getNode(here, { session: 'S', project: 'P', user: 'u' }, 'ag', 'HOST-D')) === 'running')
+  const pub = new Map()
+  A.planDashDelta(pub, A.dashUnits(A.boardView(there, T0, { raw: true })), { full: true })
+  sayC(there, I, { path: '@#70/@~B', state: 'done' }, T0 + MIN)
+  const dd = A.planDashDelta(pub, A.dashUnits(A.boardView(there, T0 + MIN, { raw: true })))
+  check('6b dashboard delta: a tick → the item (plan_item, its new state) + the plan node whose bar moved (2 of 2); not the sibling', dd.upsert.some(u => u.path === '@#70/@B' && u.plan_item === true && u.state === 'done' && u.plan_ix === 1) && dd.upsert.some(u => u.path === '@#70' && u.bar.todos === true && u.bar.done === 2)
+    && !dd.upsert.some(u => u.path === '@#70/@A'), J(dd.upsert.map(u => u.path ?? u.session)))
 })
 
 console.log(`\n${pass} passed, ${fail} failed`)

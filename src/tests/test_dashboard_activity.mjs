@@ -158,8 +158,9 @@ check('view: the session row — name, one host tag per host, its own line RENDE
   && orchRow.querySelector('.ln').textContent === 'coordinating 3 of 6 tasks' && !!orchRow.querySelector('.pb.roll') && /⌛/.test(orchRow.textContent) && /🔔/.test(orchRow.textContent), orchRow && orchRow.innerHTML)
 const resRow = pathRow('research')
 check('view (6a): the DEFAULT view = sessions + their top-level nodes; deeper nodes stay closed', !!resRow && !!pathRow('@#70') && !!pathRow('build') && !pathRow('research/sub') && !pathRow('research/@Tharsis') && !pathRow('@#70/@step4'))
-check('view: an agent row — monospace name, glyph with the ring, rendered line, bar, ETA, host tag (multi-host)', resRow.querySelector('.nm.path')?.textContent === 'research' && resRow.querySelector('.ln').textContent === 'reading 4,812 of 12,000 tiles'
-  && !!resRow.querySelector('svg.gl circle.ring') && /⌛/.test(resRow.textContent) && resRow.querySelector('.htag')?.textContent === 'HOST-A' && dOf(resRow) === 2)
+check('view: an agent row — monospace name, glyph with the ring, rendered line, bar, ETA; 6b: NO host tag on the headline host (as its parent row)', resRow.querySelector('.nm.path')?.textContent === 'research' && resRow.querySelector('.ln').textContent === 'reading 4,812 of 12,000 tiles'
+  && !!resRow.querySelector('svg.gl circle.ring') && /⌛/.test(resRow.textContent) && !resRow.querySelector('.htag') && dOf(resRow) === 2)
+check('view (6b): a host tag only where the host of a node differs from that of its parent — a top-level node on another host than the headline', pathRow('build')?.querySelector('.htag')?.textContent === 'HOST-B' && pathRow('deploy')?.querySelector('.htag')?.textContent === 'HOST-B' && !pathRow('old').querySelector('.htag'))
 const c70 = pathRow('@#70')
 check('view (6a): an implicit grouping context — "@#70", no current line, the "none" mark, its rolled-up bar, no pills', c70.querySelector('.nm.ctx')?.textContent === '@#70' && /no current line/.test(c70.querySelector('.ln.none')?.textContent || '')
   && !!c70.querySelector('svg.s-none') && !!c70.querySelector('.pb.roll') && c70.querySelectorAll('.pill').length === 0)
@@ -274,7 +275,76 @@ check('Expand all opens every session and every node down to depth 6 (Log rows a
 sec.querySelector('.sech').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
 check('leaving (collapsing the section) unsubscribes', sentOf('activity_unsub').length === 1)
 const legend = doc.getElementById('actlegend')
-check('legend: the 7 agent glyphs + the context mark + the ring / hover hint', legend.querySelectorAll('svg').length === 8 && /ring is the time left before an agent goes stale/.test(legend.textContent) && /hover the icons/.test(legend.textContent) && /context \(no ring/.test(legend.textContent))
+check('legend: the 7 agent glyphs + the context mark + (6b) the 4 plan-item marks + the ring / hover hint', legend.querySelectorAll('svg').length === 12 && /plan item: to do · in progress · done · skipped/.test(legend.textContent) && /ring is the time left before an agent goes stale/.test(legend.textContent) && /hover the icons/.test(legend.textContent) && /context \(no ring/.test(legend.textContent))
+
+try {   // a crash (an older dashboard without the 6b helpers) counts as one failure
+// ================================================================= 6b (v1.63.0): plan items, the plan bar, active only, host tags, per-host headlines
+const pi = (key, path, host, st, extra = {}) => node(key, path, 'context', host, { plan_item: true, state: st, current: { id: `c-${path}`, ts: NOW - MIN, text: path.split('/').at(-1).replace(/^@/, ''), state: st }, ...extra })
+check('6b glyph: ☐ todo = an empty box; ☑ done = a box + tick; skipped = a box struck through; running / blocked = the in-progress mark (no ring)', /s-todo.*<rect[^>]*rx="2\.2"[^>]*\/><\/svg>$/.test(X.planGlyph('todo')) && /s-done.*<rect.*<path d="M5 8\.2/.test(X.planGlyph('done'))
+  && /s-skipped.*<path d="M4\.8 8 L11\.2 8"/.test(X.planGlyph('skipped')) && /s-running.*<rect x="4\.5"/.test(X.planGlyph('running')) && /s-blocked/.test(X.planGlyph('blocked')) && !/ring/.test(X.planGlyph('running')) && X.glyphSvg({ state: 'done' }, NOW, 'plan') === X.planGlyph('done'))
+const quietAgent = run(600)
+check('6b stale: a plan item never goes stale (any state), even under a stale or gone agent — its own state shows', ['todo', 'running', 'blocked'].every(s => (e => e.state === s && !e.stale && e.staleAt === null && e.plan)(X.effState(pi('k', '@p/@x', 'H', s, { last_activity: NOW - 600 * MIN }), quietAgent, NOW, 15)))
+  && X.effState(pi('k', '@p/@x', 'H', 'todo'), { state: 'gone' }, NOW, 15).state === 'todo' && X.effState(quietAgent, null, NOW, 15).state === 'stale')
+check('6b tooltip: a plan item says so (never goes stale), not "staleness follows"', (t => /^Plan item — To do/.test(t) && /never goes stale/.test(t) && !/staleness follows/.test(t))(X.statusTip(pi('k', '@p/@x', 'H', 'todo'), quietAgent, NOW, 15)))
+check('6b bar tooltip: "2 of 4 done (50%) · 1 skipped (left out) — its plan: 5 items"', X.barTip({ done: 2, total: 4, unit: 'done', rollup: true, todos: true, skipped: 1, n: 5 }) === '2 of 4 done (50%) · 1 skipped (left out) — its plan: 5 items', X.barTip({ done: 2, total: 4, unit: 'done', rollup: true, todos: true, skipped: 1, n: 5 }))
+// a plan fixture: session-level plan @#70 with items in every state (created in one call: equal created_at, plan_ix decides), an agent under one item, a nested plan,
+// a finished agent holding an open item, an ended plan, a multi-host session (HOST-A headline; HOST-B nodes)
+const T7 = NOW - 30 * MIN, at7 = { created_at: T7 }
+const pselfA = root('HOST-A', { current: { id: 'pa', ts: NOW - 2 * MIN, text: 'planning #70', state: 'running' } }), pselfB = root('HOST-B', { current: { id: 'pb', ts: NOW - 20 * MIN, text: 'older headline on B', state: 'running' }, log: { remote: true } })
+const plan = [
+  sess('k-plan', 'Planner', 'AIMB', { hosts: ['HOST-A', 'HOST-B'], multi_host: true, self: pselfA, selves: [pselfA, pselfB] }),
+  node('k-plan', '@#70', 'context', 'HOST-A', { implicit: true, bar: { done: 2, total: 5, unit: 'done', pct: 40, rollup: true, todos: true, skipped: 1, n: 6 }, created_at: T7 - 1000 }),
+  pi('k-plan', '@#70/@Ship', 'HOST-A', 'todo', { ...at7, plan_ix: 5 }), pi('k-plan', '@#70/@Spec', 'HOST-A', 'done', { ...at7, plan_ix: 0 }), pi('k-plan', '@#70/@Build', 'HOST-A', 'running', { ...at7, plan_ix: 1 }),
+  pi('k-plan', '@#70/@Test', 'HOST-A', 'blocked', { ...at7, plan_ix: 2 }), pi('k-plan', '@#70/@Docs', 'HOST-A', 'skipped', { ...at7, plan_ix: 3 }), pi('k-plan', '@#70/@Review', 'HOST-A', 'done', { ...at7, plan_ix: 4, current: { id: 'rv', ts: NOW - MIN, text: 'approved by Robin', state: 'done' } }),
+  node('k-plan', '@#70/@Build/builder', 'agent', 'HOST-A', { current: { id: 'bd', ts: NOW - 40 * MIN, text: 'compiling', state: 'running' }, last_activity: NOW - 40 * MIN }),
+  pi('k-plan', '@#70/@Build/@unit', 'HOST-A', 'done', { ...at7, plan_ix: 0 }), pi('k-plan', '@#70/@Build/@e2e', 'HOST-A', 'todo', { ...at7, plan_ix: 1 }),
+  node('k-plan', 'retired', 'agent', 'HOST-A', { state: 'done', active: false, finished_at: NOW - 5 * MIN, current: { id: 'rt', ts: NOW - 5 * MIN, text: 'stopped', state: 'done' } }),
+  pi('k-plan', 'retired/@leftover', 'HOST-A', 'todo', at7),
+  node('k-plan', '@shipped', 'context', 'HOST-A', { implicit: true }), pi('k-plan', '@shipped/@a', 'HOST-A', 'done', at7), pi('k-plan', '@shipped/@b', 'HOST-A', 'skipped', at7),
+  node('k-plan', 'helper', 'agent', 'HOST-B', { current: { id: 'hp', ts: NOW - MIN, text: 'on B', state: 'running' } }),
+  node('k-plan', 'helper/@ctx', 'context', 'HOST-B', { current: { id: 'hc', ts: NOW - MIN, text: 'B context', state: 'running' } }),
+]
+const PU = Object.fromEntries(plan.map(u => [u.id, u]))
+const pt = X.buildTree(PU, {}).find(p => p.key === 'aimb').sessions.find(x => x.s.session === 'Planner')
+check('6b tree: plan items in CREATION order — the same created_at → plan_ix (the given order), never A→Z', J(kidsOf(find(pt.kids, '@#70'))) === J(['@#70/@Spec', '@#70/@Build', '@#70/@Test', '@#70/@Docs', '@#70/@Review', '@#70/@Ship']), J(kidsOf(find(pt.kids, '@#70'))))
+check('6b tree: the nested plan + the agent under an item nest under it', J(kidsOf(find(pt.kids, '@#70/@Build'))) === J(['@#70/@Build/builder', '@#70/@Build/@unit', '@#70/@Build/@e2e']) || J(kidsOf(find(pt.kids, '@#70/@Build'))) === J(['@#70/@Build/@unit', '@#70/@Build/@e2e', '@#70/@Build/builder']), J(kidsOf(find(pt.kids, '@#70/@Build'))))
+check('6b open / ended: isOpenItem (todo / running / blocked); planEnded = every item done or skipped', X.isOpenItem(pi('k', 'a', 'H', 'todo')) && X.isOpenItem(pi('k', 'a', 'H', 'blocked')) && !X.isOpenItem(pi('k', 'a', 'H', 'done')) && !X.isOpenItem(node('k', 'a', 'context', 'H', { state: 'running' }))
+  && X.planEnded([pi('k', 'a', 'H', 'done'), pi('k', 'b', 'H', 'skipped')]) && !X.planEnded([pi('k', 'a', 'H', 'done'), pi('k', 'b', 'H', 'todo')]) && !X.planEnded([node('k', 'a', 'context', 'H', {})]))
+const pa = X.buildTree(PU, { activeOnly: true }).find(p => p.key === 'aimb').sessions.find(x => x.s.session === 'Planner')
+check('6b active only: a finished agent holding an OPEN item stays (with it); an ENDED plan disappears (its items and its plain node); an open plan keeps its done / skipped items', !!find(pa.kids, 'retired') && !!find(pa.kids, 'retired/@leftover') && !find(pa.kids, '@shipped') && !find(pa.kids, '@shipped/@a')
+  && J(kidsOf(find(pa.kids, '@#70'))) === J(['@#70/@Spec', '@#70/@Build', '@#70/@Test', '@#70/@Docs', '@#70/@Review', '@#70/@Ship']), J(pa.kids.map(t => t.u.path)))
+check('6b host tags: hostTagOn — only where a node\'s host differs from its parent\'s (a top-level node: the headline host\'s)', !X.hostTagOn(find(pt.kids, '@#70'), true) && X.hostTagOn(find(pt.kids, 'helper'), true) && !X.hostTagOn(find(pt.kids, 'helper/@ctx'), true)
+  && !X.hostTagOn(find(pt.kids, '@#70/@Build/@unit'), true) && !X.hostTagOn(find(pt.kids, 'helper'), false) && X.hostTagOn({ u: { host: 'B' }, parentHost: 'A' }, true))
+// rows of the Planner session only (another session has an @#70 too)
+const inPlanner = p => { const rs = rowsT(), i = rs.indexOf(nmRow('Planner')); for (let j = i + 1; j < rs.length && dOf(rs[j]) > 1; j++) if (rs[j].querySelector('.nm')?.getAttribute('title') === p) return rs[j]; return null }
+// ---- rendered
+sec.querySelector('.sech').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+recv({ type: 'activity_board', full: true, epoch: 'E2', seq: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15, remote_hosts: [] }, upsert: [...units, ...plan] })
+doc.getElementById('actCollapse').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+const p70 = inPlanner('@#70')
+check('6b view: the plan node shows its "N of M done" bar (solid, class plan) with the plan tooltip', !!p70?.querySelector('.pb.plan') && (b => { b.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true })); return b.getAttribute('title') === '2 of 5 done (40%) · 1 skipped (left out) — its plan: 6 items' })(p70.querySelector('.pb')), p70 && p70.innerHTML)
+click(p70)
+const itemRows = () => rowsT().filter(r => r.classList.contains('pi') && dOf(r) === 3)
+check('6b view: the items render in creation order with ☐ / the in-progress mark / ☑ / struck-through skipped', J(itemRows().map(r => r.querySelector('.nm').textContent)) === J(['Spec', 'Build', 'Test', 'Docs', 'Review', 'Ship'])
+  && !!inPlanner('@#70/@Ship').querySelector('svg.s-todo rect[rx="2.2"]') && !!inPlanner('@#70/@Spec').querySelector('svg.s-done path') && inPlanner('@#70/@Spec').classList.contains('pdone')
+  && !!inPlanner('@#70/@Build').querySelector('svg.s-running') && inPlanner('@#70/@Docs').classList.contains('skipped') && !!inPlanner('@#70/@Docs').querySelector('svg.s-skipped'), J(itemRows().map(r => r.className)))
+const css6 = [...doc.querySelectorAll('style')].map(s => s.textContent).join('\n')
+check('6b view: skipped = struck through (CSS); an item\'s line is hidden while it is just its name, shown once it says more', /\.ar\.skipped \.nm, \.ar\.skipped \.ln \{[^}]*line-through/.test(css6) && inPlanner('@#70/@Ship').querySelector('.ln').textContent === '' && inPlanner('@#70/@Review').querySelector('.ln').textContent === 'approved by Robin')
+check('6b view: a plan item never shows a stale pill — under its quiet agent the agent row does (its own staleness)', !inPlanner('@#70/@Build').classList.contains('stale') && J(pills(inPlanner('@#70/@Test'))) === J(['blocked']))
+click(inPlanner('@#70/@Build'))
+check('6b view: the nested plan under an item and the agent working under it; the agent shows its own stale', !!inPlanner('@#70/@Build/@unit') && !!inPlanner('@#70/@Build/@e2e') && inPlanner('@#70/@Build/builder')?.classList.contains('stale') && J(pills(inPlanner('@#70/@Build/builder'))) === J(['stale']))
+check('6b view (host tags): none on the headline host\'s top-level rows or on any child of a same-host parent; HOST-B\'s top-level node carries HOST-B', !p70.querySelector('.htag') && !inPlanner('@#70/@Ship').querySelector('.htag') && inPlanner('helper')?.querySelector('.htag')?.textContent === 'HOST-B')
+const plRow = nmRow('Planner')
+check('6b view: the multi-host session row keeps a tag for every host and the headline of the host that most recently set one', J([...plRow.querySelectorAll('.htag')].map(h => h.textContent)) === J(['HOST-A', 'HOST-B']) && plRow.querySelector('.ln').textContent === 'planning #70')
+click(plRow)
+const hselfRows = rowsT().filter(r => r.getAttribute('data-k') && dOf(r) === 2 && r.querySelector('.htag') && !r.classList.contains('lg') && !r.classList.contains('click'))
+check('6b view: expanded, each host\'s OWN line shows (HOST-A\'s headline, HOST-B\'s older one), each above its Log', J(hselfRows.map(r => [r.querySelector('.htag').textContent, r.querySelector('.ln').textContent])) === J([['HOST-A', 'planning #70'], ['HOST-B', 'older headline on B']]), J(hselfRows.map(r => r.textContent)))
+ao.checked = true; ao.dispatchEvent(new win.Event('change'))
+check('6b view (active only): the open item under a finished agent stays visible; the ended plan is gone; the open plan stays complete', !!inPlanner('retired') && !inPlanner('@shipped') && !!inPlanner('@#70/@Spec') && !!inPlanner('@#70/@Docs'))
+ao.checked = false; ao.dispatchEvent(new win.Event('change'))
+recv({ type: 'activity_delta', epoch: 'E2', seq: 2, base: 1, head: { host: 'HOST-A', now: NOW, stale_after_min: 15 }, upsert: [pi('k-plan', '@#70/@Ship', 'HOST-A', 'done', { ...at7, plan_ix: 5 }), { ...plan[1], bar: { ...plan[1].bar, done: 3 } }], remove: [] })
+check('6b view: a delta ticks an item in place (☐ → ☑) and moves the plan bar', !!inPlanner('@#70/@Ship')?.querySelector('svg.s-done') && inPlanner('@#70/@Ship').classList.contains('pdone') && inPlanner('@#70').querySelector('.pb.plan > i')?.style.width === '60%', J([inPlanner('@#70/@Ship')?.outerHTML, inPlanner('@#70')?.querySelector('.pb')?.outerHTML]))
+} catch (e) { fail++; console.log('FAIL 6b block crashed:', (e && e.message) || e) }
 
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close()

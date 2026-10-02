@@ -179,13 +179,29 @@ check('--path: the old notation (--agent + --ctx @~Ctx) is the same node as the 
 const badp = await runLog([...ID, '--path', 'a/@~b/@c', 'x'])
 check('--path: a bad path is refused locally (exit 64, bad-path)', badp.code === 64 && res1(badp).code === 'bad-path', J([badp.code, badp.out]))
 
+// ---- 6b (v1.63.0): --plan "A" "B" … and --done
+const sp1 = await runLog([...ID, '--path', '@#70', '--plan', 'Spec', 'Build', 'Test'])
+b = await board(G)
+check('6b --plan: "--path @#70 --plan A B C" creates @#70/@A, @#70/@B, @#70/@C as ☐ plan items, in the given order (exit 0)', sp1.code === 0 && res1(sp1).ok === true && J((res1(sp1).plan || []).map(p => p.path)) === J(['@#70/@Spec', '@#70/@Build', '@#70/@Test'])
+  && ['Spec', 'Build', 'Test'].every((n, i) => nodeOf(b, 'Scripty', `@#70/@${n}`)?.state === 'todo' && nodeOf(b, 'Scripty', `@#70/@${n}`)?.plan_item === true && nodeOf(b, 'Scripty', `@#70/@${n}`)?.plan_ix === i), J([sp1.code, sp1.out, sp1.err.slice(0, 300)]))
+const sp2 = await runLog([...ID, '--path', '@~#70', 'the step 6 plan', '--plan', 'Build', 'Docs', '--eta', '2h'])
+b = await board(G)
+check('6b --plan: text BEFORE --plan (and a flag after the names) — the target\'s own line + the plan; re-plan keeps Build, adds Docs at the end', sp2.code === 0 && nodeOf(b, 'Scripty', '@#70')?.current?.text === 'the step 6 plan' && J((res1(sp2).plan || []).map(p => [p.name, !!p.created])) === J([['Build', false], ['Docs', true]]) && !!nodeOf(b, 'Scripty', '@#70')?.eta_at, J([sp2.code, sp2.out]))
+const sd = await runLog([...ID, '--path', '@#70/@~Spec', '--done'])
+const sd2 = await runLog([...ID, '--path', '@#70/@~Build', '--state', 'skipped'])
+b = await board(G)
+check('6b --done: = --state done; ticks an item with no text (its line keeps its text); --state skipped on an item', sd.code === 0 && res1(sd).state === 'done' && nodeOf(b, 'Scripty', '@#70/@Spec')?.state === 'done' && nodeOf(b, 'Scripty', '@#70/@Spec')?.current?.text === 'Spec'
+  && sd2.code === 0 && nodeOf(b, 'Scripty', '@#70/@Build')?.state === 'skipped' && (p => p && p.todos && p.done === 1 && p.total === 3 && p.skipped === 1)(nodeOf(b, 'Scripty', '@#70')?.progress), J([sd.out, sd2.out, nodeOf(b, 'Scripty', '@#70')?.progress]))
+const sbad = await Promise.all([runLog([...ID, '--path', '@#70', '--plan']), runLog([...ID, '--path', '@#70/@~X', '--done', '--state', 'done']), runLog([...ID, '--path', '@#70', '--plan', 'a/b']), runLog([...ID, '--agent', 'w', '--state', 'todo', 'x'])])
+check('6b script codes (exit 64, refused locally): --plan with no name; --done + --state; a bad plan name (bad-plan); todo on an agent (bad-agent-state)', sbad.every(r => r.code === 64) && J(sbad.map(r => res1(r).code)) === J(['usage', 'usage', 'bad-plan', 'bad-agent-state']), J(sbad.map(r => [r.code, res1(r).code])))
+
 // ---- 6a: --batch <file|-> — ONE call, one result line; per-item results; exit 0 / 4 / 64
 const batchFile = path.join(cfgDir, 'batch.json')
-fs.writeFileSync(batchFile, J([{ ref: 'one', text: '@~step first', progress: '1/3' }, { ref: 'two', text: '@~step second', progress: '2/3' }, { ref: 'deep', path: 'x/@y/@~z', text: 'own path wins' }]))
+fs.writeFileSync(batchFile, J([{ ref: 'one', text: '@~step first', progress: '1/3' }, { ref: 'two', text: '@~step second', progress: '2/3' }, { ref: 'deep', path: 'x/@y/@~z', text: 'relative to --agent' }, { ref: 'abs', path: '/top/@~z', text: 'absolute' }]))
 const bf = await runLog([...ID, '--agent', 'batcher', '--batch', batchFile])
 b = await board(G)
-check('--batch file: exit 0, ONE line {ok, results:[…]} in order with refs; --agent is the default for every item that names no path / agent of its own', bf.code === 0 && bf.out.length === 1 && res1(bf).ok === true && J((res1(bf).results || []).map(r => [r.ref, r.ok, r.path])) === J([['one', true, 'batcher/@step'], ['two', true, 'batcher/@step'], ['deep', true, 'x/@y/@z']]), J([bf.code, bf.out, bf.err.slice(0, 300)]))
-check('--batch file: applied in order (the last line + bar win)', nodeOf(b, 'Scripty', 'batcher/@step')?.current?.text === 'second' && nodeOf(b, 'Scripty', 'batcher/@step')?.progress?.done === 2 && !!nodeOf(b, 'Scripty', 'x/@y/@z'))
+check('--batch file: exit 0, ONE line {ok, results:[…]} in order with refs; 6b: an item path is RELATIVE to --agent (a leading / = absolute)', bf.code === 0 && bf.out.length === 1 && res1(bf).ok === true && J((res1(bf).results || []).map(r => [r.ref, r.ok, r.path])) === J([['one', true, 'batcher/@step'], ['two', true, 'batcher/@step'], ['deep', true, 'batcher/x/@y/@z'], ['abs', true, 'top/@z']]), J([bf.code, bf.out, bf.err.slice(0, 300)]))
+check('--batch file: applied in order (the last line + bar win)', nodeOf(b, 'Scripty', 'batcher/@step')?.current?.text === 'second' && nodeOf(b, 'Scripty', 'batcher/@step')?.progress?.done === 2 && !!nodeOf(b, 'Scripty', 'batcher/x/@y/@z') && !nodeOf(b, 'Scripty', 'x/@y/@z') && !!nodeOf(b, 'Scripty', 'top/@z'))
 const bs = await runLog([...ID, '--path', 'stdin-batch', '--batch', '-'], { stdin: J([{ text: '@~a from stdin' }, { text: '@~b oops', state: 'stale' }, { text: '@~c still applied' }]) })
 check('--batch -: read from stdin; a bad item fails alone → exit 4 (applied 2, failed 1)', bs.code === 4 && res1(bs).ok === true && res1(bs).applied === 2 && res1(bs).failed === 1 && res1(bs).results?.[1]?.code === 'bad-state', J([bs.code, bs.out]))
 b = await board(G)
@@ -260,8 +276,8 @@ const N = 150
 for (let i = 1; i <= N; i++) {
   if (i === 40) st.send('{not json')
   if (i === 80) st.send({ session: 'Hijack', progress: '1/2' })
-  if (i === 100) st.send({ text: 'milestone: 100 rows', agent: 'pump', context: '@~root', log: true, ref: 'm100' })
-  if (i === 120) st.send([{ ref: 'b1', path: 'pump/@arr', text: 'array line one', log: true }, { ref: 'b2', path: 'pump/@arr', text: 'second', state: 'nope' }])   // 6a: a batch line
+  if (i === 100) st.send({ text: 'milestone: 100 rows', context: '@~root', log: true, ref: 'm100' })   // 6b: an own agent would now nest under --agent (relative); a context alone keeps it
+  if (i === 120) st.send([{ ref: 'b1', path: '@arr', text: 'array line one', log: true }, { ref: 'b2', path: '@arr', text: 'second', state: 'nope' }])   // 6a: a batch line (6b: its paths are relative to --agent)
   if (i === 121) st.send([])   // an empty batch: answered in place (bad-batch)
   st.send({ progress: `${i}/${N}:rows` })
 }
@@ -275,7 +291,7 @@ const L = st.lines
 check('stream: one result per input line, in input order', L.length === N + 5 && L.every((x, i) => x.line === i + 1), J(L.map(x => x.line).slice(0, 12)))
 check('stream: the bad lines are answered in place (bad-json, bad-field, an empty batch) and the rest go through', L[39]?.code === 'bad-json' && L[80]?.code === 'bad-field' && L[124]?.code === 'bad-batch' && L.filter(x => x.ok).length === N + 2, J([L[39], L[80], L[124]]))
 check('stream (6a): an ARRAY line is a batch — one result line {line, ok, results} with per-item refs; the defaults apply; a bad item fails alone', L[122]?.ok === true && J((L[122]?.results || []).map(r => [r.ref, r.ok, r.code || r.path])) === J([['b1', true, 'pump/@arr'], ['b2', false, 'bad-state']]), J(L[122]))
-check('stream: a line may override the defaults (agent/context/log) and its ref is echoed', L[101]?.ref === 'm100' && L[101]?.logged === true && L[101]?.context === 'root' && L[102]?.logged === false, J([L[101], L[102]]))
+check('stream: a line may override the defaults (context/log) and its ref is echoed', L[101]?.ref === 'm100' && L[101]?.logged === true && L[101]?.context === 'root' && L[102]?.logged === false, J([L[101], L[102]]))
 check('stream: stdin EOF → exit 0', st.code === 0, String(st.code))
 b = await board(G)
 check('stream: the board has the last bar', ctxOf(b, 'Streamer', 'pump', 'rows')?.progress?.done === N && ctxOf(b, 'Streamer', 'pump', 'root')?.current?.text === 'milestone: 100 rows' && ctxOf(b, 'Streamer', 'pump', 'arr')?.log?.entries === 1, J(agentOf(b, 'Streamer', 'pump')))
@@ -283,11 +299,11 @@ check('stream: the board has the last bar', ctxOf(b, 'Streamer', 'pump', 'rows')
 const wsb = await new Promise(resolve => {
   const ws = new WebSocket(`ws://127.0.0.1:${WS}`), got = []
   ws.on('open', () => ws.send(J({ type: 'hello', kind: 'logger', token: TOKEN, ident: { session: 'WsBatch', project: 'AIMB', user: 'robin' } })))
-  ws.on('message', raw => { const m = JSON.parse(String(raw)); got.push(m); if (m.type === 'welcome') ws.send(J({ type: 'log', ref: 'B', input: { agent: 'w', items: [{ ref: 1, text: '@~x one' }, { ref: 2, path: 'y', text: 'two' }] } })); if (m.type === 'logged') { ws.close(); resolve(m) } })
+  ws.on('message', raw => { const m = JSON.parse(String(raw)); got.push(m); if (m.type === 'welcome') ws.send(J({ type: 'log', ref: 'B', input: { agent: 'w', items: [{ ref: 1, text: '@~x one' }, { ref: 2, path: 'y', text: 'two' }, { ref: 3, path: '/z', text: 'three' }] } })); if (m.type === 'logged') { ws.close(); resolve(m) } })
   ws.on('error', () => resolve(null))
   setTimeout(() => resolve(null), 5000)
 })
-check('logger WS: a batch request → one logged reply with per-item results (refs, the agent default, an item path wins)', wsb?.ref === 'B' && wsb?.result?.ok === true && J((wsb.result.results || []).map(r => [r.ref, r.path])) === J([[1, 'w/@x'], [2, 'y']]), J(wsb))
+check('logger WS: a batch request → one logged reply with per-item results (refs, the agent default; 6b: an item path is relative to it, "/…" absolute)', wsb?.ref === 'B' && wsb?.result?.ok === true && J((wsb.result.results || []).map(r => [r.ref, r.path])) === J([[1, 'w/@x'], [2, 'w/y'], [3, 'z']]), J(wsb))
 
 // ---- prepare-shutdown: auth
 const pa = await Promise.all([prepare('wrong'), prepare(null), post(`/admin/prepare-shutdown?token=${TOKEN}`), post('/admin/prepare-shutdown', { Authorization: `Bearer ${TOKEN}` }, 'GET'), post('/admin/nope', { Authorization: `Bearer ${TOKEN}` })])

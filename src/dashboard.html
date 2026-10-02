@@ -163,6 +163,13 @@
   .act-legend svg { flex:none; width:14px; height:14px; }
   .s-running { color:var(--ok); } .s-blocked { color:var(--warn); } .s-idle { color:var(--idle); } .s-done { color:var(--ok); } .s-failed { color:var(--bad); } .s-stale, .s-gone { color:var(--faint); }
   .bg-running, .bg-done { background:var(--ok) !important; } .bg-blocked { background:var(--warn) !important; } .bg-idle { background:var(--idle) !important; } .bg-failed { background:var(--bad) !important; }
+  /* #70 6b (v1.63.0): plan items — ☐ todo, the in-progress mark, ☑ done, struck-through skipped — and the "N of M done" bar */
+  .s-todo { color:var(--muted); } .s-skipped { color:var(--faint); }
+  .bg-todo { background:transparent !important; box-shadow:inset 0 0 0 1.5px var(--muted); border-radius:2px !important; } .bg-skipped { background:var(--faint) !important; border-radius:2px !important; }
+  .ar .nm.pi { font-weight:500; color:var(--fg); }
+  .ar.skipped .nm, .ar.skipped .ln { text-decoration:line-through; color:var(--faint); }
+  .ar.pdone .nm.pi { color:var(--muted); }
+  .ar .pb.plan > i { background:var(--ok); }
 </style>
 </head>
 <body>
@@ -793,6 +800,7 @@
     function effState(item,owner,now,staleMin){
       item=item||{}; var ctx=isCtx(item), ag=ctx?(owner||{}):item, st=ctx?((item.current&&item.current.state)||'running'):(item.state||'running');
       var hostDown=!!(item.host_down||(owner&&owner.host_down));
+      if(item.plan_item) return { state:st, was:st, gone:false, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null, noLine:!item.current, plan:true };   // 6b: a plan item never goes stale or gone (its agent's row shows that)
       var agGone=ag.state==='gone';
       if(!ctx&&agGone) return { state:'gone', was:item.was||'running', gone:true, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null, noLine:false };
       if(ctx&&!item.current) return { state:'none', was:'running', gone:false, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null, noLine:true };
@@ -810,13 +818,14 @@
       return d.toDateString()===n.toDateString()?hm:(MON[d.getMonth()]+' '+d.getDate()+' '+hm); }
     function fmtHM(t){ var d=new Date(t); return p2(d.getHours())+':'+p2(d.getMinutes()); }
     function ago(ms){ return ms>=0?fmtDur(ms)+' ago':'in '+fmtDur(-ms); }
-    var CAP={running:'Running',blocked:'Blocked',idle:'Idle',done:'Done',failed:'Failed',stale:'Stale',gone:'Gone',none:'No current line'};
+    var CAP={running:'Running',blocked:'Blocked',idle:'Idle',done:'Done',failed:'Failed',stale:'Stale',gone:'Gone',none:'No current line',todo:'To do',skipped:'Skipped'};
     // the glyph's hover text: ACTUAL times (never inline) — started, running for, last activity, stale-at; or done/failed at + took
     function statusTip(item,owner,now,staleMin,host){
       item=item||{}; var e=effState(item,owner,now,staleMin), L=[], ctx=isCtx(item);
       var start=item.started_at!=null?item.started_at:item.created_at;
       var fin=item.finished_at||(item.current&&(item.state==='done'||item.state==='failed')?item.current.ts:null);
-      if(e.noLine) L.push('A context with no current line of its own (it groups what is under it)');
+      if(e.plan){ L.push('Plan item — '+(CAP[e.state]||e.state)+(e.state==='done'||e.state==='skipped'?(item.current&&item.current.ts?' at '+fmtClock(item.current.ts,now):''):'')); L.push('a plan item never goes stale (its agents do); it stays with its plan'); }
+      else if(e.noLine) L.push('A context with no current line of its own (it groups what is under it)');
       else if(e.gone){
         L.push(e.hostDown?('Host '+(host||'?')+' is down or unreachable — its agents show as gone'):(ctx?'Gone — its agent left':'Gone — the session left the mesh'));
         L.push('was '+e.was+(item.gone_at?(e.hostDown?' · down since ':' · left at ')+fmtClock(item.gone_at,now):''));
@@ -826,17 +835,18 @@
       if(start) L.push((ctx?'created ':'started ')+fmtClock(start,now)+(!ctx&&!e.gone&&e.state!=='done'&&e.state!=='failed'?' · running for '+fmtDur(now-start):''));
       if(item.last_activity) L.push('last activity '+fmtClock(item.last_activity,now)+' ('+ago(now-item.last_activity)+')');
       if(e.staleAt!=null) L.push((e.stale?'stale since ':'stale at ')+fmtClock(e.staleAt,now)+' ('+ago(now-e.staleAt)+')'+(!ctx&&item.stale_after_ms>0?' · its own stale_after '+fmtDur(item.stale_after_ms):''));
-      if(ctx) L.push('staleness follows '+(owner&&owner.path?('agent '+owner.path):'the session')+' (a context never goes stale by itself)');
+      if(ctx&&!e.plan) L.push('staleness follows '+(owner&&owner.path?('agent '+owner.path):'the session')+' (a context never goes stale by itself)');
       if(item.implicit&&!ctx) L.push('not reported yet — named by a path below it, so it never goes stale');
       return L.join('\n');
     }
     function etaTip(eta,now){ return !(eta>0)?'':(eta>now?'ETA '+fmtEta(eta-now)+' (estimated), about '+fmtHM(eta):'ETA due now (estimated) — was about '+fmtHM(eta)); }
     function barText(p){ return p.unit==='%'?fmtNum(p.done)+'%':fmtNum(p.done)+' of '+fmtNum(p.total)+(p.unit?' '+p.unit:''); }
-    function barTip(p){ if(!p) return ''; return barText(p)+' ('+Math.floor(pct(p)+1e-9)+'%) — '+(p.rollup?'rollup of '+p.n+' below it':'reported'); }
+    function barTip(p){ if(!p) return ''; return barText(p)+' ('+Math.floor(pct(p)+1e-9)+'%)'+(p.todos&&p.skipped?' · '+p.skipped+' skipped (left out)':'')+' — '+(p.todos&&p.skipped!=null?'its plan: '+p.n+' item'+(p.n===1?'':'s'):p.rollup?'rollup of '+p.n+' below it':'reported'); }
     // 16px status glyph. AGENTS: centre = state (dot running/blocked/idle, tick done, cross failed); a LIVE item's ring empties
     // as the time left before stale runs out (data-sa / data-win tick it without a re-render). CONTEXTS (kind 'ctx', 6a): no
     // ring (they have no staleness of their own) — a smaller state mark; 'none' = no status line of its own.
     function glyphSvg(e,now,kind){
+      if(kind==='plan') return planGlyph(e&&e.state);
       var st=kind==='none'||(e&&e.noLine)?'none':e.state, ctx=kind==='ctx', h='<svg class="gl'+(ctx?' ctx':'')+' s-'+st+'" viewBox="0 0 16 16" aria-hidden="true">';
       var track='<circle cx="8" cy="8" r="6.5" fill="none" stroke="var(--track)" stroke-width="2"/>';
       if(st==='none') return h+'<circle cx="8" cy="8" r="3" fill="none" stroke="var(--faint)" stroke-width="1.5"/></svg>';
@@ -854,6 +864,24 @@
       var f=ringFrac(e,now);
       return h+track+'<circle class="ring" cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="2" transform="rotate(-90 8 8)" stroke-dasharray="'+(C*f).toFixed(2)+' '+C.toFixed(2)+'" data-sa="'+e.staleAt+'" data-win="'+e.win+'"/><circle cx="8" cy="8" r="3" fill="currentColor"/></svg>';
     }
+    // 6b: a PLAN ITEM's glyph — ☐ todo, ☑ done, a struck box for skipped, ✗ in a box for failed; running / blocked / idle show
+    // the usual in-progress mark (a context's: no ring — a plan item never goes stale)
+    function planGlyph(st){
+      st=st||'todo'; var h='<svg class="gl ctx s-'+st+'" viewBox="0 0 16 16" aria-hidden="true">', box='<rect x="2.5" y="2.5" width="11" height="11" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>';
+      if(st==='todo') return h+box+'</svg>';
+      if(st==='done') return h+box+'<path d="M5 8.2 L7.2 10.4 L11.2 5.8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      if(st==='skipped') return h+box+'<path d="M4.8 8 L11.2 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+      if(st==='failed') return h+box+'<path d="M5.6 5.6 L10.4 10.4 M10.4 5.6 L5.6 10.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+      return h+'<rect x="4.5" y="4.5" width="7" height="7" rx="2" fill="currentColor"/></svg>';
+    }
+    var OPEN_ITEM={todo:1,running:1,blocked:1};
+    function itemState(u){ return (u&&u.current&&u.current.state)||(u&&u.state)||'todo'; }
+    function isOpenItem(u){ return !!u&&!!u.plan_item&&!!OPEN_ITEM[itemState(u)]; }
+    // a list of siblings is an ENDED plan when it has plan items and every one is done or skipped
+    function planEnded(list){ var n=0, all=true; (list||[]).forEach(function(t){ var u=t.u||t; if(u.plan_item){ n++; var s=itemState(u); if(s!=='done'&&s!=='skipped') all=false; } }); return n>0&&all; }
+    // 6b (#70 "Decisions before 6b" 8): a node row shows its host tag only where its host differs from its parent's — a
+    // top-level node's parent is the session row, whose line is the HEADLINE host's
+    function hostTagOn(t,multi){ return !!multi&&!!t&&!!t.u&&String(t.parentHost==null?'':t.parentHost).toLowerCase()!==String(t.u.host).toLowerCase(); }
     // the delta store: a full board replaces it; a delta applies only on top of exactly the held (epoch, seq) → else resync
     function applyMsg(st,m){
       if(!m) return null;
@@ -878,10 +906,13 @@
     function isActiveAgent(a){ return !!a&&a.nkind==='agent'&&!a.finished_at&&a.state!=='gone'; }
     function selfActive(s){ return !!(s&&s.current&&!s.finished_at&&s.state!=='gone'); }
     // projects (A→Z) → sessions (A→Z: a live tree must not reshuffle under the pointer) → the NODE TREE of each session (6a):
-    // nodes linked by parent_key within their host (a session on several hosts shows each host's nodes, tagged); children
-    // in CREATION order (stable; plans in 6b keep their given order), then key. A node whose parent has not arrived yet sits
-    // at the top level. Each tree node: { u, kids, owner } — owner = the nearest agent above (or the host's session self).
-    // activeOnly hides finished / gone agents with everything under them, and sessions with nothing active left.
+    // nodes linked by parent_key within their host (a session on several hosts shows each host's nodes); children in
+    // CREATION order (created_at, then — 6b — plan_ix, so a plan keeps its given order; then key). A node whose parent has not
+    // arrived yet sits at the top level. Each tree node: { u, kids, owner, parentHost, open, endedPlan } — owner = the nearest
+    // agent above (or the host's session self); parentHost = the parent's host (top level: the headline host). activeOnly
+    // hides finished / gone agents with everything under them — 6b: unless that holds an OPEN plan item (todo / running /
+    // blocked) — the items of an ENDED plan (all done / skipped) and a plain context left empty by that, and sessions with
+    // nothing active left.
     function buildTree(units,opts){
       opts=opts||{}; var byKey={}, groups=[], projs={}, order=[];
       Object.keys(units||{}).forEach(function(id){ var u=units[id]; if(u&&u.kind==='session'){ var g={s:u,nodes:[]}; byKey[u.key]=g; groups.push(g); } });
@@ -890,16 +921,21 @@
         var selfOf=function(h){ var ss=g.s.selves||[g.s.self]; for(var i=0;i<ss.length;i++) if(ss[i]&&String(ss[i].host).toLowerCase()===String(h).toLowerCase()) return ss[i]; return g.s.self||null; };
         var hk=function(h,k){ return String(h).toLowerCase()+'\u0001'+k; }, tn={};
         g.nodes.forEach(function(u){ tn[hk(u.host,u.key)]={u:u,kids:[],owner:null}; });
-        var top=[];
-        g.nodes.forEach(function(u){ var t=tn[hk(u.host,u.key)], par=u.parent_key?tn[hk(u.host,u.parent_key)]:null; if(par) par.kids.push(t); else top.push(t); });
-        var cmpN=function(a,b){ var x=a.u.created_at||0, y=b.u.created_at||0; if(x!==y) return x-y; var p=String(a.u.key), q=String(b.u.key); if(p!==q) return p<q?-1:1; var h1=String(a.u.host).toLowerCase(), h2=String(b.u.host).toLowerCase(); return h1<h2?-1:h1>h2?1:0; };
+        var top=[], headHost=g.s.self?g.s.self.host:null;
+        g.nodes.forEach(function(u){ var t=tn[hk(u.host,u.key)], par=u.parent_key?tn[hk(u.host,u.parent_key)]:null; if(par){ par.kids.push(t); t.parentHost=par.u.host; } else { top.push(t); t.parentHost=headHost; } });
+        var pix=function(u){ return u.plan_ix==null?-1:u.plan_ix; };
+        var cmpN=function(a,b){ var x=a.u.created_at||0, y=b.u.created_at||0; if(x!==y) return x-y; if(pix(a.u)!==pix(b.u)) return pix(a.u)-pix(b.u); var p=String(a.u.key), q=String(b.u.key); if(p!==q) return p<q?-1:1; var h1=String(a.u.host).toLowerCase(), h2=String(b.u.host).toLowerCase(); return h1<h2?-1:h1>h2?1:0; };
+        var mark=function(t){ var o=isOpenItem(t.u); t.endedPlan=planEnded(t.kids); t.kids.forEach(function(c){ if(mark(c)) o=true; }); t.open=o; return o; };   // on the whole tree, before filtering
+        top.forEach(mark);
+        var liveLine=function(u){ var s=u.current&&u.current.state; return s==='running'||s==='blocked'; };
         var nActive=0;
-        var walk=function(list,owner,hostSelf){ list.sort(cmpN); var out=[]; list.forEach(function(t){
+        var walk=function(list,owner){ list.sort(cmpN); var ended=planEnded(list), out=[]; list.forEach(function(t){
           var ow=owner||selfOf(t.u.host);
-          if(opts.activeOnly&&t.u.nkind==='agent'&&!isActiveAgent(t.u)) return;
+          if(opts.activeOnly&&!t.open&&((t.u.nkind==='agent'&&!isActiveAgent(t.u))||(t.u.plan_item&&ended))) return;
           if(isActiveAgent(t.u)&&!t.u.implicit) nActive++;
           t.owner=ow;
           t.kids=walk(t.kids,t.u.nkind==='agent'?t.u:ow);
+          if(opts.activeOnly&&!t.open&&t.endedPlan&&t.u.nkind==='context'&&!t.u.plan_item&&!t.kids.length&&!liveLine(t.u)) return;   // an ended plan's own (plain) node, left empty
           out.push(t); }); return out; };
         var kids=walk(top,null);
         if(opts.activeOnly&&!kids.length&&!(g.s.selves||[g.s.self]).some(selfActive)) return;
@@ -922,7 +958,7 @@
     function subtreeCount(t){ var n=0, remote=false; (function w(x){ var lg=x.u.log||{}; if(lg.remote) remote=true; else n+=lg.entries||0; x.kids.forEach(w); })(t); return remote?null:n; }
     return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg,
       applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, entryTag:entryTag, subtreeCount:subtreeCount, barOf:barOf,
-      fmtDur:fmtDur, fmtClock:fmtClock, pct:pct };
+      fmtDur:fmtDur, fmtClock:fmtClock, pct:pct, planGlyph:planGlyph, isOpenItem:isOpenItem, planEnded:planEnded, hostTagOn:hostTagOn, itemState:itemState, barText:barText };
   })();
   window.AimbAct=AimbAct;
 
@@ -977,7 +1013,7 @@
     actReq({entry:{id:id,host:host}},function(r){ E.loading=false; E.queued=null; if(!r||r.ok===false) E.err=r||{code:'no-answer'}; else E.entry=r.entry; actRender(); },function(info){ E.queued=info; actRender(); });
   }
   function hostTags(hosts,down){ return (hosts||[]).map(function(h){ var d=(down||[]).indexOf(h)>=0; return '<span class="htag'+(d?' down':'')+'">'+esc(h)+'</span>'; }).join(''); }
-  function barHtml(p,tipKey){ if(!p) return '<span class="pb nil"></span>'; return '<span class="pb'+(p.rollup?' roll':'')+'" data-tip="'+tipKey+'"><i style="width:'+AimbAct.pct(p).toFixed(1)+'%"></i></span>'; }
+  function barHtml(p,tipKey){ if(!p) return '<span class="pb nil"></span>'; return '<span class="pb'+(p.todos?' plan':p.rollup?' roll':'')+'" data-tip="'+tipKey+'"><i style="width:'+AimbAct.pct(p).toFixed(1)+'%"></i></span>'; }   // 6b: a plan's "N of M done" bar is solid green
   function pillsHtml(e,noLine,hostDown){
     var h='';
     if(!noLine){ if(e.state==='blocked') h+='<span class="pill blocked">blocked</span>'; if(e.state==='failed') h+='<span class="pill failed">failed</span>'; if(e.stale) h+='<span class="pill stale">stale</span>'; }
@@ -1037,16 +1073,18 @@
       return open;
     }
     // ---- a NODE row (6a, any depth): an agent keeps the status ring; a context shows its state mark, line, bar, ETA. Open →
-    // its Log (the subtree merged) then its children, one level deeper
+    // its Log (the subtree merged) then its children, one level deeper. 6b: a PLAN ITEM shows ☐ / the in-progress mark / ☑ /
+    // a struck-through skipped row, its name as a checklist entry, and its line only once it says more than its name; a host
+    // tag only where the node's host differs from its parent's (AimbAct.hostTagOn)
     function nodeRows(t,s,d,multi){
-      var u=t.u, ctx=u.nkind==='context', id=u.id, e=AimbAct.effState(u,t.owner,now,sm), open=!!ACT.open[id];
+      var u=t.u, ctx=u.nkind==='context', id=u.id, e=AimbAct.effState(u,t.owner,now,sm), open=!!ACT.open[id], pi=!!u.plan_item, ist=pi?AimbAct.itemState(u):null;
       var noLine=ctx?e.noLine:!!u.implicit&&!u.current, bar=AimbAct.barOf(u);
-      var nm=ctx?'<span class="nm ctx" title="'+esc(u.path).replace(/"/g,'&quot;')+'">@'+esc(u.name)+'</span>':'<span class="nm path" title="'+esc(u.path).replace(/"/g,'&quot;')+'">'+esc(u.name)+'</span>';
-      var line=u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+'</span>':'<span class="ln none">'+(ctx?'no current line':u.implicit?'not reported yet':'no current line')+'</span>';
-      var glyph=AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':ctx?'ctx':null);
-      row(id,'ar click'+(ctx?' cx':'')+(e.stale?' stale':'')+(e.gone?' gone':''),d,'<span class="chv">'+(open?'▾':'▸')+'</span>'+
+      var nm=pi?'<span class="nm pi" title="'+esc(u.path).replace(/"/g,'&quot;')+'">'+esc(u.name)+'</span>':ctx?'<span class="nm ctx" title="'+esc(u.path).replace(/"/g,'&quot;')+'">@'+esc(u.name)+'</span>':'<span class="nm path" title="'+esc(u.path).replace(/"/g,'&quot;')+'">'+esc(u.name)+'</span>';
+      var line=pi&&u.current&&String(u.current.text)===String(u.name)?'<span class="ln"></span>':u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+'</span>':'<span class="ln none">'+(ctx?'no current line':u.implicit?'not reported yet':'no current line')+'</span>';
+      var glyph=pi?AimbAct.glyphSvg(e,now,'plan'):AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':ctx?'ctx':null);
+      row(id,'ar click'+(ctx?' cx':'')+(pi?' pi'+(ist==='skipped'?' skipped':ist==='done'?' pdone':''):'')+(e.stale?' stale':'')+(e.gone?' gone':''),d,'<span class="chv">'+(open?'▾':'▸')+'</span>'+
         '<span data-tip="'+tipK(id+'g',function(){ return AimbAct.statusTip(u,t.owner,anow(),actStaleMin(),u.host); })+'">'+glyph+'</span>'+
-        nm+(multi?hostTags([u.host],u.host_down?[u.host]:[]):'')+line+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
+        nm+(AimbAct.hostTagOn(t,multi)?hostTags([u.host],u.host_down?[u.host]:[]):'')+line+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
         (u.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(u.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+'<span class="ic nil"></span>'+pillsHtml(e,noLine,false),
         function(){ ACT.open[id]=!open; actRender(); });
       if(!open) return;
@@ -1065,6 +1103,12 @@
         var s=x.s, sid='sess|'+s.key, hosts=s.hosts||(s.host?[s.host]:[]);
         var self=s.self||{}, sOpen=sessionRow(sid,'ar click',1,self,'<span class="nm">'+esc(nm(s.session))+'</span>',hostTags(hosts,s.hosts_down),!!(s.hosts_down&&s.hosts_down.length),!!s.bell);
         if(sOpen) (s.selves||[self]).forEach(function(se){
+          if(s.multi_host){   // 6b (#70 "Decisions before 6b" 6): each host's OWN line; the session row shows the host that most recently set one
+            var hid='hself|'+s.key+'|'+se.host, he=AimbAct.effState(se,null,now,sm), hNo=!se.current, head=String(se.host).toLowerCase()===String(self.host).toLowerCase();
+            row(hid,'ar'+(he.stale&&!hNo?' stale':'')+(he.gone?' gone':''),2,'<span class="chv"></span><span data-tip="'+tipK(hid+'g',function(){ return hNo&&!he.gone?'No headline from '+se.host:AimbAct.statusTip(se,null,anow(),actStaleMin(),se.host); })+'">'+AimbAct.glyphSvg(he,now,hNo&&!he.gone?'none':null)+'</span>'+
+              hostTags([se.host],se.host_down?[se.host]:[])+(se.current?'<span class="ln" data-tip="'+tipK(hid+'l',head?'the headline: this host set it most recently':'this host\'s own line (another host set a headline more recently)')+'">'+esc(AimbAct.renderText(se.current.text,AimbAct.barOf(se),se.eta_at,now))+'</span>':'<span class="ln none">no headline from this host</span>')+
+              barHtml(AimbAct.barOf(se),tipK(hid+'b',AimbAct.barTip(AimbAct.barOf(se))))+'<span class="ic nil"></span><span class="ic nil"></span>'+pillsHtml(he,hNo,false));
+          }
           var lk='log|self|'+s.key+'|'+se.host;
           var cnt=null, remote=!!(se.log&&se.log.remote);
           if(!remote){ cnt=(se.log&&se.log.entries)||0; x.kids.forEach(function(t){ if(String(t.u.host).toLowerCase()===String(se.host).toLowerCase()){ var c=AimbAct.subtreeCount(t); if(c==null) remote=true; else cnt+=c; } }); }
@@ -1122,7 +1166,8 @@
     if(lg){ var t=Date.now(), mk=function(st,label){ var e=st==='running'||st==='blocked'?{state:st,live:true,staleAt:t+6*60000,win:10*60000}:{state:st,live:false,gone:st==='gone'}; return '<span>'+AimbAct.glyphSvg(e,t)+label+'</span>'; };
       lg.innerHTML=mk('running','running')+mk('blocked','blocked')+mk('idle','idle')+mk('done','done')+mk('failed','failed')+mk('stale','stale')+mk('gone','gone')+
         '<span>'+AimbAct.glyphSvg({state:'running'},t,'ctx')+'context (no ring: it follows its agent\'s staleness)</span>'+
-        '<span>· the ring is the time left before an agent goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of what is below it · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'; }
+        '<span>'+AimbAct.planGlyph('todo')+AimbAct.planGlyph('running')+AimbAct.planGlyph('done')+AimbAct.planGlyph('skipped')+'plan item: to do · in progress · done · skipped (never stale)</span>'+
+        '<span>· the ring is the time left before an agent goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of what is below it · green bar = a plan\'s N of M done · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'; }
     document.addEventListener('visibilitychange',actSync);
   }
 

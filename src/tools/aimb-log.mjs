@@ -14,10 +14,17 @@
 // (≤64, ≤64 KB) in ONE call → one line {ok, results:[…]} (exit 0 when every item applied, 4 when the bridge refused the
 // call or any item failed); in --stream a line may be an array (a batch) → one result line {line, ok, results}.
 //
+// v1.63.0 (#70 step 6b): TODOS AND PLANS. --plan "A" "B" "C" creates ☐ plan items under the target node (--path / --agent),
+// in the given order (every following argument up to the next --flag is a name; put text BEFORE --plan, or after `--`);
+// re-sending a plan keeps the existing items as they are and adds new names at the end. --done = --state done; tick an item
+// with --path "@#70/@~B" --done (text optional: an @~ line with a state keeps its text). --state todo|skipped is for plan
+// items only. Batch / stream paths are RELATIVE to --path / --agent (a leading "/" = from the session root): --path @#70
+// with an item {path:"@B/@~x"} reports to @#70/@B/@x.
+//
 // Usage (one report):
-//   node tools/aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path p] [--ctx "@~Ctx"] [--state S]
+//   node tools/aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path p] [--ctx "@~Ctx"] [--state S | --done]
 //        [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."]
-//        [--data '{...}' | --data-file f.json] [--no-log] ["<text>"]
+//        [--data '{...}' | --data-file f.json] [--no-log] ["<text>"] [--plan "A" "B" …]
 //   The text is optional when --progress/--eta is given (it defaults to "{progress}" / "{eta}", rendered when read).
 //   --no-log = log:false (update the board only; not appended to the log or the daily file). Flags after `--` are text.
 // Usage (a script reporting often — e.g. every second — over ONE connection):
@@ -26,7 +33,8 @@
 //   {path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?} (+ an optional `ref` echoed
 //   back) — or a JSON ARRAY of such objects (a batch, one result line for the array).
 //   The command line's identity applies to every line; --agent / --path / --ctx / --no-log are DEFAULTS a line may override
-//   (a line naming its own path or agent takes none of the address defaults; one with only a context keeps --agent / --path).
+//   (6b: a line's own path / agent is RELATIVE to --agent / --path — a leading "/" makes it absolute — and drops --ctx; one
+//   with only a context keeps --agent / --path).
 // Usage (a batch): node tools/aimb-log.mjs --batch items.json --session <name> --project <P> [--agent a] [--path p] [--ctx c] [--no-log]
 //   (`--batch -` reads the array from stdin).
 //   One JSON result line per input line ({line:n, ref?, ...result}), in input order. Exit 0 at stdin EOF. If the link
@@ -56,10 +64,10 @@ import WebSocket from 'ws'
 import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS } from '../lib/activity.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] ["<text>"]\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
+const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] ["<text>"] [--plan "A" "B" …]\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
 const LOG_FIELDS = MESSAGE_FIELDS   // v1.62.0: + path
 const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url'])
-const BOOL_FLAGS = new Set(['no-log', 'stream', 'help'])
+const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done'])   // v1.63.0: + done (= --state done)
 const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'stream', 'ws-port', 'url'])
 const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'batch', 'ws-port', 'url'])
 const num = (v, d) => (Number(v) > 0 ? Number(v) : d)
@@ -89,6 +97,12 @@ const flags = {}, words = []
     const eq = a.indexOf('=')
     const name = (eq > 0 ? a.slice(2, eq) : a.slice(2)).toLowerCase()
     if (name === 'token') { err = ['token-in-argv', '--token is refused: a token on the command line is visible in the process list. Set AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE), or run beside the bridge\'s config.json'] ; break }
+    if (name === 'plan') {   // v1.63.0 (#70 6b): every following argument up to the next --flag (or `--`) is a plan name
+      const names = eq > 0 ? [a.slice(eq + 1)] : []
+      if (eq < 0) while (i + 1 < argv.length && !argv[i + 1].startsWith('--')) names.push(argv[++i])
+      if (!names.length) { err = ['usage', '--plan needs at least one name: --plan "A" "B" …']; break }
+      flags.plan = (flags.plan || []).concat(names); continue
+    }
     if (BOOL_FLAGS.has(name)) { if (eq > 0) err = ['usage', `--${name} takes no value`]; else flags[name] = true; continue }
     if (!VALUE_FLAGS.has(name)) { err = ['usage', `unknown flag --${name}`]; break }
     const v = eq > 0 ? a.slice(eq + 1) : argv[i + 1]
@@ -152,7 +166,10 @@ if (!exiting) {
     const input = { ...defaults }
     if (words.length) input.text = words.join(' ')
     for (const [f, k] of [['state', 'state'], ['progress', 'progress'], ['eta', 'eta'], ['stale-after', 'stale_after'], ['details', 'details']]) if (flags[f] != null) input[k] = flags[f]
-    if (flags.data != null && flags['data-file'] != null) usage('usage', '--data and --data-file are exclusive')
+    if (flags.plan) input.plan = flags.plan                                   // v1.63.0 (#70 6b)
+    if (flags.done && flags.state != null) usage('usage', '--done and --state are exclusive (--done = --state done)')
+    else if (flags.done) input.state = 'done'
+    if (exiting) { /* usage printed */ } else if (flags.data != null && flags['data-file'] != null) usage('usage', '--data and --data-file are exclusive')
     else if (flags.data != null) { try { input.data = JSON.parse(flags.data) } catch (e) { usage('bad-data', `--data is not JSON: ${e.message}`) } }
     else if (flags['data-file'] != null) {
       let raw = null

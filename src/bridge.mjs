@@ -110,7 +110,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.62.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.63.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -868,7 +868,14 @@ const ACT_GC_MS = Number(process.env.AI_BRIDGE_ACTIVITY_GC_MS) || 60000         
 const ACT_RETENTION_MS = Number(process.env.AI_BRIDGE_ACTIVITY_RETENTION_MS) || 86400000   // retention sweep cadence (also at gateway start)
 const ACT_INDEX_MAX = Number(process.env.AI_BRIDGE_ACTIVITY_INDEX_MAX) || 100000          // id → (day, offset) entries kept; beyond, a lookup scans the day file
 const ACT_PHASE1_MS = Number(process.env.AI_BRIDGE_ACTIVITY_PHASE1_MS) || 300            // a long replay publishes a provisional board after this
-const LOG_FIELDS = [...Act.MESSAGE_FIELDS, 'items', 'plan']   // v1.62.0 (#70 step 6a): + path (the node tree) + items (a batch); plan is 6b (answered not-yet)
+const ACT_ROLLOVER_CHECK_MS = Number(process.env.AI_BRIDGE_ACTIVITY_ROLLOVER_CHECK_MS) || 30000   // v1.63.0 (#70 6b): how often the gateway looks for a local day rollover (→ carry-forward)
+// v1.63.0 (#70 6b) TEST-ONLY CLOCK HOOK: the activity board's clock = the wall clock + this offset (ms). It drives every
+// activity time (report times, day-file names, the replay window, expiry, the rollover check, the board's `now`), so a test
+// can start a gateway a few seconds before a local midnight (the day rollover → carry-forward) or days in the future (a
+// restart whose replay window excludes older files). Never set it on a live bridge.
+const ACT_CLOCK_OFFSET_MS = Number(process.env.AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS) || 0
+const actNow = () => Date.now() + ACT_CLOCK_OFFSET_MS
+const LOG_FIELDS = [...Act.MESSAGE_FIELDS, 'items']   // v1.62.0 (#70 step 6a): + path (the node tree) + items (a batch); v1.63.0 (6b): + plan (in MESSAGE_FIELDS)
 const ACT_TAP = process.env.AI_BRIDGE_TEST_ACTIVITY_TAP === '1'   // test-only (#70 step 4): `activity {tap:true}` returns the recent gossip frames sent/received
 const BOARD_FIELDS = ['project', 'session', 'agent', 'path', 'host', 'active_only', 'log', 'entry', ...(ACT_TAP ? ['tap'] : [])]   // v1.60.0: + host (the mesh board); v1.62.0: + path (a node and its subtree)
 function activityConfig(cfg) { const w = []; const c = Act.resolveConfig(cfg && cfg.activity, process.env, w); for (const x of w) log(`activity config: ${x}`); return c }
@@ -878,6 +885,7 @@ let actReplay = null       // { phase: 'replaying' | 'published' | 'done', promi
 const actIndex = new Map() // entry id -> { day, offset, length } in this host's JSONL (details/data lookups)
 const actPresent = new Set()   // session keys seen live on this host's roster (a present → absent transition marks them gone)
 let actApplies = 0, actCpTimer = null, actCpEvery = 0, actCpBusy = false
+let actCfDay = null, actCfLast = null   // v1.63.0 (#70 6b): the local day whose file holds this gateway's carry-forward; the last one written (tap)
 const actCheckpointMs = () => Number(process.env.AI_BRIDGE_ACTIVITY_CHECKPOINT_MS) || ACT_CFG.progress_checkpoint_sec * 1000   // env: tests use a short interval
 const tzOff = t => -new Date(t).getTimezoneOffset()
 const actDisabled = () => ({ ok: false, code: 'activity-disabled', what: 'the activity board is disabled on this host (config activity.enabled / AI_BRIDGE_ACTIVITY_ENABLED)' })
@@ -899,12 +907,12 @@ function startActivity() {
   activity.config = ACT_CFG
   actReplay = { phase: 'replaying', stats: null, promise: null }
   actReplay.promise = replayActivity().catch(e => log(`activity replay failed: ${(e && e.message) || e}`))
-    .finally(() => { actReplay.phase = 'done'; syncActivityGone(); syncActivityBells(); actChanged() })   // #70 step 4: the replayed board goes out to the peer hubs (step 5: with its bells)
+    .finally(() => { actReplay.phase = 'done'; syncActivityGone(); syncActivityBells(); actChanged(); actRollover('startup') })   // #70 step 4: the replayed board goes out to the peer hubs (step 5: with its bells); 6b: today's carry-forward if the files have none yet
   scheduleActivityCheckpoints()
 }
 async function replayActivity() {
   if (!PERSIST) return
-  const t0 = Date.now()
+  const t0 = actNow()
   await pruneActivity(t0)   // retention first (startup), so the replay never reads a file it is about to delete
   const rp = Act.createReplay(activity, { now: t0 })
   const fromDay = Act.localDay(t0 - ACT_CFG.finished_visible_hours * 3600000)
@@ -912,14 +920,15 @@ async function replayActivity() {
   for await (const r of persistence.activity.readBackwards(HOSTNAME, { fromDay })) {
     if (Act.recordKind(r.rec) === 'entry') indexEntry(r.rec.id, r.day, r.offset, r.length)   // v1.62.0: v2 entries only (a 1.61 v1 record is skipped)
     if (rp.feed(r.rec, r.day) === 'old' && !rp.wantsOlder(r.day)) break   // past the window (an older cp a rep line needs is still read)
-    if (++n % 256 === 0 && actReplay.phase === 'replaying' && (rp.phase1Complete() || Date.now() - t0 > ACT_PHASE1_MS)) {
+    if (++n % 256 === 0 && actReplay.phase === 'replaying' && (rp.phase1Complete() || actNow() - t0 > ACT_PHASE1_MS)) {
       rp.publish(); actReplay.phase = 'published'; actChanged()   // phase 1: current lines / bars / states visible now (and gossiped); history follows
       log(`activity: board published after ${n} records (${rp.phase1Complete() ? 'phase 1 complete' : 'provisional'}); replay continues`)
     }
   }
   const st = rp.finish()
-  actReplay.stats = { ...st, ms: Date.now() - t0 }
-  if (st.fed) log(`activity: replayed ${st.entries} entries, ${st.cps} checkpoints, ${st.reps} repeat lines → ${st.sessions} session(s) in ${Date.now() - t0}ms`)
+  actReplay.stats = { ...st, ms: actNow() - t0 }
+  if (st.fed) log(`activity: replayed ${st.entries} entries, ${st.cps} checkpoints, ${st.cfs} carry-forwards, ${st.reps} repeat lines → ${st.sessions} session(s) in ${actNow() - t0}ms`)
+  actCfDay = st.cf_today ? Act.localDay(t0) : null   // v1.63.0 (#70 6b): no carry-forward in today's file yet → one is written as soon as the replay is done
 }
 async function pruneActivity(now) {   // retention: delete day files older than log_retention_days (gateway only — the host's one writer)
   if (!PERSIST || !activity || role !== 'gateway') return
@@ -928,7 +937,7 @@ async function pruneActivity(now) {   // retention: delete day files older than 
     if (gone.length) log(`activity: retention removed ${gone.length} day file(s): ${gone.join(', ')}`)
   } catch (e) { log(`activity: retention failed: ${e.message}`) }
 }
-setInterval(() => { pruneActivity(Date.now()) }, ACT_RETENTION_MS).unref()
+setInterval(() => { pruneActivity(actNow()) }, ACT_RETENTION_MS).unref()
 async function persistActivity(rec) {   // one JSONL line (a logged entry or a cp); never from a non-gateway process
   if (!PERSIST || !activity || role !== 'gateway') return null
   try {
@@ -949,7 +958,7 @@ function scheduleActivityCheckpoints() {
 async function checkpointActivity() {
   if (!activity || role !== 'gateway' || !PERSIST || actCpBusy || (actReplay && actReplay.phase !== 'done')) return
   actCpBusy = true
-  try { await writeCheckpoints(Act.planCheckpoints(activity, Date.now())) } finally { actCpBusy = false }
+  try { await writeCheckpoints(Act.planCheckpoints(activity, actNow())) } finally { actCpBusy = false }
 }
 async function writeCheckpoints(writes) {   // the planned cp lines + the repeat line (appended, or rewritten in place) → { cp, rep }
   const day = activity.cp.day, n = { cp: 0, rep: 0 }
@@ -976,15 +985,39 @@ async function flushActivityNow() {
   else if (!actCheckpointMs()) out.skipped = 'checkpoints-off'               // progress_checkpoint_sec 0: log:false is memory-only by choice
   else if (!actCpBusy) {
     actCpBusy = true
-    try { Object.assign(out, await writeCheckpoints(Act.flushCheckpoints(activity, Date.now(), { withRep: true }))) } finally { actCpBusy = false }
+    try { Object.assign(out, await writeCheckpoints(Act.flushCheckpoints(activity, actNow(), { withRep: true }))) } finally { actCpBusy = false }
   }
   out.files_drained = await persistence.activity.drain()
   return out
 }
 process.on('exit', () => {   // a clean shutdown flushes the pending checkpoints (sync appends; a kill skips this — one interval lost)
   if (!activity || !PERSIST || !actCheckpointMs() || (actReplay && actReplay.phase !== 'done')) return
-  try { for (const w of Act.flushCheckpoints(activity, Date.now())) persistence.activity.appendSync(HOSTNAME, activity.cp.day, JSON.stringify(w.rec)) } catch { }
+  try { for (const w of Act.flushCheckpoints(activity, actNow())) persistence.activity.appendSync(HOSTNAME, activity.cp.day, JSON.stringify(w.rec)) } catch { }
 })
+// v1.63.0 (#70 6b): CARRY-FORWARD. At each LOCAL DAY ROLLOVER (checked every ACT_ROLLOVER_CHECK_MS on the activity clock)
+// — and once after a restart's replay when today's file holds no carry-forward yet — the gateway appends a `cf` record
+// for every long-lived node (lib/activity.js planCarryForward: every open plan item + its ancestors, and every node whose
+// state would otherwise fall out of the replay window) to the NEW day's file. The replay window (finished_visible_hours)
+// then always holds them, so a plan open for weeks survives restarts and the day-file retention; older history stays in
+// the older files. Serialised with the checkpoint writer (one writer per file).
+async function carryForwardActivity(why) {
+  if (!activity || role !== 'gateway' || !PERSIST || (actReplay && actReplay.phase !== 'done') || actCpBusy) return null
+  actCpBusy = true
+  try {
+    const now = actNow(), day = Act.localDay(now)
+    let n = 0
+    for (const w of Act.planCarryForward(activity, now)) if (await persistActivity(w.rec)) n++
+    actCfDay = day; actCfLast = { day, at: now, written: n, why }
+    if (n) log(`activity: carried ${n} long-lived node(s) forward into ${day} (${why})`)
+    return n
+  } finally { actCpBusy = false }
+}
+function actRollover(why) {
+  if (!activity || role !== 'gateway' || !PERSIST || (actReplay && actReplay.phase !== 'done')) return
+  if (actCfDay === Act.localDay(actNow())) return
+  carryForwardActivity(why).catch(e => log(`activity: carry-forward failed: ${(e && e.message) || e}`))
+}
+setInterval(() => actRollover('day rollover'), ACT_ROLLOVER_CHECK_MS).unref()
 function actBudget() {
   const r = Act.enforceBudget(activity, ACT_CFG.memory_budget_mb * 1048576)
   if (r.evicted.length || r.entries_dropped) log(`activity: over the ${ACT_CFG.memory_budget_mb} MB budget — evicted ${r.evicted.length} finished agent(s), dropped ${r.entries_dropped} log entries`)
@@ -992,7 +1025,7 @@ function actBudget() {
 }
 setInterval(() => {   // expiry (finished/gone agents past finished_visible_hours leave the board) + the memory budget
   if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
-  const now = Date.now()
+  const now = actNow()
   let changed = Act.expire(activity, now).length > 0
   for (const k of [...actPresent]) if (!activity.local.has(k)) actPresent.delete(k)
   for (const o of Act.expireRemote(activity, now)) { actOwner.delete(o); changed = true }   // #70 step 4: a host down past the window leaves the board
@@ -1006,7 +1039,7 @@ function syncActivityGone() {
   if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
   const live = new Set()
   for (const s of roster.values()) { if (s.origin) continue; for (const sp of (s.subpeers || [])) live.add(Act.sessionKey({ realm: sp.realm || REALM, project: sp.project, user: sp.user, session: sp.name, host: HOSTNAME })) }   // v1.60.0: the key has the host
-  const now = Date.now()
+  const now = actNow()
   let changed = false
   for (const [k, sess] of activity.local) {
     if (live.has(k)) { if (!actPresent.has(k)) { actPresent.add(k); if (sess.gone_at) { Act.markSessionGone(activity, sess, null); changed = true } } }
@@ -1045,15 +1078,16 @@ async function activityLog(ident, input, opts = {}) {   // opts.script: an aimb-
 }
 // one message (a single call or one batch item) → the `log` result shape; persisted in order (a batch awaits each append)
 async function actApplyOne(ident, input) {
-  const now = Date.now()
+  const now = actNow()
   const p = Act.parseMessage(input, { now, tzOffsetMin: tzOff(now) })
   if (!p.ok) return p
   const r = Act.apply(activity, ident, p.msg, now)
   if (!r.ok) return r
-  const persisted = r.entry && PERSIST ? !!(await persistActivity(r.entry)) : null
+  let persisted = null   // v1.63.0 (#70 6b): every record the call wrote, in order (the target's entry, then each new plan item's)
+  if (PERSIST && r.records.length) { persisted = true; for (const rec of r.records) if (!(await persistActivity(rec))) persisted = false }
   if (++actApplies % 50 === 0) actBudget()
   return { ok: true, id: r.id, ts: r.ts, session: ident.session, path: r.path, agent: r.agent, context: r.context, current: r.current, state: r.state, stale_at: r.stale_at, logged: r.logged,
-    ...(persisted === false ? { persisted: false } : {}), ...(r.evicted.length ? { evicted: r.evicted } : {}), ...(r.warnings.length ? { warnings: r.warnings } : {}) }
+    ...(r.plan ? { plan: r.plan } : {}), ...(persisted === false ? { persisted: false } : {}), ...(r.evicted.length ? { evicted: r.evicted } : {}), ...(r.warnings.length ? { warnings: r.warnings } : {}) }
 }
 const actShow = o => (o && typeof o === 'object' && o.project != null ? { ...o, project: projName(o.project) } : o)   // #71: canonical project spelling
 // ctx (v1.61.0, #70 step 5): who is asking — { ws } a dashboard (its queued remote fetches are bounded per dashboard),
@@ -1063,9 +1097,9 @@ async function activityRead(q, ctx = {}) {
   if (!ACT_CFG.enabled) return actDisabled()
   if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   q = q && typeof q === 'object' ? q : {}
-  const now = Date.now()
+  const now = actNow()
   const head = { ok: true, host: HOSTNAME, now, stale_after_min: ACT_CFG.stale_after_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
-    ...(activity.remote.size ? { remote_hosts: actRemoteInfo() } : {}), ...(ACT_TAP && q.tap ? { tap: actTap } : {}) }
+    ...(activity.remote.size ? { remote_hosts: actRemoteInfo() } : {}), ...(ACT_TAP && q.tap ? { tap: { ...actTap, carry_forward: actCfLast, cf_day: actCfDay, replay: actReplay && actReplay.stats } } : {}) }
   if (q.entry != null) {   // v1.60.0: a REMOTE entity's entry is fetched from its owner (entry:{id, host}; a remote CURRENT line is found by id)
     const e = q.entry && typeof q.entry === 'object' ? q.entry : { id: q.entry }
     const id = String(e.id || ''), want = typeof e.host === 'string' && e.host.trim() ? e.host.trim() : null
@@ -1315,7 +1349,7 @@ function onActivityFrame(sock, f) {
     if (r.changed) actDashKick()
   } else if (f.t === 'ACTIVITY_DOWN') {
     tapRec('recv', { peer: host, kind: 'down' })
-    if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, Date.now())) { log(`activity: ${host} is going down (${String(f.reason || 'notice').slice(0, 40)}) — its agents show as gone`); actDashKick() }
+    if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, actNow())) { log(`activity: ${host} is going down (${String(f.reason || 'notice').slice(0, 40)}) — its agents show as gone`); actDashKick() }
   } else if (f.t === 'ACTIVITY_REQ') actServe(sock, p, host, f)
   else if (f.t === 'ACTIVITY_RES') {
     const q = actRemotePending.get(f.rid)
@@ -1337,7 +1371,7 @@ function actServe(sock, p, host, f) {
   a.bucket -= 1
   const q = f.q && typeof f.q === 'object' ? f.q : {}
   if (f.op === 'log') {   // v1.61.0: a page continues into this host's day files once memory runs out (actLogPage)
-    actLogPage(q, now, { maxEntries: ACT_PAGE_ENTRIES, maxBytes: ACT_PAGE_BYTES }).then(lv => {
+    actLogPage(q, actNow(), { maxEntries: ACT_PAGE_ENTRIES, maxBytes: ACT_PAGE_BYTES }).then(lv => {
       if (!lv.ok) return reply({ ...lv, host: HOSTNAME })
       const { ok: _ok, ...rest } = lv
       reply({ ok: true, host: HOSTNAME, log: { ...rest, host: HOSTNAME } })
@@ -1345,7 +1379,7 @@ function actServe(sock, p, host, f) {
     return
   }
   if (f.op === 'entry') {
-    lookupActivityEntry(String(q.id || ''), now).then(r => reply(r.ok === false ? { ...r, host: HOSTNAME } : { ok: true, host: HOSTNAME, ...r }),
+    lookupActivityEntry(String(q.id || ''), actNow()).then(r => reply(r.ok === false ? { ...r, host: HOSTNAME } : { ok: true, host: HOSTNAME, ...r }),
       e => reply({ ok: false, code: 'owner-error', host: HOSTNAME, what: String((e && e.message) || e) }))
     return
   }
@@ -1373,7 +1407,7 @@ const actWaitMs = (o, pos) => Math.max(0, o.hold - Date.now(), Math.ceil(((pos -
 function activityRemote(host, op, q, ctx = {}) {
   const gw = actOwner.get(host), p = gw ? peerGw.get(gw) : null
   if (!p || !p.sock || p.sock.destroyed) return Promise.resolve({ ok: false, code: 'owner-unreachable', host, what: `host ${host} is down or unreachable right now — its history can't be fetched (its last-known lines show as gone)` })
-  if (!p.act || !p.act.cap) return Promise.resolve({ ok: false, code: 'owner-unsupported', host, what: `host ${host} runs a bridge without this activity format (needs 1.62.0+)` })
+  if (!p.act || !p.act.cap) return Promise.resolve({ ok: false, code: 'owner-unsupported', host, what: `host ${host} runs a bridge without this activity format (needs 1.63.0+ — format v3)` })
   const o = actOut(p.act), ws = ctx && ctx.ws, wait = actWaitMs(o, o.q.length + 1)
   const busy = (why, after) => Promise.resolve({ ok: false, code: 'busy', host, retry_after_ms: Math.max(100, after), what: `too many history fetches are waiting (${why}) — retry in a moment` })
   if (ws && (ws.actFetches || 0) >= ACT_QUEUE_DASH) return busy(`${ACT_QUEUE_DASH} for this dashboard`, actWaitMs(o, o.q.length))
@@ -1440,7 +1474,7 @@ function actLinkLost(gw, p, why) {
   if (p && p.act) actFailQueue(p.act, 'the link to the owning host dropped while the fetch was queued')   // v1.61.0: its queued fetches too
   for (const [rid, q] of [...actRemotePending]) if (p && q.sock === p.sock) { clearTimeout(q.timer); actRemotePending.delete(rid); q.resolve({ ok: false, code: 'owner-unreachable', host: hostOfGw(gw), what: 'the link to the owning host dropped mid-request' }) }
   const host = hostOfGw(gw)
-  if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, Date.now())) { log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`); actDashKick() }
+  if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, actNow())) { log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`); actDashKick() }
 }
 // GOING DOWN (the tray's prepare-shutdown, or a clean exit): tell every peer hub now, so their boards show our agents gone
 // at once instead of after the link times out. Resolves once the frames are written (≤300 ms) with the number sent.
@@ -1472,10 +1506,10 @@ function actAnnounceDown(reason) {
 // "Decisions before step 5" 7: registered sessions read with the `activity` tool).
 const actDashSubs = () => [...leaves].filter(ws => ws.kind === 'dashboard' && ws.actSub && ws.readyState === 1)
 function actDashHead() {
-  return { host: HOSTNAME, now: Date.now(), stale_after_min: ACT_CFG.stale_after_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
+  return { host: HOSTNAME, now: actNow(), stale_after_min: ACT_CFG.stale_after_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
     remote_hosts: activity && activity.remote.size ? actRemoteInfo() : [] }
 }
-const actDashUnits = () => Act.dashUnits(Act.boardView(activity, Date.now(), { raw: true }).map(actShow))
+const actDashUnits = () => Act.dashUnits(Act.boardView(activity, actNow(), { raw: true }).map(actShow))
 function actDashSubscribe(ws) {   // a full board now (not throttled): the page's view starts from it
   ws.actSub = { pub: new Map(), seq: 1, head: '' }
   const plan = Act.planDashDelta(ws.actSub.pub, actDashUnits(), { full: true }), head = actDashHead()

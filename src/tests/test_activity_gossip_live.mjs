@@ -97,7 +97,7 @@ function logger(host, wsPort, ident) {
 }
 // a raw peer-hub link (HELLO + PEER_HELLO) for the forgery checks
 const frameOf = o => { const b = Buffer.from(J(o)); const h = Buffer.alloc(4); h.writeUInt32BE(b.length); return Buffer.concat([h, b]) }
-function rawPeer(host, port, session, fmt = 2) {
+function rawPeer(host, port, session, fmt = 3) {   // 6b: the current format (v3)
   return new Promise(resolve => {
     const s = net.connect(Number(port), host, () => {
       s.write(frameOf({ t: 'HELLO', ver: 1, fromBridge: session, fromSession: session, name: 'fake', auth: TOKEN }))
@@ -224,9 +224,9 @@ check('truncation: ... the rest followed in later frames (≥1 s apart) until al
 
 // ---- 6. forged slices: another origin's name in the frame is refused; host fields inside never decide ownership
 const fake = await rawPeer('127.0.0.1', B_PORT, 'FAKE-HOST/0001')
-fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 2, origin: HA, epoch: 'f', seq: 1, full: true, sessions: [forgedSession('ForgedA', HA)] }))
+fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 3, origin: HA, epoch: 'f', seq: 1, full: true, sessions: [forgedSession('ForgedA', HA)] }))
 await sleep(300)
-fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 2, epoch: 'f', seq: 2, full: true, sessions: [forgedSession('ForgedB', HA)] }))
+fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 3, epoch: 'f', seq: 2, full: true, sessions: [forgedSession('ForgedB', HA)] }))
 const b6 = await until(() => board(F), b => !!group(b, 'ForgedB'), 3000)
 check('forged: a slice naming another origin (A) is dropped — nothing of it on the board', !group(b6, 'ForgedA') && !b6.some(g => (g.nodes || []).concat(g.self || []).some(e => e.current?.text === 'forged ForgedA')), J(b6.map(g => g.session)))
 check('forged: a slice\'s own host fields are ignored — it is tagged with the LINK\'s host, never A', group(b6, 'ForgedB')?.host === 'FAKE-HOST' && group(b6, 'ForgedB')?.self?.host === 'FAKE-HOST', J(group(b6, 'ForgedB')))
@@ -262,6 +262,21 @@ const rsub = await call(F, 'activity', { log: { session: 'Orch', path: '@#70/@st
 check('nested (6a): the remote SUBTREE log of a nested agent is fetched from its owner (its contexts + sub-agent, rel paths)', rsub.ok && rsub.from_host === HA && rsub.log?.entries?.length === 3
   && J(rsub.log.entries.map(e => e.rel).sort()) === J(['', '@Tharsis/@z12', 'research']), J(rsub.log?.entries?.map(e => [e.rel, e.text])))
 await sleep(1100)
+
+// ---- 6b (v1.63.0): a PLAN on A reaches F — plan items with their states, plan position and the "N of M done" bar; a tick travels as a delta
+await call(A, 'log', { as: 'Orch', secret: 'or', path: '@#76', plan: ['Spec', 'Build', 'Ship'] })
+await call(A, 'log', { as: 'Orch', secret: 'or', path: '@#76/@~Spec', state: 'done' })
+const pg = await until(() => board(F), b => agentsOf(b, 'Orch', '@#76/@Spec')[0]?.state === 'done' && !!agentsOf(b, 'Orch', '@#76/@Ship')[0], 6000)
+const it = n => agentsOf(pg, 'Orch', `@#76/@${n}`)[0]
+check('6b gossip: A\'s plan items are on F\'s board as plan items (plan_item, plan_ix, todo / done), A\'s host, with the plan bar "1 of 3 done"', ['Spec', 'Build', 'Ship'].every((n, i) => it(n)?.plan_item === true && it(n)?.plan_ix === i && it(n)?.host === HA)
+  && it('Spec').state === 'done' && it('Build').state === 'todo' && (p => p && p.todos === true && p.done === 1 && p.total === 3)(agentsOf(pg, 'Orch', '@#76')[0]?.progress), J([it('Spec'), agentsOf(pg, 'Orch', '@#76')[0]]))
+const t6b = Date.now()
+await call(A, 'log', { as: 'Orch', secret: 'or', path: '@#76/@~Build', state: 'skipped' })
+const pg2 = await until(() => board(F), b => agentsOf(b, 'Orch', '@#76/@Build')[0]?.state === 'skipped', 6000)
+const sent6b = (await tap(A)).sent.filter(x => x.peer === HB && x.ts >= t6b && x.kind === 'delta' && x.nodes.some(n => n.includes('@#76/@Build')))
+check('6b gossip: a tick (skipped) reaches F as ONE delta carrying the item (+ its chain), not the whole plan; the bar is now 1 of 2 (skipped left out)', agentsOf(pg2, 'Orch', '@#76/@Build')[0]?.state === 'skipped' && sent6b.length >= 1 && !sent6b[0].nodes.some(n => n.includes('@#76/@Ship'))
+  && (p => p && p.done === 1 && p.total === 2 && p.skipped === 1)(agentsOf(pg2, 'Orch', '@#76')[0]?.progress), J([sent6b, agentsOf(pg2, 'Orch', '@#76')[0]?.progress]))
+check('6b gossip: a remote plan item never shows stale on the receiver', (await call(F, 'activity', { session: 'Orch', path: '@#76' })).sessions?.[0]?.nodes?.filter(n => n.plan_item).every(n => !n.stale_at && n.state !== 'stale'))
 
 // ---- 7. remote history: A's log paged (3 per page on A) across ≥3 pages, from F (host B's gateway now)
 const ids7 = []

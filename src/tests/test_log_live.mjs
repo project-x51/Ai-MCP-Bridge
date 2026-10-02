@@ -134,7 +134,7 @@ check('log:false: NOT in the in-memory log; the logged entry renders against ITS
 check('log:false: NOT written to the JSONL as an entry', records().filter(r => r.id).length === nEntries)
 
 // ---- checkpoints: unchanged-but-alive → ONE cp + ONE rep line whose n grows; a change → a new cp + a fresh rep line
-const tilesCps = rs => rs.filter(r => r.kind === 'cp' && r.session === 'Ferret' && r.path === 'worker/@tiles' && r.v === 2)
+const tilesCps = rs => rs.filter(r => r.kind === 'cp' && r.session === 'Ferret' && r.path === 'worker/@tiles' && r.v === 3)
 const reps = rs => rs.filter(r => Array.isArray(r.rep))
 const repsBefore = reps(records()).length
 for (const t0 = Date.now(); Date.now() - t0 < 3200;) { await call(F, 'log', { as: 'Ferret', secret: 'fe', agent: 'worker', context: '@tiles', progress: '40/100 tiles', log: false }); await sleep(120) }
@@ -143,14 +143,14 @@ recs = records()
 const k1 = tilesCps(recs)
 check('cp: the log:false change got ONE cp line (with a per-file key + the bar)', k1.length === 1 && Number.isInteger(k1[0].k) && k1[0].progress?.done === 40 && k1[0].current?.text === 'Seeding {progress} ({pct})', J(k1))
 const r1 = reps(recs).slice(repsBefore)
-check('rep: the unchanged stream is ONE repeat line (rewritten in place), n counting the intervals', r1.length === 1 && J(r1[0].rep) === J([k1[0].k]) && r1[0].n >= 3 && r1[0].last > r1[0].since, J(r1))
+check('rep: the unchanged stream is ONE repeat line (rewritten in place), n counting the intervals', r1.length === 1 && J(r1[0].rep) === J([k1[0]?.k]) && r1[0].n >= 3 && r1[0].last > r1[0].since, J(r1))
 check('rep: nothing else was written by the stream (no log entries)', recs.filter(r => r.id).length === nEntries)
 await call(F, 'log', { as: 'Ferret', secret: 'fe', agent: 'worker', context: '@tiles', progress: '41/100 tiles', log: false })
 for (const t0 = Date.now(); Date.now() - t0 < 2400;) { await call(F, 'log', { as: 'Ferret', secret: 'fe', agent: 'worker', context: '@tiles', progress: '41/100 tiles', log: false }); await sleep(120) }
 await sleep(800)
 recs = records()
 const k2 = tilesCps(recs), r2 = reps(recs).slice(repsBefore)
-check('cp: a change mid-stream → a new cp (same key, the new bar)', k2.length === 2 && k2[1].k === k1[0].k && k2[1].progress?.done === 41, J(k2))
+check('cp: a change mid-stream → a new cp (same key, the new bar)', k2.length === 2 && k2[1]?.k === k1[0]?.k && k2[1].progress?.done === 41, J(k2))
 check('rep: ... and a FRESH repeat line after it (the first one closed)', r2.length === 2 && r2[0].n === r1[0].n && r2[1].n >= 2, J(r2))
 const lastRep = r2[1] ? r2[1].last : -1
 
@@ -193,9 +193,9 @@ const pc = await Promise.all([
   call(G, 'log', { as: 'Bridget', secret: 'bg', path: 'a/@b/@c/d/@e/@f/@g', text: 'x' }),
   call(G, 'log', { as: 'Bridget', secret: 'bg', path: 'a/@~b/@c', text: 'x' }),
   call(G, 'log', { as: 'Bridget', secret: 'bg', path: 'a/@~b', text: '@c x' }),
-  call(G, 'log', { as: 'Bridget', secret: 'bg', text: 'x', plan: ['A'] }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', text: 'x', plan: [] }),
 ])
-check('6a codes: path-too-deep (7 segments), bad-path (@~ mid-path; a prefix after @~), not-yet (plan)', J(pc.map(c => c.code)) === J(['path-too-deep', 'bad-path', 'bad-path', 'not-yet']), J(pc.map(c => c.code)))
+check('6a codes: path-too-deep (7 segments), bad-path (@~ mid-path; a prefix after @~); 6b: bad-plan (plan is supported: an empty one is refused)', J(pc.map(c => c.code)) === J(['path-too-deep', 'bad-path', 'bad-path', 'bad-plan']), J(pc.map(c => c.code)))
 
 // ---- 6a: the NODE TREE over the tool — every path form, nested nodes on the board, the subtree's merged log
 const forms = [
@@ -223,10 +223,10 @@ check('tree: own:true = the node\'s own entries only; the path filter on the boa
 
 // ---- 6a: BATCH via the tool — order, per-item results + refs, partial failure, bounds; a follower's batch is ONE frame
 const bt = await call(G, 'log', { as: 'Bridget', secret: 'bg', path: 'batcher', items: [
-  { ref: 'a', text: '@~step one', progress: '1/3' }, { ref: 'b', text: '@~step two', state: 'nope' }, { ref: 'c', text: '@~step three', progress: '3/3' }, { ref: 'd', path: 'x/@~y', text: 'no default for this one' }] })
+  { ref: 'a', text: '@~step one', progress: '1/3' }, { ref: 'b', text: '@~step two', state: 'nope' }, { ref: 'c', text: '@~step three', progress: '3/3' }, { ref: 'd', path: 'x/@~y', text: 'relative to the default' }, { ref: 'e', path: '/x/@~y', text: 'absolute: no default for this one' }] })
 tb = await board(G)
-check('batch: { ok, results:[…] } one per item in order, refs echoed; a bad item fails alone (applied 3, failed 1)', bt.ok === true && J((bt.results || []).map(r => [r.ref, r.ok, r.code || r.path])) === J([['a', true, 'batcher/@step'], ['b', false, 'bad-state'], ['c', true, 'batcher/@step'], ['d', true, 'x/@y']]) && bt.applied === 3 && bt.failed === 1, J(bt))
-check('batch: applied in order — the last good line + bar win; an item\'s own path REPLACES the default (an item field wins)', nodeOf(tb, 'Bridget', 'batcher/@step')?.current?.text === 'three' && nodeOf(tb, 'Bridget', 'batcher/@step')?.progress?.done === 3 && nodeOf(tb, 'Bridget', 'x/@y')?.current?.text === 'no default for this one')
+check('batch: { ok, results:[…] } one per item in order, refs echoed; a bad item fails alone (applied 4, failed 1); 6b: an item path is RELATIVE to the default path, "/…" absolute', bt.ok === true && J((bt.results || []).map(r => [r.ref, r.ok, r.code || r.path])) === J([['a', true, 'batcher/@step'], ['b', false, 'bad-state'], ['c', true, 'batcher/@step'], ['d', true, 'batcher/x/@y'], ['e', true, 'x/@y']]) && bt.applied === 4 && bt.failed === 1, J(bt))
+check('batch: applied in order — the last good line + bar win; 6b: a relative item path nests under the default, an absolute one does not', nodeOf(tb, 'Bridget', 'batcher/@step')?.current?.text === 'three' && nodeOf(tb, 'Bridget', 'batcher/@step')?.progress?.done === 3 && nodeOf(tb, 'Bridget', 'batcher/x/@y')?.current?.text === 'relative to the default' && nodeOf(tb, 'Bridget', 'x/@y')?.current?.text === 'absolute: no default for this one')
 const bb = await Promise.all([
   call(G, 'log', { as: 'Bridget', secret: 'bg', items: Array.from({ length: 65 }, (_, i) => ({ text: `x${i}` })) }),
   call(G, 'log', { as: 'Bridget', secret: 'bg', items: Array.from({ length: 20 }, () => ({ text: 'x', details: 'd'.repeat(4000) })) }),
@@ -286,6 +286,38 @@ await reg(D, 'Off', 'off', 'AIMB')
 const off1 = await call(D, 'log', { as: 'Off', secret: 'off', text: 'hello' }), off2 = await call(D, 'activity')
 check('enabled:false: log and activity return activity-disabled', off1.code === 'activity-disabled' && off2.code === 'activity-disabled', J([off1, off2]))
 
+// ---- 6b (v1.63.0): TODOS AND PLANS over the tool — gateway + follower, ticks, re-plan, codes, a batch item's plan, the JSONL
+const pl = await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#71', plan: ['Spec', 'Build', 'Test', 'Ship'] })
+check('6b plan (tool): plan:[…] creates ☐ items under the target in the GIVEN order; result.plan names each', pl.ok && J((pl.plan || []).map(p => [p.name, p.path, p.created, p.plan_item, p.state])) === J([['Spec', '@#71/@Spec', true, true, 'todo'], ['Build', '@#71/@Build', true, true, 'todo'], ['Test', '@#71/@Test', true, true, 'todo'], ['Ship', '@#71/@Ship', true, true, 'todo']]), J(pl))
+const pt1 = await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#71/@~Spec', state: 'done' })
+const pt2 = await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#71/@~Build', text: 'compiling' })
+const pt3 = await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#71/@~Test', state: 'skipped' })
+const rpl = await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#71', plan: ['Build', 'Docs'] })
+check('6b tick (tool): "@~…/@Spec" + state done needs no text; a line starts an item; skipped; re-plan keeps Build as it is and adds Docs at the end', pt1.ok && pt1.state === 'done' && pt2.ok && pt2.state === 'running' && pt3.ok && pt3.state === 'skipped'
+  && rpl.ok && J(rpl.plan.map(p => [p.name, !!p.created, p.state])) === J([['Build', false, 'running'], ['Docs', true, 'todo']]), J([pt1, pt2, pt3, rpl]))
+const fpl = await call(F, 'log', { as: 'Ferret', secret: 'fe', path: 'rel', text: '@~root planning the release', plan: ['lint', 'pack'] })
+check('6b plan (FOLLOWER): forwarded with its text — the agent\'s own line + 2 items under it', fpl.ok && fpl.path === 'rel' && fpl.logged === true && J(fpl.plan.map(p => p.path)) === J(['rel/@lint', 'rel/@pack']), J(fpl))
+const pc6 = await Promise.all([
+  call(G, 'log', { as: 'Bridget', secret: 'bg', path: 'spec-70/@~root', text: 'x', state: 'todo' }),
+  call(F, 'log', { as: 'Ferret', secret: 'fe', agent: 'worker', text: '@~build x', state: 'skipped' }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#71', plan: ['a/b'] }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#71/@Ship', state: 'done' }),
+])
+check('6b codes: bad-agent-state (an agent can\'t be todo), not-a-plan-item (skipped on an ordinary context), bad-plan, bad-text (a state without @~ and without text)', J(pc6.map(c => c.code)) === J(['bad-agent-state', 'not-a-plan-item', 'bad-plan', 'bad-text']), J(pc6.map(c => c.code)))
+const pbt = await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#72', items: [{ ref: 'p', plan: ['a', 'b'] }, { ref: 't', path: '@~a', state: 'done' }] })
+check('6b batch: an item may carry a plan; item paths are relative to the batch path', pbt.ok && pbt.applied === 2 && J(pbt.results.map(r => [r.ref, r.ok])) === J([['p', true], ['t', true]]) && pbt.results[1].path === '@#72/@a', J(pbt))
+await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#73', plan: ['slow'] })
+await call(G, 'log', { as: 'Bridget', secret: 'bg', path: '@#73/@~slow', text: 'quiet for a while', stale_after: '1s' })
+await sleep(1500)
+let pb = await board(G)
+check('6b board: plan items (plan_item, plan_ix, their own states) + the "N of M done" bar (skipped left out)', J(['Spec', 'Build', 'Test', 'Ship', 'Docs'].map(n => [nodeOf(pb, 'Bridget', `@#71/@${n}`)?.state, nodeOf(pb, 'Bridget', `@#71/@${n}`)?.plan_item])) === J([['done', true], ['running', true], ['skipped', true], ['todo', true], ['todo', true]])
+  && nodeOf(pb, 'Bridget', '@#71/@Docs')?.plan_ix === 1 && (b => b && b.todos && b.done === 1 && b.total === 4 && b.skipped === 1)(nodeOf(pb, 'Bridget', '@#71')?.progress) && nodeOf(pb, 'Bridget', '@#72/@a')?.state === 'done', J(nodeOf(pb, 'Bridget', '@#71')))
+check('6b stale: a plan item never goes stale (quiet past its stale_after: still running)', nodeOf(pb, 'Bridget', '@#73/@slow')?.state === 'running' && !nodeOf(pb, 'Bridget', '@#73/@slow')?.stale_at, J(nodeOf(pb, 'Bridget', '@#73/@slow')))
+const prec = records().filter(r => r.session === 'Bridget' && String(r.path).startsWith('@#71/'))
+check('6b JSONL: v3 entries — one ☐ creation record per item (plan_item, plan_ix) and each tick, in order', prec.filter(r => r.state === 'todo' && r.plan_item).map(r => r.path).join() === '@#71/@Spec,@#71/@Build,@#71/@Test,@#71/@Ship,@#71/@Docs'
+  && prec.find(r => r.id === pt1.id)?.plan_item === true && prec.find(r => r.id === pt1.id)?.text === 'Spec' && prec.every(r => r.v === 3), J(prec.map(r => [r.path, r.state, r.plan_ix])))
+const beforePlanKill = { b: J(['Spec', 'Build', 'Test', 'Ship', 'Docs'].map(n => [nodeOf(pb, 'Bridget', `@#71/@${n}`)?.state, nodeOf(pb, 'Bridget', `@#71/@${n}`)?.created_at, nodeOf(pb, 'Bridget', `@#71/@${n}`)?.plan_ix])) }
+
 // ---- restart replay #1: kill the GATEWAY → the follower takes over and replays the host's files
 const beforeKill = await board(G)
 await G.transport.close(); all.splice(all.indexOf(G), 1)
@@ -304,6 +336,9 @@ check('restart (6a): the nested nodes come back from the files — paths, kinds,
   && J(rb2.find(s => s.session === 'Bridget').nodes.map(n => n.path)) === J(beforeKill.find(s => s.session === 'Bridget').nodes.map(n => n.path)), J(rb2.find(s => s.session === 'Bridget')?.nodes?.map(n => n.path)))
 const rsub = await call(F, 'activity', { log: { session: 'Bridget', path: 'spec-70', limit: 50 } })
 check('restart (6a): the subtree log is back (merged from the nodes\' replayed logs)', rsub.log?.entries?.length === 5 && rsub.log.entries[0].text === 'old notation line', J(rsub.log?.entries?.map(e => e.text)))
+const rpb = await board(F)
+check('6b restart: the plans come back from the files — every item a plan item with its state, created_at and plan position (so its given order)', J(['Spec', 'Build', 'Test', 'Ship', 'Docs'].map(n => [nodeOf(rpb, 'Bridget', `@#71/@${n}`)?.state, nodeOf(rpb, 'Bridget', `@#71/@${n}`)?.created_at, nodeOf(rpb, 'Bridget', `@#71/@${n}`)?.plan_ix])) === beforePlanKill.b
+  && ['Spec', 'Build', 'Test', 'Ship', 'Docs'].every(n => nodeOf(rpb, 'Bridget', `@#71/@${n}`)?.plan_item === true) && nodeOf(rpb, 'Ferret', 'rel/@pack')?.plan_item === true && (b => b && b.todos && b.done === 1)(nodeOf(rpb, 'Bridget', '@#71')?.progress), J([beforePlanKill.b, (rpb.find(s => s.session === 'Bridget')?.nodes || []).filter(n => n.path.startsWith('@#71')).map(n => [n.path, n.state, n.plan_item])]))
 const e3 = await call(F, 'activity', { entry: { id: note.id } })
 check('restart: entry details still come from the file', e3.ok && e3.source === 'file' && e3.entry?.details === 'LOGGED-DETAILS', J(e3))
 await reg(F, 'Ferret', 'fe', 'AIMB')

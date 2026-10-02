@@ -6,12 +6,33 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-02, v1.62.0) — read this first after a compact
-**Current version: v1.62.0** (#70 step 6a: the UNIFIED NODE TREE — agents + contexts to any depth, `path` addressing,
-subtree logs, recursive rollup, contexts inheriting their agent's staleness — plus BATCH logging; record / slice format v2;
-code done, NOT yet deployed — live hosts run v1.54.0). v1.61.0 (#70 step 5) is committed (`2a167b2`); v1.62.0 is in the
-working tree for review. The rebuilt tray (`PrepareShutdown()` before the kill) is NOT installed: only a scratch build
-proved it compiles; Robin runs `tray/windows/build.cmd`. Everything below is durable; nothing important is only in chat.
+## RESUME STATE (updated 2026-10-02, v1.63.0) — read this first after a compact
+**Current version: v1.63.0** (#70 step 6b: TODOS AND PLANS — `todo` / `skipped` context states, plan items, `plan:[…]`
+with a keep-and-append re-plan rule, "N of M done" rollup, 7-day `finished_visible_hours`, open items never expire or get
+evicted, the day-rollover CARRY-FORWARD; plus 6a adjustments: RELATIVE batch paths, the "most recently set" headline, host
+tags only where they differ; record / slice format v3; code done, NOT yet deployed — live hosts run v1.54.0). v1.62.0
+(#70 step 6a) is committed (`2d78a21`); v1.63.0 is in the working tree for review. The rebuilt tray (`PrepareShutdown()`
+before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
+Everything below is durable; nothing important is only in chat.
+
+**2026-10-02 (v1.63.0):** Built **#70 step 6b** ("Decisions before 6b") — a context with a todo status: `todo` (☐) and
+`skipped` (struck through) states; a context created by a plan or whose first line is `todo` is a PLAN ITEM for good
+(☑ when done; `bad-agent-state` for agents, `not-a-plan-item` for ordinary contexts); `plan:["A","B"]` (script `--plan A B`,
+`--done`) creates ☐ items in the given order (re-plan: existing items kept untouched, new names appended at the end,
+missing ones left alone, a line-less context adopted); a tick needs no text; plan items never go stale (nor gone); a
+node with plan items rolls up "N of M done" (skipped left out of M; ordinary children with bars win by 6a's precedence;
+a plan item counts only as a todo of its parent); `finished_visible_hours` 168; open items never expire and are never
+evicted; an ended plan (all done / skipped, or its owner finished) expires 7 days later; at each local day rollover (and
+once after a restart without one) the gateway writes a `cf` CARRY-FORWARD of every open plan item + its ancestors and
+of every node that would fall out of the replay window, so a weeks-old plan survives restarts and retention. Batch item
+paths are now RELATIVE to the batch path (a leading `/` = absolute); the multi-host headline is the host that most
+recently SET one (6a picked the most recently active host with a line — a real difference, now tested); host tags only
+where a node's host differs from its parent's; the expanded multi-host session shows each host's own line. Records +
+slices are format **v3** (v2 records still read; a 1.62 hub's frames are ignored — hubs declare `activity_gossip:3`).
+Test-only clock hook `AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS`; new `test_activity_carry_live`. Deploy = restart every
+host's gateway on 1.63.0 together. See architecture.md §13 "Built (v1.63.0)". **Open before 6c:** "Questions before 6c"
+in #70. **#75 part 2** (the `--token-file` in `{doorbell_cmd}`) was waiting on this step's `bridge.mjs` edits — it can go
+ahead once v1.63.0 is committed.
 
 **2026-10-02 (v1.62.0):** Built **#70 step 6a** (the revised step 6, "Step 6 redesign") — one tree of NODES per
 session (the session = the root; agents start / finish / go stale / gone; contexts carry a line, progress and an ETA;
@@ -71,7 +92,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #75 part 2 (`{doorbell_cmd}` carries --token-file), #74 federation test flakes, #70 agent activity board (steps 1–5 built; next: step 6 `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #75 part 2 (`{doorbell_cmd}` carries --token-file), #74 federation test flakes, #70 agent activity board (steps 1–5, 6a, 6b built; next: 6c `{log_snippet}` + the connect reminder), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -325,7 +346,7 @@ accepted); `allow_project` let a caller declared `UNCLASSIFIED` grant (compared 
   it in grants, `access`, the roster, `list_sessions` and the dashboard, while matching stays case-insensitive.
   Verify that no path really treats different cases as different projects (topics, consent, parked mail).
 
-## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–5 built, v1.61.0; step 6a — the node tree + batch logging — built, v1.62.0; next: 6b todos + plans, then 6c `{log_snippet}` + the connect reminder — Robin + Bridget)**
+## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–5 built, v1.61.0; step 6a — the node tree + batch logging — built, v1.62.0; step 6b — todos + plans — built, v1.63.0; next: 6c `{log_snippet}` + the connect reminder — Robin + Bridget)**
 **Why:** sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows what those
 agents are doing right now. **What:** a new dashboard page showing, across the whole mesh, sessions grouped by project,
 each session's agents under it, and each agent's progress. Agents report it themselves with a doorbell-style script (or
@@ -444,7 +465,7 @@ means a version bump, or later a realm-wide setting.
 | `log_retention_days` | 7 |
 | `log_entries_per_agent` | 200, kept in memory |
 | `stale_after_min` | 15. Also the dashboard slider's default; a viewer can still move it. |
-| `finished_visible_hours` | 24 |
+| `finished_visible_hours` | 24 — **6b (v1.63.0): 168 (7 days)**, matching log retention; also the replay window |
 | `memory_budget_mb` | 64. Over budget, the oldest finished agents are evicted first. |
 | `enabled` | true |
 
@@ -639,7 +660,8 @@ Any node may contain either kind, so agents can be grouped under the task they s
 **Revised step 6:**
 - **6a:** the unified tree (core, wire, JSONL, dashboard) plus batch logging. **BUILT (v1.62.0, 2026-10-02)** — see
   "6a as built" below and architecture.md §13 "Built (v1.62.0)".
-- **6b:** todos and plans (states, `--plan`, rollup, lifetime and carry-forward, the ☐/☑ display).
+- **6b:** todos and plans (states, `--plan`, rollup, lifetime and carry-forward, the ☐/☑ display). **BUILT (v1.63.0,
+  2026-10-02)** — see "6b as built" below and architecture.md §13 "Built (v1.63.0)".
 - **6c:** `{log_snippet}` plus the connect reminder (`client:code` with the script; Cowork with the tool), the
   default-open section, gossiped entry counts, and the run-boundary history view.
 
@@ -714,6 +736,75 @@ Any node may contain either kind, so agents can be grouped under the task they s
 8. **Host tags:** shown only where a node's host differs from its parent's (6a showed one on every row of a
    multi-host session).
 
+### 6b as built (v1.63.0, 2026-10-02)
+- **The plan-item marker** is `node.plan` (+ `plan_ix`, its position in the plan call that made it) — no caller-visible
+  flag. It is set when a plan creates (or adopts) the context, or when a context's FIRST current line has state `todo`, and
+  it is never cleared. On the wire: every record of a plan item carries `plan_item:true` + `plan_ix`; gossip nodes and
+  dashboard units carry the same two fields; the replay marks a node a plan item if any of its records says so.
+- **States:** `ACTIVITY_STATES` + `todo`, `skipped`. Agents / the session → `bad-agent-state` (parse time). `skipped` on an
+  ordinary context, `todo` on one that already has a line, or a plain (non-`@~`) todo on a new context →
+  `not-a-plan-item`. An `@~` line with no state on a ☐ item starts it (running). An `@~` line WITH a state may omit text
+  (`keepText`: the line keeps its text — else the node's name). A plan item never goes stale and never shows gone
+  (`staleAt` / `effectiveState` return its own state); its owner agent's row still shows that agent's staleness.
+- **Plan API:** `plan:[names]` on any message or batch item (`parsePlan`: 1..64 names, one context segment each, one
+  leading `@` dropped, repeats folded with a `plan-duplicates` warning, else `bad-plan`; depth checked). Text optional
+  (`planOnly`: the target gets no message of its own; with text, the target's message first). Each NEW or ADOPTED item
+  gets a LOGGED ☐ entry whose text is its name — even with `log:false` — so a plan always reaches the files; `apply`
+  returns `records:[…]` (target entry first, then the items) and `plan:[{name, path, created?, adopted?, plan_item, state}]`.
+  **Re-plan merge rule:** an existing item is kept exactly as it is (state, place); a new name is appended at the END in
+  the given order; a name left out stays; re-ordering moves nothing; an existing context with no line of its own is
+  ADOPTED; one with a line is left alone (`plan_item:false`). Children keep creation order everywhere (created_at, then
+  plan_ix, then key — the replay rebuilds it from the records' order too).
+- **Rollup combination:** reported progress → SUM of the ORDINARY children's bars when they share a unit → their MEAN % →
+  "N of M done" over the PLAN-ITEM children (`{done, total: items − skipped, unit:'done', todos:true, skipped, n}`; all
+  skipped → no bar; failed counts as not done). A plan item counts only as a todo of its parent (its own bar never enters
+  the parent's sum/mean). Plan bars sum up the tree like any shared unit (`todos` kept when every summed bar is one).
+- **Lifetime:** `finished_visible_hours` 168. `expire`: nothing holding an OPEN item (todo / running / blocked) expires —
+  a finished agent with one stays, and so does a GONE session with one (the build's reading of "while their session
+  exists" — see the questions); a plan ENDS when its last item became done / skipped or its owner finished (whichever
+  first; `planEndAt`) and expires a window later (`planRemoval`: its items, and the plan node when it is a plain context
+  left with nothing else and no live line; a nested plan's node is an item of its parent plan and stays). **Eviction**
+  (`evictionCandidates`, shared by `apply` and `enforceBudget`): finished agents and ended plans, oldest first, never a
+  subtree holding an open item, never on the target's path; else `too-many-nodes` / `too-many-agents`.
+- **Carry-forward** (`planCarryForward`): `cf` records `{v:3, kind:'cf', ts, path, …identity, current (full line), state,
+  progress, eta_at, created_at, last_activity, stale_after_ms, implicit, plan_item?, plan_ix?, finished_at? (agents),
+  new_from?}` for (1) every open plan item and all its ancestors and (2) every node whose own state (line / bar / ETA /
+  reported activity) was last persisted before now − window + 25 h (`node.pt` tracks when each reached the files), parents
+  first. The replay treats a `cf` as a snapshot of its TARGET only (its own created_at / last_activity / implicit; no
+  activity refresh for anyone else). **Trigger:** the gateway checks the activity clock every `AI_BRIDGE_ACTIVITY_
+  ROLLOVER_CHECK_MS` (30 s) and writes the cfs into the new day's file when the local day changed; after a restart's
+  replay it writes them at once unless today's file already holds one (`finish().cf_today`). The test-only
+  `AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS` shifts the whole activity clock.
+- **6a adjustments:** `withDefaults` makes an item's path / agent RELATIVE to the default agent + path (a leading `/` on
+  the item's first address field = absolute; an invalid item agent is passed through so its own error shows); the headline
+  = the root with the newest current-line time (tie → most recently active; none → most recently active host) — 6a's
+  "most recently active host WITH a line" differed when a host set its headline earlier but reported later; host tags only
+  where a node's host differs from its parent's (a top-level node compares with the headline host); the expanded multi-host
+  session shows each host's own line above its Log.
+- **Formats:** records + slices v3; `recordKind` reads v2 and v3 (`cf` is a new kind); slices must be v3; hubs declare
+  `activity_gossip:3`.
+
+### Questions before 6c (raised by the 6b build, 2026-10-02 — not decided)
+- **`{log_snippet}`** — should the agent snippet teach plans (`--plan`, `@~…/@Item --done`) or only `@~root` + milestones?
+  Plans are mostly an orchestrator tool; agents mainly tick items. And `aimb-log.mjs` reads `AI_BRIDGE_TOKEN_FILE` but has
+  no `--token-file` flag: the #75 part 2 fix for `{doorbell_cmd}` will want the same for the log snippet.
+- **The connect reminder** — Cowork gets the tool form: should it mention `plan` / ticking too?
+- **Activity open by default** (decided) — with plans, should a plan node also open by default (its items visible), or
+  stay closed behind its "N of M done" bar?
+- **Gossiped entry counts** (decided) — a node's own count, or its subtree's (what the Log row shows)?
+- **The run-boundary history view** (decided) — a carried-forward plan's run can begin in a file the retention already
+  pruned: should the view say "earlier history pruned" when the run start is older than `log_retention_days`?
+- **Gone sessions holding open items** never expire (and the budget can't evict them). Keep, or expire a gone session's
+  plans after N × the window?
+- **Mixed rollup** — a node with plan items AND ordinary children with bars shows the ordinary children's rollup (6a's
+  precedence, as decided). Should the plan's "N of M done" win on such a node instead?
+- **failed / idle items** don't end a plan (only done / skipped do; the owner finishing does). OK?
+- **Host tags at the top level** compare with the session's headline host (so the headline host's top-level rows are
+  untagged). OK, or tag every top-level row of a multi-host session?
+- **Replay length** — the window is now 7 days of files, so a restart reads up to 7× more (phase 1 still publishes early).
+  Fine for now?
+- **A "Plans" filter** for the dashboard was not built (kept small). Wanted?
+
 ### Build plan
 Each step is its own version.
 1. `src/lib/activity.js`: pure logic plus unit tests. Nothing visible. **BUILT (2026-09-30)** — `src/lib/activity.js`
@@ -774,8 +865,11 @@ Each step is its own version.
    `test_activity_dashboard_live` (36; 28 FAIL pre-change). See architecture.md §13 "Built (v1.61.0)".
 6. Revised into 6a / 6b / 6c (above). **6a BUILT (v1.62.0, 2026-10-02)** — the unified node tree + batch logging;
    `test_activity_unit` 516, `test_log_live` 66, `test_log_script_live` 50, `test_activity_gossip_live` 48,
-   `test_activity_dashboard_live` 41, `test_dashboard_activity` 85. Next: 6b (todos + plans), 6c (`{log_snippet}` + the
-   connect reminder, default-open section, gossiped entry counts, the run-boundary history view).
+   `test_activity_dashboard_live` 41, `test_dashboard_activity` 85. **6b BUILT (v1.63.0, 2026-10-02)** — todos + plans,
+   lifetime + carry-forward, the 6a adjustments; `test_activity_unit` 588, `test_log_live` 75, `test_log_script_live` 54,
+   `test_activity_gossip_live` 51, `test_activity_dashboard_live` 43, `test_dashboard_activity` 105, new
+   `test_activity_carry_live` 11. Next: 6c (`{log_snippet}` + the connect reminder, default-open section, gossiped entry
+   counts, the run-boundary history view).
 
 ### Questions before step 6 (raised by the step-5 build, 2026-10-02 — not decided)
 - **Who sees the board.** The WS rule is "dashboards only", but a dashboard is just a token holder that says

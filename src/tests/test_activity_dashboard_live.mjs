@@ -194,6 +194,20 @@ await until(async () => d3.store.units, x => !!x, 4000)
 check('nested deltas (6a): the folded view equals a fresh full board', canon(d1.store) === canon(d3.store), `${canon(d1.store).length} vs ${canon(d3.store).length}`)
 d3.close()
 
+// ---- 3c (6b, v1.63.0). a PLAN on A (via the script's logger WS) reaches the dashboard as plan-item units; a tick → a delta with the item + the plan bar
+await la.log({ path: '@#77', plan: ['Spec', 'Build', 'Ship'] })
+await until(async () => agt(d1, 'Orch', '@#77/@Ship'), x => !!x, 5000)
+await sleep(1200)
+const mark3 = d1.msgs.length
+await la.log({ path: '@#77/@~Spec', state: 'done' })
+await until(async () => agt(d1, 'Orch', '@#77/@Spec')?.state === 'done', x => x, 5000)
+await sleep(300)
+const pu = n => agt(d1, 'Orch', `@#77/@${n}`), d6b = d1.msgs.slice(mark3).filter(m => m.type === 'activity_delta')
+check('6b dashboard units: plan items carry plan_item + plan_ix + their REPORTED state (todo / done), A\'s host; the plan node its "N of M done" bar', ['Spec', 'Build', 'Ship'].every((n, i) => pu(n)?.plan_item === true && pu(n)?.plan_ix === i && pu(n)?.host === HA && pu(n)?.nkind === 'context')
+  && pu('Spec').state === 'done' && pu('Build').state === 'todo' && (b => b && b.todos === true && b.done === 1 && b.total === 3)(agt(d1, 'Orch', '@#77')?.bar), J([pu('Spec'), agt(d1, 'Orch', '@#77')]))
+check('6b dashboard deltas: the tick arrives as a delta carrying the item and the plan node whose bar moved — not the untouched items', d6b.length >= 1 && d6b.some(m => (m.upsert || []).some(u => u.path === '@#77/@Spec' && u.state === 'done')) && d6b.some(m => (m.upsert || []).some(u => u.path === '@#77' && u.bar?.done === 1))
+  && !d6b.some(m => (m.upsert || []).some(u => u.path === '@#77/@Ship' || u.path === '@#77/@Build')), J(d6b.map(m => (m.upsert || []).map(u => u.path || u.session))))
+
 // ---- 4. read access: a page leaf gets neither pushes nor reads
 const pg = await wsClient(WSB, { kind: 'page', page_kind: 'probe', title: 'Probe page', instance: 'probe-pg' })
 const pr = await pg.req({ session: 'Orch' }, 3000)
