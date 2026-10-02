@@ -454,6 +454,26 @@ replay rewriting older records through later moves, re-keying day files). Agreed
 **Plan:** spec first (record formats, the key/path/alias resolution rules, migration, wire projection, the API and
 snippet, the dashboard changes, a build in steps), reviewed by Robin; then build step by step as v2.0.0.
 
+### #88 spec (draft for Robin)
+The full draft is **[docs/spec-88.md](spec-88.md)** (2026-10-03; nothing built). In short:
+- **Ids:** 16 base32 chars of sha256(host, session, creator chain, key) — minted once, stored; migrated nodes get
+  sha256(host, session, final path). Keys: today's agent-name charset minus `:`, ≤ 48, case-insensitive, unique per creator.
+- **Records v6:** `kind:"node"` records (create / label / move / rank / item / merge / unmerge / remove) carry ALL structure;
+  entries, cp and cf name the node by `n` (+ `at`, the path at the time); `cf` also carries structure; a per-day sidecar
+  `YYYY-MM-DD.idx.json` (id → offsets + that day's node records) drives paging and a GHOST table (removed nodes) that keeps
+  parent logs whole (fixes #76).
+- **Resolution:** `--key` = your own scope (create if new; location / label only at creation); references look in your
+  scope, then your creator's, up to the session's (`chain:key` to be exact); `--path` = current tree → aliases → create.
+- **Compat:** PEER_HELLO keeps `activity_gossip:5` (1.7x checks it by equality) and adds `activity_ids:1`; v5 slices are
+  projected for old hosts; their path-based requests and actions resolve on a v2 owner.
+- **Migration (Dropbox-safe, spec §7 + §10):** each host converts only its own `activity/<host>/`, by one chronological
+  forward pass, and writes ALONGSIDE: v6 day files in `activity/<host>/v6/`, a per-day map (v5 record offset → node id), a
+  baseline of the converted board, `format.json` last. The v5 files stay byte-identical (a 1.7x bridge never lists `v6/`), so
+  rollback is free; every output is a pure function of the host's own v5 files (two hosts converting at once can't collide);
+  nothing writes `config.json`; Dropbox conflicted copies are never read (exact-name patterns) and are WARNed. ~250 MB/s read in
+  a prototype; only ~12 bytes a record are written.
+- **Holes found:** H1 – H13 in the spec §9. **Open questions:** 27, numbered, each with a recommendation (spec §9).
+
 ## #87 — log panel order: oldest first, auto-scroll to the bottom  ·  **DONE (v1.72.0)**
 Robin, 2026-10-03, asking whether the log panel should run the other way.
 - **Today:** the log panel (6d) lists newest first; older pages load at the bottom.
