@@ -8,6 +8,10 @@
 // level messages, limits, enabled:false, stale via stale_after, unauthenticated frames, gone on deregister, retention
 // (a seeded old file), startup replay of a seeded day file, and restart replay (kill the gateway: the follower takes over
 // and its board comes back from the files — the log:false bar included; then a fresh gateway does it again).
+// v1.62.0 (#70 step 6a): the NODE TREE over the tool (every path form, nested nodes on the board, a subtree's merged log,
+// nested nodes replayed after a restart), BATCH logging via the tool (order, per-item results + refs, partial failure, the
+// bounds, a follower's batch forwarded in ONE frame — the gateway's test tap counts it), and a 1.61-format (v1) JSONL
+// record in the seeded day file skipped cleanly.
 // AIMB_TEST_BRIDGE=<file> runs it against another bridge copy (the pre-change proof).
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -36,7 +40,7 @@ function spawn(name, port = PORT, extra = {}) {
     env: { ...process.env, AI_BRIDGE_CONFIG: cfgFile, AI_BRIDGE_NAME: name, AI_BRIDGE_PORT: port, AI_BRIDGE_WS_PORT: String(Number(port) + 1),
       AI_BRIDGE_TOKEN: TOKEN, AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_ADVERTISE_HOST: '127.0.0.1', AI_BRIDGE_USER: 'robin',
       AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: persist, AI_BRIDGE_DISCOVERY: 'none',
-      AI_BRIDGE_ACTIVITY_CHECKPOINT_MS: '700', AI_BRIDGE_ACTIVITY_INDEX_MAX: '3', ...extra }, stderr: 'pipe' })
+      AI_BRIDGE_ACTIVITY_CHECKPOINT_MS: '700', AI_BRIDGE_ACTIVITY_INDEX_MAX: '3', AI_BRIDGE_TEST_ACTIVITY_TAP: '1', ...extra }, stderr: 'pipe' })
   const c = new Client({ name: `t-${name}`, version: '0' }, { capabilities: {} })
   return c.connect(transport).then(() => ({ c, transport, name }))
 }
@@ -56,16 +60,20 @@ function records() {
 }
 const board = async h => (await call(h, 'activity')).sessions || []
 const sess = (b, name) => b.find(s => s.session === name)
-const agentOf = (b, sname, a) => (sess(b, sname)?.agents || []).find(x => x.agent === a)
-const ctxOf = (b, sname, a, c) => ((a ? agentOf(b, sname, a) : sess(b, sname)?.self)?.contexts || []).find(x => x.name === c)
+const nodeOf = (b, sname, p) => (p === '' ? sess(b, sname)?.self : (sess(b, sname)?.nodes || []).find(x => x.path === p))   // v1.62.0: the flat node list
+const agentOf = (b, sname, a) => nodeOf(b, sname, a)
+const ctxOf = (b, sname, a, c) => (c === 'root' ? (a ? agentOf(b, sname, a) : sess(b, sname)?.self) : nodeOf(b, sname, a ? `${a}/@${c}` : `@${c}`))
 
 // ---- seeded files: an OLD day (retention) and a recent day with one entry + a garbled final line (startup replay)
 fs.mkdirSync(hostDir, { recursive: true })
-fs.writeFileSync(path.join(hostDir, '2020-01-01.jsonl'), J({ v: 1, id: 'act_old_x-1', ts: Date.UTC(2020, 0, 1), session: 'Ancient', context: 'root', text: 'old', state: 'running' }) + '\n')
-const seedTs = Date.now() - 20 * 3600000, seedId = `act_seed_${seedTs.toString(36)}-1`
-fs.writeFileSync(path.join(hostDir, `${day(seedTs)}.jsonl`), J({ v: 1, id: seedId, ts: seedTs, context: 'root', current: true, text: 'overnight batch {progress}', state: 'running',
-  progress: { done: 7, total: 9, unit: 'jobs' }, origin: os.hostname(), realm: 'default', session: 'Yday', project: 'AIMB', user: 'robin', host: os.hostname(), agent: 'nightly',
-  details: 'SEEDED-DETAILS', data: null, new_session: true, new_entity: true, new_context: true, finished_at: null }) + '\n{"garbled-final-li')
+fs.writeFileSync(path.join(hostDir, '2020-01-01.jsonl'), J({ v: 2, id: 'act_old_x-1', ts: Date.UTC(2020, 0, 1), session: 'Ancient', path: '', text: 'old', state: 'running' }) + '\n')
+const seedTs = Date.now() - 20 * 3600000, seedId = `act_seed_${seedTs.toString(36)}-1`, v1Id = `act_v1_${(seedTs - 1000).toString(36)}-1`
+fs.writeFileSync(path.join(hostDir, `${day(seedTs)}.jsonl`),
+  J({ v: 1, id: v1Id, ts: seedTs - 1000, context: 'root', current: true, text: 'A 1.61-FORMAT LINE', state: 'running', origin: os.hostname(), realm: 'default', session: 'OldFormat', project: 'AIMB', user: 'robin',
+    host: os.hostname(), agent: 'legacy', details: 'V1-DETAILS', data: null, new_session: true, new_entity: true, new_context: true, finished_at: null }) + '\n' +   // v1.62.0: a v1 record — skipped
+  J({ v: 2, id: seedId, ts: seedTs, path: 'nightly', current: true, text: 'overnight batch {progress}', state: 'running',
+  progress: { done: 7, total: 9, unit: 'jobs' }, origin: os.hostname(), realm: 'default', session: 'Yday', project: 'AIMB', user: 'robin', host: os.hostname(),
+  details: 'SEEDED-DETAILS', data: null, new_from: 0, finished_at: null }) + '\n{"garbled-final-li')
 
 const all = []
 const G = await spawn('LogGw'); all.push(G)
@@ -83,15 +91,17 @@ check('startup replay: the seeded day file\'s current line is on the board (a ga
   && agentOf(b0, 'Yday', 'nightly')?.current?.rendered === 'overnight batch 7 of 9 jobs', J(agentOf(b0, 'Yday', 'nightly')))
 const seeded = await call(G, 'activity', { entry: { id: seedId } })
 check('startup replay: a replayed current line keeps its details (entry lookup from memory)', seeded.ok && seeded.source === 'memory' && seeded.entry?.details === 'SEEDED-DETAILS', J(seeded))
+const v1e = await call(G, 'activity', { entry: { id: v1Id } })
+check('startup replay (6a): a 1.61-format (v1) record in the day file is SKIPPED — not on the board, not an entry', !sess(b0, 'OldFormat') && !J(b0).includes('1.61-FORMAT') && v1e.ok === false && v1e.code === 'unknown-entry', J([v1e, b0.map(s => s.session)]))
 
 // ---- log via the gateway's sub-peer AND the follower's (forwarded)
 await reg(G, 'Bridget', 'bg', 'AIMB')
 await reg(F, 'Ferret', 'fe', 'AIMB')
 const l1 = await call(G, 'log', { as: 'Bridget', secret: 'bg', text: '@~root orchestrating spec-70' })
-check('log (gateway sub-peer, session-level): the #70 result shape', l1.ok === true && typeof l1.id === 'string' && typeof l1.ts === 'number' && l1.agent === null && l1.context === 'root'
+check('log (gateway sub-peer, session-level): the #70 result shape (+ path)', l1.ok === true && typeof l1.id === 'string' && typeof l1.ts === 'number' && l1.agent === null && l1.context === 'root' && l1.path === ''
   && l1.current === true && l1.state === 'running' && typeof l1.stale_at === 'number' && l1.logged === true && l1.session === 'Bridget', J(l1))
 const l2 = await call(F, 'log', { as: 'Ferret', secret: 'fe', agent: 'worker', text: '@~build compiling', progress: '1/4 files', eta: '10m', details: 'FULL-COMPILER-OUTPUT', data: { errors: 0 } })
-check('log (FOLLOWER sub-peer): forwarded to the gateway, applied there', l2.ok === true && l2.agent === 'worker' && l2.context === 'build' && l2.current === true && l2.session === 'Ferret', J(l2))
+check('log (FOLLOWER sub-peer): forwarded to the gateway, applied there', l2.ok === true && l2.agent === 'worker' && l2.context === 'build' && l2.path === 'worker/@build' && l2.current === true && l2.session === 'Ferret', J(l2))
 check('log: the response carries the inbox hint (an identified caller)', !!l2.inbox && typeof l2.inbox.unread === 'number', J(l2))
 const bg = await board(G), bf = await board(F)
 check('activity (gateway): both sessions; the follower\'s line is on the gateway\'s board', sess(bg, 'Bridget')?.self?.current?.text === 'orchestrating spec-70' && ctxOf(bg, 'Ferret', 'worker', 'build')?.current?.text === 'compiling', J(bg))
@@ -124,7 +134,7 @@ check('log:false: NOT in the in-memory log; the logged entry renders against ITS
 check('log:false: NOT written to the JSONL as an entry', records().filter(r => r.id).length === nEntries)
 
 // ---- checkpoints: unchanged-but-alive → ONE cp + ONE rep line whose n grows; a change → a new cp + a fresh rep line
-const tilesCps = rs => rs.filter(r => r.kind === 'cp' && r.session === 'Ferret' && r.agent === 'worker' && r.context === 'tiles')
+const tilesCps = rs => rs.filter(r => r.kind === 'cp' && r.session === 'Ferret' && r.path === 'worker/@tiles' && r.v === 2)
 const reps = rs => rs.filter(r => Array.isArray(r.rep))
 const repsBefore = reps(records()).length
 for (const t0 = Date.now(); Date.now() - t0 < 3200;) { await call(F, 'log', { as: 'Ferret', secret: 'fe', agent: 'worker', context: '@tiles', progress: '40/100 tiles', log: false }); await sleep(120) }
@@ -163,24 +173,73 @@ check('entry: an unknown id → unknown-entry; a cp is never an entry', (await c
 // ---- session-level log + limits + codes
 await call(G, 'log', { as: 'Bridget', secret: 'bg', text: 'spawned 3 agents' })
 const sl = await call(G, 'activity', { log: { session: 'Bridget' } })
-check('session-level: the session\'s own log (no agent)', sl.ok && sl.log?.agent === null && sl.log.entries[0].text === 'spawned 3 agents' && sl.log.entries[1].text === 'orchestrating spec-70', J(sl))
+check('session-level: the session\'s own log (no path = the root\'s subtree)', sl.ok && sl.log?.path === '' && sl.log.entries[0].text === 'spawned 3 agents' && sl.log.entries[1].text === 'orchestrating spec-70', J(sl))
 const long = await call(G, 'log', { as: 'Bridget', secret: 'bg', text: 'x'.repeat(300) })
 check('limits: text > 240 is truncated with a warning', long.ok && (long.warnings || []).includes('text-truncated'), J(long))
 const codes = await Promise.all([
   call(G, 'log', { as: 'Bridget', secret: 'bg', text: `@${'c'.repeat(61)} x` }),
   call(G, 'log', { as: 'Bridget', secret: 'bg', text: 'x', details: 'd'.repeat(4097) }),
   call(G, 'log', { as: 'Bridget', secret: 'bg', text: 'x', data: { s: 'z'.repeat(17000) } }),
-  call(G, 'log', { as: 'Bridget', secret: 'bg', agent: 'a/b/c/d', text: 'x' }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', agent: 'a/b/c/d/e/f/g', text: 'x' }),
   call(F, 'log', { as: 'Ferret', secret: 'fe', text: 'x', state: 'stale' }),
   call(F, 'log', { as: 'Ferret', secret: 'fe' }),
   call(G, 'log', { text: 'no identity' }),
   call(G, 'log', { as: 'Bridget', secret: 'WRONG', text: 'x' }),
   call(F, 'log', { as: 'Ferret', secret: 'fe', text: 'x', log: 'maybe' }),
 ])
-check('limits/codes: context-too-long, details-too-large, data-too-large, agent-too-deep, bad-state, bad-text, as-required, bad-secret, bad-log',
-  J(codes.map(c => c.code)) === J(['context-too-long', 'details-too-large', 'data-too-large', 'agent-too-deep', 'bad-state', 'bad-text', 'as-required', 'bad-secret', 'bad-log']), J(codes.map(c => c.code)))
-for (let i = 1; i <= 31; i++) await call(G, 'log', { as: 'Bridget', secret: 'bg', agent: 'many', text: `@c${i} x` })
-check('limits: the 33rd context → too-many-contexts', (await call(G, 'log', { as: 'Bridget', secret: 'bg', agent: 'many', text: '@c32 x' })).code === 'too-many-contexts')
+check('limits/codes: context-too-long, details-too-large, data-too-large, path-too-deep, bad-state, bad-text, as-required, bad-secret, bad-log',
+  J(codes.map(c => c.code)) === J(['context-too-long', 'details-too-large', 'data-too-large', 'path-too-deep', 'bad-state', 'bad-text', 'as-required', 'bad-secret', 'bad-log']), J(codes.map(c => c.code)))
+const pc = await Promise.all([
+  call(G, 'log', { as: 'Bridget', secret: 'bg', path: 'a/@b/@c/d/@e/@f/@g', text: 'x' }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', path: 'a/@~b/@c', text: 'x' }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', path: 'a/@~b', text: '@c x' }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', text: 'x', plan: ['A'] }),
+])
+check('6a codes: path-too-deep (7 segments), bad-path (@~ mid-path; a prefix after @~), not-yet (plan)', J(pc.map(c => c.code)) === J(['path-too-deep', 'bad-path', 'bad-path', 'not-yet']), J(pc.map(c => c.code)))
+
+// ---- 6a: the NODE TREE over the tool — every path form, nested nodes on the board, the subtree's merged log
+const forms = [
+  ['spec-70', 'spec-70', 'agent'], ['spec-70/research', 'spec-70/research', 'agent'], ['spec-70/@~Tharsis', 'spec-70/@Tharsis', 'context'],
+  ['spec-70/@Tharsis/@~z12', 'spec-70/@Tharsis/@z12', 'context'], ['@#70/spec-70', '@#70/spec-70', 'agent'], ['@#70/@step4/spec-70', '@#70/@step4/spec-70', 'agent'],
+  ['@~"CTX strip 17"', '@"CTX strip 17"', 'context'],
+]
+const fr = []
+for (const [p] of forms) fr.push(await call(G, 'log', { as: 'Bridget', secret: 'bg', path: p, text: `form ${p}`, progress: '1/4 tiles' }))
+let tb = await board(G)
+check('tree: every path form logs ok and lands on the board as its node (path, kind)', fr.every(r => r.ok) && forms.every(([, p, k]) => nodeOf(tb, 'Bridget', p)?.kind === k), J([fr.map(r => r.code || r.path), forms.map(([, p]) => nodeOf(tb, 'Bridget', p)?.kind)]))
+check('tree: implicit intermediates (@#70, @#70/@step4) + parents/depths', nodeOf(tb, 'Bridget', '@#70')?.implicit === true && nodeOf(tb, 'Bridget', '@#70/@step4/spec-70')?.parent === '@#70/@step4'
+  && nodeOf(tb, 'Bridget', '@#70/@step4/spec-70')?.depth === 3, J(nodeOf(tb, 'Bridget', '@#70/@step4/spec-70')))
+check('tree: the @~ forms set the current line; the others only log', nodeOf(tb, 'Bridget', 'spec-70/@Tharsis/@z12')?.current?.text === 'form spec-70/@Tharsis/@~z12' && !nodeOf(tb, 'Bridget', 'spec-70/research')?.current)
+check('tree: rollup recurses (spec-70 = the sum of its own reported bar? no — it reported its own: 1/4; @#70 = its descendants\' sum)', nodeOf(tb, 'Bridget', 'spec-70')?.progress?.rollup === false
+  && nodeOf(tb, 'Bridget', '@#70')?.progress?.done === 2 && nodeOf(tb, 'Bridget', '@#70')?.progress?.total === 8 && nodeOf(tb, 'Bridget', '@#70')?.progress?.rollup === true, J(nodeOf(tb, 'Bridget', '@#70')))
+const old1 = await call(G, 'log', { as: 'Bridget', secret: 'bg', agent: 'spec-70', text: '@~Tharsis old notation line' })
+tb = await board(G)
+check('tree: the OLD notation (agent + @~Ctx) is the same node as the path form', old1.ok && old1.path === 'spec-70/@Tharsis' && nodeOf(tb, 'Bridget', 'spec-70/@Tharsis')?.current?.text === 'old notation line', J(old1))
+const sub = await call(G, 'activity', { log: { session: 'Bridget', path: 'spec-70', limit: 50 } })
+check('tree: a node\'s log = its SUBTREE merged, newest first, each entry with its path + rel', sub.ok && sub.log?.entries?.length === 5 && sub.log.entries[0].text === 'old notation line' && sub.log.entries[0].rel === '@Tharsis'
+  && sub.log.entries.some(e => e.path === 'spec-70/@Tharsis/@z12' && e.rel === '@Tharsis/@z12') && sub.log.entries.some(e => e.path === 'spec-70/research'), J(sub.log?.entries?.map(e => [e.rel, e.text])))
+check('tree: own:true = the node\'s own entries only; the path filter on the board keeps the subtree', (await call(G, 'activity', { log: { session: 'Bridget', path: 'spec-70', own: true } })).log?.entries?.length === 1
+  && (await call(G, 'activity', { session: 'Bridget', path: 'spec-70' })).sessions?.[0]?.nodes?.length === 4)
+
+// ---- 6a: BATCH via the tool — order, per-item results + refs, partial failure, bounds; a follower's batch is ONE frame
+const bt = await call(G, 'log', { as: 'Bridget', secret: 'bg', path: 'batcher', items: [
+  { ref: 'a', text: '@~step one', progress: '1/3' }, { ref: 'b', text: '@~step two', state: 'nope' }, { ref: 'c', text: '@~step three', progress: '3/3' }, { ref: 'd', path: 'x/@~y', text: 'no default for this one' }] })
+tb = await board(G)
+check('batch: { ok, results:[…] } one per item in order, refs echoed; a bad item fails alone (applied 3, failed 1)', bt.ok === true && J((bt.results || []).map(r => [r.ref, r.ok, r.code || r.path])) === J([['a', true, 'batcher/@step'], ['b', false, 'bad-state'], ['c', true, 'batcher/@step'], ['d', true, 'x/@y']]) && bt.applied === 3 && bt.failed === 1, J(bt))
+check('batch: applied in order — the last good line + bar win; an item\'s own path REPLACES the default (an item field wins)', nodeOf(tb, 'Bridget', 'batcher/@step')?.current?.text === 'three' && nodeOf(tb, 'Bridget', 'batcher/@step')?.progress?.done === 3 && nodeOf(tb, 'Bridget', 'x/@y')?.current?.text === 'no default for this one')
+const bb = await Promise.all([
+  call(G, 'log', { as: 'Bridget', secret: 'bg', items: Array.from({ length: 65 }, (_, i) => ({ text: `x${i}` })) }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', items: Array.from({ length: 20 }, () => ({ text: 'x', details: 'd'.repeat(4000) })) }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', items: [] }),
+  call(G, 'log', { as: 'Bridget', secret: 'bg', items: [{ text: 'x' }], text: 'top-level text' }),
+])
+check('batch bounds: 65 items → too-many-items, > 64 KB → batch-too-large, empty / mixed → bad-batch (the WHOLE call, nothing applied)', J(bb.map(r => r.code)) === J(['too-many-items', 'batch-too-large', 'bad-batch', 'bad-batch'])
+  && !(await board(G)).some(s => (s.nodes || []).some(n => /^x\d+$/.test(n.current?.text || ''))), J(bb.map(r => r.code)))
+const tapBefore = ((await call(G, 'activity', { tap: true, session: '-none-' })).tap?.recv || []).filter(x => x.kind === 'fwd' && x.op === 'log').length
+const fb2 = await call(F, 'log', { as: 'Ferret', secret: 'fe', agent: 'fbatch', items: Array.from({ length: 10 }, (_, i) => ({ ref: i, text: `@~n${i % 3} line ${i}` })) })
+const fwd = ((await call(G, 'activity', { tap: true, session: '-none-' })).tap?.recv || []).filter(x => x.kind === 'fwd' && x.op === 'log')
+check('batch (FOLLOWER): 10 items forwarded in ONE ACTIVITY frame, applied in order on the gateway', fb2.ok && fb2.results?.length === 10 && fb2.results.every((r, i) => r.ok && r.ref === i) && fwd.length === tapBefore + 1 && fwd.at(-1).items === 10
+  && ctxOf(await board(G), 'Ferret', 'fbatch', 'n0')?.current?.text === 'line 9', J([fb2.results?.length, fwd.slice(-2)]))
 const dflt = await call(F, 'log', { as: 'Ferret', secret: 'fe', agent: 'worker', context: '@~eta', eta: '90m' })
 b = await board(G)
 check('default text: an ETA-only message is the line "{eta}", rendered relative', dflt.ok && ctxOf(b, 'Ferret', 'worker', 'eta')?.current?.text === '{eta}' && /^~1h 2\dm$|^~1h 30m$/.test(ctxOf(b, 'Ferret', 'worker', 'eta')?.current?.rendered || ''), J(ctxOf(b, 'Ferret', 'worker', 'eta')))
@@ -191,7 +250,7 @@ check('stale: running inside its stale_after window', agentOf(await board(G), 'F
 await sleep(1600)
 const sa = agentOf(await board(G), 'Ferret', 'sleepy')
 check('stale: quiet past stale_after → stale, was running', sa?.state === 'stale' && sa?.was === 'running', J(sa))
-check('activity: filters (agent, active_only, project)', (await call(G, 'activity', { agent: 'sleepy' })).sessions?.length === 1 && (await call(G, 'activity', { project: 'nope' })).sessions?.length === 0)
+check('activity: filters (agent / path, active_only, project)', (await call(G, 'activity', { agent: 'sleepy' })).sessions?.length === 1 && (await call(G, 'activity', { path: 'sleepy' })).sessions?.length === 1 && (await call(G, 'activity', { project: 'nope' })).sessions?.length === 0)
 
 // ---- a frame from an unauthenticated / unregistered connection applies nothing
 function rawFrames(frames) {
@@ -239,6 +298,12 @@ check('restart: the log:false bar survives (from the checkpoint) and the templat
 check('restart: last_activity comes from the rep line (not stale; later than its cp)', tl?.last_activity === lastRep && tl?.last_activity > (k2[1] ? k2[1].ts : Infinity) && tl?.state === 'running', J([tl && tl.last_activity, lastRep, k2[1] && k2[1].ts]))
 check('restart: the in-memory history is back (chronological, capped)', (await call(F, 'activity', { log: { session: 'Ferret', agent: 'worker', limit: 100 } })).log?.entries?.length === 10)
 check('restart: the board matches the one before the kill (sessions)', J((await board(F)).map(s => s.session)) === J(beforeKill.map(s => s.session)))
+const rb2 = await board(F)
+check('restart (6a): the nested nodes come back from the files — paths, kinds, current lines, implicit intermediates', nodeOf(rb2, 'Bridget', 'spec-70/@Tharsis/@z12')?.current?.text === 'form spec-70/@Tharsis/@~z12'
+  && nodeOf(rb2, 'Bridget', '@#70/@step4/spec-70')?.kind === 'agent' && nodeOf(rb2, 'Bridget', '@#70')?.implicit === true && nodeOf(rb2, 'Bridget', 'batcher/@step')?.current?.text === 'three'
+  && J(rb2.find(s => s.session === 'Bridget').nodes.map(n => n.path)) === J(beforeKill.find(s => s.session === 'Bridget').nodes.map(n => n.path)), J(rb2.find(s => s.session === 'Bridget')?.nodes?.map(n => n.path)))
+const rsub = await call(F, 'activity', { log: { session: 'Bridget', path: 'spec-70', limit: 50 } })
+check('restart (6a): the subtree log is back (merged from the nodes\' replayed logs)', rsub.log?.entries?.length === 5 && rsub.log.entries[0].text === 'old notation line', J(rsub.log?.entries?.map(e => e.text)))
 const e3 = await call(F, 'activity', { entry: { id: note.id } })
 check('restart: entry details still come from the file', e3.ok && e3.source === 'file' && e3.entry?.details === 'LOGGED-DETAILS', J(e3))
 await reg(F, 'Ferret', 'fe', 'AIMB')

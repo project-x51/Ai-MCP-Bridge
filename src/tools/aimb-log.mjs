@@ -8,17 +8,27 @@
 // report as any session) — EXCEPT that the gateway refuses to speak for a session that is LIVE on the mesh roster under
 // another user (code session-user-mismatch). A script-only session is never marked gone; it can go stale.
 //
+// v1.62.0 (#70 step 6a): the node tree — --path <p> addresses any node (`spec-70/@Tharsis`, `@#70/@step4/spec-70`; `@` = a
+// context, else an agent; `@"a b"` quotes; `@~` on the last segment sets its current line); --agent / --ctx still work and
+// combine with it (agent + path + ctx, or a leading `@…` text prefix). --batch <file.json|-> sends a JSON ARRAY of items
+// (≤64, ≤64 KB) in ONE call → one line {ok, results:[…]} (exit 0 when every item applied, 4 when the bridge refused the
+// call or any item failed); in --stream a line may be an array (a batch) → one result line {line, ok, results}.
+//
 // Usage (one report):
-//   node tools/aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b/c] [--ctx "@~Ctx"] [--state S]
+//   node tools/aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path p] [--ctx "@~Ctx"] [--state S]
 //        [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."]
 //        [--data '{...}' | --data-file f.json] [--no-log] ["<text>"]
 //   The text is optional when --progress/--eta is given (it defaults to "{progress}" / "{eta}", rendered when read).
 //   --no-log = log:false (update the board only; not appended to the log or the daily file). Flags after `--` are text.
 // Usage (a script reporting often — e.g. every second — over ONE connection):
-//   node tools/aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--ctx "@~Ctx"] [--no-log]
+//   node tools/aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]
 //   then write newline-delimited JSON objects to stdin, each with the `log` tool's fields minus auth:
-//   {agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?} (+ an optional `ref` echoed back).
-//   The command line's identity applies to every line; --agent / --ctx / --no-log are DEFAULTS a line may override.
+//   {path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?} (+ an optional `ref` echoed
+//   back) — or a JSON ARRAY of such objects (a batch, one result line for the array).
+//   The command line's identity applies to every line; --agent / --path / --ctx / --no-log are DEFAULTS a line may override
+//   (a line naming its own path or agent takes none of the address defaults; one with only a context keeps --agent / --path).
+// Usage (a batch): node tools/aimb-log.mjs --batch items.json --session <name> --project <P> [--agent a] [--path p] [--ctx c] [--no-log]
+//   (`--batch -` reads the array from stdin).
 //   One JSON result line per input line ({line:n, ref?, ...result}), in input order. Exit 0 at stdin EOF. If the link
 //   drops the script reconnects with backoff; a line in flight when it dropped is reported failed (link-lost — it is
 //   NOT resent, so a logged entry is never duplicated), and a line that waits longer than AIMB_LOG_LINE_WAIT_MS (default
@@ -43,14 +53,15 @@ import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
-import { parseMessage } from '../lib/activity.js'
+import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS } from '../lib/activity.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b/c] [--ctx "@~Ctx"] [--state S] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] ["<text>"]\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin, one result line each)'
-const LOG_FIELDS = ['agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log']
-const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'ws-port', 'url'])
+const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] ["<text>"]\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
+const LOG_FIELDS = MESSAGE_FIELDS   // v1.62.0: + path
+const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url'])
 const BOOL_FLAGS = new Set(['no-log', 'stream', 'help'])
-const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'ctx', 'no-log', 'stream', 'ws-port', 'url'])
+const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'stream', 'ws-port', 'url'])
+const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'batch', 'ws-port', 'url'])
 const num = (v, d) => (Number(v) > 0 ? Number(v) : d)
 const TIMEOUT_MS = num(process.env.AIMB_LOG_TIMEOUT_MS, 8000)          // one-shot: connect + hello + reply; stream: hello + each reply
 const LINE_WAIT_MS = num(process.env.AIMB_LOG_LINE_WAIT_MS, 10000)     // stream: how long a line may wait for a (re)connected link
@@ -109,18 +120,31 @@ const OS_USER = (() => { try { return os.userInfo().username || '' } catch { ret
 const ident = { session: String(flags.session || '').trim(), project: String(flags.project || '').trim(), user: String(flags.user || process.env.AI_BRIDGE_USER || OS_USER || '').trim(), realm: REALM }
 
 // ---- the report(s): validate locally with the bridge's own parser (a bad report costs no connection and exits 64)
-const STREAM = !!flags.stream
+const STREAM = !!flags.stream, BATCH = flags.batch != null
 const defaults = {}
 if (flags.agent != null) defaults.agent = flags.agent
+if (flags.path != null) defaults.path = flags.path
 if (flags.ctx != null) defaults.context = flags.ctx
 if (flags['no-log']) defaults.log = false
 let oneShot = null
+// a batch (6a): the items + the command line's defaults, checked locally (bounds, JSON) — each item is answered by the bridge
+function batchInput(items) {
+  if (!Array.isArray(items)) return { err: { code: 'bad-batch', what: 'a batch is a JSON array of items' } }
+  const input = { ...defaults, items }
+  const sp = splitBatch(input)
+  return sp.ok ? { input } : { err: { code: sp.code, what: sp.what } }
+}
 if (!exiting) {
   if (!ident.session) usage('usage', '--session <name> is required')
   else if (!ident.project) usage('usage', '--project <P> is required')
   else if (!ident.user) usage('usage', 'no user: pass --user (the OS login user could not be read)')
   else if (!TOKEN) usage('no-token', 'no realm token: set AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE), or run the script from the bridge\'s src/tools (it reads ../config.json)')
-  else if (STREAM) {
+  else if (STREAM && BATCH) usage('usage', '--stream and --batch are exclusive (a stream line may itself be an array)')
+  else if (BATCH) {
+    const extra = Object.keys(flags).filter(k => !BATCH_FLAGS.has(k))
+    if (extra.length) usage('usage', `--batch takes the report fields per item, not --${extra.join(' / --')}`)
+    else if (words.length) usage('usage', '--batch reads its items from the file (or stdin); no positional text')
+  } else if (STREAM) {
     const extra = Object.keys(flags).filter(k => !STREAM_FLAGS.has(k))
     if (extra.length) usage('usage', `--stream takes the report fields per line, not --${extra.join(' / --')}`)
     else if (words.length) usage('usage', '--stream reads its reports from stdin; no positional text')
@@ -147,8 +171,24 @@ if (!exiting) {
 function hello(ws) { ws.send(JSON.stringify({ type: 'hello', kind: 'logger', token: TOKEN, ident })) }
 const unsupported = m => ({ ok: false, code: 'gateway-unsupported', what: `the gateway on ${URL_} runs bridge ${m.bridge_version || '?'}; aimb-log needs 1.59.0+ on this host's gateway (restart it on the new version)` })
 
-if (!exiting && oneShot) {
-  // ONE report: connect → hello → welcome → log → logged → print → exit
+// ---- a batch: read the array (file or stdin), check it locally, then ONE call like a one-shot (exit 0 only when every item applied)
+async function readBatch() {
+  let raw
+  try {
+    if (flags.batch === '-') { const chunks = []; for await (const c of process.stdin) chunks.push(c); raw = Buffer.concat(chunks).toString('utf8') }
+    else raw = fs.readFileSync(String(flags.batch), 'utf8')
+  } catch (e) { return usage('bad-batch', `--batch unreadable: ${e.code || e.message}`) }
+  let items
+  try { items = JSON.parse(raw.replace(/^\uFEFF/, '')) } catch (e) { return usage('bad-batch', `--batch is not JSON: ${e.message}`) }
+  const b = batchInput(items)
+  if (b.err) return usage(b.err.code, b.err.what)
+  oneShot = b.input
+  sendOne()
+}
+if (!exiting && BATCH) readBatch()
+else if (!exiting && oneShot) sendOne()
+function sendOne() {
+  // ONE report (or one batch): connect → hello → welcome → log → logged → print → exit
   const ws = new WebSocket(URL_)
   let welcomed = false
   const timer = setTimeout(() => { finish(4, { ok: false, code: 'timeout', what: `no answer from ${URL_} within ${TIMEOUT_MS}ms` }); try { ws.terminate() } catch { } }, TIMEOUT_MS)
@@ -160,7 +200,7 @@ if (!exiting && oneShot) {
       welcomed = true
       if (!m.logger) return done(4, unsupported(m))   // a pre-1.59 gateway took the hello for a page: close at once
       ws.send(JSON.stringify({ type: 'log', ref: 1, input: oneShot }))
-    } else if (m.type === 'logged') done(m.result && m.result.ok ? 0 : 4, m.result || { ok: false, code: 'bad-reply' })
+    } else if (m.type === 'logged') done(m.result && m.result.ok && !(m.result.failed > 0) ? 0 : 4, m.result || { ok: false, code: 'bad-reply' })   // a batch with a failed item → 4
     else if (m.type === 'error') done(4, { ok: false, code: m.code || 'error', what: m.what || null })
   })
   ws.on('close', () => done(4, { ok: false, code: 'link-closed', what: welcomed ? 'the bridge closed the link before answering' : 'the bridge closed the link (bad token?)' }))
@@ -236,14 +276,20 @@ if (!exiting && STREAM) {
     if (!line) return
     let o
     try { o = JSON.parse(line) } catch (e) { item.result = { ok: false, code: 'bad-json', what: e.message } }
-    if (!item.result && (!o || typeof o !== 'object' || Array.isArray(o))) item.result = { ok: false, code: 'bad-line', what: 'each line must be a JSON object' }
+    if (!item.result && Array.isArray(o)) {   // v1.62.0: a batch line — one call, one result line {line, ok, results}
+      const b = batchInput(o)
+      if (b.err) item.result = { ok: false, ...b.err }
+      else { item.input = b.input; item.deadline = Date.now() + LINE_WAIT_MS }
+      queue.push(item); pump(); return
+    }
+    if (!item.result && (!o || typeof o !== 'object')) item.result = { ok: false, code: 'bad-line', what: 'each line must be a JSON object (or an array of them: a batch)' }
     if (!item.result) {
       const { ref, ...fields } = o
       item.ref = ref
       const extra = Object.keys(fields).filter(k => !LOG_FIELDS.includes(k))
       if (extra.length) item.result = { ok: false, code: 'bad-field', what: `unknown field(s) ${extra.join(', ')}: a line carries ${LOG_FIELDS.join(', ')} (+ ref); the identity comes from the command line` }
       else {
-        item.input = { ...defaults, ...fields }
+        item.input = withDefaults(defaults, fields)   // v1.62.0: a line with its own path / agent takes none of the address defaults
         const p = parseMessage(item.input, { now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset() })
         if (!p.ok) item.result = { ok: false, code: p.code || 'bad-input', what: p.what || null }
         else item.deadline = Date.now() + LINE_WAIT_MS

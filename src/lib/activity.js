@@ -1,124 +1,126 @@
 // #70 agent activity board — the PURE core. No I/O, no timers, no clock: every function that needs the time takes `now`
 // (ms epoch) as a parameter, so the whole model is exercised directly by tests/test_activity_unit. Step 1 built the model;
-// step 2 (v1.58.0) wires it into bridge.mjs (the `log` + `activity` tools, the gateway-owned state, the daily JSONL) and
-// adds here: the `log` flag, the session identity, the persistence markers, checkpoints (cp/rep) and the newest-first replay.
+// step 2 (v1.58.0) wired it into bridge.mjs (the `log` + `activity` tools, the gateway-owned state, the daily JSONL); steps
+// 3–5 added the script, the gossip and the dashboard. Step 6a (v1.62.0, #70 "Step 6 redesign") REPLACED the fixed
+// session → agent → context shape with ONE TREE OF NODES per session, and added batch logging.
 //
-// THE MODEL (docs/issues.md #70). The tree is project → session → agent → context → message.
-// - A SESSION is keyed by sessionKey(realm, projKey(project), lc(user), lc(session), lc(host)). v1.60.0 (#70 "Decisions
-//   before step 4"): the HOST is part of the identity, and it is always the ORIGIN that holds the entity — this state's own
-//   `origin` for the local slice (ident.host is ignored: each host only ever writes its OWN entities), the link's host for
-//   a remote slice. The same session name reporting from two hosts is two entities; the board GROUPS them (boardView).
-//   Its own reports (no `agent`) go to `session.self`, an entity shaped exactly like an agent (path null) that never counts
-//   toward the agents-per-session limit and is never evicted.
-// - An AGENT is a `/`-path label (≤3 segments) under its session. Agents don't register: the first message creates one.
-//   Paths are FLAT keys (lc'd, first-seen spelling shown) — `a/b` does not create `a`; the dashboard draws the tree.
-// - Every message belongs to a CONTEXT. `@root` (the default) is the entity's own context and exists from creation.
-//   `@ctx text` appends to the log only; `@~ctx text` also makes it the context's CURRENT line. No prefix = `@root`,
-//   log-only — so setting a current line is always a deliberate `@~`. Context names are lc-keyed (first-seen spelling
-//   kept), so `@Build` and `@build` are one context (the #71 lesson: never let case split an identity).
-// - STATE (`running|blocked|failed|done|idle`) is the CURRENT line's state; a context with no current line counts as
-//   running. ONLY an `@~` message changes it (an `@` message records its state in its log entry only). An entry's state
-//   defaults to the context's current state, else running. The entity's state is its root context's. `@~root`
-//   done|failed FINISHES the entity (`finished_at`); a later `@~root` running|blocked|idle revives it.
-// - STALE is computed, never reported (effectiveState/staleAt): a running or blocked item with no message of ANY kind
-//   for longer than its window (the per-message `stale_after` override if its last message set one, else the host's
-//   `stale_after_min`). done/failed/idle never go stale, nor does anything under a finished entity. GONE (the session
-//   left the mesh — markSessionGone) outranks stale for anything not done/failed.
-// - PROGRESS and ETA are context attributes set by ANY message (`@` included — a bar update can't change the headline)
-//   and STICKY ("none" clears either). ETA is stored as an absolute ms time (eta_at) and is null whenever the context's
-//   state is done/failed (dropped when it goes done/failed, ignored while it is). `details` and `data` belong to the
-//   LINE: they are replaced by each `@~` and never carried forward.
-// - THE `log` FLAG (default true). log:true appends the message to the in-memory log and returns the full `entry` for the
-//   daily JSONL. log:false still takes full effect (an `@~` sets the current line + state, progress/ETA move the bar, it
-//   is activity and refreshes stale) but is NOT logged: apply returns entry:null, logged:false — scripts reporting every
-//   second use it. A message carrying progress and/or eta may omit text (logged or not): it defaults to "{progress}"
-//   (or "{eta}" with only an ETA).
-// - TEXT IS A TEMPLATE: {progress} {pct} {done} {total} {unit} {eta} are rendered at READ time (renderText) — a current
-//   line against the context's CURRENT bar + ETA (so "@~Seeding {progress}" moves with log:false updates), a log entry
-//   against what was recorded on it. State, the JSONL and the gossip snapshot keep the raw template.
+// THE MODEL (docs/issues.md #70 "Step 6 redesign: unified tree").
+// - A SESSION is keyed by sessionKey(realm, projKey(project), lc(user), lc(session), lc(host)) — the HOST is the ORIGIN
+//   that holds it (this state's own `origin` for the local slice; the link's host for a remote slice). The same session
+//   name on two hosts is two sessions; the board GROUPS them (boardView). Unchanged by 6a.
+// - A session holds a tree of NODES in `sess.nodes` (a flat Map keyed by the node KEY) plus `sess.kids` (parent key →
+//   child keys, insertion order). The session itself is the ROOT node (key '', path ''), agent-like for lifecycle (it
+//   starts, finishes on a done/failed current line, goes stale, gone) — what `session.self` was before 6a.
+// - Every other node is one of two KINDS, decided by its path segment: an AGENT (an actor: it starts, finishes when its
+//   own current line is set done/failed, can go stale or gone, has `stale_after`) or a CONTEXT (a piece of work: a current
+//   line, progress, an ETA — it never goes stale itself). Any node may contain either kind.
+// - PATHS (parsePath / formatPath): one `/`-separated path; a segment starting with `@` is a context, anything else an
+//   agent: `spec-70`, `spec-70/research`, `spec-70/@Tharsis`, `spec-70/@Tharsis/@z12`, `@#70/spec-70`,
+//   `@#70/@step4/spec-70`. Quote a context name with spaces: `@"CTX strip 17"`. `@~` on the LAST segment sets that node's
+//   CURRENT line; `@root` / `@~root` as the last segment means the node itself (so `a/b/@~root` = a/b's own headline, and
+//   a bare `@~root` the session's). Names: an agent segment is letters/digits/_ then `. : # + -` (≤48 chars, no spaces); a
+//   context name ≤60 chars, no `"`, `/` or control characters ("root" is reserved). The node KEY = lc(canonical path) —
+//   case-insensitive, first-seen spelling kept (the #71 lesson); the parent key is the key minus its last segment.
+// - THE OLD NOTATION IS A SPECIAL CASE (resolveAddress): `agent` (agent segments only) + `path` + ONE trailing context —
+//   the `context` param ("@root" | "@Ctx" | "@~Ctx", markers optional) or else a leading `@…` prefix in the text, which
+//   may itself be a relative path (`@Tharsis/@~z12 …`, `@#70/spec-70 …`). So agent:"a/b" + text "@~Ctx …" = a/b/@~Ctx.
+// - Intermediate nodes a path names are created IMPLICITLY (no current line, `implicit:true`); a node stops being implicit
+//   the first time a message targets it or is OWNED by it. The OWNER of a message is the nearest agent at or above its
+//   target (the root when there is none). An implicit agent never goes stale (it never reported) — the root included: a
+//   session whose only reports come from its agents has no staleness of its own.
+// - Every message belongs to its TARGET node. `@~` (current:true) sets the target's current line + state; without it the
+//   message is logged only. STATE (`running|blocked|failed|done|idle`) is the current line's; a node with no current line
+//   counts as running. ONLY a current line changes it (a plain message records its state in its log entry only). An entry's
+//   state defaults to the target's current state, else running. A done|failed current line on an AGENT node (or the root)
+//   FINISHES it (`finished_at`); a later running|blocked|idle line revives it. Contexts don't finish (6b adds todos).
+// - ACTIVITY: a message refreshes `last_activity` (and sets `stale_after`, until each node's next message) on its target
+//   and every node above it up to and including its OWNER — so a context's message keeps its agent fresh, but a sub-agent
+//   does not refresh its parent agent (each actor goes stale by its own reports, as before). The session header's
+//   last_activity moves on every message. GONE is per agent (markSessionGone / markOriginDown mark every agent node).
+// - STALE is computed, never reported (effectiveState / staleAt) and belongs to AGENTS (and the root): a running or
+//   blocked agent with no message of ANY kind (owned by it) for longer than its window (its `stale_after` if its last
+//   message set one, else the host's `stale_after_min`). done/failed/idle never go stale, nor does an implicit agent. A
+//   CONTEXT never goes stale by itself: it shows the staleness (and gone) of its NEAREST AGENT ANCESTOR — the root for a
+//   context directly under the session (6a decision: the session's own reports, at any depth that doesn't cross an agent,
+//   keep it fresh — exactly as the session row always has) — and only while it has a live (running/blocked) current line
+//   of its own; a context with no current line (a grouping node) shows no state and never shows stale.
+// - PROGRESS and ETA are node attributes set by ANY message to that node (sticky; "none" clears either). ETA is stored as
+//   an absolute ms time (eta_at) and is null whenever the node's state is done/failed. `details` and `data` belong to the
+//   LINE: they are replaced by each current line and never carried forward.
+// - ROLLUP (rollup / the bar): a node's bar is its REPORTED progress, else the SUM of its children's bars when they share a
+//   unit, else the MEAN % of its children that have a bar — recursively, through any depth (`rollupStrategies` is the hook
+//   where 6b adds "N of M todos done").
+// - THE `log` FLAG (default true): log:false takes full effect on the board but is not appended to the log or the JSONL.
+//   TEXT IS A TEMPLATE ({progress} {pct} {done} {total} {unit} {eta}) rendered at READ time (renderText).
+// - BATCH (splitBatch): `items:[…]` (≤64 items, ≤64 KB) applied in order, one result each; one bad item doesn't abort the
+//   rest. Top-level path / agent / context / log are DEFAULTS for every item.
 //
-// MEMORY MODEL (#70 "Memory model"): an in-memory log entry keeps only text, state, time, context, the current flag and
-// small fields (progress/eta/stale_after + has_details/has_data flags). `details`/`data` live in memory ONLY on each
-// context's CURRENT line. apply() RETURNS the full entry (details + data + identity) for the caller to append to the
-// host's daily JSONL, which is where older entries' details/data are read back from. Logs are capped per entity
-// (`log_entries_per_agent`, oldest dropped); enforceBudget() evicts the oldest finished agents, then the oldest log
-// entries — never current lines.
+// MEMORY MODEL: every node keeps its OWN bounded log (`log_entries_per_agent` entries, oldest dropped → `log_dropped`, and
+// `log_floor` = the newest dropped entry's time: older entries of that node live only in the files). An in-memory entry
+// keeps only text, state, time, the current flag and small fields; `details`/`data` live in memory ONLY on each node's
+// CURRENT line. A node's "Log" view (logView) is the MERGED log of its subtree, newest first (a k-way merge over the
+// subtree's per-node logs), paged by cursor, continuing into the day files below the subtree's floor.
 //
-// PERSISTED RECORDS (the daily JSONL, one host = one writer): logged entries, CHECKPOINTS and REPEAT lines.
-// - Every record that is the FIRST persisted one of its session / entity / context carries new_session / new_entity /
-//   new_context, and an entry whose new agent evicted another carries `evicted:[path]`; a logged `@~root` line carries
-//   the entity's resulting `finished_at`. The replay uses them to stop exactly where an instance began (an evicted or
-//   expired agent that came back is a NEW instance), so it equals a chronological apply of the same records.
-// - planCheckpoints() (the gateway calls it every `progress_checkpoint_sec`): a context with log:false activity since
-//   the last tick whose current line / bar / ETA CHANGED since its last persisted record gets ONE full `cp` line
-//   { kind:"cp", k, ts, identity, current, state, progress, eta_at } — `k` is a small per-FILE integer given to that
-//   context the first time it is checkpointed in that day's file. Contexts alive but UNCHANGED are run-length encoded
-//   in ONE trailing repeat line { rep:[k...], n, since, last }: every listed key was alive and unchanged in each of the
-//   n intervals since..last. The SAME key set next tick rewrites that last line in place (n+1, last); a different set
-//   (or any other write in between: a log entry or a cp) starts a new one. Contexts with no activity are not listed.
+// PERSISTED RECORDS (the daily JSONL, one host = one writer) — RECORD FORMAT v2 (6a; v1 records of 1.58–1.61 are SKIPPED
+// by recordKind, never misread): logged entries { v:2, id, ts, path, current, text, state, …, identity, details, data },
+// CHECKPOINTS { v:2, kind:"cp", k, ts, path, current, state, progress, eta_at, … } and REPEAT lines { v:2, rep:[k…], n,
+// since, last }. The FIRST persisted record touching a node carries `new_from: i` (the chain root..target from index i on
+// is new — 0 = the session itself); an entry whose new agent evicted others carries `evicted:[path]`; a current line on an
+// agent carries the agent's resulting `finished_at`. The replay uses them to stop exactly where an instance began.
 //
-// REPLAY (createReplay / replayNewestFirst): rebuilds the local slice from records fed NEWEST FIRST (the JSONL read
-// backwards). Phase 1 resolves each context's current line, bar, ETA, state and its entity's finished status from the
-// newest record carrying them (a cp is a full snapshot; the newest of cp or logged entry wins) and stops looking once
-// found or once the instance's first record (its new_* marker) is passed — phase1Complete() says when everything seen so
-// far is resolved, so the board can publish early. Phase 2 fills each entity's log history (bounded, chronological;
-// cp/rep lines never count). last_activity also takes the `last` of any rep line listing the context's key (same file).
+// REPLAY (createReplay / replayNewestFirst): rebuilds the local slice from records fed NEWEST FIRST. Phase 1 resolves each
+// node's current line, bar, ETA, state and (agents) finished status from the newest record carrying them and stops once
+// found or once the instance's first record (new_from) is passed — a node is sealed with its whole subtree. Phase 2 fills
+// each node's log. Equivalent to a chronological apply() of the same records (the seeded-random unit test).
 //
-// GOSSIP (build-plan step 4, v1.60.0): snapshot() is the compact replicated form — current lines only, no details/data
-// (only has_* flags so a viewer knows to fetch), no log entries, arrays key-sorted and fields in a fixed order so equal
-// state serialises identically. The replication model is PER-ORIGIN OWNERSHIP, not last-writer-wins: each host is
-// authoritative for the sessions it hosts, so mergeSnapshot(from, snap) REPLACES everything held for `from` (never a
-// field merge), cannot touch another origin's slice or our own, and is idempotent (a canonical signature per slice).
-// On the wire (v1.60.0) a link carries a FULL slice on (re)link / on request and then DELTAS: planSlice() diffs this
-// host's gossip units (one per entity, plus its session header) against what that link was last sent (a per-link `pub`)
-// and emits only the changed entities + removals, NEWEST-ACTIVE FIRST under a byte cap (the rest follows in the next
-// frame; `truncated` says more is pending). applySlice() patches the held slice by (epoch, seq): a delta whose `base`
-// isn't the held seq is refused 'out-of-sync' (the caller asks for a full one). markOriginDown() shows a slice's
-// unfinished entities as GONE (its host went down / unreachable) until a fresh full slice replaces it; dropOrigin() /
-// expireRemote() forget it.
+// GOSSIP: snapshot() / planSlice() / applySlice() — FORMAT v2 (a 1.61 v1 slice is refused 'bad-version'). One UNIT per
+// node (its own fields only: no children, no rollup, no log, never details/data). Per-origin ownership, deltas against a
+// per-link published view, newest-active first under a byte cap. A receiver stores nodes flat by key, so a child that
+// arrives before its parent (a truncated frame) is held and linked once the parent arrives.
 //
-// DASHBOARDS (build-plan step 5, v1.61.0): boardView({ raw:true }) is the page's form — reported states and raw times /
-// templates, so the page computes stale with its own slider and renders the placeholders, and time passing is never a
-// change; dashUnits() splits it into one unit per session group + one per agent, and planDashDelta() diffs a dashboard's
-// published view the way planSlice diffs a link's. `host_down` marks entities of a slice whose host went down (gone
-// because the HOST went away, not the session); `bell` (setBells) marks a session a doorbell listener watches and rides
-// the gossip header. logView({ files:true }) hands the caller a descriptor to page on into the host's day files once memory
-// runs out (fileCursor / parseFileCursor, fileEntryMatches, fileEntryView).
-//
-// LIMITS are locked in code (they change what crosses the mesh, so every bridge must agree — a change is a version
-// bump); the per-host knobs come from the `activity` config block + AI_BRIDGE_ACTIVITY_* env (resolveConfig).
+// DASHBOARDS: boardView({ raw:true }) → dashUnits() (one unit per session group + one per NODE) → planDashDelta().
+// LIMITS are locked in code (they change what crosses the mesh); per-host knobs come from the `activity` config block.
 import { lc, projKey } from './keys.js'
 
-/** The locked #70 limits. text/context are counted in code points; details/data in UTF-8 bytes (data serialised). */
+/** The locked #70 limits (6a: depth/nodes replace "agent path depth 3" + "32 contexts per agent"). text/context in code
+ * points; details/data/batch in UTF-8 bytes. */
 export const ACTIVITY_LIMITS = Object.freeze({
   text: 240,                        // message text; LONGER IS TRUNCATED (… + warning), not rejected — see parseMessage
   context: 60,                      // context name; longer is REJECTED (a name is an identity: truncating could merge two)
-  pathDepth: 3,                     // agent path segments (a/b/c)
-  pathSegment: 48,                  // chars per agent path segment (this module's choice; not in the spec table)
-  contextsPerAgent: 32,             // INCLUDING @root, which every entity has — so 31 named contexts
-  agentsPerSession: 128,            // the session's own entity (self) is not counted
+  depth: 6,                         // path segments below the session (a/b/@c/@d/e/@f)
+  pathSegment: 48,                  // chars per agent segment (this module's choice; not in the spec table)
+  agentsPerSession: 128,            // agent nodes (the session root is not counted)
+  nodesPerSession: 4096,            // every node of either kind (the root not counted)
   detailsBytes: 4 * 1024,
   dataBytes: 16 * 1024,
   staleAfterMaxMs: 24 * 3600000,    // a longer stale_after is CLAMPED to 24h (+ warning)
   etaMaxMs: 7 * 86400000,           // an ETA further out than 7 days is rejected (this module's choice)
   unit: 24,                         // progress unit label, code points (this module's choice)
+  batchItems: 64,                   // a `log` call's items:[…] (6a)
+  batchBytes: 64 * 1024,            // … and their JSON size
 })
+/** Record / slice format (6a). A 1.62 bridge skips v1 (1.58–1.61) JSONL records and refuses v1 gossip slices. */
+export const ACTIVITY_FORMAT = 2
 /** The reportable states. `stale` and `gone` are derived (effectiveState), never reported. */
 export const ACTIVITY_STATES = Object.freeze(['running', 'blocked', 'failed', 'done', 'idle'])
 /** The per-host defaults (`activity` config block). */
 export const ACTIVITY_DEFAULTS = Object.freeze({
-  log_retention_days: 7,            // daily JSONL retention (used by step 2; validated here)
-  log_entries_per_agent: 200,       // in-memory log cap per entity
+  log_retention_days: 7,            // daily JSONL retention
+  log_entries_per_agent: 200,       // in-memory log cap per NODE (6a: every node keeps its own log)
   stale_after_min: 15,              // the default stale window (also the dashboard slider's default)
   finished_visible_hours: 24,       // a finished (or gone) agent stays visible/gossiped this long
   memory_budget_mb: 64,             // enforceBudget's default budget
-  progress_checkpoint_sec: 60,      // step 2: cp/rep cadence for log:false activity (0 = off; else 10..3600)
+  progress_checkpoint_sec: 60,      // cp/rep cadence for log:false activity (0 = off; else 10..3600)
   enabled: true,
 })
 /** @typedef {Readonly<{ log_retention_days:number, log_entries_per_agent:number, stale_after_min:number, finished_visible_hours:number,
  *   memory_budget_mb:number, progress_checkpoint_sec:number, enabled:boolean }>} ActivityConfig */
 /** config key -> env override name (AI_BRIDGE_ACTIVITY_<KEY>). */
 export const ACTIVITY_ENV = Object.freeze(Object.fromEntries(Object.keys(ACTIVITY_DEFAULTS).map(k => [k, 'AI_BRIDGE_ACTIVITY_' + k.toUpperCase()])))
+/** The message fields of a `log` call / batch item (6a: + path; `plan` is 6b — an item carrying it answers not-yet). */
+export const MESSAGE_FIELDS = Object.freeze(['path', 'agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log'])
+/** Batch-level DEFAULTS allowed beside items:[…] (each item's own field wins). */
+export const BATCH_DEFAULT_FIELDS = Object.freeze(['path', 'agent', 'context', 'log'])
 // numeric ranges: an out-of-range number is CLAMPED into [lo, hi] and rounded to an integer
 const CONFIG_RANGES = {
   log_retention_days: [1, 365],
@@ -150,17 +152,15 @@ const CONTROL = /[\u0000-\u001f\u007f]/g
 const normText = s => s.replace(/\s*[\r\n\t\f\v]+\s*/g, ' ').replace(CONTROL, '').trim()
 /** Drop null/undefined/false fields (compact gossip; a missing flag reads as false). Field order is kept. */
 function compact(o) { const r = {}; for (const k of Object.keys(o)) { const v = o[k]; if (v !== null && v !== undefined && v !== false) r[k] = v } return r }
+const str = (v, max = 200) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null)
 
 /**
  * The session key: realm + projKey(project) + lc(user) + lc(session) + lc(host), JSON-encoded so no separator can collide.
- * v1.60.0 (#70 "Decisions before step 4"): the HOST is part of it (it was not in steps 1–3) — each host writes only its
- * own entities, so the same name on two hosts is two sessions, grouped for display by groupKey(). Inside this module the
- * host is always the ORIGIN holding the session (keyOf). Case-insensitive; records keep the first-seen spelling. A
- * missing realm is 'default' (the bridge's).
+ * Inside this module the host is always the ORIGIN holding the session (keyOf). A missing realm is 'default'.
  * @param {{ realm?: string|null, project?: string|null, user?: string|null, session?: string|null, host?: string|null }} ident
  */
 export const sessionKey = ident => { const i = ident && typeof ident === 'object' ? ident : {}; return JSON.stringify([lc(i.realm) || 'default', projKey(i.project), lc(i.user), lc(i.session), lc(i.host) || '']) }
-/** The cross-host GROUP key (#70 step 4: the board groups a session's entities from every host): sessionKey minus the host. */
+/** The cross-host GROUP key (the board groups a session's entities from every host): sessionKey minus the host. */
 export const groupKey = ident => { const i = ident && typeof ident === 'object' ? ident : {}; return JSON.stringify([lc(i.realm) || 'default', projKey(i.project), lc(i.user), lc(i.session)]) }
 /** The key of `ident` as held in `origin`'s slice (default: this state's own) — the host is the origin, never ident.host. */
 const keyOf = (state, ident, origin) => sessionKey({ ...(ident && typeof ident === 'object' ? ident : {}), host: origin || state.origin })
@@ -173,6 +173,9 @@ export function entryTime(id) {
   const t = m ? parseInt(m[1], 36) : NaN
   return Number.isFinite(t) && t > 1e12 && t < 1e14 ? t : null
 }
+/** An entry's ORDER key [ts, seq]: logs are kept sorted by it and merged by it (ties within one ms keep apply order). */
+const seqOf = id => { const m = typeof id === 'string' && id.match(/-([0-9a-z]+)$/); const n = m ? parseInt(m[1], 36) : 0; return Number.isFinite(n) ? n : 0 }
+const ordCmp = (a, b) => a.ts - b.ts || seqOf(a.id) - seqOf(b.id) || cmp(a.id, b.id)
 
 // ---------------------------------------------------------------------------------------------------------------
 // config
@@ -232,7 +235,7 @@ export function resolveConfig(cfgBlock, env = {}, warnings) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// parsing
+// parsing: durations, progress, ETA
 
 /**
  * A duration → ms, or NaN. A number, or a bare numeric string, is MINUTES (like consent's TTLs). Otherwise one or more
@@ -257,8 +260,7 @@ export function parseDuration(v) {
  * Progress → { ok:true, value:{done,total,unit}, warning? } | { ok:false, what }. Accepts "4812/12000 tiles",
  * "4812/12000:tiles", "3/6" (unit ''), "61%" (→ {done:61,total:100,unit:'%'}), a bare number (a percent) or an object
  * {done,total,unit}. total must be > 0 and done ≥ 0; done > total (or a percent > 100) is CLAMPED to total with a
- * 'progress-clamped' warning — counts legitimately overshoot an estimated total, and losing the whole report over it
- * would be worse. The unit is ≤ ACTIVITY_LIMITS.unit code points.
+ * 'progress-clamped' warning. The unit is ≤ ACTIVITY_LIMITS.unit code points.
  * @param {any} v
  */
 export function parseProgress(v) {
@@ -287,9 +289,8 @@ export function parseProgress(v) {
 
 /**
  * ETA → absolute ms epoch, or NaN. A duration ("15m", "1h25m", "90s"; a number = minutes; > 0 and ≤ 7 days) counts
- * from `now`. A clock time "HH:MM" (24h) is LOCAL time at `tzOffsetMin` (minutes EAST of UTC: NZST = +720 — i.e.
- * `-new Date().getTimezoneOffset()`), today, or tomorrow if that time has already passed. Resolved at parse time so
- * the stored value is absolute. A DST change between now and the clock time is not modelled (off by the shift).
+ * from `now`. A clock time "HH:MM" (24h) is LOCAL time at `tzOffsetMin` (minutes EAST of UTC), today, or tomorrow if that
+ * time has already passed. Resolved at parse time so the stored value is absolute.
  * @param {any} v
  * @param {number} now
  * @param {number} [tzOffsetMin]
@@ -308,9 +309,12 @@ export function parseEta(v, now, tzOffsetMin = 0) {
   return Number.isFinite(ms) && ms > 0 && ms <= ACTIVITY_LIMITS.etaMaxMs ? now + ms : NaN
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// parsing: names + PATHS (6a)
+
 /**
- * Canonicalise a context NAME (without its at-sign/tilde markers): whitespace runs → one space, trimmed, ≤ ACTIVITY_LIMITS.context code
- * points, no control chars or `"`. Any case of "root" → 'root'.
+ * Canonicalise a context NAME (without its at-sign/tilde markers): whitespace runs → one space, trimmed, ≤ 60 code
+ * points, no control chars, `"` or `/` (6a: a slash separates path segments). Any case of "root" → 'root'.
  * @param {any} raw
  * @returns {ActivityResult} { ok:true, name } or { ok:false, code, what }
  */
@@ -319,56 +323,132 @@ export function normContextName(raw) {
   const name = raw.replace(/\s+/g, ' ').trim()
   if (!name) return bad('bad-context', 'context name is empty')
   if (/["\u0000-\u001f\u007f]/.test(name)) return bad('bad-context', 'context name may not contain quotes or control characters')
+  if (name.includes('/')) return bad('bad-context', 'context name may not contain "/" (it separates path segments — nest with a path: "@a/@b")')
   if (cpLen(name) > ACTIVITY_LIMITS.context) return bad('context-too-long', `context name is longer than ${ACTIVITY_LIMITS.context} chars`)
   return { ok: true, name: lc(name) === 'root' ? 'root' : name }
 }
-
 const SEGMENT = /^[\p{L}\p{N}_][\p{L}\p{N}_.:#+-]*$/u
+function normAgentSeg(raw) {
+  const s = String(raw).trim()
+  if (!s) return bad('bad-agent', 'agent path has an empty segment')
+  if (cpLen(s) > ACTIVITY_LIMITS.pathSegment) return bad('bad-agent', `agent path segment "${cpSlice(s, 20)}…" is longer than ${ACTIVITY_LIMITS.pathSegment} chars`)
+  if (!SEGMENT.test(s)) return bad('bad-agent', `agent path segment "${cpSlice(s, 40)}" may only use letters, digits and _ . : # + - (no spaces; a context segment starts with @)`)
+  return { ok: true, name: s }
+}
+const tooDeep = n => bad('path-too-deep', `the path has ${n} segments; the limit is ${ACTIVITY_LIMITS.depth}`)
 /**
- * Canonicalise an agent path: 1..3 `/`-separated segments, each trimmed, ≤ 48 chars, letters/digits/`_` then also
- * `. : # + -` (no spaces — it's a CLI flag value). Leading/trailing slashes are dropped; an empty inner segment is not.
+ * Canonicalise an AGENT path (agent segments only — the old `agent` field): 1..6 `/`-separated segments, each trimmed.
+ * Leading/trailing slashes are dropped; an empty inner segment is not.
  * @param {any} raw
- * @returns {ActivityResult} { ok:true, path } or { ok:false, code, what }
+ * @returns {ActivityResult} { ok:true, path, segs } or { ok:false, code, what }
  */
 export function normAgentPath(raw) {
   if (typeof raw !== 'string') return bad('bad-agent', 'agent must be a string path like "spec-70/research"')
-  const segs = raw.trim().replace(/^\/+|\/+$/g, '').split('/').map(s => s.trim())
-  if (segs.length === 1 && !segs[0]) return bad('bad-agent', 'agent path is empty')
-  if (segs.length > ACTIVITY_LIMITS.pathDepth) return bad('agent-too-deep', `agent path has ${segs.length} levels; the limit is ${ACTIVITY_LIMITS.pathDepth} (a/b/c)`)
-  for (const s of segs) {
-    if (!s) return bad('bad-agent', 'agent path has an empty segment')
-    if (cpLen(s) > ACTIVITY_LIMITS.pathSegment) return bad('bad-agent', `agent path segment "${cpSlice(s, 20)}…" is longer than ${ACTIVITY_LIMITS.pathSegment} chars`)
-    if (!SEGMENT.test(s)) return bad('bad-agent', `agent path segment "${s}" may only use letters, digits and _ . : # + - (no spaces)`)
-  }
-  return { ok: true, path: segs.join('/') }
+  const parts = raw.trim().replace(/^\/+|\/+$/g, '').split('/')
+  if (parts.length === 1 && !parts[0].trim()) return bad('bad-agent', 'agent path is empty')
+  if (parts.length > ACTIVITY_LIMITS.depth) return tooDeep(parts.length)
+  /** @type {PathSeg[]} */
+  const segs = []
+  for (const p of parts) { const a = normAgentSeg(p); if (!a.ok) return a; segs.push({ kind: 'agent', name: a.name }) }
+  return { ok: true, path: formatPath(segs), segs }
 }
-
-// A leading context prefix in text: @name / @~name / @"name with spaces" / @~"name". `@` (or `@~`) followed by
-// whitespace or the end is NOT a prefix (the text is literal). An unterminated quote, or a quote not followed by
-// whitespace, is an error (clearly meant as a prefix). Returns { name:null } when there is no prefix.
-/** @returns {ActivityResult} */
+/** @typedef {{ kind: 'agent'|'context', name: string }} PathSeg */
+const needsQuote = name => /\s/.test(name) || name[0] === '~'
+const segText = s => (s.kind === 'context' ? '@' + (needsQuote(s.name) ? `"${s.name}"` : s.name) : s.name)
+/** The canonical display path of segments ('' = the session root). Its lc() is the node KEY. @param {PathSeg[]} segs */
+export const formatPath = segs => segs.map(segText).join('/')
+/** The node key of a display path (case-insensitive). */
+export const pathKey = p => lc(p)
+/** A child's display path: its parent's (first-seen) path + the new segment. */
+const childPath = (parent, seg) => (parent && parent.path ? parent.path + '/' : '') + segText(seg)
+const parentKeyOf = k => { const i = k.lastIndexOf('/'); return k ? (i < 0 ? '' : k.slice(0, i)) : null }
+/**
+ * Scan a path at `i` of `s`: segments split on `/` (outside quotes). A segment starting with `@` is a context (`@~` = the
+ * current-line marker; `@"…"` quoted; `@root` = the node itself), anything else an agent segment. textMode: the path is a
+ * text PREFIX — it ends at whitespace (unquoted names may not contain spaces); otherwise it runs to the end of `s` and an
+ * unquoted context name may contain spaces.
+ * @returns {ActivityResult} { ok, segs:[{kind,name,current,root}], end }
+ */
+function scanPath(s, i, textMode) {
+  const out = []
+  const isWs = c => /\s/.test(c)
+  for (;;) {
+    if (i >= s.length || (textMode && isWs(s[i]))) { if (!out.length) return bad('bad-path', 'empty path'); break }
+    if (s[i] === '/') return bad('bad-path', 'path has an empty segment')
+    if (s[i] === '@') {
+      let j = i + 1, current = false
+      if (s[j] === '~') { current = true; j++ }
+      let raw
+      if (s[j] === '"') {
+        const close = s.indexOf('"', j + 1)
+        if (close < 0) return bad('bad-context', 'unterminated quoted context name (@"…")')
+        raw = s.slice(j + 1, close); j = close + 1
+        if (j < s.length && s[j] !== '/' && !(textMode && isWs(s[j]))) return bad('bad-context', textMode ? 'a quoted context name must be followed by a space' : 'a quoted context name must end its segment')
+        const n = normContextName(raw); if (!n.ok) return n
+        out.push({ kind: 'context', name: n.name, current, root: n.name === 'root' })
+      } else {
+        let k = j
+        while (k < s.length && s[k] !== '/' && !(textMode && isWs(s[k]))) k++
+        raw = s.slice(j, k); j = k
+        const n = normContextName(raw); if (!n.ok) return n
+        out.push({ kind: 'context', name: n.name, current, root: n.name === 'root' })
+      }
+      i = j
+    } else {
+      let k = i
+      while (k < s.length && s[k] !== '/' && !(textMode && isWs(s[k]))) k++
+      const a = normAgentSeg(s.slice(i, k)); if (!a.ok) return a
+      out.push({ kind: 'agent', name: a.name, current: false, root: false })
+      i = k
+    }
+    if (s[i] === '/') { i++; if (i >= s.length || (textMode && isWs(s[i]))) break }   // a trailing slash is tolerated
+    else if (i < s.length && !(textMode && isWs(s[i]))) return bad('bad-path', 'unexpected character in the path')
+  }
+  return { ok: true, segs: out, end: i }
+}
+/** Normalise scanned segments: `@~` only on the last, `@root` only last (→ the node itself), depth ≤ 6. */
+function finishSegs(raw) {
+  const segs = [], n = raw.length
+  let current = false
+  for (let k = 0; k < n; k++) {
+    const r = raw[k], last = k === n - 1
+    if (r.current && !last) return bad('bad-path', '@~ (set the current line) may only mark the LAST segment')
+    if (r.root && !last) return bad('bad-path', '@root (the node itself) may only be the last segment')
+    if (last && r.current) current = true
+    if (!r.root) segs.push({ kind: r.kind, name: r.name })
+  }
+  if (segs.length > ACTIVITY_LIMITS.depth) return tooDeep(segs.length)
+  return { ok: true, segs, current }
+}
+/**
+ * Parse a full node PATH (the `path` field): `spec-70/@Tharsis/@~z12`, `@#70/spec-70`, `@"CTX strip 17"`, `a/@~root`.
+ * Leading/trailing slashes are dropped; '' (or just '@root') = the session itself.
+ * @param {any} raw
+ * @returns {ActivityResult} { ok:true, segs, current, path, key } or { ok:false, code, what }
+ */
+export function parsePath(raw) {
+  if (typeof raw !== 'string') return bad('bad-path', 'path must be a string like "spec-70/@Tharsis"')
+  const s = raw.trim().replace(/^\/+|\/+$/g, '')
+  if (!s) return { ok: true, segs: [], current: false, path: '', key: '' }
+  const r = scanPath(s, 0, false); if (!r.ok) return r
+  const f = finishSegs(r.segs); if (!f.ok) return f
+  const path = formatPath(f.segs)
+  return { ok: true, segs: f.segs, current: f.current, path, key: pathKey(path) }
+}
+// A leading `@…` prefix in text — a RELATIVE path whose first segment is a context or the node itself (`@~Ctx`,
+// `@"a b"`, `@Tharsis/@~z12`, `@#70/spec-70`). `@` (or `@~`) followed by whitespace or the end is NOT a prefix.
+/** @returns {ActivityResult} { ok, raw:null } or { ok, raw:[seg…], rest } */
 function splitPrefix(text) {
   const t = text.replace(/^\s+/, '')
-  if (t[0] !== '@') return { ok: true, name: null }
-  let i = 1, current = false
-  if (t[i] === '~') { current = true; i++ }
-  if (i >= t.length || /\s/.test(t[i])) return { ok: true, name: null }
-  let raw, rest
-  if (t[i] === '"') {
-    const close = t.indexOf('"', i + 1)
-    if (close < 0) return bad('bad-context', 'unterminated quoted context name (@"…")')
-    if (close + 1 < t.length && !/\s/.test(t[close + 1])) return bad('bad-context', 'a quoted context name must be followed by a space')
-    raw = t.slice(i + 1, close); rest = t.slice(close + 1)
-  } else {
-    const m = t.slice(i).match(/^\S+/)
-    raw = m[0]; rest = t.slice(i + raw.length)
-  }
-  const n = normContextName(raw)
-  if (!n.ok) return n
-  return { ok: true, name: n.name, current, rest }
+  if (t[0] !== '@') return { ok: true, raw: null }
+  let i = 1
+  if (t[i] === '~') i++
+  if (i >= t.length || /\s/.test(t[i])) return { ok: true, raw: null }
+  const r = scanPath(t, 0, true); if (!r.ok) return r
+  return { ok: true, raw: r.segs, rest: t.slice(r.end) }
 }
-// The `context` parameter: "@root" | "@Ctx" | "@~Ctx" | "@~\"Ctx\"" — the markers are optional ("build" = @build,
-// "~build" = @~build) and the whole remainder is the name (spaces allowed without quotes).
+// The legacy `context` parameter: "@root" | "@Ctx" | "@~Ctx" | "@~\"Ctx\"" — the markers are optional ("build" = @build,
+// "~build" = @~build) and the whole remainder is ONE context name (spaces allowed without quotes). Nest with `path`.
 /** @returns {ActivityResult} */
 function parseContextParam(v) {
   if (typeof v !== 'string') return bad('bad-context', 'context must be a string like "@root", "@build" or "@~build"')
@@ -378,56 +458,79 @@ function parseContextParam(v) {
   s = s.trim()
   if (s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"') s = s.slice(1, -1)
   const n = normContextName(s)
-  return n.ok ? { ok: true, name: n.name, current } : n
+  return n.ok ? { ok: true, raw: [{ kind: 'context', name: n.name, current, root: n.name === 'root' }] } : n
 }
+/**
+ * Resolve the ADDRESS of a message or a query (6a): `agent` (agent segments only — the old field) + `path` (any path) +
+ * ONE trailing part — the `context` param, else (when `text` is given and textPrefix) a leading `@…` prefix in the text.
+ * Precedence: context param > text prefix; agent and path concatenate (agent first). `@~` marks only the overall LAST
+ * segment. Returns the node's segments, path and key, the current flag, and the text left after a stripped prefix.
+ * @param {any} input @param {{ text?: string|null }} [o]
+ * @returns {ActivityResult} { ok, segs, current, path, key, text }
+ */
+export function resolveAddress(input, o = {}) {
+  const raw = []
+  let text = o.text
+  if (has(input, 'agent')) { const a = normAgentPath(input.agent); if (!a.ok) return a; for (const sg of a.segs) raw.push({ ...sg, current: false, root: false }) }
+  if (has(input, 'path')) {
+    if (typeof input.path !== 'string') return bad('bad-path', 'path must be a string like "spec-70/@Tharsis"')
+    const s = input.path.trim().replace(/^\/+|\/+$/g, '')
+    if (s) { const r = scanPath(s, 0, false); if (!r.ok) return r; raw.push(...r.segs) }
+  }
+  let tail = null
+  if (has(input, 'context') && !(typeof input.context === 'string' && !input.context.trim())) {
+    const c = parseContextParam(input.context); if (!c.ok) return c
+    tail = c.raw
+  } else if (typeof text === 'string') {
+    const p = splitPrefix(text); if (!p.ok) return p
+    if (p.raw) { tail = p.raw; text = p.rest }
+  }
+  if (tail) {
+    const prev = raw[raw.length - 1]
+    if (prev && (prev.current || prev.root)) return bad('bad-path', 'the path already ends with @~ / @root — a context (or a text prefix) can\'t follow it')
+    raw.push(...tail)
+  }
+  const f = finishSegs(raw); if (!f.ok) return f
+  const path = formatPath(f.segs)
+  return { ok: true, segs: f.segs, current: f.current, path, key: pathKey(path), text }
+}
+const ownerIndex = segs => { for (let i = segs.length - 1; i >= 0; i--) if (segs[i].kind === 'agent') return i + 1; return 0 }   // index into the chain [root, …segs]
 
 /**
  * @typedef {{ done:number, total:number, unit:string }} ActivityProgress
  * @typedef {{
- *   agent: string|null, context: string, root: boolean, current: boolean, text: string, state: string|null,
- *   progress?: ActivityProgress|null, eta_at?: number|null, stale_after_ms: number|null,
+ *   segs: PathSeg[], path: string, key: string, agent: string|null, context: string, root: boolean, current: boolean,
+ *   text: string, state: string|null, progress?: ActivityProgress|null, eta_at?: number|null, stale_after_ms: number|null,
  *   details: string|null, data: any, log: boolean, warnings: string[] }} ActivityMsg
- *   `progress` / `eta_at` are ABSENT when not given and null when explicitly cleared ("none"). `text` is the RAW
- *   template (placeholders are rendered at read time — renderText) and never empty.
+ *   `path`/`key` address the TARGET node ('' = the session root); `agent` = its OWNER's path (null = the session), `context`
+ *   = the target's name when it is a context, else 'root' (the old shape); `root` = the target is an agent or the session.
+ *   `progress` / `eta_at` are ABSENT when not given and null when explicitly cleared ("none").
  */
 
 /**
  * Validate + normalise one report (the `log` tool / aimb-log script argument shape) into a message for apply().
- * - Context: from `context` when given (then `text` is taken LITERALLY — no prefix parsing, so a text may start with
- *   "@"), else a leading `@name` / `@~name` / `@"a b"` / `@~"a b"` prefix, which is stripped. Absent → `@root`, log-only.
- * - text: newlines/tabs → spaces, trimmed, must be non-empty; longer than 240 code points is TRUNCATED to 239 + "…"
- *   with a 'text-truncated' warning (a status line is worth keeping even when chatty; a reject would cost the agent
- *   another call). Everything else over a limit is REJECTED. DEFAULT TEXT (step 2): a message carrying progress and/or
- *   eta may omit text (logged or not) — it becomes "{progress}" (or "{eta}" when only an ETA is given), a template the
- *   reader renders against the context's live bar. No text and no progress/eta is still rejected.
- * - log: true (default) | false — see the module header (accepts booleans, 1/0 and "true"/"false"/"yes"/"no").
- * - state: running|blocked|failed|done|idle (case-insensitive) or absent (null → apply() picks the default).
- * - progress / eta: see parseProgress / parseEta; the string "none" clears either.
- * - stale_after: a duration > 0; over 24h is clamped with a 'stale-after-capped' warning.
- * - details: a string ≤ 4 KB UTF-8. data: a plain object/array (or a JSON string of one), JSON-cloned, ≤ 16 KB.
- * @param {any} input  { agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log? }
+ * - The address: see resolveAddress (path / agent / context / a text prefix). A text prefix is stripped; with the
+ *   `context` param the text is taken LITERALLY.
+ * - text: newlines/tabs → spaces, trimmed, non-empty; longer than 240 code points is TRUNCATED to 239 + "…" with a
+ *   'text-truncated' warning. DEFAULT TEXT: a message carrying progress and/or eta may omit text — "{progress}" (or
+ *   "{eta}"). Everything else over a limit is REJECTED.
+ * - log, state, progress, eta, stale_after, details, data: as before 6a. `plan` (6b) → 'not-yet'.
+ * @param {any} input  { path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log? }
  * @param {{ now?: number, tzOffsetMin?: number }} [opts]  needed only to resolve an eta
  * @returns {ActivityResult} { ok:true, msg: ActivityMsg } or { ok:false, code, what }
  */
 export function parseMessage(input, opts = {}) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return bad('bad-input', 'expected an object { text, agent?, context?, state?, progress?, eta?, stale_after?, details?, data?, log? }')
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return bad('bad-input', 'expected an object { text, path?, agent?, context?, state?, progress?, eta?, stale_after?, details?, data?, log? }')
+  if (input.plan !== undefined) return bad('not-yet', 'plan (todos) arrives in #70 step 6b — not supported yet')
+  if (input.items !== undefined) return bad('bad-input', 'items:[…] is a batch — log it as a batch (splitBatch)')
   const warnings = []
-  let agent = null
-  if (has(input, 'agent')) { const a = normAgentPath(input.agent); if (!a.ok) return a; agent = a.path }
   const log = has(input, 'log') ? boolVal(input.log) : true
   if (log === null) return bad('bad-log', 'log must be true (append to the log; the default) or false (update the board only)')
   const bar = has(input, 'progress') || has(input, 'eta')   // a bar update may omit text: it defaults to a template
   if (input.text != null && typeof input.text !== 'string') return bad('bad-text', 'text must be a string')
   if (typeof input.text !== 'string' && !bar) return bad('bad-text', 'text must be a string (it may be omitted only when progress or eta is given)')
-  let text = input.text || '', context = 'root', current = false
-  if (has(input, 'context') && !(typeof input.context === 'string' && !input.context.trim())) {
-    const c = parseContextParam(input.context); if (!c.ok) return c
-    context = c.name; current = c.current
-  } else {
-    const p = splitPrefix(text); if (!p.ok) return p
-    if (p.name !== null) { context = p.name; current = p.current; text = p.rest }
-  }
-  text = normText(text)
+  const ad = resolveAddress(input, { text: input.text || '' }); if (!ad.ok) return ad
+  let text = normText(ad.text)
   if (!text) {
     if (!bar) return bad('text-empty', 'text is empty (a context prefix alone is not a message)')
     text = has(input, 'progress') ? '{progress}' : '{eta}'   // #70: the default text of a bar update (rendered at read time)
@@ -438,8 +541,10 @@ export function parseMessage(input, opts = {}) {
     state = typeof input.state === 'string' ? input.state.trim().toLowerCase() : ''
     if (!ACTIVITY_STATES.includes(state)) return bad('bad-state', `state must be one of ${ACTIVITY_STATES.join('|')}`)
   }
+  const segs = ad.segs, oi = ownerIndex(segs), tgt = segs[segs.length - 1]
   /** @type {ActivityMsg} */
-  const msg = { agent, context, root: context === 'root', current, text, state, stale_after_ms: null, details: null, data: null, log, warnings }
+  const msg = { segs, path: ad.path, key: ad.key, agent: oi ? formatPath(segs.slice(0, oi)) : null, context: tgt && tgt.kind === 'context' ? tgt.name : 'root',
+    root: !tgt || tgt.kind === 'agent', current: ad.current, text, state, stale_after_ms: null, details: null, data: null, log, warnings }
   if (has(input, 'progress')) {
     if (typeof input.progress === 'string' && input.progress.trim().toLowerCase() === 'none') msg.progress = null
     else {
@@ -481,195 +586,279 @@ export function parseMessage(input, opts = {}) {
   return { ok: true, msg }
 }
 
+/**
+ * Merge batch / stream DEFAULTS under one item (6a). `log` is a plain default. The ADDRESS defaults (path / agent / context)
+ * are all-or-nothing: an item naming its own `path` or `agent` takes NONE of them (its address is its own); an item with
+ * only a `context` keeps the default path / agent and replaces the default context (the pre-6a stream rule).
+ * @param {Record<string, any>} defaults @param {Record<string, any>} item
+ */
+export function withDefaults(defaults, item) {
+  const d = { ...(defaults || {}) }
+  if (item && (item.path !== undefined || item.agent !== undefined)) { delete d.path; delete d.agent; delete d.context }
+  return { ...d, ...item }
+}
+/**
+ * BATCH (6a): split a `log` call's `{ items:[…], path?, agent?, context?, log? }` into per-item inputs. Bounds: 1..64 items
+ * and ≤ 64 KB of items JSON — over either, the WHOLE call is refused ('too-many-items' / 'batch-too-large'). The
+ * top-level path / agent / context / log are DEFAULTS merged under each item (withDefaults: an item with its own path or agent takes none of the address defaults); any other top-level
+ * message field beside items is 'bad-batch'. Each item: an object of MESSAGE_FIELDS + an optional `ref` (echoed) + `plan`
+ * (6b: answered not-yet); a non-object item or an unknown field gets its own error (`error`) and the rest still apply.
+ * @param {any} input
+ * @returns {ActivityResult} { ok:true, items:[{ ref?, input?, error? }] } or { ok:false, code, what }
+ */
+export function splitBatch(input) {
+  if (!input || typeof input !== 'object' || !Array.isArray(input.items)) return bad('bad-batch', 'a batch is { items:[{ text, path?, … }, …] }')
+  const items = input.items
+  if (!items.length) return bad('bad-batch', 'items is empty')
+  if (items.length > ACTIVITY_LIMITS.batchItems) return bad('too-many-items', `a batch holds at most ${ACTIVITY_LIMITS.batchItems} items (got ${items.length}) — split it`)
+  let bytes
+  try { bytes = utf8(JSON.stringify(items)) } catch (e) { return bad('bad-batch', `items are not JSON-serialisable (${e && e.message})`) }
+  if (bytes > ACTIVITY_LIMITS.batchBytes) return bad('batch-too-large', `the batch is ${bytes} bytes of JSON; the limit is ${ACTIVITY_LIMITS.batchBytes} — split it or trim details/data`)
+  const extra = Object.keys(input).filter(k => k !== 'items' && input[k] !== undefined && !BATCH_DEFAULT_FIELDS.includes(k))
+  if (extra.length) return bad('bad-batch', `beside items only ${BATCH_DEFAULT_FIELDS.join(' / ')} may be given (as defaults for every item); put ${extra.join(', ')} in each item`)
+  const defaults = {}
+  for (const k of BATCH_DEFAULT_FIELDS) if (input[k] !== undefined) defaults[k] = input[k]
+  const out = []
+  for (const it of items) {
+    if (!it || typeof it !== 'object' || Array.isArray(it)) { out.push({ error: bad('bad-item', 'each item must be an object { text, path?, … }') }); continue }
+    const { ref, ...fields } = it
+    const r = ref !== undefined ? { ref } : {}
+    const unknown = Object.keys(fields).filter(k => !MESSAGE_FIELDS.includes(k) && k !== 'plan')
+    if (unknown.length) { out.push({ ...r, error: bad('bad-field', `unknown field(s) ${unknown.join(', ')}: an item carries ${MESSAGE_FIELDS.join(', ')} (+ ref)`) }); continue }
+    if (fields.plan !== undefined) { out.push({ ...r, error: bad('not-yet', 'plan (todos) arrives in #70 step 6b — not supported yet') }); continue }
+    out.push({ ...r, input: withDefaults(defaults, fields) })
+  }
+  return { ok: true, items: out }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // state
 
 /**
  * @typedef {{ id:string, ts:number, text:string, state:string, details?:string|null, data?:any, data_bytes?:number,
  *   has_details?:boolean, has_data?:boolean }} ActivityLine
- * @typedef {{ name:string, key:string, created_at:number, last_activity:number, stale_after_ms:number|null,
- *   current:ActivityLine|null, progress:ActivityProgress|null, eta_at:number|null, persisted?:boolean,
- *   cp_dirty?:number }} ActivityContext
- * @typedef {{ path:string|null, key:string|null, started_at:number, last_activity:number, finished_at:number|null,
- *   gone_at:number|null, stale_after_ms:number|null, contexts:Map<string, ActivityContext>, log:any[],
- *   log_dropped:number, persisted?:boolean }} ActivityEntity
+ * @typedef {{ key:string, path:string, name:string, kind:'agent'|'context', parent:string|null, depth:number,
+ *   created_at:number, last_activity:number, stale_after_ms:number|null, current:ActivityLine|null,
+ *   progress:ActivityProgress|null, eta_at:number|null, finished_at:number|null, gone_at:number|null, implicit:boolean,
+ *   log:any[], log_dropped:number, log_floor:number, persisted?:boolean, cp_dirty?:number }} ActivityNode
  * @typedef {{ key:string, origin:string, realm?:string, session:string, project:string, user:string|null,
- *   host:string|null, created_at:number, last_activity:number, gone_at:number|null, self:ActivityEntity,
- *   agents:Map<string, ActivityEntity>, persisted?:boolean, bell?:boolean }} ActivitySession
+ *   host:string|null, created_at:number, last_activity:number, gone_at:number|null, nodes:Map<string, ActivityNode>,
+ *   kids:Map<string, Set<string>>, nAgents:number, bell?:boolean }} ActivitySession
  * @typedef {{ day:string, keys:Map<string, number>, next:number,
  *   rep:{ keys:number[], since:number, last:number, n:number, offset?:number }|null }} ActivityCpFile
- * @typedef {{ v:1, config:any, origin:string, idPrefix:string, seq:number, local:Map<string, ActivitySession>,
+ * @typedef {{ v:2, config:any, origin:string, idPrefix:string, seq:number, local:Map<string, ActivitySession>,
  *   remote:Map<string, { sessions:Map<string, ActivitySession>, sig:string|null, down_at?:number|null, epoch?:string|null, seq?:number, truncated?:boolean }>,
- *   cpLive:Map<string, [string, string|null, string]>, cp:ActivityCpFile|null }} ActivityState
+ *   cpLive:Map<string, [string, string]>, cp:ActivityCpFile|null }} ActivityState
  */
 
 /**
  * A fresh state container (a plain object of Maps; every function here takes it as the first argument).
  * @param {{ config?: any, origin?: string, idPrefix?: string }} [opts]
- *   config: a resolveConfig() result or a raw `activity` block (re-validated either way, env NOT consulted here);
- *   origin: this host's name (whose slice snapshot() produces and mergeSnapshot() refuses to overwrite);
- *   idPrefix: prefix for entry ids — the bridge passes `act_<boot nonce>_`, since the in-state sequence restarts at 0
- *   (an id is `<prefix><ts base36>-<seq base36>`; entryTime() reads the time back out).
  * @returns {ActivityState}
  */
 export function createActivity({ config, origin = 'local', idPrefix = 'act_' } = {}) {
-  return { v: 1, config: resolveConfig(config || {}, {}), origin: String(origin || 'local'), idPrefix: String(idPrefix), seq: 0, local: new Map(), remote: new Map(),
+  return { v: 2, config: resolveConfig(config || {}, {}), origin: String(origin || 'local'), idPrefix: String(idPrefix), seq: 0, local: new Map(), remote: new Map(),
     cpLive: new Map(), cp: null }
 }
 
-// `persisted`: has a record of this session/entity/context reached the JSONL yet (its first one carries new_*)?
+// `persisted`: has a record touching this node reached the JSONL yet (its first one carries new_from)?
 // `cp_dirty`: bits of what a log:false message changed since the last persisted record (CP_CUR | CP_PROG | CP_ETA).
 const CP_CUR = 1, CP_PROG = 2, CP_ETA = 4
-/** @returns {ActivityContext} */
-function newContext(name, now) {
-  return { name, key: lc(name), created_at: now, last_activity: now, stale_after_ms: null, current: null, progress: null, eta_at: null, persisted: false, cp_dirty: 0 }
+/** @returns {ActivityNode} */
+function newNode(path, segs, now) {
+  const last = segs.length ? segs[segs.length - 1] : null, key = pathKey(path)
+  return { key, path, name: last ? last.name : '', kind: last ? last.kind : 'agent', parent: parentKeyOf(key), depth: segs.length, created_at: now, last_activity: now,
+    stale_after_ms: null, current: null, progress: null, eta_at: null, finished_at: null, gone_at: null, implicit: true, log: [], log_dropped: 0, log_floor: 0, persisted: false, cp_dirty: 0 }
 }
-/** @returns {ActivityEntity} */
-function newEntity(path, now) {
-  const e = { path, key: path == null ? null : lc(path), started_at: now, last_activity: now, finished_at: null, gone_at: null,
-    stale_after_ms: null, contexts: new Map(), log: [], log_dropped: 0, persisted: false }
-  e.contexts.set('root', newContext('root', now))
-  return e
+/** A new session record with its root node. */
+function newSession(key, origin, f, now) {
+  const s = { key, origin, realm: f.realm, session: f.session, project: f.project, user: f.user, host: origin, created_at: now, last_activity: now, gone_at: null,
+    nodes: new Map(), kids: new Map(), nAgents: 0 }
+  s.nodes.set('', newNode('', [], now))   // implicit until a message is OWNED by the session itself (an agents-only session never goes stale)
+  return s
 }
-function oldestFinished(sess) {
-  let best = null
-  for (const a of sess.agents.values()) if (a.finished_at && (!best || a.finished_at < best.finished_at || (a.finished_at === best.finished_at && a.key < best.key))) best = a
-  return best
+/** Add a node to a session (its parent need not exist yet: a remote child may arrive first — kids are keyed by parent key). */
+function addNode(sess, node) {
+  sess.nodes.set(node.key, node)
+  if (node.parent != null) { let k = sess.kids.get(node.parent); if (!k) sess.kids.set(node.parent, (k = new Set())); k.add(node.key) }
+  if (node.key && node.kind === 'agent') sess.nAgents++
 }
-const str = (v, max = 200) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null)
+/** Every key of `key`'s subtree (itself first, depth-first, kids in insertion order). */
+function subtreeKeys(sess, key) {
+  const out = [], stack = [key]
+  while (stack.length) { const k = stack.pop(); if (!sess.nodes.has(k)) continue; out.push(k); const ks = sess.kids.get(k); if (ks) stack.push(...[...ks].reverse()) }
+  return out
+}
+/** Remove a node and its whole subtree; returns the removed nodes. Never the root. */
+function removeSubtree(sess, key) {
+  if (!key || !sess.nodes.has(key)) return []
+  const keys = subtreeKeys(sess, key), out = []
+  for (const k of keys) { const n = sess.nodes.get(k); sess.nodes.delete(k); sess.kids.delete(k); if (n.kind === 'agent') sess.nAgents--; out.push(n) }
+  const n0 = out[0], pk = sess.kids.get(n0.parent)
+  if (pk) { pk.delete(key); if (!pk.size) sess.kids.delete(n0.parent) }
+  return out
+}
+/** The node chain root → target for segs (missing nodes as null). */
+function chainKeys(segs) { const out = ['']; for (let i = 1; i <= segs.length; i++) out.push(pathKey(formatPath(segs.slice(0, i)))); return out }
+/** The nearest AGENT at or above a node (the root when none). */
+function ownerOf(sess, node) {
+  let n = node
+  while (n && n.kind !== 'agent') n = sess.nodes.get(n.parent)
+  return n || sess.nodes.get('')
+}
+/** The finished agents that may be evicted for a message to `targetKey`: oldest first, never an ancestor of the target. */
+function evictionCandidates(sess, targetKey) {
+  const out = []
+  for (const n of sess.nodes.values()) if (n.key && n.kind === 'agent' && n.finished_at && !(targetKey === n.key || targetKey.startsWith(n.key + '/'))) out.push(n)
+  return out.sort((a, b) => a.finished_at - b.finished_at || cmp(a.key, b.key))
+}
 /** The small in-memory log entry of a (logged) message or a JSONL entry — the SAME shape from both (replay equality). */
 function smallOf(e) {
-  const s = compact({ id: e.id, ts: e.ts, context: e.context, current: !!e.current, text: e.text, state: e.state,
+  const s = compact({ id: e.id, ts: e.ts, current: !!e.current, text: e.text, state: e.state,
     progress: e.progress || undefined, eta_at: e.eta_at || undefined, stale_after_ms: e.stale_after_ms || undefined,
     has_details: e.has_details ? true : undefined, has_data: e.has_data ? true : undefined })
   if (e.progress === null) s.progress = null   // an explicit "none" is recorded (the replay must see the clear)
   if (e.eta_at === null) s.eta_at = null
   return s
 }
-/** new_session / new_entity / new_context for the FIRST persisted record of each (and mark them persisted). */
-function persistMarks(sess, ent, ctx) {
-  const m = {}
-  if (!sess.persisted) { m.new_session = true; sess.persisted = true }
-  if (!ent.persisted) { m.new_entity = true; ent.persisted = true }
-  if (!ctx.persisted) { m.new_context = true; ctx.persisted = true }
-  return m
+/** Insert an entry into a node's log in ORDER (apply order; an earlier-timed report goes where its time puts it). */
+function logInsert(node, e) {
+  const L = node.log
+  let i = L.length
+  while (i > 0 && ordCmp(L[i - 1], e) > 0) i--
+  L.splice(i, 0, e)
 }
-const cpId = (sKey, aKey, cKey) => JSON.stringify([sKey, aKey, cKey])
+function logDropOldest(node) { const e = node.log.shift(); if (e) { node.log_dropped++; if (e.ts > node.log_floor) node.log_floor = e.ts } return e }
+/** new_from for the FIRST persisted record touching a node of the chain (and mark the chain persisted). */
+function persistMarks(chain) {
+  let k = -1
+  for (let i = 0; i < chain.length; i++) if (!chain[i].persisted) { k = i; break }
+  for (const n of chain) n.persisted = true
+  return k >= 0 ? { new_from: k } : {}
+}
+const cpId = (sKey, nKey) => JSON.stringify([sKey, nKey])
 const fullLine = l => (l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, details: l.details || null, data: l.data != null ? l.data : null } : null)
 
 /**
  * Apply one parsed message from a LOCAL session. Atomic: a rejected message changes nothing.
- * - Creates the session / agent / context on first use (a new entity starts with an empty @root).
- * - log:true (the default) appends a small log entry (capped at config.log_entries_per_agent, oldest dropped →
- *   entity.log_dropped) and returns the full `entry` (details + data + identity + persistence markers) for the JSONL.
- *   log:false appends nothing and returns entry:null, logged:false — everything below still applies.
- * - `@~` sets the context's current line (+ its details/data, which live nowhere else in memory). Progress / eta are
- *   applied from ANY message (sticky; "none" cleared them at parse); the ETA is then dropped if the context's state is
- *   done/failed.
- * - Entry state = msg.state, else the context's current state, else running.
- * - `@~root` done|failed finishes the entity (finished_at, first time only); `@~root` running|blocked|idle revives it.
- * - last_activity (session, entity, context) = now (never moved backwards) for ANY message; `stale_after` is stored on
- *   the entity AND the context and lasts until each one's next message (a message without it clears it).
- * - Limits: a new context beyond 32 (incl. root) → 'too-many-contexts'. A new agent beyond 128 EVICTS the session's
- *   oldest FINISHED agent (reported in `evicted`; its log survives in the JSONL) and is rejected ('too-many-agents')
- *   only when none has finished — or when the new agent's message is log:false (an eviction must reach the JSONL).
- * - A message arriving for a session marked gone clears gone_at on the session and the reporting entity.
- * - A log:false message marks what it changed (current line / bar / ETA) dirty and the context live for the next
- *   planCheckpoints(); a logged one closes the open repeat line.
+ * - Creates the session and every node the path names (intermediates IMPLICIT). The target and its owner stop being
+ *   implicit.
+ * - log:true appends a small entry to the TARGET's own log (capped per node, oldest dropped) and returns the full `entry`
+ *   for the JSONL; log:false appends nothing (entry:null, logged:false).
+ * - `@~` sets the target's current line (+ details/data); done|failed on an AGENT target finishes it, a live state
+ *   revives it. Progress / eta from ANY message (ETA dropped while done/failed).
+ * - last_activity (and stale_after) on the target and every node up to its OWNER; the session header always.
+ * - LIMITS: depth ≤ 6 (parse), ≤ 128 agents and ≤ 4096 nodes per session. A message that would exceed either EVICTS the
+ *   oldest FINISHED agents (each with its whole subtree; never an ancestor of the target; reported in `evicted`, their
+ *   history stays in the JSONL) and is rejected ('too-many-agents' / 'too-many-nodes') only when that can't make room —
+ *   or when it is log:false (an eviction must reach the JSONL).
+ * - A message clears gone_at on the session and on its owner.
  * @param {ActivityState} state
  * @param {{ session:string, project?:string, user?:string|null, realm?:string, host?:string }} ident  the reporting session
- *   (v1.60.0: `host` is ignored — a local session's host is always state.origin, part of its key)
  * @param {ActivityMsg} msg  parseMessage(...).msg
  * @param {number} now
- * @returns {ActivityResult} { ok:true, id, ts, logged, entry, current, state, stale_at, agent, context,
+ * @returns {ActivityResult} { ok:true, id, ts, logged, entry, current, state, stale_at, path, agent, context,
  *   evicted:string[], warnings:string[] } or { ok:false, code, what }
  */
 export function apply(state, ident, msg, now) {
   if (!state || !(state.local instanceof Map)) return bad('bad-state-object', 'pass a createActivity() state')
   if (!state.config.enabled) return bad('activity-disabled', 'the activity board is disabled on this host (activity.enabled)')
   if (!Number.isFinite(now)) return bad('bad-now', 'now must be a ms epoch')
-  if (!msg || typeof msg.text !== 'string' || !msg.text || typeof msg.context !== 'string') return bad('bad-message', 'pass the msg from parseMessage()')
+  if (!msg || typeof msg.text !== 'string' || !msg.text || !Array.isArray(msg.segs)) return bad('bad-message', 'pass the msg from parseMessage()')
   const logged = msg.log !== false
   const sessName = str(ident && ident.session)
   if (!sessName) return bad('bad-session', 'the reporting session needs a name')
   const L = ACTIVITY_LIMITS
-  const sKey = keyOf(state, { realm: ident.realm, project: ident.project, user: ident.user, session: sessName })   // v1.60.0: host = this origin
+  const sKey = keyOf(state, { realm: ident.realm, project: ident.project, user: ident.user, session: sessName })
   let sess = state.local.get(sKey)
-  const aKey = msg.agent == null ? null : lc(msg.agent)
-  let ent = sess ? (aKey === null ? sess.self : sess.agents.get(aKey)) : null
-  let evict = null
-  if (aKey !== null && !ent && sess && sess.agents.size >= L.agentsPerSession) {
-    evict = oldestFinished(sess)
-    if (!evict) return bad('too-many-agents', `this session already has ${L.agentsPerSession} agents and none has finished (report @~root done/failed when an agent ends)`)
-    if (!logged) return bad('too-many-agents', `this session has ${L.agentsPerSession} agents: a NEW agent must introduce itself with a logged message (log:true), which evicts the oldest finished one`)
-  }
-  const cKey = lc(msg.context)
-  let ctx = ent ? ent.contexts.get(cKey) : null
-  if (!ctx && ent && ent.contexts.size >= L.contextsPerAgent) return bad('too-many-contexts', `this ${aKey === null ? 'session' : 'agent'} already has ${L.contextsPerAgent} contexts (including @root)`)
+  const segs = msg.segs, keys = chainKeys(segs), tKey = keys[keys.length - 1]
+  // the nodes this message would create, and room for them (simulate evictions first: atomic)
+  let newN = 0, newA = 0
+  for (let i = 1; i < keys.length; i++) if (!sess || !sess.nodes.has(keys[i])) { newN++; if (segs[i - 1].kind === 'agent') newA++ }
+  const evict = []
+  if (sess && newN) {
+    let nNodes = sess.nodes.size - 1 + newN, nAg = sess.nAgents + newA
+    if (nNodes > L.nodesPerSession || nAg > L.agentsPerSession) {
+      const gone = new Set()
+      for (const c of evictionCandidates(sess, tKey)) {
+        if (nNodes <= L.nodesPerSession && nAg <= L.agentsPerSession) break
+        if (gone.has(c.key)) continue
+        const sub = subtreeKeys(sess, c.key)
+        for (const k of sub) { gone.add(k); nNodes--; if (sess.nodes.get(k).kind === 'agent') nAg-- }
+        evict.push(c)
+      }
+      if (nAg > L.agentsPerSession) return bad('too-many-agents', `this session already has ${L.agentsPerSession} agents and none (outside this path) has finished (report a done/failed current line when an agent ends)`)
+      if (nNodes > L.nodesPerSession) return bad('too-many-nodes', `this session already has ${L.nodesPerSession} nodes and not enough finished agents to evict`)
+      if (!logged) return bad(newA ? 'too-many-agents' : 'too-many-nodes', `this session is at its limit: a NEW node must arrive with a logged message (log:true), which evicts the oldest finished agent(s)`)
+    }
+  } else if (!sess && (newN > L.nodesPerSession || newA > L.agentsPerSession)) return bad('too-many-nodes', 'too many nodes')
   // ---- every check passed: mutate ----
   if (!sess) {
-    sess = { key: sKey, origin: state.origin, realm: str(ident.realm) || 'default', session: sessName, project: str(ident.project) || 'unclassified', user: str(ident.user), host: state.origin,
-      created_at: now, last_activity: now, gone_at: null, self: newEntity(null, now), agents: new Map(), persisted: false }
+    sess = newSession(sKey, state.origin, { realm: str(ident.realm) || 'default', session: sessName, project: str(ident.project) || 'unclassified', user: str(ident.user) }, now)
     state.local.set(sKey, sess)
-    if (aKey === null) ent = sess.self
   }
-  if (evict) sess.agents.delete(evict.key)
-  if (!ent) { ent = newEntity(msg.agent, now); sess.agents.set(aKey, ent) }
-  if (!ctx) ctx = ent.contexts.get(cKey)
-  if (!ctx) { ctx = newContext(msg.context, now); ent.contexts.set(cKey, ctx) }
-  const before = { cur: ctx.current, prog: JSON.stringify(ctx.progress), eta: ctx.eta_at }
-  const entryState = msg.state || (ctx.current ? ctx.current.state : null) || 'running'
+  const evicted = []
+  for (const c of evict) if (sess.nodes.has(c.key)) { removeSubtree(sess, c.key); evicted.push(c.path) }
+  const chain = [sess.nodes.get('')]
+  for (let i = 1; i < keys.length; i++) {
+    let n = sess.nodes.get(keys[i])
+    if (!n) { n = newNode(childPath(chain[i - 1], segs[i - 1]), segs.slice(0, i), now); addNode(sess, n) }   // the parent's first-seen spelling
+    chain.push(n)
+  }
+  const tgt = chain[chain.length - 1], oi = ownerIndex(segs), owner = chain[oi]
+  tgt.implicit = false; owner.implicit = false
+  const before = { cur: tgt.current, prog: JSON.stringify(tgt.progress), eta: tgt.eta_at }
+  const entryState = msg.state || (tgt.current ? tgt.current.state : null) || 'running'
   const id = `${state.idPrefix}${now.toString(36)}-${(++state.seq).toString(36)}`
   // max(): a report timed earlier than one already applied (clock skew, a replayed JSONL) never moves activity back
-  sess.last_activity = Math.max(sess.last_activity, now); ent.last_activity = Math.max(ent.last_activity, now); ctx.last_activity = Math.max(ctx.last_activity, now)
-  ent.stale_after_ms = ctx.stale_after_ms = msg.stale_after_ms || null
-  sess.gone_at = null; ent.gone_at = null
+  sess.last_activity = Math.max(sess.last_activity, now)
+  for (let i = oi; i < chain.length; i++) { chain[i].last_activity = Math.max(chain[i].last_activity, now); chain[i].stale_after_ms = msg.stale_after_ms || null }
+  sess.gone_at = null; owner.gone_at = null
   let lineId = id
   if (msg.current) {
     // a log:false line IDENTICAL to the current one (text, state, details, data) keeps it — "alive, unchanged" (a rep, not a cp)
-    const c0 = ctx.current, same = !logged && c0 && c0.text === msg.text && c0.state === entryState && (c0.details || null) === (msg.details || null)
+    const c0 = tgt.current, same = !logged && c0 && c0.text === msg.text && c0.state === entryState && (c0.details || null) === (msg.details || null)
       && JSON.stringify(c0.data != null ? c0.data : null) === JSON.stringify(msg.data != null ? msg.data : null)
     if (same) lineId = c0.id
-    else ctx.current = { id, ts: now, text: msg.text, state: entryState, details: msg.details || null, data: msg.data != null ? msg.data : null,
+    else tgt.current = { id, ts: now, text: msg.text, state: entryState, details: msg.details || null, data: msg.data != null ? msg.data : null,
       data_bytes: msg.data != null ? utf8(JSON.stringify(msg.data)) : 0 }
-    if (cKey === 'root') {
-      if (DONE_OR_FAILED.has(entryState)) { if (!ent.finished_at) ent.finished_at = now }
-      else ent.finished_at = null
+    if (tgt.kind === 'agent') {
+      if (DONE_OR_FAILED.has(entryState)) { if (!tgt.finished_at) tgt.finished_at = now }
+      else tgt.finished_at = null
     }
   }
-  if ('progress' in msg) ctx.progress = msg.progress ? { ...msg.progress } : null   // #70 step 2: ANY message moves the bar
-  if ('eta_at' in msg) ctx.eta_at = msg.eta_at || null
-  if (DONE_OR_FAILED.has(stateOf(ctx))) ctx.eta_at = null                         // dropped on done/failed, ignored while it is
+  if ('progress' in msg) tgt.progress = msg.progress ? { ...msg.progress } : null   // ANY message moves the bar
+  if ('eta_at' in msg) tgt.eta_at = msg.eta_at || null
+  if (DONE_OR_FAILED.has(stateOf(tgt))) tgt.eta_at = null                          // dropped on done/failed, ignored while it is
   const res = { ok: true, id: lineId, ts: now, logged, entry: null, current: !!msg.current, state: entryState,
-    stale_at: staleAt(ctx, state.config.stale_after_min, ent), agent: ent.path, context: ctx.name, evicted: evict ? [evict.path] : [], warnings: msg.warnings || [] }
-  if (!logged) {   // the board only: mark what changed for the next checkpoint, and the context as live this interval
-    const bits = (ctx.current !== before.cur ? CP_CUR : 0) | (JSON.stringify(ctx.progress) !== before.prog ? CP_PROG : 0) | (ctx.eta_at !== before.eta ? CP_ETA : 0)
-    ctx.cp_dirty = (ctx.cp_dirty || 0) | bits
-    state.cpLive.set(cpId(sKey, aKey, cKey), [sKey, aKey, cKey])
+    stale_at: staleAt(tgt, state.config.stale_after_min, owner), path: tgt.path, agent: oi ? owner.path : null, context: tgt.kind === 'context' ? tgt.name : 'root',
+    evicted, warnings: msg.warnings || [] }
+  if (!logged) {   // the board only: mark what changed for the next checkpoint, and the node as live this interval
+    const bits = (tgt.current !== before.cur ? CP_CUR : 0) | (JSON.stringify(tgt.progress) !== before.prog ? CP_PROG : 0) | (tgt.eta_at !== before.eta ? CP_ETA : 0)
+    tgt.cp_dirty = (tgt.cp_dirty || 0) | bits
+    state.cpLive.set(cpId(sKey, tKey), [sKey, tKey])
     return res
   }
-  const small = smallOf({ id, ts: now, context: ctx.name, current: msg.current, text: msg.text, state: entryState,
+  const small = smallOf({ id, ts: now, current: msg.current, text: msg.text, state: entryState,
     progress: 'progress' in msg ? msg.progress : undefined, eta_at: 'eta_at' in msg ? msg.eta_at : undefined, stale_after_ms: msg.stale_after_ms,
     has_details: !!msg.details, has_data: msg.data != null })
-  ent.log.push(small)
-  while (ent.log.length > state.config.log_entries_per_agent) { ent.log.shift(); ent.log_dropped++ }
+  logInsert(tgt, small)
+  while (tgt.log.length > state.config.log_entries_per_agent) logDropOldest(tgt)
   // this entry persists what it carries: the line (+ its state, and a done/failed line's dropped ETA), the bar, the ETA
-  if (ctx.cp_dirty) ctx.cp_dirty &= ~((msg.current ? CP_CUR | (DONE_OR_FAILED.has(entryState) ? CP_ETA : 0) : 0) | ('progress' in msg ? CP_PROG : 0) | ('eta_at' in msg ? CP_ETA : 0))
+  if (tgt.cp_dirty) tgt.cp_dirty &= ~((msg.current ? CP_CUR | (DONE_OR_FAILED.has(entryState) ? CP_ETA : 0) : 0) | ('progress' in msg ? CP_PROG : 0) | ('eta_at' in msg ? CP_ETA : 0))
   if (state.cp) state.cp.rep = null   // any other write closes the open repeat line
-  res.entry = { v: 1, ...small, current: !!msg.current, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host,
-    agent: ent.path, details: msg.details || null, data: msg.data != null ? msg.data : null, ...persistMarks(sess, ent, ctx),
-    ...(evict ? { evicted: [evict.path] } : {}), ...(msg.current && cKey === 'root' ? { finished_at: ent.finished_at } : {}) }
+  res.entry = { v: ACTIVITY_FORMAT, ...small, current: !!msg.current, path: tgt.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host,
+    details: msg.details || null, data: msg.data != null ? msg.data : null, ...persistMarks(chain),
+    ...(evicted.length ? { evicted } : {}), ...(msg.current && tgt.kind === 'agent' ? { finished_at: tgt.finished_at } : {}) }
   return res
 }
 
 /**
- * The checkpoint writes due now (the gateway calls this every `progress_checkpoint_sec`, then appends / rewrites them
- * in order). Every context with log:false activity since the last call is either CHANGED (its current line, bar or
- * ETA moved since its last persisted record — or it has no key in today's file yet) → one full `cp` line, or UNCHANGED
- * → its key joins this interval's repeat line. The repeat line REWRITES the open one in place (rewrite:true, n+1) when
- * the key set is EXACTLY the same and nothing else was written since; otherwise a new one is appended (so every key on
- * a repeat line was alive in each of its n intervals). A new local day starts a new file: keys restart at 1 and every
- * live context gets a full cp there.
+ * The checkpoint writes due now (the gateway calls this every `progress_checkpoint_sec`, then appends / rewrites them in
+ * order). Every NODE with log:false activity since the last call is either CHANGED (its current line, bar or ETA moved
+ * since its last persisted record — or it has no key in today's file yet) → one full `cp` line, or UNCHANGED → its key
+ * joins this interval's repeat line (rewritten in place while the key set is exactly the same and nothing else was written
+ * since). A new local day starts a new file: keys restart at 1 and every live node gets a full cp there.
  * @param {ActivityState} state
  * @param {number} now
  * @returns {{ kind:string, rewrite?:boolean, rec:any }[]}  kind 'cp' | 'rep'
@@ -678,18 +867,18 @@ export function planCheckpoints(state, now) {
   const day = localDay(now)
   if (!state.cp || state.cp.day !== day) state.cp = { day, keys: new Map(), next: 1, rep: null }
   const cp = state.cp, writes = [], same = []
-  for (const [id, [sKey, aKey, cKey]] of [...state.cpLive]) {
+  for (const [id, [sKey, nKey]] of [...state.cpLive]) {
     state.cpLive.delete(id)
-    const sess = state.local.get(sKey), ent = sess && (aKey === null ? sess.self : sess.agents.get(aKey)), ctx = ent && ent.contexts.get(cKey)
-    if (!ctx) continue   // evicted / expired since
+    const sess = state.local.get(sKey), node = sess && sess.nodes.get(nKey)
+    if (!node) continue   // evicted / expired since
     let k = cp.keys.get(id)
-    if (ctx.cp_dirty || k === undefined) {
+    if (node.cp_dirty || k === undefined) {
       if (k === undefined) { k = cp.next++; cp.keys.set(id, k) }
-      writes.push({ kind: 'cp', rec: checkpointOf(state, sess, ent, ctx, now, k) })
-      ctx.cp_dirty = 0
+      writes.push({ kind: 'cp', rec: checkpointOf(state, sess, node, now, k) })
+      node.cp_dirty = 0
     } else same.push(k)
   }
-  if (writes.length || !same.length) cp.rep = null   // a cp line (or an interval with no unchanged-live context) closes it
+  if (writes.length || !same.length) cp.rep = null   // a cp line (or an interval with no unchanged-live node) closes it
   if (!same.length) return writes
   same.sort((a, b) => a - b)
   if (cp.rep && cp.rep.keys.join() === same.join()) { cp.rep.n++; cp.rep.last = now; writes.push({ kind: 'rep', rewrite: true, rec: repRecord(cp.rep) }) }
@@ -697,31 +886,28 @@ export function planCheckpoints(state, now) {
   return writes
 }
 /**
- * Every dirty context's cp NOW, regardless of the interval (a clean shutdown's flush). By default only the cp lines (the
- * process 'exit' flush appends synchronously and can't rewrite a repeat line); `{ withRep: true }` (v1.59.0, #70 step 3:
- * the tray's prepare-shutdown) returns the whole plan — the repeat line too, so the alive-but-unchanged contexts' last
- * activity also survives the kill that follows.
- * @param {ActivityState} state
- * @param {number} now
- * @param {{ withRep?: boolean }} [opts]
+ * Every dirty node's cp NOW, regardless of the interval (a clean shutdown's flush). By default only the cp lines;
+ * `{ withRep: true }` (the tray's prepare-shutdown) returns the whole plan — the repeat line too.
+ * @param {ActivityState} state @param {number} now @param {{ withRep?: boolean }} [opts]
  */
 export function flushCheckpoints(state, now, opts = {}) {
-  for (const s of state.local.values()) for (const e of [s.self, ...s.agents.values()]) for (const c of e.contexts.values())
-    if (c.cp_dirty) state.cpLive.set(cpId(s.key, e.key, c.key), [s.key, e.key, c.key])
+  for (const s of state.local.values()) for (const n of s.nodes.values()) if (n.cp_dirty) state.cpLive.set(cpId(s.key, n.key), [s.key, n.key])
   const plan = planCheckpoints(state, now)
   return opts && opts.withRep ? plan : plan.filter(w => w.kind === 'cp')
 }
-const repRecord = r => ({ rep: r.keys.slice(), n: r.n, since: r.since, last: r.last })
-/** One context's full checkpoint line (a snapshot: current line incl. details/data, state, bar, ETA; root: finished_at). */
-function checkpointOf(state, sess, ent, ctx, now, k) {
-  return { v: 1, kind: 'cp', k, ts: now, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host,
-    agent: ent.path, context: ctx.name, current: fullLine(ctx.current), state: stateOf(ctx), progress: ctx.progress ? { ...ctx.progress } : null, eta_at: ctx.eta_at || null,
-    ...(ctx.key === 'root' ? { finished_at: ent.finished_at } : {}), ...persistMarks(sess, ent, ctx) }
+const repRecord = r => ({ v: ACTIVITY_FORMAT, rep: r.keys.slice(), n: r.n, since: r.since, last: r.last })
+/** One node's full checkpoint line (a snapshot: current line incl. details/data, state, bar, ETA; an agent: finished_at). */
+function checkpointOf(state, sess, node, now, k) {
+  const chain = []
+  for (let n = node; n; n = n.parent != null ? sess.nodes.get(n.parent) : null) chain.unshift(n)
+  return { v: ACTIVITY_FORMAT, kind: 'cp', k, ts: now, path: node.path, origin: state.origin, realm: sess.realm || 'default', session: sess.session, project: sess.project, user: sess.user, host: sess.host,
+    current: fullLine(node.current), state: stateOf(node), progress: node.progress ? { ...node.progress } : null, eta_at: node.eta_at || null,
+    ...(node.kind === 'agent' ? { finished_at: node.finished_at } : {}), ...persistMarks(chain) }
 }
 
 /**
- * Mark a LOCAL session as having left the mesh (its unfinished agents then show as `gone`), or pass `now = null` to
- * clear it (the session is back). A later message from the session clears it for the session + that entity anyway.
+ * Mark a LOCAL session as having left the mesh (its unfinished agents then show as `gone`), or pass `now = null` to clear
+ * it (the session is back). A later message from the session clears it for the session + that message's owner anyway.
  * @param {ActivityState} state
  * @param {{ session:string, project?:string, user?:string|null, realm?:string }} ident  (a session record works too)
  * @param {number|null} now
@@ -731,23 +917,23 @@ export function markSessionGone(state, ident, now) {
   const sess = state.local.get(keyOf(state, ident))
   if (!sess) return false
   const at = Number.isFinite(now) ? now : null
-  sess.gone_at = at; sess.self.gone_at = at
-  for (const a of sess.agents.values()) a.gone_at = at
+  sess.gone_at = at
+  for (const n of sess.nodes.values()) if (n.kind === 'agent') n.gone_at = at
   return true
 }
 
 /**
- * Remove LOCAL agents that finished (or went gone) more than `finished_visible_hours` ago, and gone sessions past the
- * same window. Their history stays in the daily JSONL. Remote slices are expired by their own origin.
+ * Remove LOCAL agents that finished (or went gone) more than `finished_visible_hours` ago — each WITH ITS SUBTREE — and
+ * gone sessions past the same window. Their history stays in the daily JSONL. Remote slices are expired by their origin.
  * @param {ActivityState} state
  * @param {number} now
- * @returns {{ session:string, project:string, agent:string|null }[]} what was removed (agent null = the whole session)
+ * @returns {{ session:string, project:string, agent:string|null }[]} what was removed (agent = the node path; null = the whole session)
  */
 export function expire(state, now) {
   const hours = state.config.finished_visible_hours, out = []
   for (const [k, s] of [...state.local]) {
     if (s.gone_at && !visible({ finished_at: null, gone_at: s.gone_at }, now, hours)) { state.local.delete(k); out.push({ session: s.session, project: s.project, agent: null }); continue }
-    for (const [ak, a] of [...s.agents]) if (!visible(a, now, hours)) { s.agents.delete(ak); out.push({ session: s.session, project: s.project, agent: a.path }) }
+    for (const n of [...s.nodes.values()]) if (n.key && n.kind === 'agent' && s.nodes.has(n.key) && !visible(n, now, hours)) { removeSubtree(s, n.key); out.push({ session: s.session, project: s.project, agent: n.path }) }
   }
   return out
 }
@@ -758,12 +944,18 @@ export function getSession(state, ident, origin) {
   const sl = state.remote.get(origin)
   return (sl && sl.sessions.get(keyOf(state, ident, origin))) || null
 }
-/** An entity (agent path, or null/undefined = the session itself), local by default. */
-export function getEntity(state, ident, agent, origin) {
+/** A NODE by path (null / '' = the session root), local by default. The path is canonicalised (case-insensitive). */
+export function getNode(state, ident, path, origin) {
   const s = getSession(state, ident, origin)
   if (!s) return null
-  return agent == null || agent === '' ? s.self : s.agents.get(lc(agent)) || null
+  if (path == null || path === '') return s.nodes.get('') || null
+  const p = parsePath(String(path))
+  return p.ok ? s.nodes.get(p.key) || null : null
 }
+/** Compat alias (pre-6a name): an agent path is a node path. */
+export const getEntity = getNode
+/** A node's children (in insertion order). */
+export function childrenOf(sess, node) { const ks = sess && node ? sess.kids.get(node.key) : null; return ks ? [...ks].map(k => sess.nodes.get(k)).filter(Boolean) : [] }
 /** Every session held (local first, then each remote origin), sorted by origin then key. Each has `.origin`. */
 export function allSessions(state) {
   const out = [...state.local.values()].sort((a, b) => cmp(a.key, b.key))
@@ -774,62 +966,73 @@ export function allSessions(state) {
 // ---------------------------------------------------------------------------------------------------------------
 // derived views (pure; the dashboard's stale slider passes its own staleMin)
 
-/** The reported state of an entity (its root context's current line) or a context (its current line); else running. */
-export function stateOf(item) {
-  if (!item) return 'running'
-  if (item.contexts instanceof Map) { const r = item.contexts.get('root'); return r && r.current ? r.current.state : 'running' }
-  return item.current ? item.current.state : 'running'
-}
+/** The reported state of a node (its current line's); else running. */
+export function stateOf(item) { return item && item.current ? item.current.state : 'running' }
+const isContext = n => !!n && n.kind === 'context'
 /**
- * When `item` (an entity or a context) goes stale: last_activity + its stale_after override, else staleMin minutes.
- * null when it can't go stale: its state isn't running/blocked, or it (or `parent`, for a context) has finished.
- * @param {any} item @param {number} staleMin @param {any} [parent]  the entity a context belongs to
+ * When `item` goes stale. An AGENT (or the root): last_activity + its stale_after override, else staleMin minutes; null
+ * when it can't (not running/blocked, finished, implicit). A CONTEXT never goes stale itself: when it has a LIVE current
+ * line of its own it shows its owner's stale_at (`owner` = its nearest agent ancestor), else null.
+ * @param {any} item @param {number} staleMin @param {any} [owner]  for a context: its nearest agent ancestor
  */
-export function staleAt(item, staleMin, parent) {
-  if (!item || item.finished_at || (parent && parent.finished_at)) return null
+export function staleAt(item, staleMin, owner) {
+  if (!item) return null
+  if (isContext(item)) return item.current && LIVE.has(item.current.state) && owner && !isContext(owner) ? staleAt(owner, staleMin) : null
+  if (item.finished_at || item.implicit) return null
   if (!LIVE.has(stateOf(item))) return null
   const win = item.stale_after_ms > 0 ? item.stale_after_ms : (Number.isFinite(staleMin) && staleMin > 0 ? staleMin : ACTIVITY_DEFAULTS.stale_after_min) * MIN
   return item.last_activity + win
 }
 /**
- * The state to SHOW. `gone` (the session left; not for done/failed) outranks `stale`; stale = quiet for LONGER than
- * the window (now > stale_at). Returns { state, was, stale, gone, stale_at } — `was` is the reported state, for
- * "stale, was blocked".
- * @param {any} item @param {number} now @param {number} staleMin @param {any} [parent]
+ * The state to SHOW. `gone` (the owner agent left; not for done/failed) outranks `stale`; stale = quiet for LONGER than the
+ * window (now > stale_at). A context inherits both from `owner` (its nearest agent ancestor). Returns { state, was, stale,
+ * gone, stale_at } — `was` is the reported state.
+ * @param {any} item @param {number} now @param {number} staleMin @param {any} [owner]
  */
-export function effectiveState(item, now, staleMin, parent) {
+export function effectiveState(item, now, staleMin, owner) {
   const was = stateOf(item)
-  const finished = !!(item && (item.finished_at || (parent && parent.finished_at)))
-  const gone = !!(item && (item.gone_at || (parent && parent.gone_at))) && !finished && !DONE_OR_FAILED.has(was)
+  const agent = isContext(item) ? owner : item
+  const finished = !!(agent && agent.finished_at)
+  const gone = !!(agent && agent.gone_at) && !finished && !DONE_OR_FAILED.has(was)
   if (gone) return { state: 'gone', was, stale: false, gone: true, stale_at: null }
-  const at = staleAt(item, staleMin, parent)
+  const at = staleAt(item, staleMin, owner)
   const stale = at !== null && now > at
   return { state: stale ? 'stale' : was, was, stale, gone: false, stale_at: at }
 }
 /** Percent 0..100 of a progress value. */
 export const progressPct = p => (p && p.total > 0 ? Math.min(100, (p.done / p.total) * 100) : 0)
+// ROLLUP strategies, in precedence order after a node's own reported progress (6a). Each gets the children's bars and
+// returns a bar or null. 6b adds "N of M todos done" (for a node with todo children) at the end of this list.
+const rollupStrategies = [
+  bars => {   // the SUM of the children's bars when they all share a unit (case-insensitive; '' counts, '%' doesn't sum)
+    const u = lc(bars[0].unit)
+    if (u === '%' || !bars.every(p => lc(p.unit) === u)) return null
+    const done = bars.reduce((s, p) => s + p.done, 0), total = bars.reduce((s, p) => s + p.total, 0)
+    return { done, total, unit: bars[0].unit, pct: progressPct({ done, total }), rollup: true, n: bars.length }
+  },
+  bars => { const mean = Math.round((bars.reduce((s, p) => s + progressPct(p), 0) / bars.length) * 10) / 10; return { done: mean, total: 100, unit: '%', pct: mean, rollup: true, n: bars.length } },
+]
 /**
- * The progress an entity's @root shows. A REPORTED @root progress wins (rollup:false). Otherwise its other contexts
- * with progress roll up (rollup:true): summed when they all share a unit (case-insensitive; '' counts as a unit, '%'
- * doesn't sum), else the mean percent as {done:<mean>, total:100, unit:'%'}. null when nothing has progress.
+ * A node's BAR (6a, recursive): its REPORTED progress (rollup:false), else its children's bars rolled up (rollup:true):
+ * summed when they share a unit, else the mean percent — through any depth. null when nothing below has progress.
+ * `memo` (a Map) caches per call when walking a whole board.
+ * @param {ActivitySession} sess @param {ActivityNode} node @param {Map<string, any>} [memo]
  * @returns {null | { done:number, total:number, unit:string, pct:number, rollup:boolean, n:number }}
  */
-export function rollup(entity) {
-  if (!entity || !(entity.contexts instanceof Map)) return null
-  const root = entity.contexts.get('root')
-  if (root && root.progress) return { ...root.progress, pct: progressPct(root.progress), rollup: false, n: 1 }
-  const ps = [...entity.contexts.values()].filter(c => c.key !== 'root' && c.progress).sort((a, b) => cmp(a.key, b.key)).map(c => c.progress)
-  if (!ps.length) return null
-  const u = lc(ps[0].unit)
-  if (u !== '%' && ps.every(p => lc(p.unit) === u)) {
-    const done = ps.reduce((s, p) => s + p.done, 0), total = ps.reduce((s, p) => s + p.total, 0)
-    return { done, total, unit: ps[0].unit, pct: progressPct({ done, total }), rollup: true, n: ps.length }
+export function rollup(sess, node, memo) {
+  if (!sess || !node) return null
+  if (memo && memo.has(node.key)) return memo.get(node.key)
+  let r = null
+  if (node.progress) r = { ...node.progress, pct: progressPct(node.progress), rollup: false, n: 1 }
+  else {
+    const bars = childrenOf(sess, node).sort((a, b) => cmp(a.key, b.key)).map(c => rollup(sess, c, memo)).filter(Boolean)
+    if (bars.length) for (const f of rollupStrategies) { r = f(bars); if (r) break }
   }
-  const mean = Math.round((ps.reduce((s, p) => s + progressPct(p), 0) / ps.length) * 10) / 10
-  return { done: mean, total: 100, unit: '%', pct: mean, rollup: true, n: ps.length }
+  if (memo) memo.set(node.key, r)
+  return r
 }
-/** Not finished and not gone (the dashboard's "Active only" filter). */
-export const isActive = entity => !!entity && !entity.finished_at && !entity.gone_at
+/** An agent not finished and not gone (the dashboard's "Active only" filter). */
+export const isActive = node => !!node && !node.finished_at && !node.gone_at
 /**
  * Still shown/gossiped? Unfinished + present → true; finished (or gone) → for `finishedVisibleHours` after it.
  * @param {any} entity @param {number} now @param {number} finishedVisibleHours
@@ -842,14 +1045,17 @@ export function visible(entity, now, finishedVisibleHours) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// replay: rebuild the local slice from the JSONL, NEWEST FIRST (#70 "Decisions after step 1": restart replay)
+// replay: rebuild the local slice from the JSONL, NEWEST FIRST
 
 const finite = v => typeof v === 'number' && Number.isFinite(v)
-/** A JSONL record's kind: 'entry' (a logged message), 'cp', 'rep' — or null for anything unusable (skipped). */
+/**
+ * A JSONL record's kind: 'entry' (a logged message), 'cp', 'rep' — or null for anything unusable (skipped), INCLUDING a
+ * pre-6a v1 record (1.58–1.61: agent/context fields, no `v:2`) — never misread as a node record.
+ */
 export function recordKind(r) {
-  if (!r || typeof r !== 'object' || Array.isArray(r)) return null
+  if (!r || typeof r !== 'object' || Array.isArray(r) || r.v !== ACTIVITY_FORMAT) return null
   if (Array.isArray(r.rep)) return finite(r.last) && r.rep.every(k => Number.isInteger(k)) ? 'rep' : null
-  if (typeof r.session !== 'string' || !r.session.trim() || typeof r.context !== 'string' || !finite(r.ts)) return null
+  if (typeof r.session !== 'string' || !r.session.trim() || typeof r.path !== 'string' || !finite(r.ts)) return null
   if (r.kind === 'cp') return Number.isInteger(r.k) ? 'cp' : null
   if (r.kind != null) return null
   return typeof r.id === 'string' && typeof r.text === 'string' && r.text && ACTIVITY_STATES.includes(r.state) ? 'entry' : null
@@ -858,20 +1064,18 @@ const wProgress = p => { if (p === null) return null; const r = p && typeof p ==
 
 /**
  * A stateful reverse folder: feed() the host's records NEWEST FIRST (today's file from its end, then earlier days), then
- * finish(). Equivalent to a chronological apply() of the same logged entries (current state AND log contents) — the
- * unit test proves it on a seeded random sequence — plus the cp/rep records (a cp is a snapshot of one context).
- * - Phase 1 (current state): each context's current line = the newest `@~` entry or cp; its bar / ETA = the newest
- *   record carrying them (ETA: a newer `@` ETA counts only if the state then was not done/failed); its entity's
- *   finished_at = the newest root line's; last_activity = the max over its records and the `last` of any rep line that
- *   lists its key in the same file. A field stops being looked for once found, or once the record that began its
- *   instance (new_session / new_entity / new_context) is passed. phase1Complete() = every entity and context seen so
- *   far is resolved, so the caller can publish() early.
- * - Phase 2 (history): the newest log_entries_per_agent logged entries per entity, put back in chronological order;
- *   cp and rep lines never count. finish() resolves the rest (end of input = the beginning of time) and installs it.
- * - Only records within `finished_visible_hours` of `now` are used: feed() returns 'old' for an older one (the caller
- *   stops reading). Exception: an older cp whose key an in-window rep line of the same file still needs is used (a
- *   context alive all day on one cp + one rep line). Agents that would already have expired are dropped (expire()).
- * - An entity whose instance was evicted (an entry's `evicted`) is not resurrected from its older records.
+ * finish(). Equivalent to a chronological apply() of the same logged entries (current state AND log contents) — the unit
+ * test proves it on seeded random sequences with nested paths — plus the cp/rep records (a cp is a snapshot of one node).
+ * - Phase 1 (current state): each node's current line = the newest current-line entry or cp; its bar / ETA = the newest
+ *   record carrying them (ETA: a newer plain ETA counts only if the state then was not done/failed); an agent's
+ *   finished_at = its newest current line's; last_activity (target..owner) = the max over its records and the `last` of
+ *   any rep line that lists its key in the same file. A node stops being looked for once resolved, or once the record that
+ *   began its instance (new_from) is passed — which SEALS it with its subtree: any older record whose chain passes through
+ *   it is an older instance and is skipped. phase1Complete() = every node seen so far is resolved (publish early).
+ * - Phase 2 (history): the newest log_entries_per_agent logged entries per node, chronological; cp/rep never count.
+ * - Only records within `finished_visible_hours` of `now` are used ('old' → the caller stops), except an older cp a rep
+ *   line of the same file still needs. A node whose instance began before the window gets log_floor = the window start.
+ * - A path evicted by an entry (`evicted`) and not seen newer is DEAD: older records under it are skipped.
  * @param {ActivityState} state  publish()/finish() REPLACE state.local (live applies must wait for finish())
  * @param {{ now: number }} opts
  */
@@ -883,17 +1087,21 @@ export function createReplay(state, { now }) {
   const repLast = new Map()   // day -> Map(k -> newest `last` of a rep line listing k)  (keys are per file)
   const cpKeys = new Map()    // today's file: cpId -> k (re-derived, so new cps keep numbering past them)
   let maxK = 0, fed = 0, skipped = 0, entries = 0, cps = 0, reps = 0
-  const rCtx = name => ({ name, key: lc(name), created: null, last: -Infinity, sa: null, saSet: false, current: null, curFound: false,
-    progress: null, progFound: false, eta: null, etaRes: false, pend: null, hasPend: false, touched: false, sealed: false })
-  const rEnt = path => { const e = { path, key: path == null ? null : lc(path), started: null, last: -Infinity, sa: null, saSet: false, finAt: null, finRes: false,
-    sealed: false, touched: false, contexts: new Map(), log: [], total: 0 }; e.contexts.set('root', rCtx('root')); return e }
+  const rNode = (path, segs) => {
+    const last = segs.length ? segs[segs.length - 1] : null
+    return { key: pathKey(path), path, segs, name: last ? last.name : '', kind: last ? last.kind : 'agent', created: null, last: -Infinity, sa: null, saSet: false,
+      current: null, curFound: false, progress: null, progFound: false, eta: null, etaRes: false, pend: null, hasPend: false, finAt: null, finRes: false,
+      implicit: true, seen: false, sealed: false, marker: false, log: [], total: 0, floor: 0 }
+  }
   const resolveEta = (c, v) => { c.eta = v; c.etaRes = true }
-  function sealCtx(c) { if (!c.etaRes) resolveEta(c, c.hasPend ? c.pend : null); c.curFound = c.progFound = true; c.sealed = true }
-  function sealEnt(e) { e.finRes = true; for (const c of e.contexts.values()) sealCtx(c); e.sealed = true }
-  function sealSess(s) { sealEnt(s.self); for (const a of s.agents.values()) sealEnt(a); s.sealed = true }
-  const ctxDone = c => !c.touched || (c.curFound && c.progFound && c.etaRes)
-  const entDone = e => !e.touched || (e.finRes && [...e.contexts.values()].every(ctxDone))
-
+  function sealNode(s, n, marker) {
+    for (const x of s.nodes.values()) {
+      if (x.sealed || !(x.key === n.key || n.key === '' || x.key.startsWith(n.key + '/'))) continue
+      if (!x.etaRes) resolveEta(x, x.hasPend ? x.pend : null)
+      x.curFound = x.progFound = x.finRes = true; x.sealed = true; if (marker) x.marker = true
+    }
+  }
+  const nodeDone = n => !n.seen || (n.curFound && n.progFound && n.etaRes && (n.kind !== 'agent' || n.finRes))
   /**
    * One record (newest first). `day` = the file it came from (default: its own local day).
    * @returns {'ok'|'skip'|'old'}
@@ -912,64 +1120,73 @@ export function createReplay(state, { now }) {
     }
     const d = day || localDay(rec.ts)
     let repL = -Infinity
+    const pp = parsePath(rec.path)
+    if (!pp.ok || pp.current) { skipped++; return 'skip' }
     if (kind === 'cp') {
       const m = repLast.get(d), r = m && m.get(rec.k)
       if (rec.ts < cutoff && r === undefined) return 'old'
       if (r !== undefined) { repL = r; m.delete(rec.k) }   // a rep line lists the NEAREST older cp with its key (same file): consume
-      if (d === today) { const id = cpId(keyOf(state, rec), rec.agent == null ? null : lc(rec.agent), lc(rec.context)); if (!cpKeys.has(id)) cpKeys.set(id, rec.k); maxK = Math.max(maxK, rec.k) }
+      if (d === today) { const id = cpId(keyOf(state, rec), pp.key); if (!cpKeys.has(id)) cpKeys.set(id, rec.k); maxK = Math.max(maxK, rec.k) }
     } else if (rec.ts < cutoff) return 'old'
-    // v1.60.0: the key's host is THIS origin whatever the record says — the files are per host (one writer), and a
-    // step-2/3 record may lack `host` (or carry the old spelling); keyOf ignores rec.host
-    const sk = keyOf(state, rec), ak = rec.agent == null ? null : lc(rec.agent), ck = lc(rec.context)
+    // the key's host is THIS origin whatever the record says — the files are per host (one writer); keyOf ignores rec.host
+    const sk = keyOf(state, rec), keys = chainKeys(pp.segs)
     let s = sessions.get(sk)
-    if (s && (s.sealed || (ak !== null && s.dead.has(ak)))) { skipped++; return 'skip' }   // an older instance
-    let e = s ? (ak === null ? s.self : s.agents.get(ak)) : null
-    if (e && e.sealed) { skipped++; return 'skip' }
-    let c = e ? e.contexts.get(ck) : null
-    if (c && c.sealed) { skipped++; return 'skip' }
-    let path = null, cname = null
-    if (ak !== null && !e) { const p = normAgentPath(rec.agent); if (!p.ok || (s && s.agents.size >= ACTIVITY_LIMITS.agentsPerSession)) { skipped++; return 'skip' } path = p.path }
-    if (!c) { const n = normContextName(rec.context); if (!n.ok || (e && e.contexts.size >= ACTIVITY_LIMITS.contextsPerAgent)) { skipped++; return 'skip' } cname = n.name }
+    if (s) {
+      if (keys.some(k => s.dead.has(k))) { skipped++; return 'skip' }   // an evicted older instance
+      for (const k of keys) { const n = s.nodes.get(k); if (n && n.sealed) { skipped++; return 'skip' } }   // an older instance of a node on the chain
+      let newN = 0, newA = 0
+      for (let i = 1; i < keys.length; i++) if (!s.nodes.has(keys[i])) { newN++; if (pp.segs[i - 1].kind === 'agent') newA++ }
+      if (s.nodes.size - 1 + newN > ACTIVITY_LIMITS.nodesPerSession || s.nAgents + newA > ACTIVITY_LIMITS.agentsPerSession) { skipped++; return 'skip' }
+    }
     // ---- accepted: create what's new ----
-    if (!s) { s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: state.origin, created: null, last: -Infinity, sealed: false, self: rEnt(null), agents: new Map(), dead: new Set() }; sessions.set(sk, s) }
-    if (!e) { e = ak === null ? s.self : rEnt(path); if (ak !== null) s.agents.set(ak, e) }
-    if (!c) { c = e.contexts.get(ck) || rCtx(cname); e.contexts.set(ck, c) }
+    if (!s) {
+      s = { key: sk, realm: 'default', session: rec.session, project: 'unclassified', user: null, host: state.origin, created: null, last: -Infinity, nodes: new Map(), dead: new Set(), nAgents: 0 }
+      s.nodes.set('', rNode('', [])); sessions.set(sk, s)
+    }
+    const chain = [s.nodes.get('')]
+    for (let i = 1; i < keys.length; i++) {
+      let n = s.nodes.get(keys[i])
+      if (!n) { const sg = pp.segs.slice(0, i); n = rNode(childPath(chain[i - 1], sg[i - 1]), sg); s.nodes.set(keys[i], n); if (n.kind === 'agent') s.nAgents++ }
+      chain.push(n)
+    }
     fed++
     // identity spellings: every record carries the canonical (first-seen) one; the OLDEST record's is kept
     s.session = rec.session.trim(); s.project = str(rec.project) || 'unclassified'; s.user = str(rec.user); s.realm = str(rec.realm) || 'default'
-    e.touched = c.touched = true
+    const tgt = chain[chain.length - 1], oi = ownerIndex(pp.segs)
+    tgt.implicit = false; chain[oi].implicit = false
     const act = Math.max(rec.ts, repL)
-    s.last = Math.max(s.last, act); e.last = Math.max(e.last, act); c.last = Math.max(c.last, act)
-    s.created = rec.ts; e.started = rec.ts; c.created = rec.ts   // overwritten by each OLDER record → the instance's first
+    s.last = Math.max(s.last, act)
+    for (const n of chain) n.created = rec.ts   // overwritten by each OLDER record → the instance's first
+    for (let i = oi; i < chain.length; i++) chain[i].seen = true   // phase 1 waits only for nodes a record TOUCHED (target..owner), not bare ancestors
+    s.created = rec.ts
+    for (let i = oi; i < chain.length; i++) chain[i].last = Math.max(chain[i].last, act)
     if (kind === 'cp') {
       cps++
       const st = rec.current && ACTIVITY_STATES.includes(rec.current.state) ? rec.current.state : 'running'
-      if (!c.curFound) { c.current = rec.current && typeof rec.current.text === 'string' && rec.current.text ? lineOf(rec.current) : null; c.curFound = true }
-      if (!c.progFound) { c.progress = wProgress(rec.progress) || null; c.progFound = true }
-      if (!c.etaRes) resolveEta(c, c.hasPend ? (DONE_OR_FAILED.has(st) ? null : c.pend) : (finite(rec.eta_at) ? rec.eta_at : null))
-      if (ck === 'root' && !e.finRes) { e.finAt = finite(rec.finished_at) ? rec.finished_at : (DONE_OR_FAILED.has(st) && rec.current ? rec.current.ts : null); e.finRes = true }
+      if (!tgt.curFound) { tgt.current = rec.current && typeof rec.current.text === 'string' && rec.current.text ? lineOf(rec.current) : null; tgt.curFound = true }
+      if (!tgt.progFound) { tgt.progress = wProgress(rec.progress) || null; tgt.progFound = true }
+      if (!tgt.etaRes) resolveEta(tgt, tgt.hasPend ? (DONE_OR_FAILED.has(st) ? null : tgt.pend) : (finite(rec.eta_at) ? rec.eta_at : null))
+      if (tgt.kind === 'agent' && !tgt.finRes) { tgt.finAt = finite(rec.finished_at) ? rec.finished_at : (DONE_OR_FAILED.has(st) && rec.current ? rec.current.ts : null); tgt.finRes = true }
     } else {
       entries++
-      e.total++
-      if (e.log.length < N) e.log.push(smallOf(rec))
-      if (!e.saSet) { e.sa = rec.stale_after_ms > 0 ? rec.stale_after_ms : null; e.saSet = true }
-      if (!c.saSet) { c.sa = rec.stale_after_ms > 0 ? rec.stale_after_ms : null; c.saSet = true }
-      if (!c.progFound && 'progress' in rec) { const p = wProgress(rec.progress); if (p !== undefined) { c.progress = p; c.progFound = true } }
-      if (rec.current && !c.curFound) { c.current = lineOf(rec); c.curFound = true }
-      if (!c.etaRes) {   // the newest ETA-bearing record wins, unless the state when it arrived was done/failed
+      tgt.total++
+      if (tgt.log.length < N) tgt.log.push(smallOf(rec))
+      else if (!tgt.floor) tgt.floor = rec.ts   // the newest entry that doesn't fit = the newest one only in the files
+      for (let i = oi; i < chain.length; i++) if (!chain[i].saSet) { chain[i].sa = rec.stale_after_ms > 0 ? rec.stale_after_ms : null; chain[i].saSet = true }
+      if (!tgt.progFound && 'progress' in rec) { const p = wProgress(rec.progress); if (p !== undefined) { tgt.progress = p; tgt.progFound = true } }
+      if (rec.current && !tgt.curFound) { tgt.current = lineOf(rec); tgt.curFound = true }
+      if (!tgt.etaRes) {   // the newest ETA-bearing record wins, unless the state when it arrived was done/failed
         const hasEta = 'eta_at' in rec
         if (rec.current) {
-          if (DONE_OR_FAILED.has(rec.state)) resolveEta(c, null)
-          else if (c.hasPend) resolveEta(c, c.pend)
-          else if (hasEta) resolveEta(c, finite(rec.eta_at) ? rec.eta_at : null)
-        } else if (hasEta && !c.hasPend) { c.pend = finite(rec.eta_at) ? rec.eta_at : null; c.hasPend = true }
+          if (DONE_OR_FAILED.has(rec.state)) resolveEta(tgt, null)
+          else if (tgt.hasPend) resolveEta(tgt, tgt.pend)
+          else if (hasEta) resolveEta(tgt, finite(rec.eta_at) ? rec.eta_at : null)
+        } else if (hasEta && !tgt.hasPend) { tgt.pend = finite(rec.eta_at) ? rec.eta_at : null; tgt.hasPend = true }
       }
-      if (rec.current && ck === 'root' && !e.finRes) { e.finAt = 'finished_at' in rec ? (finite(rec.finished_at) ? rec.finished_at : null) : (DONE_OR_FAILED.has(rec.state) ? rec.ts : null); e.finRes = true }
-      if (Array.isArray(rec.evicted)) for (const p of rec.evicted) { const k = lc(p); if (!s.agents.has(k)) s.dead.add(k) }   // that agent's older instance ended here
+      if (rec.current && tgt.kind === 'agent' && !tgt.finRes) { tgt.finAt = 'finished_at' in rec ? (finite(rec.finished_at) ? rec.finished_at : null) : (DONE_OR_FAILED.has(rec.state) ? rec.ts : null); tgt.finRes = true }
+      if (Array.isArray(rec.evicted)) for (const p of rec.evicted) { const q = parsePath(String(p)); if (q.ok && q.key && !s.nodes.has(q.key)) s.dead.add(q.key) }   // that subtree's older instance ended here
     }
-    if (rec.new_context) sealCtx(c)
-    if (rec.new_entity) sealEnt(e)
-    if (rec.new_session) sealSess(s)
+    if (Number.isInteger(rec.new_from) && rec.new_from >= 0 && rec.new_from < chain.length) sealNode(s, chain[rec.new_from], true)
     return 'ok'
   }
   function lineOf(r) {
@@ -977,49 +1194,50 @@ export function createReplay(state, { now }) {
     return { id: String(r.id || ''), ts: finite(r.ts) ? r.ts : 0, text: String(r.text), state: ACTIVITY_STATES.includes(r.state) ? r.state : 'running',
       details: typeof r.details === 'string' && r.details ? r.details : null, data, data_bytes: data != null ? utf8(JSON.stringify(data)) : 0 }
   }
-  /** Contexts/entities seen so far whose phase-1 fields are not all resolved yet. */
-  function pending() { let n = 0; for (const s of sessions.values()) for (const e of [s.self, ...s.agents.values()]) if (!entDone(e)) n++; return n }
+  /** Nodes seen so far whose phase-1 fields are not all resolved yet. */
+  function pending() { let n = 0; for (const s of sessions.values()) for (const x of s.nodes.values()) if (!nodeDone(x)) n++; return n }
   /** Does `day`'s file still hold an older cp that an in-window rep line needs? (keep reading it past the window) */
   const wantsOlder = day => { const m = repLast.get(day); return !!(m && m.size) }
   function build(withLogs) {
     const out = new Map()
     for (const s of sessions.values()) {
       const created = s.created
-      const sess = { key: s.key, origin: state.origin, realm: s.realm, session: s.session, project: s.project, user: s.user, host: s.host,
-        created_at: created, last_activity: Math.max(created, s.last), gone_at: null, self: bEnt(s.self, created, withLogs), agents: new Map(), persisted: true }
-      for (const [k, a] of s.agents) sess.agents.set(k, bEnt(a, a.started, withLogs))
+      const sess = newSession(s.key, state.origin, { realm: s.realm, session: s.session, project: s.project, user: s.user }, created)
+      sess.last_activity = Math.max(created, s.last)
+      sess.nodes.clear()
+      // parents before children (shorter keys first is not enough — sort by depth, then key) so kids keep a stable order
+      const list = [...s.nodes.values()].sort((a, b) => a.segs.length - b.segs.length || cmp(a.key, b.key))
+      for (const r of list) addNode(sess, bNode(r, r.key ? r.created : created, withLogs))
+      for (const n of sess.nodes.values()) n.persisted = true
       out.set(s.key, sess)
     }
     state.local = out
     state.cpLive = new Map()
     expire(state, now)
   }
-  function bEnt(r, started, withLogs) {
-    const e = newEntity(r.path, started)
-    e.last_activity = Math.max(started, r.last); e.finished_at = r.finAt; e.stale_after_ms = r.sa; e.persisted = r.touched
-    e.contexts.clear()
-    for (const c of r.contexts.values()) {
-      const created = c.key === 'root' ? started : c.created
-      const x = newContext(c.name, created)
-      x.last_activity = Math.max(created, c.last); x.stale_after_ms = c.sa; x.persisted = c.touched
-      x.current = c.current ? { ...c.current } : null
-      x.progress = c.progress ? { ...c.progress } : null
-      x.eta_at = c.etaRes ? c.eta : (c.hasPend ? c.pend : null)   // provisional until resolved
-      if (DONE_OR_FAILED.has(stateOf(x))) x.eta_at = null
-      e.contexts.set(c.key, x)
+  function bNode(r, created, withLogs) {
+    const n = newNode(r.path, r.segs, created)
+    n.last_activity = Math.max(created, r.last); n.stale_after_ms = r.sa; n.implicit = r.implicit
+    n.current = r.current ? { ...r.current } : null
+    n.progress = r.progress ? { ...r.progress } : null
+    n.eta_at = r.etaRes ? r.eta : (r.hasPend ? r.pend : null)   // provisional until resolved
+    if (DONE_OR_FAILED.has(stateOf(n))) n.eta_at = null
+    if (n.kind === 'agent') n.finished_at = r.key === '' && !r.finRes ? null : r.finAt
+    if (withLogs) {
+      n.log = r.log.slice().reverse().sort(ordCmp); n.log_dropped = r.total - n.log.length
+      n.log_floor = r.floor || (r.marker ? 0 : (r.total ? cutoff : 0))   // an instance that began before the window: older entries are only in the files
     }
-    if (withLogs) { e.log = r.log.slice().reverse(); e.log_dropped = r.total - e.log.length }
-    return e
+    return n
   }
   return {
     feed, pending, wantsOlder,
-    /** true once at least one record was used and every entity/context seen so far has its phase-1 fields */
+    /** true once at least one record was used and every node seen so far has its phase-1 fields */
     phase1Complete: () => fed > 0 && pending() === 0,
     /** Install the phase-1 view (current lines, bars, states; no history) into state.local — early, provisional. */
     publish() { build(false) },
     /** End of input: resolve everything, install current state + history, re-derive today's cp keys. */
     finish() {
-      for (const s of sessions.values()) sealSess(s)
+      for (const s of sessions.values()) sealNode(s, s.nodes.get(''), false)
       build(true)
       state.cp = cpKeys.size || maxK ? { day: today, keys: new Map(cpKeys), next: maxK + 1, rep: null } : null
       return { fed, skipped, entries, cps, reps, sessions: state.local.size }
@@ -1062,10 +1280,10 @@ export function fmtEta(ms) {
   return `~${mm}m`
 }
 /**
- * Render a status-text TEMPLATE (#70 step 2). Placeholders: {progress} → "4,812 of 12,000 tiles" ("61%" for a % bar,
- * "3 of 6" without a unit); {pct} → "40%" (floored, so 100% only when done); {done}, {total}, {unit}; {eta} → "~1h 25m"
- * from eta_at vs now ("now" once due, "?" when there is no ETA). `{{` and `}}` are literal braces. An unknown {word} is
- * left untouched, and so is a bar placeholder with no bar to fill it (or {unit} with no unit).
+ * Render a status-text TEMPLATE. Placeholders: {progress} → "4,812 of 12,000 tiles" ("61%" for a % bar, "3 of 6" without a
+ * unit); {pct} → "40%" (floored); {done}, {total}, {unit}; {eta} → "~1h 25m" from eta_at vs now ("now" once due, "?" when
+ * there is no ETA). `{{` and `}}` are literal braces. An unknown {word} is left untouched, and so is a bar placeholder
+ * with no bar to fill it (or {unit} with no unit).
  * @param {string} template @param {any} progress  {done,total,unit} (or a rollup) or null
  * @param {number|null|undefined} eta_at @param {number} now
  */
@@ -1090,56 +1308,47 @@ export function renderText(template, progress, eta_at, now) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// read views (the `activity` tool; the step-5 dashboard and the orchestrator query build on the same)
+// read views (the `activity` tool; the dashboard builds on the raw form)
 
-// a current line renders against the context's CURRENT bar + ETA (a root line: the bar the entity shows — its rollup)
+// a current line renders against the node's BAR (its reported progress, else its rollup) + ETA
 const lineView = (l, p, eta, now) => (l ? compact({ id: l.id, ts: l.ts, text: l.text, rendered: renderText(l.text, p, eta, now), state: l.state,
   has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null)
+const rawLine = l => (l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null)
+/** Is `key` inside `k`'s subtree (or `k` itself)? '' = everything. */
+const under = (key, k) => !k || key === k || key.startsWith(k + '/')
 /**
- * The MESH board (v1.60.0, #70 step 4): every session this host holds — its own (local) and each remote origin's slice —
- * GROUPED by realm + project + user + session name across hosts (groupKey). Each group lists its agents from every host,
- * EACH ENTITY TAGGED with its `host` (an agent path on two hosts = two entries); a group spanning one host carries `host`
- * (as before), one spanning several carries `hosts:[…]` + `multi_host:true`, `self` = the most recently active host's
- * session entity and `selves` = every host's. EFFECTIVE state is computed HERE, on the reader's side, with `staleMin`
- * (default this host's config.stale_after_min) — stale, and gone (a session that left its host's roster, or a remote slice
- * whose origin went down: markOriginDown). Rollup progress, visibility. Groups sorted by key; agents by path then host.
+ * The MESH board: every session this host holds — its own and each remote origin's slice — GROUPED by realm + project +
+ * user + session name across hosts (groupKey). Each group: `self` = the most recently active host's ROOT node (`selves` =
+ * every host's when it spans several), and `nodes` = every non-root node from every host, FLAT, each with its `path`,
+ * `kind`, `depth`, `parent` path and `host` (the same path on two hosts = two entries), sorted by path then host.
+ * EFFECTIVE state is computed HERE with `staleMin` (default this host's config.stale_after_min): agents by their own
+ * activity, contexts by their nearest agent ancestor's. `progress` is the node's BAR (reported or rolled up).
  * @param {ActivityState} state @param {number} now
- * @param {{ project?:string, session?:string, agent?:string, host?:string, active_only?:boolean, staleMin?:number, raw?:boolean }} [opts]
- *   agent matches that path or anything under it (`a` → `a`, `a/b`); host keeps only that host's entities;
- *   active_only drops finished/gone agents; raw (v1.61.0) = the dashboard form (reported states, raw templates + times)
+ * @param {{ project?:string, session?:string, agent?:string, path?:string, host?:string, active_only?:boolean, staleMin?:number, raw?:boolean }} [opts]
+ *   path (or the old `agent`) keeps the nodes at that path and under it; host keeps only that host's; active_only drops
+ *   finished/gone agents with their subtrees; raw = the dashboard form (reported states, raw templates + times, own
+ *   `progress` + the rolled-up `bar`)
  */
 export function boardView(state, now, opts = {}) {
   const sm = Number(opts.staleMin) > 0 ? Number(opts.staleMin) : state.config.stale_after_min
   const hours = state.config.finished_visible_hours
-  const pk = str(opts.project) ? projKey(opts.project) : null, sk = str(opts.session) ? lc(opts.session) : null, ak = str(opts.agent) ? lc(opts.agent).replace(/^\/+|\/+$/g, '') : null
-  const hk = str(opts.host) ? lc(opts.host) : null
-  // v1.61.0 (#70 step 5): RAW = the dashboard's form — the REPORTED state (gone kept: it is data, not time), the raw line
-  // template and the raw times, no `rendered` / `stale_at` / `was`-for-stale: the page computes stale + renders the
-  // placeholders itself (its own slider, its own clock), so a delta never carries a change that is only time passing
+  const pk = str(opts.project) ? projKey(opts.project) : null, sk = str(opts.session) ? lc(opts.session) : null, hk = str(opts.host) ? lc(opts.host) : null
+  let nk = null
+  const pf = str(opts.path) || str(opts.agent)
+  if (pf) { const p = parsePath(pf); nk = p.ok ? p.key : lc(pf).replace(/^\/+|\/+$/g, '') }
   const raw = !!opts.raw
-  const rawLine = l => (l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null)
-  const ctxView = (c, e) => {
-    const eff = effectiveState(c, now, sm, e)
-    if (raw) return compact({ name: c.name, state: eff.gone ? 'gone' : eff.was, was: eff.gone ? eff.was : null, current: rawLine(c.current),
-      progress: c.progress ? { ...c.progress } : null, eta_at: c.eta_at, created_at: c.created_at, last_activity: c.last_activity, stale_after_ms: c.stale_after_ms })
-    return compact({ name: c.name, state: eff.state, was: eff.state !== eff.was ? eff.was : null, stale_at: eff.stale_at,
-      current: lineView(c.current, c.key === 'root' ? rollup(e) : c.progress, c.eta_at, now),
-      progress: c.progress ? { ...c.progress, pct: Math.round(progressPct(c.progress) * 10) / 10 } : null, eta_at: c.eta_at, created_at: c.created_at,
-      last_activity: c.last_activity, stale_after_ms: c.stale_after_ms })
-  }
-  // a remote entity's log lives on its owner (fetched on demand): its view says so instead of counting a log it lacks.
-  // v1.61.0: `host_down` = its host went down / unreachable (ACTIVITY_DOWN or the link dropped) — distinct from a session
-  // that LEFT (gone_at without host_down)
-  const entView = (e, host, local, down) => {
-    const eff = effectiveState(e, now, sm), root = e.contexts.get('root'), bar = rollup(e)
-    const ctxs = [...e.contexts.values()].sort((a, b) => (a.key === 'root' ? -1 : b.key === 'root' ? 1 : cmp(a.key, b.key))).map(c => ctxView(c, e))
-    const lg = local ? { entries: e.log.length, dropped: e.log_dropped } : { remote: true }
-    if (raw) return compact({ agent: e.path, host, state: eff.gone ? 'gone' : eff.was, was: eff.gone ? eff.was : null, active: isActive(e), host_down: down || null,
-      current: rawLine(root && root.current), progress: bar, eta_at: root ? root.eta_at : null, started_at: e.started_at, last_activity: e.last_activity,
-      finished_at: e.finished_at, gone_at: e.gone_at, stale_after_ms: e.stale_after_ms, contexts: ctxs, log: lg })
-    return compact({ agent: e.path, host, state: eff.state, was: eff.state !== eff.was ? eff.was : null, stale_at: eff.stale_at, active: isActive(e), visible: visible(e, now, hours),
-      host_down: down || null, current: lineView(root && root.current, bar, root ? root.eta_at : null, now), progress: bar, eta_at: root ? root.eta_at : null, started_at: e.started_at, last_activity: e.last_activity,
-      finished_at: e.finished_at, gone_at: e.gone_at, stale_after_ms: e.stale_after_ms, contexts: ctxs, log: lg })
+  // a remote node's log lives on its owner (fetched on demand): its view says so. host_down = its HOST went away
+  const nodeView = (s, n, host, local, down, memo) => {
+    const owner = ownerOf(s, n), eff = effectiveState(n, now, sm, owner), bar = rollup(s, n, memo)
+    const lg = local ? { entries: n.log.length, dropped: n.log_dropped } : { remote: true }
+    const isAg = n.kind === 'agent'
+    const base = { path: n.path, kind: n.kind, name: n.key ? n.name : null, depth: n.depth, parent: n.key ? (s.nodes.get(n.parent) || { path: n.parent }).path : null, host }
+    if (raw) return compact({ ...base, key: n.key, parent_key: n.parent, state: !isContext(n) && eff.gone ? 'gone' : eff.was, was: !isContext(n) && eff.gone ? eff.was : null, implicit: n.implicit,
+      active: isAg ? isActive(n) : null, host_down: down || null, current: rawLine(n.current), progress: n.progress ? { ...n.progress } : null, bar, eta_at: n.eta_at,
+      created_at: n.created_at, last_activity: n.last_activity, finished_at: n.finished_at, gone_at: isAg ? n.gone_at : null, stale_after_ms: n.stale_after_ms, log: lg })
+    return compact({ ...base, state: eff.state, was: eff.state !== eff.was ? eff.was : null, stale_at: eff.stale_at, implicit: n.implicit, active: isAg ? isActive(n) : null,
+      visible: isAg ? visible(n, now, hours) : null, host_down: down || null, current: lineView(n.current, bar, n.eta_at, now), progress: bar, eta_at: n.eta_at,
+      created_at: n.created_at, last_activity: n.last_activity, finished_at: n.finished_at, gone_at: isAg ? n.gone_at : null, stale_after_ms: n.stale_after_ms, log: lg })
   }
   const groups = new Map()   // groupKey -> [{ s, host, local, down }]
   const add = (s, host, local, down) => {
@@ -1155,29 +1364,40 @@ export function boardView(state, now, opts = {}) {
   const out = []
   for (const g of [...groups.keys()].sort(cmp)) {
     const parts = groups.get(g).sort((a, b) => (a.local !== b.local ? (a.local ? -1 : 1) : cmp(lc(a.host), lc(b.host))))
-    let agents = []
-    for (const p of parts) for (const a of p.s.agents.values()) agents.push({ a, p })
-    if (ak) agents = agents.filter(x => x.a.key === ak || x.a.key.startsWith(ak + '/'))
-    if (opts.active_only) agents = agents.filter(x => isActive(x.a))
-    if (ak && !agents.length) continue
-    agents.sort((x, y) => cmp(x.a.key, y.a.key) || cmp(lc(x.p.host), lc(y.p.host)))
+    let nodes = []
+    for (const p of parts) {
+      p.memo = new Map()
+      const dead = new Set()   // active_only: an inactive agent hides its subtree
+      const list = [...p.s.nodes.values()].filter(n => n.key).sort((a, b) => a.depth - b.depth || cmp(a.key, b.key))
+      for (const n of list) {
+        if (opts.active_only && (dead.has(n.parent) || (n.kind === 'agent' && !isActive(n)))) { dead.add(n.key); continue }
+        if (nk && !under(n.key, nk)) continue
+        nodes.push({ n, p })
+      }
+    }
+    if (nk && !nodes.length) continue
+    nodes.sort((x, y) => cmp(x.n.key, y.n.key) || cmp(lc(x.p.host), lc(y.p.host)))
     const hosts = [...new Set(parts.map(p => p.host))]
     const lead = parts[0].s, multi = hosts.length > 1
-    const newest = parts.reduce((b, p) => (p.s.last_activity > b.s.last_activity ? p : b), parts[0])
+    // the headline: the most recently active host's root — among the hosts whose root HAS a current line (6a: an agents-only
+    // host that happened to report last no longer blanks a headline another host set), else the most recently active
+    const withLine = parts.filter(p => { const r = p.s.nodes.get(''); return !!(r && r.current) })
+    const newest = (withLine.length ? withLine : parts).reduce((b, p) => (p.s.last_activity > b.s.last_activity ? p : b), (withLine.length ? withLine : parts)[0])
     const goneAll = parts.every(p => p.s.gone_at)
     const down = parts.filter(p => p.down).map(p => p.host)
+    const selfOf = p => nodeView(p.s, p.s.nodes.get(''), p.host, p.local, p.down, p.memo)
     out.push(compact({ session: lead.session, project: lead.project, user: lead.user, realm: lead.realm, host: multi ? null : hosts[0], hosts: multi ? hosts : null, multi_host: multi,
       created_at: Math.min(...parts.map(p => p.s.created_at)), last_activity: Math.max(...parts.map(p => p.s.last_activity)),
       gone_at: goneAll ? Math.max(...parts.map(p => p.s.gone_at)) : null,
-      bell: parts.some(p => p.s.bell), hosts_down: down.length ? down : null,   // v1.61.0: a doorbell armed for the session (on any of its hosts); hosts down
-      self: entView(newest.s.self, newest.host, newest.local, newest.down), selves: multi ? parts.map(p => entView(p.s.self, p.host, p.local, p.down)) : null,
-      agents: agents.map(x => entView(x.a, x.p.host, x.p.local, x.p.down)) }))
+      bell: parts.some(p => p.s.bell), hosts_down: down.length ? down : null,
+      self: selfOf(newest), selves: multi ? parts.map(selfOf) : null,
+      nodes: nodes.map(x => nodeView(x.p.s, x.n, x.p.host, x.p.local, x.p.down, x.p.memo)) }))
   }
   return out
 }
 /**
- * The DOORBELL flag (v1.61.0, #70 step 5): mark each LOCAL session whose name (+ project, when the watch names one) a
- * doorbell `listener` on this host's gateway is watching — `bell` rides the session header (gossip + dashboards).
+ * The DOORBELL flag: mark each LOCAL session whose name (+ project, when the watch names one) a doorbell `listener` on this
+ * host's gateway is watching — `bell` rides the session header (gossip + dashboards).
  * @param {ActivityState} state @param {{ name?: string|null, project?: string|null }[]} watches
  * @returns {boolean} whether any session's flag changed
  */
@@ -1191,28 +1411,29 @@ export function setBells(state, watches) {
   return changed
 }
 /**
- * DASHBOARD DELTAS (v1.61.0, #70 step 5) — the same shape of diff as the gossip (a per-subscriber published view; only
- * what changed + removals), over the MERGED raw board: one unit per session GROUP (its header, self/selves — not its
- * agents) and one per AGENT entity (group + host + path). Each unit carries a stable `id`, its kind and its group key.
+ * DASHBOARD DELTAS: the same shape of diff as the gossip (a per-subscriber published view; only what changed + removals),
+ * over the MERGED raw board: one unit per session GROUP (its header + self/selves) and, 6a, one per NODE (group + host +
+ * node key; `kind:'node'`, `nkind` = agent|context, `parent_key`). Each unit carries a stable `id`.
  * @param {any[]} board  boardView(state, now, { raw:true }) (canonical project spellings applied by the caller)
  * @returns {Map<string, { json:string, obj:any }>}
  */
 export function dashUnits(board) {
   const units = new Map()
   for (const g of Array.isArray(board) ? board : []) {
-    const gk = groupKey(g), { agents, ...hdr } = g
+    const gk = groupKey(g), { nodes, ...hdr } = g
     const gid = JSON.stringify(['s', gk]), go = { id: gid, kind: 'session', key: gk, ...hdr }
     units.set(gid, { json: JSON.stringify(go), obj: go })
-    for (const a of agents || []) {
-      const id = JSON.stringify(['a', gk, lc(a.host), lc(a.agent)]), ao = { id, kind: 'agent', group: gk, ...a }
-      units.set(id, { json: JSON.stringify(ao), obj: ao })
+    for (const n of nodes || []) {
+      const { kind: nkind, ...rest } = n
+      const id = JSON.stringify(['n', gk, lc(n.host), n.key]), no = { id, kind: 'node', nkind, group: gk, ...rest }
+      units.set(id, { json: JSON.stringify(no), obj: no })
     }
   }
   return units
 }
 /**
  * One dashboard's next delta against its published view `pub` (id -> json): the changed / new units (`upsert`, sessions
- * before agents) and the ids that left (`remove`). `full` resets the view and sends everything. `pub` is updated.
+ * before nodes, parents before children) and the ids that left (`remove`). `full` resets the view. `pub` is updated.
  * @param {Map<string, string>} pub @param {Map<string, { json:string, obj:any }>} units @param {{ full?: boolean }} [opts]
  * @returns {{ upsert:any[], remove:string[], empty:boolean }}
  */
@@ -1221,12 +1442,12 @@ export function planDashDelta(pub, units, opts = {}) {
   const upsert = [], remove = []
   for (const [id, u] of units) if (pub.get(id) !== u.json) { upsert.push(u.obj); pub.set(id, u.json) }
   for (const id of [...pub.keys()]) if (!units.has(id)) { remove.push(id); pub.delete(id) }
-  upsert.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'session' ? -1 : 1))
+  upsert.sort((a, b) => (a.kind === b.kind ? (a.depth || 0) - (b.depth || 0) : a.kind === 'session' ? -1 : 1))
   return { upsert, remove, empty: !upsert.length && !remove.length }
 }
 /**
- * The sessions matching a log query on EVERY host held (v1.60.0): [{ host, local, session }] — by name (+ project / user
- * / host when given, case-insensitive). The bridge reads a local one here and fetches a remote one from its owner.
+ * The sessions matching a log query on EVERY host held: [{ host, local, session }] — by name (+ project / user / host
+ * when given, case-insensitive). The bridge reads a local one here and fetches a remote one from its owner.
  * @param {ActivityState} state @param {{ session?:string, project?:string, user?:string, host?:string }} q
  */
 export function locateSessions(state, q) {
@@ -1239,87 +1460,110 @@ export function locateSessions(state, q) {
   for (const o of [...state.remote.keys()].sort(cmp)) for (const s of [...state.remote.get(o).sessions.values()].sort((a, b) => cmp(a.key, b.key))) if (ok(s, o)) out.push({ host: o, local: false, session: s })
   return out
 }
-/** Which host holds the CURRENT line `id` (v1.60.0): { host, local } or null. Remote log entries aren't gossiped — pass entry:{id, host}. */
+/** Which host holds the CURRENT line `id`: { host, local } or null. Remote log entries aren't gossiped — pass entry:{id, host}. */
 export function locateEntry(state, id) {
   if (typeof id !== 'string' || !id) return null
-  const has = s => [s.self, ...s.agents.values()].some(e => [...e.contexts.values()].some(c => c.current && c.current.id === id))
-  for (const s of state.local.values()) if (has(s)) return { host: state.origin, local: true }
-  for (const [o, sl] of state.remote) for (const s of sl.sessions.values()) if (has(s)) return { host: o, local: false }
+  const hasIt = s => [...s.nodes.values()].some(n => n.current && n.current.id === id)
+  for (const s of state.local.values()) if (hasIt(s)) return { host: state.origin, local: true }
+  for (const [o, sl] of state.remote) for (const s of sl.sessions.values()) if (hasIt(s)) return { host: o, local: false }
   return null
 }
+/** Resolve a log query's NODE address (path / agent / context; `@~` ignored) → { ok, key } . */
+export function queryNodeKey(q) {
+  const ad = resolveAddress({ path: q && q.path, agent: q && q.agent, context: q && q.context })
+  return ad.ok ? { ok: true, key: ad.key, path: ad.path } : ad
+}
+const relPath = (path, base) => (!base ? path : path === base ? '' : path.slice(base.length + 1))
 /**
- * One entity's in-memory log, NEWEST FIRST (optionally one context's). The session is found by name (+ project/user
- * when the name alone is ambiguous). Checkpoints and repeat lines are never in it. Each entry's `rendered` uses the
- * progress / ETA RECORDED on that entry (history stays accurate), `now` for {eta}.
- * PAGED (v1.60.0, #70 step 4 — remote history travels in chunks): `cursor` = the id of the last entry of the previous
- * page → the entries OLDER than it; a page holds at most `limit` (≤ log_entries_per_agent, ≤ opts.maxEntries) entries
- * and ~opts.maxBytes of JSON (at least one entry); `next_cursor` is set while older entries remain. An unknown cursor
- * whose id still names a time continues from that time (its entry was dropped meanwhile); otherwise 'bad-cursor'.
+ * A NODE's log, NEWEST FIRST — 6a: by default the MERGED log of its whole SUBTREE (every node keeps its own log; this is a
+ * k-way merge over them, cut by the cursor with a binary search per node), `own:true` for the node's own entries only.
+ * The session is found by name (+ project/user when the name alone is ambiguous); the node by path / agent / context
+ * (resolveAddress; omitted = the session itself). Each entry carries its node's `path` and `rel` (relative to the
+ * queried node; '' = the node itself) and is rendered against the progress / ETA RECORDED on it.
+ * PAGED: `cursor` = the id of the last entry of the previous page (its time + sequence decide, so it works for any node
+ * and after the entry was dropped); a page holds at most `limit` (≤ log_entries_per_agent, ≤ opts.maxEntries) entries and
+ * ~opts.maxBytes of JSON (at least one); `next_cursor` is set while older entries remain.
+ * opts.files: the caller pages on into the DAY FILES. The subtree's memory is complete only down to its FLOOR (the max of
+ * its nodes' log_floor — the newest entry some node holds only in the files; else the oldest entry in memory): memory
+ * serves entries at or above it, then a `files` descriptor { target, from, before, need, bytes, maxBytes } continues below.
  * @param {ActivityState} state
- * @param {{ session:string, project?:string, user?:string, agent?:string|null, context?:string, limit?:number, cursor?:string }} q
+ * @param {{ session:string, project?:string, user?:string, path?:string|null, agent?:string|null, context?:string, own?:boolean, limit?:number, cursor?:string }} q
  * @param {number} [now]
- * @param {{ maxEntries?: number, maxBytes?: number, files?: boolean }} [opts]  files (v1.61.0): the caller pages on into the
- *   day files — a file cursor is accepted, and a page that exhausts memory with room left carries a `files` descriptor
- *   { target, from, before, need, bytes, maxBytes } for it (the caller strips it)
+ * @param {{ maxEntries?: number, maxBytes?: number, files?: boolean }} [opts]
  * @returns {ActivityResult}
  */
 export function logView(state, q, now = Date.now(), opts = {}) {
-  if (!q || typeof q !== 'object' || !str(q.session)) return bad('bad-log-query', 'log needs { session, project?, agent?, context?, limit?, cursor? }')
+  if (!q || typeof q !== 'object' || !str(q.session)) return bad('bad-log-query', 'log needs { session, project?, path?, agent?, context?, own?, limit?, cursor? }')
   const sk = lc(q.session), pk = str(q.project) ? projKey(q.project) : null, uk = str(q.user) ? lc(q.user) : null
   const cands = [...state.local.values()].filter(s => lc(s.session) === sk && (!pk || projKey(s.project) === pk) && (!uk || lc(s.user) === uk))
   if (!cands.length) return bad('unknown-session', `no activity from a session "${q.session}" on this host`)
   if (cands.length > 1) return { ok: false, code: 'ambiguous-session', what: 'several sessions have that name — pass project (and user)', candidates: cands.map(s => ({ session: s.session, project: s.project, user: s.user })) }
   const s = cands[0]
-  const ent = !str(q.agent) ? s.self : s.agents.get(lc(q.agent))
-  if (!ent) return bad('unknown-agent', `session "${s.session}" has no agent "${q.agent}"`)
-  let ck = null
-  if (str(q.context)) { const c = parseContextParam(q.context); if (!c.ok) return c; ck = lc(c.name) }
+  const qa = queryNodeKey(q); if (!qa.ok) return qa
+  const node = s.nodes.get(qa.key)
+  if (!node) return bad('unknown-node', `session "${s.session}" has no node "${qa.path}"`)
+  const own = !!q.own
+  const scope = own ? [node] : subtreeKeys(s, node.key).map(k => s.nodes.get(k))
   const maxE = Number(opts && opts.maxEntries) > 0 ? Math.floor(Number(opts.maxEntries)) : Infinity, maxB = Number(opts && opts.maxBytes) > 0 ? Number(opts.maxBytes) : Infinity
   const lim = Math.max(1, Math.min(Number(q.limit) > 0 ? Math.floor(Number(q.limit)) : 50, state.config.log_entries_per_agent, maxE))
-  const list = ck ? ent.log.filter(x => lc(x.context) === ck) : ent.log
-  const head = { ok: true, session: s.session, project: s.project, user: s.user, agent: ent.path, context: ck ? (ent.contexts.get(ck) || { name: ck }).name : null }
-  // v1.61.0 (#70 step 5): opts.files = the caller can continue into the host's DAY FILES once memory runs out — a `files`
-  // descriptor (what to match, where to start, how much room is left) is returned for it; the caller strips it
-  const target = { realm: s.realm, project: s.project, user: s.user, session: s.session, agent: ent.path, context: ck }
+  let total = 0, dropped = 0
+  for (const n of scope) { total += n.log.length; dropped += n.log_dropped }
+  const head = { ok: true, session: s.session, project: s.project, user: s.user, path: node.path, kind: node.kind, own }
+  const target = { realm: s.realm, project: s.project, user: s.user, session: s.session, key: node.key, own }
   const fc = parseFileCursor(q.cursor)
   if (fc) {
     if (!(opts && opts.files)) return bad('bad-cursor', 'that cursor pages the day files, which this reader does not serve')
-    return { ...head, entries: [], total: list.length, dropped: ent.log_dropped, next_cursor: null, files: { target, from: fc, before: null, need: lim, bytes: 0, maxBytes: maxB } }
+    return { ...head, entries: [], total, dropped, next_cursor: null, files: { target, from: fc, before: null, need: lim, bytes: 0, maxBytes: maxB } }
   }
-  let end = list.length, cursorT = null   // entries [0, end) are older than the cursor
+  let cur = null   // entries strictly OLDER than this order key
   if (str(q.cursor)) {
-    let i = -1
-    for (let j = list.length - 1; j >= 0; j--) if (list[j].id === q.cursor) { i = j; break }
-    if (i >= 0) end = i
-    else {
-      const t = entryTime(q.cursor)
-      if (t === null) return bad('bad-cursor', 'cursor must be the next_cursor of a previous page')
-      end = 0; while (end < list.length && list[end].ts < t) end++   // its entry was dropped meanwhile: continue by time
-      cursorT = t
-    }
+    const t = entryTime(q.cursor)
+    if (t === null) return bad('bad-cursor', 'cursor must be the next_cursor of a previous page')
+    cur = { ts: t, id: q.cursor }
+  }
+  // the FLOOR: memory is complete for the whole subtree only at or above it (opts.files: the files serve what is below)
+  let floor = 0, minOldest = null
+  for (const n of scope) { if (n.log_floor > floor) floor = n.log_floor; if (n.log.length && (minOldest === null || n.log[0].ts < minOldest)) minOldest = n.log[0].ts }
+  const cutTs = opts && opts.files && floor ? floor : null
+  // per node: [lo, hi) = the entries older than the cursor and (files) at/above the floor — a binary search each
+  const heads = []
+  for (const n of scope) {
+    const Lg = n.log
+    if (!Lg.length) continue
+    let lo = 0, hi = Lg.length
+    if (cur) { let a = 0, b = Lg.length; while (a < b) { const m = (a + b) >> 1; if (ordCmp(Lg[m], cur) < 0) a = m + 1; else b = m } hi = a }
+    if (cutTs !== null) { let a = 0, b = hi; while (a < b) { const m = (a + b) >> 1; if (Lg[m].ts < cutTs) a = m + 1; else b = m } lo = a }
+    if (hi > lo) heads.push({ n, i: hi - 1, lo })
   }
   const entries = []
-  let bytes = 0, i = end - 1
-  for (; i >= 0 && entries.length < lim; i--) {
-    const x = { ...list[i], rendered: renderText(list[i].text, list[i].progress, list[i].eta_at, now) }
+  let bytes = 0, more = false
+  for (;;) {
+    let best = null
+    for (const h of heads) if (h.i >= h.lo && (!best || ordCmp(h.n.log[h.i], best.n.log[best.i]) > 0)) best = h
+    if (!best) break
+    if (entries.length >= lim) { more = true; break }
+    const e = best.n.log[best.i]
+    const x = { ...e, path: best.n.path, rel: relPath(best.n.path, node.path), rendered: renderText(e.text, e.progress, e.eta_at, now) }
     const b = utf8(JSON.stringify(x)) + 1
-    if (entries.length && bytes + b > maxB) break
-    entries.push(x); bytes += b
+    if (entries.length && bytes + b > maxB) { more = true; break }
+    entries.push(x); bytes += b; best.i--
   }
-  const out = /** @type {any} */ ({ ...head, entries, total: list.length, dropped: ent.log_dropped, next_cursor: i >= 0 && entries.length ? entries[entries.length - 1].id : null })
-  if (opts && opts.files && i < 0) {   // memory ran out: older entries are only in the day files
+  const out = /** @type {any} */ ({ ...head, entries, total, dropped, next_cursor: more && entries.length ? entries[entries.length - 1].id : null })
+  if (opts && opts.files && !more) {   // memory ran out: older entries are only in the day files
     if (entries.length >= lim || bytes >= maxB) out.next_cursor = entries.length ? entries[entries.length - 1].id : null   // full: the next page starts there
     else {
-      const oldest = ent.log.length ? ent.log[0] : null   // the memory log is a contiguous tail: the files continue from before it
-      const ids = new Set(ent.log.map(x => x.id))
-      if (cursorT !== null) ids.add(q.cursor)   // a cursor whose entry was dropped: the files continue from before IT (shown already)
-      const bts = cursorT !== null ? (oldest ? Math.min(oldest.ts, cursorT) : cursorT) : oldest ? oldest.ts : null
+      let bts = cutTs !== null ? cutTs : minOldest
+      if (cur && (bts === null || cur.ts < bts)) bts = cur.ts   // a cursor below the floor (its entry was dropped): the files continue before IT
+      const ids = new Set()
+      // the memory entries AT that time were all served (on this page or an earlier one) unless it lies below the floor cut — the files skip them
+      if (bts !== null && (cutTs === null || bts >= cutTs)) for (const n of scope) for (const e of n.log) if (e.ts === bts) ids.add(e.id)
+      if (cur) ids.add(cur.id)
       out.files = { target, from: null, before: bts !== null ? { ts: bts, ids } : null, need: lim - entries.length, bytes, maxBytes: maxB }
     }
   }
   return out
 }
-/** A day-file paging cursor (v1.61.0): `f1.<day>.<offset>` = continue with the records BEFORE that byte offset of that day's file. */
+/** A day-file paging cursor: `f1.<day>.<offset>` = continue with the records BEFORE that byte offset of that day's file. */
 export const fileCursor = (day, offset) => `f1.${day}.${Math.max(0, Math.floor(Number(offset) || 0))}`
 /** @returns {{ day:string, offset:number } | null} */
 export function parseFileCursor(c) {
@@ -1327,18 +1571,18 @@ export function parseFileCursor(c) {
   return m ? { day: m[1], offset: Number(m[2]) } : null
 }
 /**
- * Is this day-file record a LOGGED entry of `target` (logView's files.target: realm + project + user + session + agent
- * path or null for the session itself + an optional lc'd context)? cp / rep lines never match.
+ * Is this day-file record a LOGGED v2 entry of `target` (logView's files.target: realm + project + user + session + the
+ * node key + own)? It matches the node itself or (own:false) anything under it. cp / rep / v1 lines never match.
  */
 export function fileEntryMatches(rec, target) {
   if (recordKind(rec) !== 'entry' || !target) return false
   if (lc(rec.session) !== lc(target.session) || projKey(rec.project) !== projKey(target.project) || lc(rec.user) !== lc(target.user)) return false
   if ((lc(rec.realm) || 'default') !== (lc(target.realm) || 'default')) return false
-  if (target.agent == null ? rec.agent != null : rec.agent == null || lc(rec.agent) !== lc(target.agent)) return false
-  return !target.context || lc(rec.context) === target.context
+  const k = pathKey(rec.path), t = target.key || ''
+  return target.own ? k === t : under(k, t)
 }
-/** A day-file entry in logView's entry shape (the small in-memory form + `rendered` as recorded). */
-export const fileEntryView = (rec, now) => ({ ...smallOf(rec), rendered: renderText(rec.text, rec.progress, rec.eta_at, now) })
+/** A day-file entry in logView's entry shape (the small in-memory form + path, rel and `rendered` as recorded). */
+export const fileEntryView = (rec, now, basePath = '') => ({ ...smallOf(rec), path: rec.path, rel: relPath(rec.path, basePath), rendered: renderText(rec.text, rec.progress, rec.eta_at, now) })
 /**
  * An entry by id from MEMORY: a current line (with its details/data; `rendered` against the live bar) or a log entry
  * (flags only — the caller reads details/data back from the JSONL; `rendered` as recorded). null when not held.
@@ -1348,51 +1592,51 @@ export const fileEntryView = (rec, now) => ({ ...smallOf(rec), rendered: renderT
 export function findEntry(state, id, now = Date.now()) {
   if (typeof id !== 'string' || !id) return null
   let hit = null
-  for (const s of state.local.values()) for (const e of [s.self, ...s.agents.values()]) {
-    const who = { session: s.session, project: s.project, user: s.user, realm: s.realm, host: s.host, agent: e.path }
-    for (const c of e.contexts.values()) if (c.current && c.current.id === id) {
-      const l = c.current
-      const r = renderText(l.text, c.key === 'root' ? rollup(e) : c.progress, c.eta_at, now)
-      return { where: 'current', complete: true, entry: { id: l.id, ts: l.ts, ...who, context: c.name, current: true, text: l.text, rendered: r, state: l.state, details: l.details || null, data: l.data != null ? l.data : null } }
+  for (const s of state.local.values()) {
+    const who = { session: s.session, project: s.project, user: s.user, realm: s.realm, host: s.host }
+    for (const n of s.nodes.values()) {
+      if (n.current && n.current.id === id) {
+        const l = n.current
+        const r = renderText(l.text, rollup(s, n), n.eta_at, now)
+        return { where: 'current', complete: true, entry: { id: l.id, ts: l.ts, ...who, path: n.path, kind: n.kind, current: true, text: l.text, rendered: r, state: l.state, details: l.details || null, data: l.data != null ? l.data : null } }
+      }
+      if (!hit) { const x = n.log.find(y => y.id === id); if (x) hit = { where: 'log', complete: !x.has_details && !x.has_data, entry: { ...x, ...who, path: n.path, kind: n.kind, current: !!x.current, rendered: renderText(x.text, x.progress, x.eta_at, now), details: null, data: null } } }
     }
-    if (!hit) { const x = e.log.find(y => y.id === id); if (x) hit = { where: 'log', complete: !x.has_details && !x.has_data, entry: { ...x, ...who, current: !!x.current, rendered: renderText(x.text, x.progress, x.eta_at, now), details: null, data: null } } }
   }
   return hit
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// gossip: snapshot + per-origin merge
+// gossip: snapshot + per-origin merge (FORMAT v2: one unit per node)
 
 function snapLine(l) {
   return l ? compact({ id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: !!(l.data != null || l.has_data) }) : null
 }
-function snapCtx(c) {
-  return compact({ name: c.name, created_at: c.created_at, last_activity: c.last_activity, stale_after_ms: c.stale_after_ms,
-    progress: c.progress ? { done: c.progress.done, total: c.progress.total, unit: c.progress.unit } : null, eta_at: c.eta_at, current: snapLine(c.current) })
+/** A node's replicated form: its OWN fields (never children, rollup, log, details/data). */
+function snapNode(n) {
+  return compact({ path: n.path, created_at: n.created_at, last_activity: n.last_activity, finished_at: n.finished_at, gone_at: n.kind === 'agent' ? n.gone_at : null,
+    stale_after_ms: n.stale_after_ms, implicit: n.implicit, progress: n.progress ? { done: n.progress.done, total: n.progress.total, unit: n.progress.unit } : null,
+    eta_at: n.eta_at, current: snapLine(n.current) })
 }
-function snapEntity(e) {
-  return compact({ path: e.path, started_at: e.started_at, last_activity: e.last_activity, finished_at: e.finished_at, gone_at: e.gone_at,
-    stale_after_ms: e.stale_after_ms, contexts: [...e.contexts.values()].sort((a, b) => cmp(a.key, b.key)).map(snapCtx) })
-}
+const sortedNodes = s => [...s.nodes.values()].sort((a, b) => cmp(a.key, b.key))
 function snapSession(s) {
   return compact({ session: s.session, project: s.project, user: s.user, realm: s.realm, host: s.host, created_at: s.created_at, last_activity: s.last_activity,
-    gone_at: s.gone_at, bell: !!s.bell, self: snapEntity(s.self), agents: [...s.agents.values()].sort((a, b) => cmp(a.key, b.key)).map(snapEntity) })
+    gone_at: s.gone_at, bell: !!s.bell, nodes: sortedNodes(s).map(snapNode) })
 }
 /**
- * The compact replicated form of one origin's slice (default: ours): current lines only (with has_details/has_data
- * flags, never the details/data), no log entries, sessions/agents/contexts sorted by key and every record's fields in
- * a fixed order with null/false fields omitted — equal state serialises identically. Call expire() first so finished
- * agents past their window leave the gossip.
+ * The compact replicated form of one origin's slice (default: ours): every node's own fields (current lines with
+ * has_details/has_data flags, never the details/data; no log), sessions + nodes sorted by key, null/false fields omitted —
+ * equal state serialises identically. Format v2.
  * @param {ActivityState} state
  * @param {(s: ActivitySession) => boolean} [sessionFilter]
- * @param {string} [origin]  a remote origin re-gossips that origin's slice verbatim (e.g. a gateway to its followers)
- * @returns {{ v:1, origin:string, sessions:any[] }}
+ * @param {string} [origin]  a remote origin re-gossips that origin's slice verbatim
+ * @returns {{ v:2, origin:string, sessions:any[] }}
  */
 export function snapshot(state, sessionFilter, origin) {
   const o = origin || state.origin
   const src = o === state.origin ? state.local : (state.remote.get(o) || { sessions: new Map() }).sessions
   const list = [...src.values()].filter(s => !sessionFilter || sessionFilter(s)).sort((a, b) => cmp(a.key, b.key))
-  return { v: 1, origin: o, sessions: list.map(snapSession) }
+  return { v: ACTIVITY_FORMAT, origin: o, sessions: list.map(snapSession) }
 }
 
 // --- wire → state (defensive: a snapshot is untrusted input; the same limits apply) ---
@@ -1410,30 +1654,34 @@ function wLine(l) {
   return { id: typeof l.id === 'string' ? l.id.slice(0, 100) : '', ts: wTime(l.ts) || 0, text, state: ACTIVITY_STATES.includes(l.state) ? l.state : 'running',
     has_details: !!l.has_details, has_data: !!l.has_data }
 }
-function wEntity(r, path) {
-  const e = newEntity(path, wTime(r.started_at) || 0)
-  e.last_activity = wTime(r.last_activity) || 0
-  e.finished_at = wPos(r.finished_at); e.gone_at = wPos(r.gone_at)
-  e.stale_after_ms = wPos(r.stale_after_ms) ? Math.min(wPos(r.stale_after_ms), ACTIVITY_LIMITS.staleAfterMaxMs) : null
-  e.contexts.clear()
-  for (const c of Array.isArray(r.contexts) ? r.contexts : []) {
-    if (!c || typeof c !== 'object') continue
-    const n = normContextName(c.name)
-    if (!n.ok || e.contexts.has(lc(n.name))) continue
-    if (e.contexts.size >= ACTIVITY_LIMITS.contextsPerAgent - (e.contexts.has('root') || n.name === 'root' ? 0 : 1)) continue   // keep a slot for root
-    const ctx = newContext(n.name, wTime(c.created_at) || 0)
-    ctx.last_activity = wTime(c.last_activity) || 0
-    ctx.stale_after_ms = wPos(c.stale_after_ms) ? Math.min(wPos(c.stale_after_ms), ACTIVITY_LIMITS.staleAfterMaxMs) : null
-    const p = c.progress ? parseProgress(c.progress) : null
-    ctx.progress = p && p.ok ? p.value : null
-    ctx.eta_at = wPos(c.eta_at)
-    ctx.current = wLine(c.current)
-    e.contexts.set(ctx.key, ctx)
-  }
-  if (!e.contexts.has('root')) e.contexts.set('root', newContext('root', e.started_at))
-  return e
+/** A node from the wire (validated path → canonical key), or null. */
+function wNode(r) {
+  if (!r || typeof r !== 'object') return null
+  const p = parsePath(typeof r.path === 'string' ? r.path : '')
+  if (!p.ok || p.current) return null
+  const n = newNode(p.path, p.segs, wTime(r.created_at) || 0)
+  n.last_activity = wTime(r.last_activity) || 0
+  n.stale_after_ms = wPos(r.stale_after_ms) ? Math.min(wPos(r.stale_after_ms), ACTIVITY_LIMITS.staleAfterMaxMs) : null
+  n.implicit = r.implicit === true
+  const pr = r.progress ? parseProgress(r.progress) : null
+  n.progress = pr && pr.ok ? pr.value : null
+  n.eta_at = wPos(r.eta_at)
+  n.current = wLine(r.current)
+  if (n.kind === 'agent') { n.finished_at = wPos(r.finished_at); n.gone_at = wPos(r.gone_at) }
+  n.persisted = true
+  return n
 }
-// a session record's header from the wire; host = the ORIGIN (the link's host — never the record's `host` field, v1.60.0)
+/** Put a wire node into a session (REPLACING one held at its key); false when over the limits. */
+function wPut(s, n) {
+  const old = s.nodes.get(n.key)
+  if (old) {
+    if (old.kind === 'agent' && n.key) s.nAgents--
+    s.nodes.delete(n.key)
+  } else if (n.key && (s.nodes.size - (s.nodes.has('') ? 1 : 0) >= ACTIVITY_LIMITS.nodesPerSession || (n.kind === 'agent' && s.nAgents >= ACTIVITY_LIMITS.agentsPerSession))) return false
+  addNode(s, n)
+  return true
+}
+// a session record's header from the wire; host = the ORIGIN (the link's host — never the record's `host` field)
 function wHeader(r, origin) {
   if (!r || typeof r !== 'object') return null
   const session = str(r.session)
@@ -1446,25 +1694,24 @@ function wHeader(r, origin) {
 function wSession(r, origin) {
   const h = wHeader(r, origin)
   if (!h) return null
-  const s = { ...h, self: wEntity(r.self && typeof r.self === 'object' ? r.self : {}, null), agents: new Map() }
-  for (const a of Array.isArray(r.agents) ? r.agents : []) {
-    if (s.agents.size >= ACTIVITY_LIMITS.agentsPerSession) break
-    if (!a || typeof a !== 'object') continue
-    const p = normAgentPath(a.path)
-    if (!p.ok || s.agents.has(lc(p.path))) continue
-    s.agents.set(lc(p.path), wEntity(a, p.path))
+  const s = { ...h, nodes: new Map(), kids: new Map(), nAgents: 0 }
+  for (const x of Array.isArray(r.nodes) ? r.nodes : []) {
+    const n = wNode(x)
+    if (!n || s.nodes.has(n.key)) continue
+    wPut(s, n)
   }
+  if (!s.nodes.has('')) addNode(s, newNode('', [], h.created_at))
   return s
 }
+const badVersion = v => bad('bad-version', `activity slice format v${v == null ? '?' : v}; this bridge speaks v${ACTIVITY_FORMAT} (a 1.61 or older peer — upgrade it)`)
 /**
- * Fold a remote host's snapshot in. PER-ORIGIN OWNERSHIP: the slice REPLACES everything held for `fromOrigin` (sessions
- * it no longer lists disappear); no other origin's slice is touched, and our own origin is refused. The snapshot is
- * re-validated against the same limits. Idempotent: a slice whose canonical form equals the held one → changed:false.
- * A slice held while its origin was marked DOWN is always replaced (changed:true), which clears the gone marks.
+ * Fold a remote host's snapshot in. PER-ORIGIN OWNERSHIP: the slice REPLACES everything held for `fromOrigin`; no other
+ * origin's slice is touched, and our own origin is refused. Re-validated against the same limits. Idempotent. A slice
+ * held while its origin was marked DOWN is always replaced (changed:true). A snapshot whose `v` isn't 2 → 'bad-version'.
  * @param {ActivityState} state
  * @param {string} fromOrigin  the host that OWNS the slice (the link it arrived on decides, not the snapshot's field)
  * @param {any} snap  a snapshot() from that host
- * @param {{ epoch?: any, seq?: number, truncated?: boolean }} [meta]  v1.60.0: the wire position of a full slice (applySlice)
+ * @param {{ epoch?: any, seq?: number, truncated?: boolean }} [meta]
  * @returns {ActivityResult} { ok:true, changed:boolean, sessions:number } or { ok:false, code, what }
  */
 export function mergeSnapshot(state, fromOrigin, snap, meta = {}) {
@@ -1472,6 +1719,7 @@ export function mergeSnapshot(state, fromOrigin, snap, meta = {}) {
   if (!origin) return bad('bad-origin', 'mergeSnapshot needs the owning origin')
   if (lc(origin) === lc(state.origin)) return bad('own-origin', 'a remote snapshot may not replace this host\'s own slice')
   if (!snap || typeof snap !== 'object' || !Array.isArray(snap.sessions)) return bad('bad-snapshot', 'expected { v, origin, sessions:[...] }')
+  if (snap.v !== ACTIVITY_FORMAT) return badVersion(snap.v)
   const sessions = new Map()
   for (const r of snap.sessions) {
     if (sessions.size >= MAX_SESSIONS_PER_ORIGIN) break
@@ -1488,14 +1736,13 @@ export function mergeSnapshot(state, fromOrigin, snap, meta = {}) {
 /** Forget a remote origin's slice (the host left the mesh). Returns whether one was held. */
 export const dropOrigin = (state, origin) => state.remote.delete(origin)
 
-// ---- v1.60.0 (#70 step 4): the wire — per-link deltas under a byte cap, newest-active first
+// ---- the wire — per-link deltas under a byte cap, newest-active first (one unit per NODE)
 
 const sessHeader = s => compact({ session: s.session, project: s.project, user: s.user, realm: s.realm, host: s.host, created_at: s.created_at, last_activity: s.last_activity, gone_at: s.gone_at,
-  bell: !!s.bell })   // v1.61.0 (#70 step 5): the doorbell flag rides the header (a ≤1.60 receiver ignores it)
+  bell: !!s.bell })
 /**
- * This host's gossip UNITS: one per entity (a session's own entity or an agent), keyed `[sessionKey, agentKey]`, with
- * its canonical JSON (snapshot form) and last_activity, plus each session's header. Compute once per change and reuse
- * for every link (planSlice opts.units).
+ * This host's gossip UNITS: one per NODE, keyed `[sessionKey, nodeKey]`, with its canonical JSON (snapshot form) and
+ * last_activity, plus each session's header. Compute once per change and reuse for every link (planSlice opts.units).
  * @param {ActivityState} state
  * @returns {{ sessions: Map<string, any>, ents: Map<string, any> }}
  */
@@ -1504,10 +1751,9 @@ export function gossipUnits(state) {
   for (const s of state.local.values()) {
     const hdr = sessHeader(s)
     sessions.set(s.key, { sk: s.key, hdr, hj: JSON.stringify(hdr), id: { realm: s.realm, project: s.project, user: s.user, session: s.session }, last: s.last_activity })
-    for (const e of [s.self, ...s.agents.values()]) {
-      const ent = snapEntity(e)
-      const uk = JSON.stringify([s.key, e.key])
-      ents.set(uk, { uk, sk: s.key, path: e.path, self: e.path == null, ent, json: JSON.stringify(ent), last: e.last_activity })
+    for (const n of s.nodes.values()) {
+      const ent = snapNode(n), uk = JSON.stringify([s.key, n.key])
+      ents.set(uk, { uk, sk: s.key, path: n.path, key: n.key, ent, json: JSON.stringify(ent), last: n.last_activity })
     }
   }
   return { sessions, ents }
@@ -1515,12 +1761,11 @@ export function gossipUnits(state) {
 /** A link's published view — what it was last sent: hdrs sk -> { hj, id }, ents uk -> { json, sk, path }. */
 export const createPub = () => ({ hdrs: new Map(), ents: new Map() })
 /**
- * The next frame body for ONE link: a FULL slice (`full:true` — everything, the link's pub reset) or a DELTA against the
- * link's `pub` — the changed / new entities (each inside its session record: the header + `self` and/or `agents:[…]`
- * that changed) and `remove:[{realm, project, user, session[, agent]}]` (no agent = the whole session). Entities go
- * NEWEST-ACTIVE FIRST (last_activity desc) until `maxBytes` of JSON; the first always goes (an entity is bounded by the
- * locked limits). What didn't fit stays unpublished, so the NEXT frame carries it: `truncated:true` / pending:true. The
- * pub is updated to exactly what the body carries. Returns { body:null } when a delta has nothing to say.
+ * The next frame body for ONE link: a FULL slice (`full:true`) or a DELTA against the link's `pub` — the changed / new
+ * nodes (each inside its session record: the header + `nodes:[…]`) and `remove:[{realm, project, user, session[, path]}]`
+ * (no path = the whole session; a node removal removes its subtree on the receiver). Nodes go NEWEST-ACTIVE FIRST until
+ * `maxBytes` of JSON; the first always goes. What didn't fit stays unpublished, so the NEXT frame carries it
+ * (`truncated:true` / pending:true). Returns { body:null } when a delta has nothing to say.
  * @param {ActivityState} state
  * @param {{ hdrs: Map<string, any>, ents: Map<string, any> }} pub
  * @param {{ full?: boolean, maxBytes?: number, units?: { sessions: Map<string, any>, ents: Map<string, any> } }} [opts]
@@ -1536,7 +1781,7 @@ export function planSlice(state, pub, opts = {}) {
     for (const [sk, h] of pub.hdrs) if (!u.sessions.has(sk)) { remove.push({ ...h.id }); pub.hdrs.delete(sk); gone.add(sk) }
     for (const [uk, e] of pub.ents) {
       if (gone.has(e.sk)) { pub.ents.delete(uk); continue }
-      if (!u.ents.has(uk)) { const h = pub.hdrs.get(e.sk); if (h && e.path != null) remove.push({ ...h.id, agent: e.path }); pub.ents.delete(uk) }
+      if (!u.ents.has(uk)) { const h = pub.hdrs.get(e.sk); if (h && e.path) remove.push({ ...h.id, path: e.path }); pub.ents.delete(uk) }
     }
   }
   const cand = [], withEnt = new Set()
@@ -1551,22 +1796,20 @@ export function planSlice(state, pub, opts = {}) {
     if ((n || out.size) && bytes + add > maxBytes) { pending = true; break }
     let r = rec
     if (!r) { r = { ...s.hdr }; out.set(c.sk, r); pub.hdrs.set(c.sk, { hj: s.hj, id: s.id }) }
-    if (!c.hdrOnly) { if (c.self) r.self = c.ent; else (r.agents || (r.agents = [])).push(c.ent); pub.ents.set(c.uk, { json: c.json, sk: c.sk, path: c.path }); n++ }
+    if (!c.hdrOnly) { (r.nodes || (r.nodes = [])).push(c.ent); pub.ents.set(c.uk, { json: c.json, sk: c.sk, path: c.path }); n++ }
     bytes += add
   }
   if (!full && !out.size && !remove.length) return { body: null, pending: false, entities: 0, bytes: 0 }
-  const body = /** @type {any} */ (full ? { full: true, sessions: [...out.values()] } : { sessions: [...out.values()], ...(remove.length ? { remove } : {}) })
+  const body = /** @type {any} */ (full ? { v: ACTIVITY_FORMAT, full: true, sessions: [...out.values()] } : { v: ACTIVITY_FORMAT, sessions: [...out.values()], ...(remove.length ? { remove } : {}) })
   if (pending) body.truncated = true
   return { body, pending, entities: n, bytes }
 }
 /**
- * Fold one wire frame body from `fromOrigin` (the link's host — the frame's own fields never decide ownership). A FULL
- * body (`full:true`) replaces the origin's slice (mergeSnapshot) and records its (epoch, seq). A DELTA applies only on
- * top of exactly the held position — same epoch and `base` === the held seq, and the slice not marked down — else it is
- * refused with code 'out-of-sync' (the caller asks the owner for a full slice). Removals first, then each session
- * record: a new session is created (capped at 1024 per origin), an existing one gets its header, its `self` when
- * present and each listed agent REPLACED (a new agent beyond 128 is dropped). Everything is re-validated (wSession /
- * wEntity), exactly like a snapshot. An empty delta with base === seq is a sync beat (changed:false).
+ * Fold one wire frame body from `fromOrigin` (the link's host). A body whose `v` isn't 2 is refused 'bad-version' (a
+ * 1.61 peer's slice is skipped, never misread). A FULL body replaces the origin's slice (mergeSnapshot) and records its
+ * (epoch, seq). A DELTA applies only on top of exactly the held position — else 'out-of-sync'. Removals first (a node
+ * removal takes its subtree), then each session record: a new session is created, an existing one gets its header and
+ * each listed node REPLACED (a new node beyond the limits is dropped). Everything is re-validated.
  * @param {ActivityState} state @param {string} fromOrigin @param {any} body
  * @returns {ActivityResult} { ok:true, changed, full, sessions } or { ok:false, code, what }
  */
@@ -1574,9 +1817,10 @@ export function applySlice(state, fromOrigin, body) {
   const origin = typeof fromOrigin === 'string' ? fromOrigin.trim() : ''
   if (!origin) return bad('bad-origin', 'applySlice needs the owning origin')
   if (lc(origin) === lc(state.origin)) return bad('own-origin', 'a remote slice may not touch this host\'s own entities')
-  if (!body || typeof body !== 'object' || (body.sessions != null && !Array.isArray(body.sessions)) || (body.remove != null && !Array.isArray(body.remove))) return bad('bad-slice', 'expected { full?, epoch, seq, base?, sessions:[…], remove?:[…] }')
+  if (!body || typeof body !== 'object' || (body.sessions != null && !Array.isArray(body.sessions)) || (body.remove != null && !Array.isArray(body.remove))) return bad('bad-slice', 'expected { v:2, full?, epoch, seq, base?, sessions:[…], remove?:[…] }')
+  if (body.v !== ACTIVITY_FORMAT) return badVersion(body.v)
   if (body.full) {
-    const r = mergeSnapshot(state, origin, { sessions: body.sessions || [] }, { epoch: body.epoch, seq: body.seq, truncated: body.truncated })
+    const r = mergeSnapshot(state, origin, { v: ACTIVITY_FORMAT, sessions: body.sessions || [] }, { epoch: body.epoch, seq: body.seq, truncated: body.truncated })
     return r.ok ? { ...r, full: true } : r
   }
   const held = state.remote.get(origin)
@@ -1588,9 +1832,9 @@ export function applySlice(state, fromOrigin, body) {
     if (!h) continue
     const s = held.sessions.get(h.key)
     if (!s) continue
-    if (r.agent == null) { held.sessions.delete(h.key); changed = true; continue }
-    const p = normAgentPath(r.agent)
-    if (p.ok && s.agents.delete(lc(p.path))) changed = true
+    if (r.path == null || r.path === '') { if (r.path == null) { held.sessions.delete(h.key); changed = true } continue }
+    const p = parsePath(String(r.path))
+    if (p.ok && p.key && s.nodes.has(p.key)) { removeSubtree(s, p.key); changed = true }
   }
   for (const r of body.sessions || []) {
     const h = wHeader(r, origin)
@@ -1601,14 +1845,7 @@ export function applySlice(state, fromOrigin, body) {
       held.sessions.set(h.key, wSession(r, origin)); changed = true; continue
     }
     s.created_at = h.created_at; s.last_activity = h.last_activity; s.gone_at = h.gone_at; s.bell = h.bell
-    if (r.self && typeof r.self === 'object') s.self = wEntity(r.self, null)
-    for (const a of Array.isArray(r.agents) ? r.agents : []) {
-      if (!a || typeof a !== 'object') continue
-      const p = normAgentPath(a.path)
-      if (!p.ok) continue
-      if (!s.agents.has(lc(p.path)) && s.agents.size >= ACTIVITY_LIMITS.agentsPerSession) continue
-      s.agents.set(lc(p.path), wEntity(a, p.path))
-    }
+    for (const x of Array.isArray(r.nodes) ? r.nodes : []) { const n = wNode(x); if (n) wPut(s, n) }
     changed = true
   }
   held.seq = Number.isFinite(Number(body.seq)) ? Number(body.seq) : held.seq
@@ -1617,9 +1854,8 @@ export function applySlice(state, fromOrigin, body) {
   return { ok: true, changed, full: false, sessions: held.sessions.size }
 }
 /**
- * The origin went down or became unreachable (its going-down notice, its link dropped, it was retired / expired): every
- * session and entity of its slice not already gone is marked gone at `now` — the board keeps the last-known lines and
- * shows them GONE (done/failed stay as they were). Kept until a fresh full slice replaces it (which clears the marks) or
+ * The origin went down or became unreachable: every session and AGENT node of its slice not already gone is marked gone
+ * at `now` (contexts show their agent's). Kept until a fresh full slice replaces it (which clears the marks) or
  * expireRemote() drops it. Returns whether a slice was held.
  * @param {ActivityState} state @param {string} origin @param {number} now
  */
@@ -1631,7 +1867,7 @@ export function markOriginDown(state, origin, now) {
   sl.down_at = at
   for (const s of sl.sessions.values()) {
     if (!s.gone_at) s.gone_at = at
-    for (const e of [s.self, ...s.agents.values()]) if (!e.gone_at) e.gone_at = at
+    for (const n of s.nodes.values()) if (n.kind === 'agent' && !n.gone_at) n.gone_at = at
   }
   return true
 }
@@ -1653,17 +1889,15 @@ const OBJ = 64, MAPE = 48, NUMS = 48
 const sB = s => (typeof s === 'string' ? 16 + 2 * s.length : 0)
 const progB = p => (p ? OBJ + sB(p.unit) + 16 : 0)
 const lineB = l => (l ? OBJ + sB(l.id) + sB(l.text) + sB(l.state) + 16 + (l.details ? sB(l.details) : 0) + (l.data != null ? OBJ + 2 * (l.data_bytes || 0) : 0) : 0)
-const ctxB = c => OBJ + MAPE + sB(c.name) + sB(c.key) + NUMS + lineB(c.current) + progB(c.progress)
-const entryB = e => 16 + OBJ + sB(e.id) + sB(e.text) + sB(e.context) + sB(e.state) + NUMS + progB(e.progress)
-function entityB(e) {
-  let n = OBJ + MAPE + sB(e.path) + sB(e.key) + NUMS
-  for (const c of e.contexts.values()) n += ctxB(c)
-  for (const x of e.log) n += entryB(x)
-  return n
+const entryB = e => 16 + OBJ + sB(e.id) + sB(e.text) + sB(e.state) + NUMS + progB(e.progress)
+function nodeB(n) {
+  let b = OBJ + 2 * MAPE + sB(n.path) + sB(n.key) + sB(n.name) + sB(n.parent) + NUMS + lineB(n.current) + progB(n.progress)
+  for (const x of n.log) b += entryB(x)
+  return b
 }
 function sessionB(s) {
-  let n = OBJ + MAPE + sB(s.key) + sB(s.session) + sB(s.project) + sB(s.user) + sB(s.host) + NUMS + entityB(s.self)
-  for (const a of s.agents.values()) n += entityB(a)
+  let n = OBJ + MAPE + sB(s.key) + sB(s.session) + sB(s.project) + sB(s.user) + sB(s.host) + NUMS
+  for (const x of s.nodes.values()) n += nodeB(x)
   return n
 }
 /** Estimated in-memory bytes of the whole state (local + remote slices). @param {ActivityState} state */
@@ -1674,11 +1908,10 @@ export function estimateBytes(state) {
   return n
 }
 /**
- * Bring the state under `budgetBytes` (default config.memory_budget_mb). Evicts, in order: (1) the oldest FINISHED
- * local agents (by finished_at); then (2) the oldest log entries across every local entity (by ts; each entity's log
- * drops from its front). Never a current line, never an unfinished agent, never a session's own entity, never a
- * remote slice (its origin bounds it and replaces it on every gossip). May still be over (over:true) when current
- * lines alone exceed the budget.
+ * Bring the state under `budgetBytes` (default config.memory_budget_mb). Evicts, in order: (1) the oldest FINISHED local
+ * agents (by finished_at) — each WITH ITS SUBTREE; then (2) the oldest log entries across every local node (each node's
+ * log drops from its front; its log_floor moves up). Never a current line, never an unfinished agent, never a session's
+ * root, never a remote slice. May still be over (over:true) when current lines alone exceed the budget.
  * @param {ActivityState} state
  * @param {number} [budgetBytes]
  * @returns {{ evicted:{session:string, project:string, agent:string}[], entries_dropped:number, bytes_before:number, bytes_after:number, over:boolean }}
@@ -1690,24 +1923,24 @@ export function enforceBudget(state, budgetBytes) {
   const evicted = []
   if (bytes > budget) {
     const fin = []
-    for (const s of state.local.values()) for (const a of s.agents.values()) if (a.finished_at) fin.push({ s, a })
-    fin.sort((x, y) => x.a.finished_at - y.a.finished_at || cmp(x.s.key, y.s.key) || cmp(x.a.key, y.a.key))
-    for (const { s, a } of fin) {
+    for (const s of state.local.values()) for (const n of s.nodes.values()) if (n.key && n.kind === 'agent' && n.finished_at) fin.push({ s, n })
+    fin.sort((x, y) => x.n.finished_at - y.n.finished_at || cmp(x.s.key, y.s.key) || cmp(x.n.key, y.n.key))
+    for (const { s, n } of fin) {
       if (bytes <= budget) break
-      bytes -= entityB(a)
-      s.agents.delete(a.key)
-      evicted.push({ session: s.session, project: s.project, agent: a.path })
+      if (!s.nodes.has(n.key)) continue   // went with an evicted ancestor
+      for (const x of removeSubtree(s, n.key)) bytes -= nodeB(x)
+      evicted.push({ session: s.session, project: s.project, agent: n.path })
     }
   }
   if (bytes > budget) {
     const all = []
-    for (const s of state.local.values()) for (const ent of [s.self, ...s.agents.values()]) ent.log.forEach((e, i) => all.push({ ts: e.ts, i, ent }))
+    for (const s of state.local.values()) for (const n of s.nodes.values()) n.log.forEach((e, i) => all.push({ ts: e.ts, i, n }))
     all.sort((x, y) => x.ts - y.ts || x.i - y.i)
-    for (const { ent } of all) {
+    for (const { n } of all) {
       if (bytes <= budget) break
-      const e = ent.log.shift()
+      const e = logDropOldest(n)
       if (!e) continue
-      ent.log_dropped++; dropped++
+      dropped++
       bytes -= entryB(e)
     }
   }

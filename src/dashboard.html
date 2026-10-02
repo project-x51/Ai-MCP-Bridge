@@ -101,7 +101,7 @@
   .sech:hover { color:var(--fg-strong); }
   .chev { display:inline-block; width:15px; color:var(--faint); font-size:11px; vertical-align:1px; }
   .sec.collapsed .secb { display:none; }
-  /* ---- #70 step 5 (v1.61.0): the Activity tree (project → session → agent → context → log entry) */
+  /* ---- #70 step 5 (v1.61.0): the Activity tree — 6a (v1.62.0): project → session → its NODE tree (agents + contexts, any depth) → log entry */
   #acttag:empty { display:none; }
   .act-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; font-size:12px; color:var(--muted); margin:2px 0 8px; }
   .act-bar label { cursor:pointer; user-select:none; white-space:nowrap; }
@@ -115,12 +115,15 @@
   .act-btn:hover, .seg button:hover { color:var(--fg-strong); }
   .act-tree { font-size:12.5px; border-top:1px solid var(--line-soft); }
   .act-msg { color:var(--faint); font-size:12px; font-style:italic; padding:8px 4px; }
-  .ar { display:flex; align-items:center; gap:7px; min-height:26px; padding:2px 8px 2px calc(6px + var(--d, 0) * 20px); border-bottom:1px solid var(--line-soft); color:var(--fg); }
+  .ar { display:flex; align-items:center; gap:7px; min-height:26px; padding:2px 8px 2px calc(6px + var(--d, 0) * 16px); border-bottom:1px solid var(--line-soft); color:var(--fg); }
+  @media (max-width: 720px) { .ar { padding-left:calc(4px + var(--d, 0) * 11px); gap:5px; } .ar .pb { width:64px; } .ar .nm { max-width:160px; } }
   .ar.click { cursor:pointer; } .ar.click:hover { background:var(--hover); }
   .ar .chv { flex:none; width:12px; text-align:center; color:var(--faint); font-size:10px; }
   .ar .gl { flex:none; width:16px; height:16px; display:block; }
   .ar .nm { flex:none; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; color:var(--fg-strong); }
   .ar .nm.path { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:11.5px; }
+  .ar .nm.ctx { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:11.5px; color:var(--info); font-weight:600; }
+  .ar .gl.ctx { width:14px; height:14px; margin:0 1px; }
   .ar .nm .pre { color:var(--faint); font-weight:400; }
   .ar .ln { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .ar .ln.none { color:var(--faint); font-style:italic; }
@@ -150,7 +153,7 @@
   .ar .ctag { flex:none; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:10.5px; color:var(--info); }
   .ar .ctag.cur { font-weight:700; }
   .ar .tgt { flex:none; width:16px; text-align:center; color:var(--muted); }
-  .ad { padding:4px 10px 8px calc(30px + var(--d, 0) * 20px); border-bottom:1px solid var(--line-soft); font-size:11.5px; }
+  .ad { padding:4px 10px 8px calc(30px + var(--d, 0) * 16px); border-bottom:1px solid var(--line-soft); font-size:11.5px; }
   .ad pre { margin:4px 0 0; background:var(--surface); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:280px; overflow:auto; color:var(--fg); }
   .ad .k { color:var(--muted); font-weight:600; font-size:10.5px; }
   .spin { display:inline-block; width:9px; height:9px; border:2px solid var(--line); border-top-color:var(--info); border-radius:50%; animation:aspin .8s linear infinite; vertical-align:-1px; margin-right:5px; }
@@ -183,7 +186,7 @@
   <h2 class="sech"><span class="chev">▾</span>Activity <span id="acttag" class="bub b-info" style="font-weight:600"></span></h2>
   <div class="secb">
     <div class="act-bar">
-      <span class="seg" id="actDepth" title="Show every project down to this level"><button data-l="collapsed">Projects</button><button data-l="sessions">Sessions</button><button data-l="all">Agents</button></span>
+      <span class="seg" id="actDepth" title="Show every project down to this level: projects only / their sessions / sessions + their top-level nodes (open a node for what is under it)"><button data-l="collapsed">Projects</button><button data-l="sessions">Sessions</button><button data-l="all">Nodes</button></span>
       <label title="Hide finished and gone agents, and sessions with nothing active"><input type="checkbox" id="actActive" style="vertical-align:middle;margin-right:4px">active only</label>
       <label title="A running or blocked item with no message for this long counts as stale (an item's own stale_after wins)">stale after <input type="range" id="actStale" min="5" max="60" step="1" value="15"> <b id="actStaleV" style="color:var(--fg-strong)">15m</b></label>
       <span><button class="act-btn" id="actExpand">Expand all</button> <button class="act-btn" id="actCollapse">Collapse all</button></span>
@@ -748,11 +751,13 @@
     pulse(t.from); pulse(t.to);
   }
 
-  // ------------------------------------------------ activity (#70 step 5, v1.61.0)
+  // ------------------------------------------------ activity (#70 step 5, v1.61.0; the node tree: step 6a, v1.62.0)
   // The PURE part — window.AimbAct, unit-tested by tests/test_dashboard_activity.mjs. The bridge sends REPORTED states and
-  // raw times (boardView raw), so stale is computed HERE from last_activity + the item's own stale_after (else the slider):
-  // the slider is instant and a delta never carries "time passed". Also: the status glyph (centre = state, ring = time
-  // left before stale), the text placeholders (a port of lib/activity.js renderText), progress / ETA tooltips, the
+  // raw times (boardView raw), one unit per session group and one per NODE (an agent or a context, any depth, `parent_key`
+  // linking them), so stale is computed HERE from last_activity + the item's own stale_after (else the slider): the slider
+  // is instant and a delta never carries "time passed". AGENTS (and the session) go stale by their own activity; a CONTEXT
+  // shows its nearest agent ancestor's staleness / gone (6a). Also: the status glyph (centre = state, ring = time left
+  // before stale — agents only), the text placeholders (a port of lib/activity.js renderText), progress / ETA tooltips, the
   // project-level cycle, active-only filtering, the delta store (a seq gap → resync) and the tree.
   var AimbAct=(function(){
     var MIN=60000, LIVE={running:1,blocked:1}, C=2*Math.PI*6.5;
@@ -780,15 +785,23 @@
           default: return m;
         } });
     }
-    // the state to SHOW: gone comes from the bridge (data); stale = running/blocked, not finished, quiet > its window
-    function effState(item,parent,now,staleMin){
-      item=item||{}; var st=item.state||'running';
-      var hostDown=!!(item.host_down||(parent&&parent.host_down));
-      if(st==='gone') return { state:'gone', was:item.was||'running', gone:true, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null };
-      var finished=!!(item.finished_at||(parent&&parent.finished_at));
-      var win=item.stale_after_ms>0?item.stale_after_ms:((staleMin>0?staleMin:15)*MIN);
-      var at=!finished&&LIVE[st]?(item.last_activity||0)+win:null, stale=at!==null&&now>at;
-      return { state:stale?'stale':st, was:st, gone:false, hostDown:hostDown, stale:stale, live:at!==null&&!stale, staleAt:at, win:win };
+    function isCtx(u){ return !!u&&u.nkind==='context'; }
+    function barOf(u){ return u?(u.bar||u.progress||null):null; }   // a node's bar: its own reported progress, else the bridge's rollup
+    // the state to SHOW. An AGENT (or the session): gone comes from the bridge (data); stale = running/blocked, not finished,
+    // not implicit, quiet > its window. A CONTEXT (6a): its own reported state, but gone / stale / finished come from `owner`
+    // (its nearest agent ancestor, or the session) — and only while it has a live current line of its own.
+    function effState(item,owner,now,staleMin){
+      item=item||{}; var ctx=isCtx(item), ag=ctx?(owner||{}):item, st=ctx?((item.current&&item.current.state)||'running'):(item.state||'running');
+      var hostDown=!!(item.host_down||(owner&&owner.host_down));
+      var agGone=ag.state==='gone';
+      if(!ctx&&agGone) return { state:'gone', was:item.was||'running', gone:true, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null, noLine:false };
+      if(ctx&&!item.current) return { state:'none', was:'running', gone:false, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null, noLine:true };
+      if(ctx&&agGone&&st!=='done'&&st!=='failed') return { state:'gone', was:st, gone:true, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null, noLine:false };
+      var finished=!!ag.finished_at;   // an agent's own lifecycle; a context's agent's (a sub-agent under a finished agent still goes stale by itself)
+      var win=ag.stale_after_ms>0?ag.stale_after_ms:((staleMin>0?staleMin:15)*MIN);
+      var agLive=LIVE[ctx?((ag.current&&ag.current.state)||'running'):st]&&!ag.implicit;
+      var at=!finished&&LIVE[st]&&agLive?(ag.last_activity||0)+win:null, stale=at!==null&&now>at;
+      return { state:stale?'stale':st, was:st, gone:false, hostDown:hostDown, stale:stale, live:at!==null&&!stale&&!ctx, staleAt:at, win:win, noLine:false };
     }
     function ringFrac(e,now){ return e&&e.live?Math.max(0,Math.min(1,(e.staleAt-now)/e.win)):0; }
     function fmtDur(ms){ ms=Math.max(0,ms||0); var s=Math.round(ms/1000); if(s<60) return s+'s'; var m=Math.round(s/60); if(m<60) return m+'m';
@@ -797,32 +810,42 @@
       return d.toDateString()===n.toDateString()?hm:(MON[d.getMonth()]+' '+d.getDate()+' '+hm); }
     function fmtHM(t){ var d=new Date(t); return p2(d.getHours())+':'+p2(d.getMinutes()); }
     function ago(ms){ return ms>=0?fmtDur(ms)+' ago':'in '+fmtDur(-ms); }
-    var CAP={running:'Running',blocked:'Blocked',idle:'Idle',done:'Done',failed:'Failed',stale:'Stale',gone:'Gone'};
+    var CAP={running:'Running',blocked:'Blocked',idle:'Idle',done:'Done',failed:'Failed',stale:'Stale',gone:'Gone',none:'No current line'};
     // the glyph's hover text: ACTUAL times (never inline) — started, running for, last activity, stale-at; or done/failed at + took
-    function statusTip(item,parent,now,staleMin,host){
-      item=item||{}; var e=effState(item,parent,now,staleMin), L=[];
+    function statusTip(item,owner,now,staleMin,host){
+      item=item||{}; var e=effState(item,owner,now,staleMin), L=[], ctx=isCtx(item);
       var start=item.started_at!=null?item.started_at:item.created_at;
       var fin=item.finished_at||(item.current&&(item.state==='done'||item.state==='failed')?item.current.ts:null);
-      if(e.gone){
-        L.push(e.hostDown?('Host '+(host||'?')+' is down or unreachable — its agents show as gone'):'Gone — the session left the mesh');
+      if(e.noLine) L.push('A context with no current line of its own (it groups what is under it)');
+      else if(e.gone){
+        L.push(e.hostDown?('Host '+(host||'?')+' is down or unreachable — its agents show as gone'):(ctx?'Gone — its agent left':'Gone — the session left the mesh'));
         L.push('was '+e.was+(item.gone_at?(e.hostDown?' · down since ':' · left at ')+fmtClock(item.gone_at,now):''));
       } else if(e.state==='done'||e.state==='failed'){
-        L.push(CAP[e.state]+(fin?' at '+fmtClock(fin,now):'')+(fin&&start?' · took '+fmtDur(fin-start):''));
+        L.push(CAP[e.state]+(!ctx&&fin?' at '+fmtClock(fin,now):'')+(!ctx&&fin&&start?' · took '+fmtDur(fin-start):''));
       } else L.push(e.stale?('Stale — was '+e.was):CAP[e.state]);
-      if(start) L.push('started '+fmtClock(start,now)+(!e.gone&&e.state!=='done'&&e.state!=='failed'?' · running for '+fmtDur(now-start):''));
+      if(start) L.push((ctx?'created ':'started ')+fmtClock(start,now)+(!ctx&&!e.gone&&e.state!=='done'&&e.state!=='failed'?' · running for '+fmtDur(now-start):''));
       if(item.last_activity) L.push('last activity '+fmtClock(item.last_activity,now)+' ('+ago(now-item.last_activity)+')');
-      if(e.staleAt!=null) L.push((e.stale?'stale since ':'stale at ')+fmtClock(e.staleAt,now)+' ('+ago(now-e.staleAt)+')'+(item.stale_after_ms>0?' · its own stale_after '+fmtDur(item.stale_after_ms):''));
+      if(e.staleAt!=null) L.push((e.stale?'stale since ':'stale at ')+fmtClock(e.staleAt,now)+' ('+ago(now-e.staleAt)+')'+(!ctx&&item.stale_after_ms>0?' · its own stale_after '+fmtDur(item.stale_after_ms):''));
+      if(ctx) L.push('staleness follows '+(owner&&owner.path?('agent '+owner.path):'the session')+' (a context never goes stale by itself)');
+      if(item.implicit&&!ctx) L.push('not reported yet — named by a path below it, so it never goes stale');
       return L.join('\n');
     }
     function etaTip(eta,now){ return !(eta>0)?'':(eta>now?'ETA '+fmtEta(eta-now)+' (estimated), about '+fmtHM(eta):'ETA due now (estimated) — was about '+fmtHM(eta)); }
     function barText(p){ return p.unit==='%'?fmtNum(p.done)+'%':fmtNum(p.done)+' of '+fmtNum(p.total)+(p.unit?' '+p.unit:''); }
-    function barTip(p){ if(!p) return ''; return barText(p)+' ('+Math.floor(pct(p)+1e-9)+'%) — '+(p.rollup?'rollup of its '+p.n+' context'+(p.n===1?'':'s'):'reported'); }
-    // 16px status glyph: centre = state (dot running/blocked/idle, tick done, cross failed); a LIVE item's ring empties as
-    // the time left before stale runs out (data-sa / data-win let the page tick it without a re-render)
+    function barTip(p){ if(!p) return ''; return barText(p)+' ('+Math.floor(pct(p)+1e-9)+'%) — '+(p.rollup?'rollup of '+p.n+' below it':'reported'); }
+    // 16px status glyph. AGENTS: centre = state (dot running/blocked/idle, tick done, cross failed); a LIVE item's ring empties
+    // as the time left before stale runs out (data-sa / data-win tick it without a re-render). CONTEXTS (kind 'ctx', 6a): no
+    // ring (they have no staleness of their own) — a smaller state mark; 'none' = no status line of its own.
     function glyphSvg(e,now,kind){
-      var st=kind==='none'?'none':e.state, h='<svg class="gl s-'+st+'" viewBox="0 0 16 16" aria-hidden="true">';
+      var st=kind==='none'||(e&&e.noLine)?'none':e.state, ctx=kind==='ctx', h='<svg class="gl'+(ctx?' ctx':'')+' s-'+st+'" viewBox="0 0 16 16" aria-hidden="true">';
       var track='<circle cx="8" cy="8" r="6.5" fill="none" stroke="var(--track)" stroke-width="2"/>';
       if(st==='none') return h+'<circle cx="8" cy="8" r="3" fill="none" stroke="var(--faint)" stroke-width="1.5"/></svg>';
+      if(ctx){
+        if(st==='done') return h+'<path d="M4.4 8.3 L7 10.9 L11.8 5.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        if(st==='failed') return h+'<path d="M5.2 5.2 L10.8 10.8 M10.8 5.2 L5.2 10.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+        if(st==='gone') return h+'<circle cx="8" cy="8" r="3.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="1.8 1.8"/></svg>';
+        return h+'<rect x="4.5" y="4.5" width="7" height="7" rx="2" fill="currentColor"/></svg>';
+      }
       if(st==='done') return h+'<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-opacity=".35" stroke-width="2"/><path d="M4.9 8.2 L7.1 10.4 L11.2 5.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
       if(st==='failed') return h+'<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-opacity=".35" stroke-width="2"/><path d="M5.6 5.6 L10.4 10.4 M10.4 5.6 L5.6 10.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
       if(st==='gone') return h+'<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.2 2.2"/><circle cx="8" cy="8" r="2.6" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
@@ -852,29 +875,54 @@
     }
     var LEVELS=['all','sessions','collapsed'];
     function nextLevel(l){ var i=LEVELS.indexOf(l); return LEVELS[(i<0?0:i+1)%LEVELS.length]; }
-    function isActiveAgent(a){ return !!a&&!a.finished_at&&a.state!=='gone'; }
+    function isActiveAgent(a){ return !!a&&a.nkind==='agent'&&!a.finished_at&&a.state!=='gone'; }
     function selfActive(s){ return !!(s&&s.current&&!s.finished_at&&s.state!=='gone'); }
-    function pathKey(p){ return String(p==null?'':p).toLowerCase().replace(/\//g,'\u0001'); }
-    // projects (A→Z) → sessions (A→Z: a live tree must not reshuffle under the pointer) → agents (path order; a/b nests under a)
+    // projects (A→Z) → sessions (A→Z: a live tree must not reshuffle under the pointer) → the NODE TREE of each session (6a):
+    // nodes linked by parent_key within their host (a session on several hosts shows each host's nodes, tagged); children
+    // in CREATION order (stable; plans in 6b keep their given order), then key. A node whose parent has not arrived yet sits
+    // at the top level. Each tree node: { u, kids, owner } — owner = the nearest agent above (or the host's session self).
+    // activeOnly hides finished / gone agents with everything under them, and sessions with nothing active left.
     function buildTree(units,opts){
       opts=opts||{}; var byKey={}, groups=[], projs={}, order=[];
-      Object.keys(units||{}).forEach(function(id){ var u=units[id]; if(u&&u.kind==='session'){ var g={s:u,agents:[]}; byKey[u.key]=g; groups.push(g); } });
-      Object.keys(units||{}).forEach(function(id){ var u=units[id]; if(u&&u.kind==='agent'&&byKey[u.group]) byKey[u.group].agents.push(u); });
+      Object.keys(units||{}).forEach(function(id){ var u=units[id]; if(u&&u.kind==='session'){ var g={s:u,nodes:[]}; byKey[u.key]=g; groups.push(g); } });
+      Object.keys(units||{}).forEach(function(id){ var u=units[id]; if(u&&u.kind==='node'&&byKey[u.group]) byKey[u.group].nodes.push(u); });
       groups.forEach(function(g){
-        g.agents.sort(function(a,b){ var x=pathKey(a.agent), y=pathKey(b.agent); if(x!==y) return x<y?-1:1; var hx=String(a.host).toLowerCase(), hy=String(b.host).toLowerCase(); return hx<hy?-1:hx>hy?1:0; });
-        var have={}; g.agents.forEach(function(a){ have[String(a.agent).toLowerCase()]=1; });
-        var list=g.agents.map(function(a){ var segs=String(a.agent).split('/'), d=0, pre=''; for(var i=1;i<segs.length;i++) if(have[segs.slice(0,i).join('/').toLowerCase()]){ d++; pre=segs.slice(0,i).join('/')+'/'; } return {a:a,depth:d,pre:pre}; });
-        var nActive=g.agents.filter(isActiveAgent).length;
-        if(opts.activeOnly){ list=list.filter(function(x){ return isActiveAgent(x.a); }); if(!list.length&&!(g.s.selves||[g.s.self]).some(selfActive)) return; }
+        var selfOf=function(h){ var ss=g.s.selves||[g.s.self]; for(var i=0;i<ss.length;i++) if(ss[i]&&String(ss[i].host).toLowerCase()===String(h).toLowerCase()) return ss[i]; return g.s.self||null; };
+        var hk=function(h,k){ return String(h).toLowerCase()+'\u0001'+k; }, tn={};
+        g.nodes.forEach(function(u){ tn[hk(u.host,u.key)]={u:u,kids:[],owner:null}; });
+        var top=[];
+        g.nodes.forEach(function(u){ var t=tn[hk(u.host,u.key)], par=u.parent_key?tn[hk(u.host,u.parent_key)]:null; if(par) par.kids.push(t); else top.push(t); });
+        var cmpN=function(a,b){ var x=a.u.created_at||0, y=b.u.created_at||0; if(x!==y) return x-y; var p=String(a.u.key), q=String(b.u.key); if(p!==q) return p<q?-1:1; var h1=String(a.u.host).toLowerCase(), h2=String(b.u.host).toLowerCase(); return h1<h2?-1:h1>h2?1:0; };
+        var nActive=0;
+        var walk=function(list,owner,hostSelf){ list.sort(cmpN); var out=[]; list.forEach(function(t){
+          var ow=owner||selfOf(t.u.host);
+          if(opts.activeOnly&&t.u.nkind==='agent'&&!isActiveAgent(t.u)) return;
+          if(isActiveAgent(t.u)&&!t.u.implicit) nActive++;
+          t.owner=ow;
+          t.kids=walk(t.kids,t.u.nkind==='agent'?t.u:ow);
+          out.push(t); }); return out; };
+        var kids=walk(top,null);
+        if(opts.activeOnly&&!kids.length&&!(g.s.selves||[g.s.self]).some(selfActive)) return;
+        var nAll=0; (function cnt(l){ l.forEach(function(t){ if(isActiveAgent(t.u)&&!t.u.implicit) nAll++; cnt(t.kids); }); })(kids);
         var pk=String(g.s.project||'').toLowerCase();
         if(!projs[pk]){ projs[pk]={key:pk,name:g.s.project,sessions:[],nSessions:0,nActive:0}; order.push(pk); }
-        projs[pk].sessions.push({s:g.s,agents:list,nActive:nActive}); projs[pk].nSessions++; projs[pk].nActive+=nActive;
+        projs[pk].sessions.push({s:g.s,kids:kids,nActive:nAll}); projs[pk].nSessions++; projs[pk].nActive+=nAll;
       });
       order.sort(function(a,b){ return a<b?-1:a>b?1:0; });
       return order.map(function(k){ var p=projs[k]; p.sessions.sort(function(x,y){ var a=String(x.s.session).toLowerCase(), b=String(y.s.session).toLowerCase(); return a<b?-1:a>b?1:0; }); return p; });
     }
+    // a log entry's tag, relative to the node whose Log is open: '@~root' / '@root' for the node itself, else its relative
+    // path with '@~' on a current line's last context segment ('@Tharsis/@~z12'; an agent's own line: 'research/@~root')
+    function entryTag(x){ var r=x&&x.rel!=null?String(x.rel):'', cur=!!(x&&x.current);
+      if(!r) return cur?'@~root':'@root';
+      if(!cur) return r;
+      var i=r.lastIndexOf('/'), last=r.slice(i+1);
+      return last.charAt(0)==='@'?r.slice(0,i+1)+'@~'+last.slice(1):r+'/@~root'; }
+    // the subtree's local log count (null when any of it lives on another host — fetched on demand)
+    function subtreeCount(t){ var n=0, remote=false; (function w(x){ var lg=x.u.log||{}; if(lg.remote) remote=true; else n+=lg.entries||0; x.kids.forEach(w); })(t); return remote?null:n; }
     return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg,
-      applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, fmtDur:fmtDur, fmtClock:fmtClock, pct:pct };
+      applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, entryTag:entryTag, subtreeCount:subtreeCount, barOf:barOf,
+      fmtDur:fmtDur, fmtClock:fmtClock, pct:pct };
   })();
   window.AimbAct=AimbAct;
 
@@ -941,7 +989,7 @@
     var tree=document.getElementById('acttree'); if(!tree) return;
     var tag=document.getElementById('acttag'), now=anow(), sm=actStaleMin(), rows=[];
     ACT.tips={ hd:'Host down: its gateway sent a going-down notice or its link dropped — every agent on that host shows as gone until it returns (unlike gone: a session that left)' }; ACT.acts={};
-    function row(id,cls,d,html,act,tip){ var k=kOf(id); rows.push({k:k,cls:cls,d:d,html:html}); if(act) ACT.acts[k]=act; }
+    function row(id,cls,d,html,act){ var k=kOf(id); rows.push({k:k,cls:cls,d:d,html:html}); if(act) ACT.acts[k]=act; }
     function tipK(id,f){ var k='t'+kOf(id); ACT.tips[k]=f; return k; }
     var head=ACT.st.head||{};
     if(!ACT.on&&!ACT.st.units){ tree.innerHTML='<div class="act-msg">'+(sock&&sock.readyState===1?'Open this section to watch the activity board.':'Not connected to the bridge.')+'</div>'; if(tag) tag.textContent=''; return; }
@@ -950,16 +998,16 @@
     var projs=AimbAct.buildTree(ACT.st.units,{activeOnly:ACT.activeOnly}), nAct=0;
     projs.forEach(function(p){ nAct+=p.nActive; });
     if(tag) tag.textContent=projs.length+(projs.length===1?' project':' projects')+' · '+nAct+' active agent'+(nAct===1?'':'s')+(head.loading?' · loading':'');
-    // ---- an entity's expansion: its Log row (all contexts), then each context (expands into its own log)
+    // ---- a node's Log row: the MERGED log of its subtree (6a), newest first; each entry tagged with its path relative to it
     function logRows(key,q,d,label,lbTip){
       var open=!!ACT.open[key], L=ACT.logs[key];
       row(key,'ar click lg',d,'<span class="chv">'+(open?'▾':'▸')+'</span><span class="tgt">≡</span><span class="nm">Log</span><span class="ln" data-tip="'+tipK(key,lbTip)+'">'+esc(label)+'</span>',
         function(){ ACT.open[key]=!open; if(!open){ delete ACT.logs[key]; actLoadLog(key,q,false); } actRender(); });   // each open fetches a fresh first page
       if(!open) return;
       if(L) L.entries.forEach(function(x){
-        var ek=key+'|e|'+x.id, can=!!(x.has_details||x.has_data), eo=can&&!!ACT.open[ek], cx=String(x.context||'root');
+        var ek=key+'|e|'+x.id, can=!!(x.has_details||x.has_data), eo=can&&!!ACT.open[ek];
         row(ek,'ar le'+(can?' click':''),d+1,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span><span class="dot bg-'+esc(x.state||'running')+'" data-tip="'+tipK(ek+'s',(x.state||'running')+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"></span>'+
-          '<span class="ctag'+(x.current?' cur':'')+'">@'+(x.current?'~':'')+esc(cx)+'</span><span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(can?'<span class="ic" data-tip="'+tipK(ek+'i','has '+(x.has_details?'details':'')+(x.has_details&&x.has_data?' + ':'')+(x.has_data?'data':''))+'">⋯</span>':''),
+          '<span class="ctag'+(x.current?' cur':'')+'" title="'+esc(x.path!=null?(x.path||'(the session)'):'').replace(/"/g,'&quot;')+'">'+esc(AimbAct.entryTag(x))+'</span><span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(can?'<span class="ic" data-tip="'+tipK(ek+'i','has '+(x.has_details?'details':'')+(x.has_details&&x.has_data?' + ':'')+(x.has_data?'data':''))+'">⋯</span>':''),
           can?function(){ ACT.open[ek]=!eo; if(!eo) actLoadEntry(x.id,q.host); actRender(); }:null);
         if(eo){ var E=ACT.ents[x.id]||{}, inner='';
           if(E.entry){ if(E.entry.details) inner+='<div class="k">details</div><pre>'+esc(E.entry.details)+'</pre>'; if(E.entry.data!=null) inner+='<div class="k">data</div><pre>'+esc(JSON.stringify(E.entry.data,null,2))+'</pre>'; if(!inner) inner='<span class="empty">no details or data</span>'; if(E.entry.note) inner+='<div class="k">'+esc(E.entry.note)+'</div>'; }
@@ -973,52 +1021,57 @@
       else if(L&&L.next) row(mk,'ar more click',d+1,'<span class="chv"></span><span class="nm">load older…</span>',function(){ actLoadLog(key,q,true); });
       else if(L&&L.loaded&&!L.entries.length) row(mk,'ar more',d+1,'<span class="chv"></span><span class="nm">no entries</span>');
     }
-    function entityBody(ent,s,ek,d,hostLbl){
-      var q={session:s.session,project:s.project,user:s.user||null,host:ent.host,agent:ent.agent||null};
-      var n=ent.log&&ent.log.entries!=null?ent.log.entries:null;
-      logRows('log|'+ek,q,d,(n!=null?n+' entr'+(n===1?'y':'ies')+', all contexts':'all contexts')+(hostLbl?' · '+ent.host:''),
-        n!=null?('in memory on '+ent.host+(ent.log.dropped?' (+'+ent.log.dropped+' older, paged from the day files)':'; older entries page in from the day files')):('history lives on '+ent.host+' — fetched on demand'));
-      (ent.contexts||[]).forEach(function(c){
-        if(c.name==='root') return;
-        var ck='ctx|'+ek+'|'+c.name, co=!!ACT.open[ck], ce=AimbAct.effState(c,ent,now,sm);
-        row(ck,'ar click'+(ce.stale?' stale':'')+(ce.gone?' gone':''),d,'<span class="chv">'+(co?'▾':'▸')+'</span><span class="tgt" title="context">◎</span>'+
-          '<span data-tip="'+tipK(ck+'g',function(){ return AimbAct.statusTip(c,ent,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.glyphSvg(ce,now)+'</span><span class="nm">@'+esc(c.name)+'</span>'+
-          (c.current?'<span class="ln">'+esc(AimbAct.renderText(c.current.text,c.progress,c.eta_at,now))+'</span>':'<span class="ln none">no current line</span>')+
-          barHtml(c.progress,tipK(ck+'b',AimbAct.barTip(c.progress)))+(c.eta_at?'<span class="ic" data-tip="'+tipK(ck+'e',function(){ return AimbAct.etaTip(c.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+'<span class="ic nil"></span>'+pillsHtml(ce,false,false),
-          function(){ ACT.open[ck]=!co; actRender(); });
-        if(co) logRows('clog|'+ek+'|'+c.name,{session:q.session,project:q.project,user:q.user,host:q.host,agent:q.agent,context:'@"'+c.name+'"'},d+1,'@'+c.name+' only',
-          'this context\'s entries, newest first');
-      });
-    }
-    function entityRow(id,cls,d,ent,nameHtml,tagsHtml,parentDown,bell,isSelf){
-      var e=AimbAct.effState(ent,null,now,sm), noLine=isSelf&&!ent.current;
-      var line=ent.current?'<span class="ln">'+esc(AimbAct.renderText(ent.current.text,ent.progress,ent.eta_at,now))+'</span>':'<span class="ln none">'+(isSelf?'no status line of its own':'no current line')+'</span>';
+    function logLabel(n,host,hostLbl,what){ return (n!=null?n+' entr'+(n===1?'y':'ies')+', '+what:what)+(hostLbl?' · '+host:''); }
+    function logTip(n,host){ return n!=null?('in memory on '+host+'; older entries page in from the day files'):('history lives on '+host+' — fetched on demand'); }
+    // ---- a session row: its own line (the root node); open → its Log (the whole session's merged log, per host)
+    function sessionRow(id,cls,d,ent,nameHtml,tagsHtml,parentDown,bell){
+      var e=AimbAct.effState(ent,null,now,sm), noLine=!ent.current;
+      var line=ent.current?'<span class="ln">'+esc(AimbAct.renderText(ent.current.text,AimbAct.barOf(ent),ent.eta_at,now))+'</span>':'<span class="ln none">no status line of its own</span>';
       var open=!!ACT.open[id];
       row(id,cls+(e.stale&&!noLine?' stale':'')+(e.gone?' gone':''),d,'<span class="chv">'+(open?'▾':'▸')+'</span>'+
         '<span data-tip="'+tipK(id+'g',function(){ return noLine&&!e.gone?'No status line of its own (report @~root to set one)':AimbAct.statusTip(ent,null,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':null)+'</span>'+
-        nameHtml+tagsHtml+line+barHtml(ent.progress,tipK(id+'b',AimbAct.barTip(ent.progress)))+
+        nameHtml+tagsHtml+line+barHtml(AimbAct.barOf(ent),tipK(id+'b',AimbAct.barTip(AimbAct.barOf(ent))))+
         (ent.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(ent.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+
         (bell?'<span class="ic" data-tip="'+tipK(id+'d','Doorbell armed')+'">🔔</span>':'<span class="ic nil"></span>')+pillsHtml(e,noLine,parentDown),
         function(){ ACT.open[id]=!open; actRender(); });
       return open;
     }
+    // ---- a NODE row (6a, any depth): an agent keeps the status ring; a context shows its state mark, line, bar, ETA. Open →
+    // its Log (the subtree merged) then its children, one level deeper
+    function nodeRows(t,s,d,multi){
+      var u=t.u, ctx=u.nkind==='context', id=u.id, e=AimbAct.effState(u,t.owner,now,sm), open=!!ACT.open[id];
+      var noLine=ctx?e.noLine:!!u.implicit&&!u.current, bar=AimbAct.barOf(u);
+      var nm=ctx?'<span class="nm ctx" title="'+esc(u.path).replace(/"/g,'&quot;')+'">@'+esc(u.name)+'</span>':'<span class="nm path" title="'+esc(u.path).replace(/"/g,'&quot;')+'">'+esc(u.name)+'</span>';
+      var line=u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+'</span>':'<span class="ln none">'+(ctx?'no current line':u.implicit?'not reported yet':'no current line')+'</span>';
+      var glyph=AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':ctx?'ctx':null);
+      row(id,'ar click'+(ctx?' cx':'')+(e.stale?' stale':'')+(e.gone?' gone':''),d,'<span class="chv">'+(open?'▾':'▸')+'</span>'+
+        '<span data-tip="'+tipK(id+'g',function(){ return AimbAct.statusTip(u,t.owner,anow(),actStaleMin(),u.host); })+'">'+glyph+'</span>'+
+        nm+(multi?hostTags([u.host],u.host_down?[u.host]:[]):'')+line+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
+        (u.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(u.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+'<span class="ic nil"></span>'+pillsHtml(e,noLine,false),
+        function(){ ACT.open[id]=!open; actRender(); });
+      if(!open) return;
+      var n=AimbAct.subtreeCount(t);
+      logRows('log|'+id,{session:s.session,project:s.project,user:s.user||null,host:u.host,path:u.path},d+1,logLabel(n,u.host,false,t.kids.length?'this node and below':'this node'),logTip(n,u.host));
+      t.kids.forEach(function(c){ nodeRows(c,s,d+1,multi); });
+    }
     if(!projs.length) rows.push({k:'empty',cls:'act-msg',d:0,html:ACT.activeOnly?'Nothing active right now (untick “active only” to see finished agents).':'No agent activity on the mesh yet — sessions report with the log tool or tools/aimb-log.mjs.'});
     projs.forEach(function(p){
       var pk='proj|'+p.key, lvl=ACT.levels[p.key]||ACT.defLevel;
-      row(pk,'ar click proj',0,'<span class="chv">'+(lvl==='all'?'▾':lvl==='sessions'?'▿':'▸')+'</span><span class="nm" data-tip="'+tipK(pk,'Click: all → sessions only → collapsed (now: '+(lvl==='all'?'all':lvl==='sessions'?'sessions only':'collapsed')+')')+'">📁 '+esc(pj(p.name)||'(no project)')+'</span>'+
+      row(pk,'ar click proj',0,'<span class="chv">'+(lvl==='all'?'▾':lvl==='sessions'?'▿':'▸')+'</span><span class="nm" data-tip="'+tipK(pk,'Click: sessions + their top-level nodes → sessions only → collapsed (now: '+(lvl==='all'?'top-level nodes':lvl==='sessions'?'sessions only':'collapsed')+')')+'">📁 '+esc(pj(p.name)||'(no project)')+'</span>'+
         '<span class="cnt">'+p.nSessions+' session'+(p.nSessions===1?'':'s')+' · '+p.nActive+' active agent'+(p.nActive===1?'':'s')+'</span>',
         function(){ ACT.levels[p.key]=AimbAct.nextLevel(lvl); actRender(); });
       if(lvl==='collapsed') return;
       p.sessions.forEach(function(x){
         var s=x.s, sid='sess|'+s.key, hosts=s.hosts||(s.host?[s.host]:[]);
-        var self=s.self||{}, sOpen=entityRow(sid,'ar click',1,self,'<span class="nm">'+esc(nm(s.session))+'</span>',hostTags(hosts,s.hosts_down),!!(s.hosts_down&&s.hosts_down.length),!!s.bell,true);
-        if(sOpen) (s.selves||[self]).forEach(function(se){ entityBody(se,s,'self|'+s.key+'|'+se.host,2,!!s.multi_host); });
-        if(lvl!=='all') return;
-        x.agents.forEach(function(y){
-          var a=y.a, d=2+y.depth, path=String(a.agent), rest=y.pre?path.slice(y.pre.length):path;
-          var aOpen=entityRow(a.id,'ar click',d,a,'<span class="nm path" title="'+esc(path).replace(/"/g,'&quot;')+'">'+(y.pre?'<span class="pre">'+esc(y.pre)+'</span>':'')+esc(rest)+'</span>',s.multi_host?hostTags([a.host],a.host_down?[a.host]:[]):'',false,false,false);
-          if(aOpen) entityBody(a,s,a.id,d+1,false);
+        var self=s.self||{}, sOpen=sessionRow(sid,'ar click',1,self,'<span class="nm">'+esc(nm(s.session))+'</span>',hostTags(hosts,s.hosts_down),!!(s.hosts_down&&s.hosts_down.length),!!s.bell);
+        if(sOpen) (s.selves||[self]).forEach(function(se){
+          var lk='log|self|'+s.key+'|'+se.host;
+          var cnt=null, remote=!!(se.log&&se.log.remote);
+          if(!remote){ cnt=(se.log&&se.log.entries)||0; x.kids.forEach(function(t){ if(String(t.u.host).toLowerCase()===String(se.host).toLowerCase()){ var c=AimbAct.subtreeCount(t); if(c==null) remote=true; else cnt+=c; } }); }
+          logRows(lk,{session:s.session,project:s.project,user:s.user||null,host:se.host},2,logLabel(remote?null:cnt,se.host,!!s.multi_host,'the whole session'),logTip(remote?null:cnt,se.host));
         });
+        if(lvl!=='all') return;
+        x.kids.forEach(function(t){ nodeRows(t,s,2,!!s.multi_host); });
       });
     });
     actReconcile(tree,rows);
@@ -1047,6 +1100,7 @@
       rs[i].setAttribute('stroke-dasharray',(C*f).toFixed(2)+' '+C.toFixed(2)); }
   }
   function actStaleLabel(){ var v=document.getElementById('actStaleV'); if(v) v.textContent=actStaleMin()+'m'+(ACT.staleMin==null?' (bridge default)':''); }
+  function allNodeIds(projs){ var out=[]; projs.forEach(function(p){ p.sessions.forEach(function(x){ (function w(l){ l.forEach(function(t){ out.push(t.u.id); w(t.kids); }); })(x.kids); }); }); return out; }
   function wireActivity(){
     var tree=document.getElementById('acttree'); if(!tree) return;
     tree.addEventListener('click',function(ev){ var el=ev.target&&ev.target.closest?ev.target.closest('[data-k]'):null; var f=el&&ACT.acts[el.getAttribute('data-k')]; if(f){ ev.preventDefault(); f(); } });
@@ -1061,12 +1115,14 @@
     for(var i=0;i<segs.length;i++) segs[i].addEventListener('click',function(ev){ var l=ev.currentTarget.getAttribute('data-l'); ACT.defLevel=l; Object.keys(ACT.levels).forEach(function(k){ ACT.levels[k]=l; });
       AimbAct.buildTree(ACT.st.units||{},{}).forEach(function(p){ ACT.levels[p.key]=l; }); actRender(); });
     var ex=document.getElementById('actExpand'), co=document.getElementById('actCollapse');
-    if(ex) ex.addEventListener('click',function(){ AimbAct.buildTree(ACT.st.units||{},{activeOnly:ACT.activeOnly}).forEach(function(p){ ACT.levels[p.key]='all'; p.sessions.forEach(function(x){ ACT.open['sess|'+x.s.key]=true; x.agents.forEach(function(y){ ACT.open[y.a.id]=true; }); }); }); ACT.defLevel='all'; actRender(); });
+    if(ex) ex.addEventListener('click',function(){ var projs=AimbAct.buildTree(ACT.st.units||{},{activeOnly:ACT.activeOnly}); projs.forEach(function(p){ ACT.levels[p.key]='all'; p.sessions.forEach(function(x){ ACT.open['sess|'+x.s.key]=true; }); });
+      allNodeIds(projs).forEach(function(id){ ACT.open[id]=true; }); ACT.defLevel='all'; actRender(); });   // every session and every node, at any depth (logs stay closed)
     if(co) co.addEventListener('click',function(){ ACT.open={}; actRender(); });
     var lg=document.getElementById('actlegend');
     if(lg){ var t=Date.now(), mk=function(st,label){ var e=st==='running'||st==='blocked'?{state:st,live:true,staleAt:t+6*60000,win:10*60000}:{state:st,live:false,gone:st==='gone'}; return '<span>'+AimbAct.glyphSvg(e,t)+label+'</span>'; };
       lg.innerHTML=mk('running','running')+mk('blocked','blocked')+mk('idle','idle')+mk('done','done')+mk('failed','failed')+mk('stale','stale')+mk('gone','gone')+
-        '<span>· the ring is the time left before an item goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of its contexts · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'; }
+        '<span>'+AimbAct.glyphSvg({state:'running'},t,'ctx')+'context (no ring: it follows its agent\'s staleness)</span>'+
+        '<span>· the ring is the time left before an agent goes stale · hover the icons for the actual times · ⌛ ETA (estimated) · 🔔 doorbell armed · striped bar = rollup of what is below it · <span class="pill hostdown">host down</span> = its host went away (not the session)</span>'; }
     document.addEventListener('visibilitychange',actSync);
   }
 

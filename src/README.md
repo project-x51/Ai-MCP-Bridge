@@ -59,7 +59,8 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
     `tools/aimb-doorbell-clock.mjs`, which must sit beside it.
   - `tools/aimb-log.mjs` — **the activity reporter (#70 step 3)**: a node CLI that reports an agent's or a script's
     status to this host's activity board without registering (one report, or `--stream` NDJSON). It imports
-    `lib/activity.js` to validate locally, so it runs from inside the bridge's `src/`. See "Log / activity" below.
+    `lib/activity.js` to validate locally, so it runs from inside the bridge's `src/`. v1.62.0: `--path` (the node
+    tree) and `--batch <file|->`. See "Log / activity" below.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -183,7 +184,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 • `set_behavior {behavior, operation?, scope, match?, as?, secret?}` • `list_behaviors {as?, secret?}` • `clear_behavior {operation?, scope?, match?, as?, secret?}` (#29/#32/#44 per-operation behaviour reminders)
 • `allow_project {project, mode?, as?, secret?}` • `revoke_project {project, as?, secret?}` • `request_project_access {to, reason?, as?, secret?}`
 • `http_request {backend, method?, path?, query?, headers?, body?, json?, as?, secret?}` (#33/#36 egress — present only when a backend is configured)
-• `log {as, secret, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?}` • `activity {project?, session?, agent?, host?, active_only?, log?, entry?}` (#70 the mesh-wide activity board — see "Log / activity")
+• `log {as, secret, path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?, items?}` • `activity {project?, session?, path?, agent?, host?, active_only?, log?, entry?}` (#70 the mesh-wide activity board — see "Log / activity")
 • `set_wake {…}` (reserved — unsupported).
 
 **Feature detection (#41):** `profile.names` says which facet the operator CONFIGURED; `capabilities` says
@@ -455,27 +456,99 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
-remote history (step 4, "Mesh-wide" below), and the dashboard's **Activity** tree (step 5, "The Activity page" below). The
-agent snippet (step 6) follows.
+remote history (step 4, "Mesh-wide" below), the dashboard's **Activity** tree (step 5, "The Activity page" below), and
+the **unified node tree + batch logging** (step 6a, v1.62.0, "The node tree" below). Todos / plans (6b) and the agent
+snippet (6c) follow.
 
-**Reporting — `log {as, secret, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?}`.**
-You report as a registered session (`as` + `secret`). Omit `agent` for the session itself; `agent:"spec-70/research"`
-(≤3 levels) reports for one of your agents — agents never register. The identity is **realm + project + user + session
-name + host** (v1.60.0; + the agent path): each host only ever writes its own entities, so the same session or agent name
+### The node tree (v1.62.0, step 6a)
+A session holds ONE TREE of **nodes**. The session itself is the root. Every other node is one of two kinds:
+- an **agent** (an actor) — it starts with its first message, **finishes** when its own current line is set done/failed
+  (a later running/blocked/idle line revives it), can go **stale** or **gone**, and takes `stale_after`;
+- a **context** (a piece of work) — a current line, progress and an ETA. It never goes stale by itself.
+
+Any node may contain either kind, so agents can be grouped under the task they serve and contexts can nest.
+
+**Paths.** One `/`-separated path; a segment starting with `@` is a context, anything else an agent:
+
+| Path | Means |
+|---|---|
+| `spec-70` | an agent |
+| `spec-70/research` | a sub-agent |
+| `spec-70/@Tharsis` | a context of that agent |
+| `spec-70/@Tharsis/@z12` | a nested context |
+| `@#70/spec-70` | agent spec-70 grouped under the session's context #70 |
+| `@#70/@step4/spec-70` | an agent under a nested task context |
+
+- `@~` on the **last** segment sets that node's current line: `spec-70/@~Tharsis`. `@root` / `@~root` as the last
+  segment means the node itself: `spec-70/@~root` is the agent's own headline, a bare `@~root` the session's.
+- Quote a context name with spaces: `@"CTX strip 17"` (in the `path` field an unquoted name may contain spaces too;
+  the canonical spelling quotes it). An agent segment is letters/digits/`_` then `. : # + -` (≤48 chars); a context
+  name ≤60 chars without `"`, `/` or control characters; `root` is reserved. Matching is case-insensitive; the first
+  spelling seen is kept.
+- Intermediate nodes a path names are created **implicitly** (`implicit:true`, no line of their own); a node stops being
+  implicit once a message targets it or is owned by it. An implicit agent never goes stale.
+- **The old notation is a special case:** `agent` (agent segments only) + `path` + ONE trailing context — the `context`
+  param (`"@~Ctx"`, markers optional, the text then literal) or else a leading `@…` prefix in the text, which may itself
+  be a relative path (`"@Tharsis/@~z12 seeding"`). Precedence: `context` beats a text prefix; `agent` then `path`
+  concatenate. So `agent:"a/b"` + text `"@~Ctx …"` = `a/b/@~Ctx`, and no address + `"@~root …"` = the session's headline.
+
+**Activity and staleness.** A message's **owner** is the nearest agent at or above its target (the session when there is
+none). A message refreshes `last_activity` (and sets `stale_after`) on its target and every node up to its owner — a
+context's message keeps its agent fresh; a sub-agent does not refresh its parent agent. **Staleness belongs to agents**
+(and the session). A context shows the staleness / gone of its **nearest agent ancestor**, and only while it has a live
+current line of its own (a context with no line — a grouping node — shows no state). A context directly under the
+session follows the **session's own** reports (any message whose owner is the session, at any depth that doesn't cross an
+agent) — exactly as the session row always has.
+
+**Rollup** recurses through any depth: a node's bar is its reported progress, else the sum of its children's bars when
+they share a unit, else the mean % of its children that have a bar (6b adds "N of M todos done").
+
+**Logs.** Every node keeps its **own** bounded log (`log_entries_per_agent` per node). A node's **Log** is the merged log
+of its whole **subtree**, newest first (`own:true` for the node's own entries); each entry carries its `path` and `rel`
+(relative to the node). Paging works for any node, local and remote: the merged memory is complete down to the
+subtree's **floor** (the newest entry any of its nodes holds only in the files), then the pages continue into the day
+files.
+
+**Limits** (locked): depth ≤ **6** segments; per session **128 agents** and **4096 nodes** of either kind (the root not
+counted); text 240, context name 60, `details` 4 KB, `data` 16 KB (unchanged). A message that needs room **evicts the
+oldest finished agent with its whole subtree** (never an ancestor of its own target; reported in `evicted`) and is
+refused (`too-many-agents` / `too-many-nodes`) only when that can't make room — or when it is `log:false`.
+
+**Batch.** `log {…, items:[{ path?, agent?, text, context?, state?, progress?, eta?, stale_after?, details?, data?, log?,
+ref? }, …]}` logs several messages in **one call**, applied **in order**: `{ok:true, results:[one per item, its ref
+echoed], applied, failed}` — a bad item fails alone. Bounds: ≤ **64 items** and ≤ **64 KB** of items JSON; over either,
+the whole call is refused (`too-many-items` / `batch-too-large`; `bad-batch` for an empty / non-array batch or another
+message field beside `items`). Beside `items`, `log` is a default for every item and `path` / `agent` / `context` are
+**address defaults** for the items that name no `path` / `agent` of their own (an item with only a `context` keeps the
+default path / agent). A follower forwards a batch to its gateway in ONE `ACTIVITY` frame; the `logger` WS accepts
+`{type:"log", ref, input:{items:[…]}}`; the script takes `--batch <file.json|->` and, in `--stream`, a line that is a JSON
+array. A batch is gossiped and pushed to dashboards as one coalesced update. An item with `plan` answers `not-yet` (6b).
+
+**Formats (v1.62.0).** Day-file records are **v2** (`{"v":2, …, "path":"spec-70/@Tharsis", …}`; `new_from` marks the first
+persisted record of each node on its chain); 1.58–1.61 records (v1: `agent` / `context`) are **skipped**, never
+misread. Gossip slices are v2 (one unit per node) and hubs declare `activity_gossip:2` — a 1.60/1.61 hub (format 1)
+exchanges no activity with a 1.62 hub (its frames are ignored; remote fetches to it answer `owner-unsupported`).
+
+**Reporting — `log {as, secret, path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?, items?}`.**
+You report as a registered session (`as` + `secret`). Address a node with `path` (above; omit it for the session itself)
+or the old `agent` + `context` / text prefix — agents never register. The identity is **realm + project + user + session
+name + host** (v1.60.0; + the node path): each host only ever writes its own entities, so the same session or node
 reporting from two hosts is two entities, which the board groups under one session (a session that moves machines
 leaves its old host's entries to go stale or gone).
-- Every message belongs to a **context**: `"@build compiling"` appends to the build context's log; `"@~build
-  compiling"` also makes it that context's **current line**; `"@~root …"` sets your own headline; no prefix = `@root`,
-  log only. `context:"@~build"` does the same without a prefix (the text is then literal). Quote spaces: `@~"strip 17"`.
-- **State** (`running|blocked|failed|done|idle`) changes only with an `@~` line; `@~root` done/failed **finishes** the
-  agent. Stale is computed (quiet longer than `stale_after_min`, or the message's own `stale_after`, ≤24h); gone = the
-  session left this host's roster (deregister / TTL / its process exited), cleared when it comes back.
-- **Progress / ETA** (`"4812/12000 tiles"`, `"3/6"`, `"61%"` / `"15m"`, `"1h25m"`, `"19:27"`) move the bar from **any**
-  message, stick until changed (`"none"` clears) and the ETA is dropped while the context is done/failed.
+- Every message belongs to its **target node**: `path:"w/@build", text:"compiling"` (or `agent:"w"` + `"@build
+  compiling"`) appends to the build context's log; `@~` on the last segment (`"w/@~build"`, `"@~build compiling"`)
+  also makes it that node's **current line**; `"@~root …"` sets your own headline; no address = the session itself, log
+  only. `context:"@~build"` does the same as a text prefix (the text is then literal). Quote spaces: `@~"strip 17"`.
+- **State** (`running|blocked|failed|done|idle`) changes only with a current (`@~`) line; done/failed on an **agent's**
+  own line **finishes** it. Stale is computed for agents (quiet longer than `stale_after_min`, or the message's own
+  `stale_after`, ≤24h; a context follows its agent); gone = the session left this host's roster (deregister / TTL / its
+  process exited), cleared when it comes back.
+- **Progress / ETA** (`"4812/12000 tiles"`, `"3/6"`, `"61%"` / `"15m"`, `"1h25m"`, `"19:27"`) move the node's bar from
+  **any** message, stick until changed (`"none"` clears) and the ETA is dropped while the node is done/failed.
 - **Text is a template**, rendered when read: `{progress}` → "4,812 of 12,000 tiles" ("61%" for a % bar, "3 of 6"
   without a unit), `{pct}` → "40%" (floored), `{done}` `{total}` `{unit}`, `{eta}` → "~1h 25m" ("now" once due, "?"
   with no ETA). `{{` / `}}` are literal braces; an unknown `{word}`, or a bar placeholder with no bar, stays as typed. A
@@ -486,22 +559,27 @@ leaves its old host's entries to go stale or gone).
   agent's own tool calls cost tokens, so agents log sparingly, at milestones; a **script** may report often with
   `log:false` (e.g. every second) and occasionally `log:true`. The bridge checkpoints that progress every
   `progress_checkpoint_sec` so the bar survives a restart.
-- Limits (locked; a change is a version bump): text 240 chars (longer is truncated + `warnings`), context name 60, 32
-  contexts per agent, 128 agents per session (the 129th evicts the oldest *finished* one), `details` 4 KB, `data` 16 KB
-  JSON — keep both small. **Status text is plaintext, realm-wide: never put secrets in it.**
-- Returns `{ ok, id, ts, session, agent, context, current, state, stale_at, logged }` (+ `warnings`, `evicted`; codes
-  like `context-too-long`, `too-many-agents`, `activity-disabled`, `activity-loading`, `no-gateway`).
+- Limits (locked; a change is a version bump): text 240 chars (longer is truncated + `warnings`), context name 60, depth
+  6, 128 agents and 4096 nodes per session (room is made by evicting the oldest *finished* agent with its subtree),
+  `details` 4 KB, `data` 16 KB JSON — keep both small. **Status text is plaintext, realm-wide: never put secrets in it.**
+- Returns `{ ok, id, ts, session, path, agent, context, current, state, stale_at, logged }` (`agent` = the owner agent's
+  path, `context` = the target's name when it is a context; + `warnings`, `evicted`; codes like `bad-path`,
+  `path-too-deep`, `context-too-long`, `too-many-agents`, `too-many-nodes`, `activity-disabled`, `activity-loading`,
+  `no-gateway`). A batch returns `{ ok, results, applied, failed }`.
 
-**Reading — `activity {project?, session?, agent?, host?, active_only?, log?, entry?}`.** The mesh board: sessions →
-agents → contexts with their current lines (`text` raw, `rendered` filled in), effective state (`stale` / `gone`; `was` =
-the reported one — computed by the READER with its own `stale_after_min`), rollup progress (summed per shared unit, else
-the mean %), ETA, visibility and log counts. Sessions are **grouped** by realm + project + user + name across hosts:
-every agent (and the session's own entity) carries its `host`; a group on one host has `host`, one on several has
-`hosts:[…]`, `multi_host:true`, `self` (the most recently active host's) and `selves` (one per host). `remote_hosts`
-lists each remote host held (`sessions`, `seq`, `linked`, `down_at`, `truncated`).
-`log:{session, project?, user?, host?, agent?, context?, limit?, cursor?}` is one agent's (or the session's) log, newest
-first, paged — `next_cursor` → pass it as `cursor` for the older page; a name on several hosts is `ambiguous-session`
-(with each candidate's host) unless the agent or `host` settles it. `entry:{id, host?}` is one entry in full with its
+**Reading — `activity {project?, session?, path?, agent?, host?, active_only?, log?, entry?}`.** The mesh board: sessions,
+each with `self` (its root node) and `nodes` — every node of its tree, FLAT, with `path`, `kind` (agent | context),
+`depth`, `parent` and `host`, its current line (`text` raw, `rendered` filled in), effective state (`stale` / `gone`;
+`was` = the reported one — computed by the READER with its own `stale_after_min`; contexts by their agent), `progress` =
+its bar (reported, or the recursive rollup), ETA, `implicit`, visibility and log counts. Sessions are **grouped** by realm
++ project + user + name across hosts: every node (and the root) carries its `host`; a group on one host has `host`, one
+on several has `hosts:[…]`, `multi_host:true`, `self` (the most recently active host's root that has a line of its own)
+and `selves` (one per host). `path` (or `agent`) keeps a node and its subtree; `active_only` drops finished / gone agents
+with what is under them. `remote_hosts` lists each remote host held (`sessions`, `seq`, `linked`, `down_at`, `truncated`).
+`log:{session, project?, user?, host?, path?, agent?, context?, own?, limit?, cursor?}` is a node's log — its SUBTREE
+merged (each entry with `path` + `rel`), or `own:true` for its own entries — newest first, paged: `next_cursor` → pass it
+as `cursor` for the older page; a name on several hosts is `ambiguous-session` (with each candidate's host) unless the
+node or `host` settles it. `entry:{id, host?}` is one entry in full with its
 `details`/`data` (memory for a current line, else the day file — via an id → offset index, else a scan of the day the
 id's timestamp names); another host's CURRENT line is found by id alone, its older log entries need `host`. A remote
 read answers with `from_host`. Times are ms epochs.
@@ -513,10 +591,10 @@ the host's files (below); a `log` call waits for that (≤15 s, else `activity-l
 
 **Files:** `<persist dir>/activity/<host>/YYYY-MM-DD.jsonl` (local date), only with persistence on. One JSON line per
 logged entry (with `details`/`data` and the identity), plus two compact kinds for `log:false` activity:
-- a **checkpoint** `{"kind":"cp","k":3,"ts":…,"session":…,"agent":…,"context":…,"current":{…},"state":…,"progress":…,"eta_at":…}`
-  — written at most once per context per interval when its line / bar / ETA changed; `k` is a small per-file key given
-  to the context the first time it is checkpointed that day;
-- a **repeat line** `{"rep":[3,7],"n":245,"since":…,"last":…}` — these keys were alive and *unchanged* for `n`
+- a **checkpoint** `{"v":2,"kind":"cp","k":3,"ts":…,"session":…,"path":"w/@tiles","current":{…},"state":…,"progress":…,"eta_at":…}`
+  — written at most once per node per interval when its line / bar / ETA changed; `k` is a small per-file key given
+  to the node the first time it is checkpointed that day;
+- a **repeat line** `{"v":2,"rep":[3,7],"n":245,"since":…,"last":…}` — these keys were alive and *unchanged* for `n`
   intervals from `since` to `last`. While the set stays exactly the same the bridge rewrites this last line in place;
   any other write (an entry, a cp) or a different set starts a new one. Contexts with no activity aren't listed.
 
@@ -569,19 +647,27 @@ follower's `activity` shows the mesh too):
 - **Mixed versions:** a ≤1.59 hub doesn't declare `activity_gossip`, so it gets no activity frames (and would ignore
   them); its agents simply don't appear on 1.60 boards. Deploy = restart each host's gateway on 1.60.0.
 
-### The Activity page (v1.61.0, step 5)
-The dashboard's **Activity** section is the mesh board as a tree: **project → session → agent → context → log entry**.
-- **Projects** show their counts (sessions · active agents). Clicking a project heading cycles **all → sessions only →
-  collapsed**; the **Projects / Sessions / Agents** control sets every project at once. The default view shows every
-  session with its agents' `@root` rows; contexts and logs start closed.
+### The Activity page (v1.61.0, step 5; the node tree v1.62.0, step 6a)
+The dashboard's **Activity** section is the mesh board as a tree: **project → session → its node tree (agents and
+contexts, to any depth) → log entry**.
+- **Projects** show their counts (sessions · active agents — reported, unfinished agents). Clicking a project heading
+  cycles **sessions + top-level nodes → sessions only → collapsed**; the **Projects / Sessions / Nodes** control sets
+  every project at once (v1.62.0: "Nodes" — formerly "Agents" — means *expand down to each session's top-level nodes*).
+  The default view shows every session with its top-level nodes' current lines; deeper nodes and logs start closed.
+- **Every node expands on its own:** open it for its **Log** (the merged log of its subtree, "N entries, this node and
+  below", each entry tagged with its path relative to the node — `@~root`, `@Tharsis/@~z12`, `research/@~root`) and
+  then its children, one level (16 px) deeper — readable down to depth 6. Children are listed in creation order.
+- **Agents** keep the status **ring** glyph and their name (monospace). **Contexts** (`@name`, in the info colour)
+  show a smaller **state mark** without a ring — they have no staleness of their own: a context under a stale agent
+  greys out with a stale pill, and its tooltip names the agent it follows. A node with no line of its own (an implicit
+  grouping node) shows a hollow mark and "no current line".
 - **A session row:** its name, a **host tag** per host (a session on several hosts is ONE row; its headline is the most
   recently active host's; its agents are tagged by host), the `@root` line with its placeholders filled, the status
   glyph, the progress bar, ⌛ when there is an ETA, 🔔 when a doorbell is armed for it, and pills.
-- **An agent row:** the glyph, its path (monospace; `a/b` nests under `a`), its `@root` line, the bar (striped = a rollup
-  of its contexts), ⌛, pills. **Expanding** a session or agent shows its **Log** ("N entries, all contexts" — newest
-  first, each entry with its time, a state dot, `@ctx` / `@~ctx` and the text; "load older…" at the end pages on) and
-  then its **contexts** (◎, the line, the bar, ⌛), each expanding into its own log. An entry with details / data expands
-  into the text and the pretty-printed JSON.
+- **A node row:** the glyph / mark, its name, a host tag when the session spans hosts, its line with the placeholders
+  filled, the bar (striped = a rollup of what is below it), ⌛, pills. The **Log** pages newest first (time, a state dot,
+  the relative tag, the text; "load older…" at the end pages on). An entry with details / data expands into the text and
+  the pretty-printed JSON. A session row's Log is the whole session's (one per host).
 - **The status glyph** (16 px): the centre is the state (a dot for running / blocked / idle, a tick for done, a cross for
   failed); a live item's **ring empties** as the time left before it goes stale runs out. **No time text is inline** —
   hover the glyph for the actual times (started, running for, last activity, stale at — or done / failed at and how long
@@ -598,7 +684,8 @@ The dashboard's **Activity** section is the mesh board as a tree: **project → 
 **Data path — deltas, not boards.** The section is collapsed by default, and a dashboard subscribes only while it is
 open and the browser tab is visible — one that never opens it costs the bridge nothing:
 - `{type:"activity_sub"}` → `{type:"activity_board", full:true, epoch, seq:1, head, upsert:[…]}`: every **unit** — one
-  per session group (header, `self` / `selves`, `bell`, `hosts_down`) and one per agent — in the **raw** form: the
+  per session group (header, `self` / `selves`, `bell`, `hosts_down`) and one per **node** (v1.62.0: `kind:"node"`,
+  `nkind` agent | context, `path`, `key`, `parent_key`, `depth`, its own `progress` and the rolled-up `bar`) — in the **raw** form: the
   reported state (`gone` included), the raw line template, the raw times; no `rendered` or `stale_at` (the page computes
   those), so time passing is never a change.
 - Then at most once a second, when anything changed: `{type:"activity_delta", epoch, seq, base, head, upsert:[changed
@@ -650,9 +737,14 @@ node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agen
 node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agent tiles --ctx "@~Tharsis" --progress 4812/12000:tiles --eta 1h25m
 ```
 
-`--session <name> --project <P> [--user U] [--agent a/b/c] [--ctx "@~Ctx"] [--state S] [--progress 4812/12000:tiles]
+`--session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S] [--progress 4812/12000:tiles]
 [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json] [--no-log] ["<text>"]` — the
-`log` tool's fields as flags. The text is the positional argument (several words are joined; anything after `--` is
+`log` tool's fields as flags (v1.62.0: `--path` addresses any node — `--path "@#70/@step4/spec-70"`, `--path
+"spec-70/@~Tharsis"` — and combines with `--agent` / `--ctx` / a text prefix exactly as the tool's fields do).
+**`--batch <items.json|->`** (v1.62.0) sends a JSON array of items (the tool's item fields + `ref`; ≤64, ≤64 KB) in ONE
+call — `--agent` / `--path` / `--ctx` / `--no-log` are the defaults — and prints ONE line `{ok, results, applied,
+failed}`: exit 0 when every item applied, 4 when the bridge refused the call or any item failed, 64 for a bad file or
+the bounds. The text is the positional argument (several words are joined; anything after `--` is
 text); it is optional when `--progress`/`--eta` is given (default `"{progress}"` / `"{eta}"`). `--ctx` sets the context
 (the text is then literal), `--no-log` = `log:false`, `--data-file` may start with a BOM. The report is validated
 locally with the bridge's own parser first, so a bad one costs no connection.
@@ -687,9 +779,11 @@ my-seeder | node aimb-log.mjs --stream --session Bridget --project AIMB --agent 
 #           {"text":"@~root done","state":"done","log":true,"ref":"fin"}   {"line":2,"ref":"fin","ok":true,…}
 ```
 
-- A line carries the `log` tool's fields minus auth (`agent text context state progress eta stale_after details data
-  log`, + an optional `ref`, echoed back). The command line's identity applies to every line; `--agent`, `--ctx` and
-  `--no-log` are defaults a line may override. Any other field (e.g. `session`) → that line gets `bad-field`; bad JSON
+- A line carries the `log` tool's fields minus auth (`path agent text context state progress eta stale_after details data
+  log`, + an optional `ref`, echoed back) — or (v1.62.0) a JSON **array** of them: a batch, answered by ONE result line
+  `{line, ok, results, applied, failed}`. The command line's identity applies to every line; `--agent`, `--path`, `--ctx`
+  and `--no-log` are defaults a line may override (a line naming its own `path` / `agent` takes none of the address
+  defaults; one with only a `context` keeps `--agent` / `--path`). Any other field (e.g. `session`) → that line gets `bad-field`; bad JSON
   → `bad-json` — answered in place, the stream goes on. Only identity flags, those defaults, `--ws-port`/`--url` are
   allowed with `--stream`.
 - **Exit 0 at stdin EOF**, once every line is answered. A fatal hello error (`unauthorized`, `bad-ident`,
@@ -702,7 +796,7 @@ my-seeder | node aimb-log.mjs --stream --session Bridget --project AIMB --agent 
 **Protocol** (the gateway's WS port; only the gateway serves it): `hello {type:"hello", kind:"logger", token,
 ident:{session, project, user, realm}}` → `{type:"welcome", logger:true, bridge_version, realm, host, ident}` or
 `{type:"error", code, what}` + close (`unauthorized`, `ident-required`, `bad-ident`, `realm-mismatch`); then
-`{type:"log", ref, input:{…log fields}}` → `{type:"logged", ref, result}` per report. A logger socket is **not** a page
+`{type:"log", ref, input:{…log fields}}` → `{type:"logged", ref, result}` per report (v1.62.0: `input:{items:[…], …defaults}` is a batch → `result:{ok, results, applied, failed}`). A logger socket is **not** a page
 or a session: it never appears in `list_sessions`, the dashboard or the roster, and gets no roster pushes. A pre-1.59
 gateway takes the hello for a page and answers a plain `welcome` (no `logger:true`); the script then closes at once
 with `gateway-unsupported`.

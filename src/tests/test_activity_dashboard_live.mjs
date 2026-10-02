@@ -6,6 +6,9 @@
 //   C  127.0.0.3:14220 "DASH-C"  killed mid-test (host down)
 //   E  127.0.0.4:14240 "DASH-A"  (!) a second hub with A's host name → B logs the duplicate-hostname warning
 // Every host keeps log_entries_per_agent = 10 in memory, so a 30–40 entry history pages on into the files. Ports 14200–14299.
+// v1.62.0 (#70 step 6a): dashboard units are one per NODE (kind "node", nkind, parent_key, the rolled-up `bar`); a nested
+// tree's deltas fold to the same view as a fresh full board; a NESTED node's subtree log pages into the day files locally
+// and remotely; a node's own-only view applies in the files too; a 1.61-format (v1) record in an old day file is skipped.
 // AIMB_TEST_BRIDGE=<file> runs it against another bridge copy (the pre-change proof).
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -105,7 +108,7 @@ function wsClient(port, hello, host = '127.0.0.1') {
 const dashOn = (port, inst) => wsClient(port, { kind: 'dashboard', instance: inst })
 const units = d => Object.values(d.store.units || {})
 const grp = (d, name) => units(d).find(u => u.kind === 'session' && String(u.session).toLowerCase() === name.toLowerCase())
-const agt = (d, name, p, host) => units(d).find(u => u.kind === 'agent' && grp(d, name) && u.group === grp(d, name).key && u.agent === p && (!host || u.host === host))
+const agt = (d, name, p, host) => units(d).find(u => u.kind === 'node' && grp(d, name) && u.group === grp(d, name).key && u.path === p && (!host || u.host === host))   // v1.62.0: node units
 
 const all = []
 const drop = h => { const i = all.indexOf(h); if (i >= 0) all.splice(i, 1) }
@@ -155,11 +158,11 @@ const deltas = burst.filter(m => m.type === 'activity_delta'), gaps = deltas.sli
 check(`deltas: ${180} updates in ${secs.toFixed(1)} s → only DELTAS (no full board) to the subscriber`, deltas.length >= 2 && burst.every(m => m.type === 'activity_delta'), J(burst.map(m => m.type)))
 check(`deltas: at most one per second (${deltas.length} in ${secs.toFixed(1)} s, gaps ≥ ~1 s)`, deltas.length <= Math.ceil(secs) + 2 && gaps.every(g => g >= 900), J(gaps))
 check('deltas: chained — each base is the previous seq', deltas.every((m, i) => i === 0 || m.base === deltas[i - 1].seq) && deltas.every(m => m.seq === m.base + 1), J(deltas.map(m => [m.base, m.seq])))
-check('deltas: carry only what changed (the pumped agents + their session, never the whole board)', deltas.every(m => (m.upsert || []).length <= 4 && (m.upsert || []).every(u => (u.kind === 'agent' && /^p[123]$/.test(u.agent)) || (u.kind === 'session' && u.session === 'Pump'))), J(deltas.map(m => (m.upsert || []).map(u => u.agent || u.session))))
+check('deltas: carry only what changed (the pumped agents + their @bar nodes + their session, never the whole board)', deltas.every(m => (m.upsert || []).length <= 7 && (m.upsert || []).every(u => (u.kind === 'node' && /^p[123](\/@bar)?$/.test(u.path)) || (u.kind === 'session' && u.session === 'Pump'))), J(deltas.map(m => (m.upsert || []).map(u => u.path || u.session))))
 check('no subscription → no pushes: the idle dashboard got no activity_board / activity_delta', d0.boards().length === 0, J(d0.boards().map(m => m.type)))
 const d2 = await dashOn(WSB, 'dash-truth'); d2.send({ type: 'activity_sub' })
 await until(async () => d2.store.units, x => !!x, 4000)
-check('deltas: the subscriber\'s folded view equals a fresh full board', canon(d1.store) === canon(d2.store) && agt(d1, 'Pump', 'p3')?.contexts?.find(c => c.name === 'bar')?.progress?.done === 60, `${canon(d1.store).length} vs ${canon(d2.store).length}`)
+check('deltas: the subscriber\'s folded view equals a fresh full board', canon(d1.store) === canon(d2.store) && agt(d1, 'Pump', 'p3/@bar')?.progress?.done === 60 && agt(d1, 'Pump', 'p3')?.bar?.done === 60, `${canon(d1.store).length} vs ${canon(d2.store).length}`)
 d2.close()
 
 // ---- 3. seq gap → resync
@@ -171,7 +174,25 @@ await sleep(1100)
 await la.log({ agent: 'gap2', text: '@~root second change' })
 await until(async () => d1.msgs.filter(m => m.type === 'activity_board').length > nFull && agt(d1, 'Orch', 'gap2'), x => !!x, 5000)
 check('resync: the delta after a lost one does not follow → the page asks again and gets a FULL board', d1.resyncs >= 1 && d1.msgs.filter(m => m.type === 'activity_board').length > nFull, J({ resyncs: d1.resyncs, fulls: d1.msgs.filter(m => m.type === 'activity_board').length }))
-check('resync: the view is whole again (the lost change is there)', !!agt(d1, 'Orch', 'gap1') && !!agt(d1, 'Orch', 'gap2'), J(units(d1).filter(u => u.kind === 'agent').map(u => u.agent)))
+check('resync: the view is whole again (the lost change is there)', !!agt(d1, 'Orch', 'gap1') && !!agt(d1, 'Orch', 'gap2'), J(units(d1).filter(u => u.kind === 'node').map(u => u.path)))
+
+// ---- 3b (6a). a NESTED tree's deltas: node units with parent keys + kinds; the folded view equals a fresh full board
+const mark2 = d1.msgs.length
+await la.log({ path: '@#70/@step4/spec-70', text: '@Tharsis/@~z12 deep line {progress}', progress: '1/4 tiles' })
+await la.log({ path: '@#70/@step4/spec-70/research', text: '@~root a sub-agent' })
+await until(async () => agt(d1, 'Orch', '@#70/@step4/spec-70/research'), x => !!x, 5000)
+await sleep(1200)
+await la.log({ path: '@#70/@step4/spec-70/@Tharsis/@z12', progress: '3/4 tiles', log: false })
+await until(async () => agt(d1, 'Orch', '@#70/@step4/spec-70/@Tharsis/@z12')?.progress?.done === 3, x => x, 5000)
+await sleep(300)
+const z12 = agt(d1, 'Orch', '@#70/@step4/spec-70/@Tharsis/@z12'), lastD = d1.msgs.slice(mark2).filter(m => m.type === 'activity_delta').at(-1)
+check('nested units (6a): every node is a unit with nkind, depth, parent_key; implicit intermediates; the rolled-up bar on the ancestors', z12?.nkind === 'context' && z12?.depth === 5 && z12?.parent_key === '@#70/@step4/spec-70/@tharsis'
+  && agt(d1, 'Orch', '@#70')?.implicit === true && agt(d1, 'Orch', '@#70')?.bar?.done === 3 && agt(d1, 'Orch', '@#70/@step4/spec-70')?.nkind === 'agent', J([z12, agt(d1, 'Orch', '@#70')]))
+check('nested deltas (6a): a deep bar update → only that node, its ancestors whose bar moved and the session header', !!lastD && (lastD.upsert || []).every(u => u.kind === 'session' || /^@#70(\/@step4(\/spec-70(\/@Tharsis(\/@z12)?)?)?)?$/.test(u.path)) && (lastD.upsert || []).some(u => u.path === '@#70/@step4/spec-70/@Tharsis/@z12'), J(lastD && lastD.upsert.map(u => u.path || u.session)))
+const d3 = await dashOn(WSB, 'dash-truth2'); d3.send({ type: 'activity_sub' })
+await until(async () => d3.store.units, x => !!x, 4000)
+check('nested deltas (6a): the folded view equals a fresh full board', canon(d1.store) === canon(d3.store), `${canon(d1.store).length} vs ${canon(d3.store).length}`)
+d3.close()
 
 // ---- 4. read access: a page leaf gets neither pushes nor reads
 const pg = await wsClient(WSB, { kind: 'page', page_kind: 'probe', title: 'Probe page', instance: 'probe-pg' })
@@ -196,7 +217,8 @@ const idsB = []
 for (let i = 1; i <= 40; i++) idsB.push((await pl.log({ agent: 'deep', text: `@step b entry ${i}` })).id)
 const old = new Date(Date.now() - 3 * 86400000), day = `${old.getFullYear()}-${String(old.getMonth() + 1).padStart(2, '0')}-${String(old.getDate()).padStart(2, '0')}`
 const oldIds = [], oldRecs = []
-for (let i = 1; i <= 5; i++) { const ts = old.getTime() + i * 1000, id = `act_old_${ts.toString(36)}-${i}`; oldIds.push(id); oldRecs.push(J({ v: 1, id, ts, context: 'step', text: `old entry ${i}`, state: 'running', origin: HB, realm: 'default', session: 'PagerB', project: 'Tools', user: 'robin', host: HB, agent: 'deep' })) }
+for (let i = 1; i <= 5; i++) { const ts = old.getTime() + i * 1000, id = `act_old_${ts.toString(36)}-${i}`; oldIds.push(id); oldRecs.push(J({ v: 2, id, ts, path: 'deep/@step', text: `old entry ${i}`, state: 'running', origin: HB, realm: 'default', session: 'PagerB', project: 'Tools', user: 'robin', host: HB })) }
+oldRecs.splice(2, 0, J({ v: 1, id: `act_v1_${(old.getTime() + 2500).toString(36)}-9`, ts: old.getTime() + 2500, context: 'step', text: 'A 1.61-FORMAT LINE', state: 'running', origin: HB, realm: 'default', session: 'PagerB', project: 'Tools', user: 'robin', host: HB, agent: 'deep' }))   // 6a: skipped
 const oldDir = path.join(dirs.B, 'activity', 'dash-b')
 fs.mkdirSync(oldDir, { recursive: true }); fs.writeFileSync(path.join(oldDir, `${day}.jsonl`), oldRecs.join('\n') + '\n')
 const pagesB = []
@@ -212,24 +234,27 @@ check(`local paging: ${pagesB.length} pages (≥3) chained by next_cursor, newes
   J(pagesB.map(p => [p.ok, p.code, p.log?.entries?.length, p.log?.from_files, p.log?.next_cursor])))
 check('local paging: page 1 = the 10 kept in memory (a page never exceeds log_entries_per_agent); page 2 continues in the files with a file cursor', pagesB[0]?.log?.entries?.length === 10 && !pagesB[0]?.log?.from_files
   && pagesB[1]?.log?.from_files === 10 && /^f1\./.test(pagesB[1]?.log?.next_cursor || ''), J(pagesB.slice(0, 2).map(p => [p.log?.entries?.length, p.log?.from_files, p.log?.next_cursor])))
-check('local paging: file entries keep the in-memory shape (rendered, context, state; no details/data)', (pagesB[1]?.log?.entries || []).length > 0 && pagesB[1].log.entries.every(e => e.rendered && e.context === 'step' && e.state === 'running' && !('details' in e)), J(pagesB[1]?.log?.entries?.[0]))
-const ctxPage = await d1.req({ log: { session: 'PagerB', agent: 'deep', context: '@root', limit: 12 } })
-check('local paging: a context filter applies in the files too (no @root entries → empty, no cursor)', ctxPage.ok && ctxPage.log?.entries?.length === 0 && ctxPage.log?.next_cursor === null, J(ctxPage.log))
+check('local paging: file entries keep the in-memory shape (rendered, path + rel, state; no details/data)', (pagesB[1]?.log?.entries || []).length > 0 && pagesB[1].log.entries.every(e => e.rendered && e.path === 'deep/@step' && e.rel === '@step' && e.state === 'running' && !('details' in e)), J(pagesB[1]?.log?.entries?.[0]))
+check('local paging (6a): the 1.61-format (v1) line in the old day file was skipped (never in a page)', !gotB.some(id => id.startsWith('act_v1_')) && !J(pagesB).includes('1.61-FORMAT'))
+const ctxPage = await d1.req({ log: { session: 'PagerB', agent: 'deep', own: true, limit: 12 } })
+check('local paging (6a): a node\'s OWN-only view applies in the files too (deep\'s entries all live in deep/@step → empty, no cursor)', ctxPage.ok && ctxPage.log?.entries?.length === 0 && ctxPage.log?.next_cursor === null, J(ctxPage.log))
+const nestPage = await d1.req({ log: { session: 'PagerB', path: 'deep/@step', limit: 12, cursor: pagesB[1]?.log?.next_cursor } })
+check('local paging (6a): the nested context\'s own subtree pages on into the files with a file cursor', nestPage.ok && (nestPage.log?.entries || []).length > 0 && nestPage.log.entries.every(e => e.path === 'deep/@step' && e.rel === ''), J(nestPage.log && nestPage.log.entries.length))
 
 // ---- 6. remote paging: A's history through B, owner-paged (8 per page) on into A's day files
 const pa = await logger('127.0.0.2', WSA, { session: 'PagerA', project: 'AIMB', user: 'robin' })
 const idsA = []
-for (let i = 1; i <= 30; i++) idsA.push((await pa.log({ agent: 'deep', text: `@step a entry ${i}` })).id)
-await until(async () => agt(d1, 'PagerA', 'deep'), x => !!x, 5000)
+for (let i = 1; i <= 30; i++) idsA.push((await pa.log({ path: '@#70/deep/@step', text: `a entry ${i}` })).id)   // 6a: a NESTED node on the remote host
+await until(async () => agt(d1, 'PagerA', '@#70/deep'), x => !!x, 5000)
 const pagesA = []
 cur = null
 for (let k = 0; k < 8; k++) {
-  const r = await d1.req({ log: { session: 'PagerA', agent: 'deep', ...(cur ? { cursor: cur } : {}) } })
+  const r = await d1.req({ log: { session: 'PagerA', path: '@#70/deep', ...(cur ? { cursor: cur } : {}) } })
   pagesA.push(r); cur = r.log?.next_cursor
   if (!cur || r.ok === false) break
 }
 const gotA = pagesA.flatMap(p => (p.log?.entries || []).map(e => e.id))
-check(`remote paging: ${pagesA.length} pages (≥3) of A's history through B, newest first, into A's files`, pagesA.length >= 3 && pagesA.every(p => p.ok && p.from_host === HA) && J(gotA) === J([...idsA].reverse()),
+check(`remote paging: ${pagesA.length} pages (≥3) of A's NESTED subtree (@#70/deep) through B, newest first, into A's files`, pagesA.length >= 3 && pagesA.every(p => p.ok && p.from_host === HA) && J(gotA) === J([...idsA].reverse()),
   J(pagesA.map(p => [p.ok, p.code, p.log?.entries?.length, p.log?.from_files])))
 check('remote paging: the owner\'s page size holds (≤8) and later pages come from the files', pagesA.every(p => (p.log?.entries || []).length <= 8) && pagesA.some(p => p.log?.from_files > 0), J(pagesA.map(p => p.log?.from_files)))
 await sleep(2500)   // A's bucket (2/s) refills

@@ -110,7 +110,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.61.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.62.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -868,9 +868,9 @@ const ACT_GC_MS = Number(process.env.AI_BRIDGE_ACTIVITY_GC_MS) || 60000         
 const ACT_RETENTION_MS = Number(process.env.AI_BRIDGE_ACTIVITY_RETENTION_MS) || 86400000   // retention sweep cadence (also at gateway start)
 const ACT_INDEX_MAX = Number(process.env.AI_BRIDGE_ACTIVITY_INDEX_MAX) || 100000          // id → (day, offset) entries kept; beyond, a lookup scans the day file
 const ACT_PHASE1_MS = Number(process.env.AI_BRIDGE_ACTIVITY_PHASE1_MS) || 300            // a long replay publishes a provisional board after this
-const LOG_FIELDS = ['agent', 'text', 'context', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log']
+const LOG_FIELDS = [...Act.MESSAGE_FIELDS, 'items', 'plan']   // v1.62.0 (#70 step 6a): + path (the node tree) + items (a batch); plan is 6b (answered not-yet)
 const ACT_TAP = process.env.AI_BRIDGE_TEST_ACTIVITY_TAP === '1'   // test-only (#70 step 4): `activity {tap:true}` returns the recent gossip frames sent/received
-const BOARD_FIELDS = ['project', 'session', 'agent', 'host', 'active_only', 'log', 'entry', ...(ACT_TAP ? ['tap'] : [])]   // v1.60.0: + host (the mesh board)
+const BOARD_FIELDS = ['project', 'session', 'agent', 'path', 'host', 'active_only', 'log', 'entry', ...(ACT_TAP ? ['tap'] : [])]   // v1.60.0: + host (the mesh board); v1.62.0: + path (a node and its subtree)
 function activityConfig(cfg) { const w = []; const c = Act.resolveConfig(cfg && cfg.activity, process.env, w); for (const x of w) log(`activity config: ${x}`); return c }
 let ACT_CFG = activityConfig(CFG)
 let activity = null        // the host's activity state — on the GATEWAY only (a follower forwards)
@@ -910,7 +910,7 @@ async function replayActivity() {
   const fromDay = Act.localDay(t0 - ACT_CFG.finished_visible_hours * 3600000)
   let n = 0
   for await (const r of persistence.activity.readBackwards(HOSTNAME, { fromDay })) {
-    if (r.rec && typeof r.rec.id === 'string' && r.rec.kind == null) indexEntry(r.rec.id, r.day, r.offset, r.length)
+    if (Act.recordKind(r.rec) === 'entry') indexEntry(r.rec.id, r.day, r.offset, r.length)   // v1.62.0: v2 entries only (a 1.61 v1 record is skipped)
     if (rp.feed(r.rec, r.day) === 'old' && !rp.wantsOlder(r.day)) break   // past the window (an older cp a rep line needs is still read)
     if (++n % 256 === 0 && actReplay.phase === 'replaying' && (rp.phase1Complete() || Date.now() - t0 > ACT_PHASE1_MS)) {
       rp.publish(); actReplay.phase = 'published'; actChanged()   // phase 1: current lines / bars / states visible now (and gossiped); history follows
@@ -1018,21 +1018,41 @@ function syncActivityGone() {
 async function activityLog(ident, input, opts = {}) {   // opts.script: an aimb-log.mjs report (#70 step 3) — never tracked for gone
   if (!ACT_CFG.enabled) return actDisabled()
   if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  const batch = !!input && typeof input === 'object' && input.items !== undefined
+  const split = batch ? Act.splitBatch(input) : null   // v1.62.0 (#70 step 6a): a BATCH — its bounds refuse the whole call (before any wait)
+  if (split && !split.ok) return split
   if (actReplay && actReplay.phase !== 'done') {   // a new gateway finishes the replay before it applies anything
     const ready = await Promise.race([actReplay.promise.then(() => true), new Promise(res => { setTimeout(() => res(false), ACT_LOAD_WAIT_MS).unref() })])
     if (!ready) return { ok: false, code: 'activity-loading', what: 'the activity board is still loading this host\'s log after a restart — retry in a moment' }
   }
+  let res
+  if (!batch) res = await actApplyOne(ident, input)
+  else {   // items IN ORDER, one result each (+ its ref); one bad item never aborts the rest; ONE coalesced gossip / dashboard update
+    const results = []
+    for (const it of split.items) {
+      const r = it.error ? it.error : await actApplyOne(ident, it.input)
+      results.push(it.ref !== undefined ? { ref: it.ref, ...r } : r)
+    }
+    const failed = results.filter(r => !r.ok).length
+    res = { ok: true, results, applied: results.length - failed, failed }
+  }
+  if (batch ? res.applied : res.ok) {
+    actChanged()   // #70 step 4: coalesced into ≤1 gossip frame per second per peer link (a batch: one change)
+    syncActivityBells()   // #70 step 5: a new session may be one an armed doorbell watches
+    if (!opts.script) actPresent.add(Act.sessionKey({ ...ident, host: HOSTNAME }))   // a script-only session is never marked gone (it can still go stale)
+  }
+  return res
+}
+// one message (a single call or one batch item) → the `log` result shape; persisted in order (a batch awaits each append)
+async function actApplyOne(ident, input) {
   const now = Date.now()
   const p = Act.parseMessage(input, { now, tzOffsetMin: tzOff(now) })
   if (!p.ok) return p
   const r = Act.apply(activity, ident, p.msg, now)
   if (!r.ok) return r
-  actChanged()   // #70 step 4: coalesced into ≤1 gossip frame per second per peer link
-  syncActivityBells()   // #70 step 5: a new session may be one an armed doorbell watches
-  if (!opts.script) actPresent.add(Act.sessionKey({ ...ident, host: HOSTNAME }))   // a script-only session is never marked gone (it can still go stale)
   const persisted = r.entry && PERSIST ? !!(await persistActivity(r.entry)) : null
   if (++actApplies % 50 === 0) actBudget()
-  return { ok: true, id: r.id, ts: r.ts, session: ident.session, agent: r.agent, context: r.context, current: r.current, state: r.state, stale_at: r.stale_at, logged: r.logged,
+  return { ok: true, id: r.id, ts: r.ts, session: ident.session, path: r.path, agent: r.agent, context: r.context, current: r.current, state: r.state, stale_at: r.stale_at, logged: r.logged,
     ...(persisted === false ? { persisted: false } : {}), ...(r.evicted.length ? { evicted: r.evicted } : {}), ...(r.warnings.length ? { warnings: r.warnings } : {}) }
 }
 const actShow = o => (o && typeof o === 'object' && o.project != null ? { ...o, project: projName(o.project) } : o)   // #71: canonical project spelling
@@ -1061,8 +1081,8 @@ async function activityRead(q, ctx = {}) {
   if (q.log != null) {   // v1.60.0: the session is found on ANY host held; a remote one's log page is fetched from its owner
     const lq = typeof q.log === 'object' && q.log ? q.log : { session: q.log }
     let cands = Act.locateSessions(activity, lq)
-    const ak = typeof lq.agent === 'string' && lq.agent.trim() ? lc(lq.agent.trim()).replace(/^\/+|\/+$/g, '') : null
-    if (cands.length > 1 && ak) { const f = cands.filter(c => c.session.agents.has(ak)); if (f.length) cands = f }
+    const nq = Act.queryNodeKey(lq)   // v1.62.0: the node (path / agent / context) — a name on several hosts narrows to those holding it
+    if (cands.length > 1 && nq.ok && nq.key) { const f = cands.filter(c => c.session.nodes.has(nq.key)); if (f.length) cands = f }
     if (cands.length > 1) return { ok: false, code: 'ambiguous-session', what: 'several sessions match — pass project, user and/or host', candidates: cands.map(c => ({ session: c.session.session, project: projName(c.session.project), user: c.session.user, host: c.host })) }
     const c = cands[0]
     const sub = { ...lq, ...(c ? { session: c.session.session, project: c.session.project, user: c.session.user } : {}) }
@@ -1073,7 +1093,7 @@ async function activityRead(q, ctx = {}) {
     const { ok: _ok, ...rest } = lv
     return { ...head, log: actShow({ ...rest, host: HOSTNAME }) }
   }
-  return { ...head, sessions: Act.boardView(activity, now, { project: q.project, session: q.session, agent: q.agent, host: q.host, active_only: !!q.active_only }).map(actShow) }
+  return { ...head, sessions: Act.boardView(activity, now, { project: q.project, session: q.session, agent: q.agent, path: q.path, host: q.host, active_only: !!q.active_only }).map(actShow) }
 }
 // #70 step 5 (v1.61.0): HISTORY PAGING INTO THE DAY FILES. logView pages the in-memory log; once it runs out (or the
 // cursor is a file cursor `f1.<day>.<offset>`) the page continues in this host's daily JSONL, read BACKWARDS in chunks
@@ -1094,7 +1114,7 @@ async function actLogPage(q, now, opts = {}) {
     scanned += r.length + 1; last = r
     const rec = r.rec
     if (rec && Act.fileEntryMatches(rec, f.target) && !(f.before && (rec.ts > f.before.ts || f.before.ids.has(rec.id)))) {
-      const x = Act.fileEntryView(rec, now), b = Buffer.byteLength(JSON.stringify(x)) + 1
+      const x = Act.fileEntryView(rec, now, lv.path), b = Buffer.byteLength(JSON.stringify(x)) + 1
       if (n >= f.need || (out.length && bytes + b > maxB)) { stop = 'full'; break }
       out.push(x); bytes += b; n++; lastHit = r
     }
@@ -1115,11 +1135,11 @@ async function lookupActivityEntry(id, now) {
   if (PERSIST) {
     let rec = null, via = null
     const ix = actIndex.get(id)
-    if (ix) { const r = await persistence.activity.readAt(HOSTNAME, ix.day, ix.offset, ix.length); if (r && r.id === id && r.kind == null) { rec = r; via = 'index' } }
+    if (ix) { const r = await persistence.activity.readAt(HOSTNAME, ix.day, ix.offset, ix.length); if (r && r.id === id && Act.recordKind(r) === 'entry') { rec = r; via = 'index' } }
     const t = rec ? null : Act.entryTime(id)
-    if (t) for (const d of new Set([Act.localDay(t), Act.localDay(t - 86400000), Act.localDay(t + 86400000)])) { rec = await persistence.activity.find(HOSTNAME, d, id); if (rec) { via = 'scan'; break } }
+    if (t) for (const d of new Set([Act.localDay(t), Act.localDay(t - 86400000), Act.localDay(t + 86400000)])) { const r = await persistence.activity.find(HOSTNAME, d, id); if (r && Act.recordKind(r) === 'entry') { rec = r; via = 'scan'; break } }   // v1.62.0: a 1.61 (v1) record is not an entry
     if (rec) {
-      const { v: _v, new_session: _s, new_entity: _e, new_context: _c, ...e } = rec
+      const { v: _v, new_from: _n, ...e } = rec
       return { source: 'file', via, entry: actShow({ ...e, rendered: Act.renderText(e.text, e.progress, e.eta_at, now) }) }
     }
   }
@@ -1187,7 +1207,7 @@ async function loggerLog(ident, input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, code: 'bad-input', what: 'log needs an input object' }
   if (loggerUserConflict(ident)) return { ok: false, code: 'session-user-mismatch', what: `session "${ident.session}" (${projName(ident.project)}) is live on the mesh under another user — a script may not report for it` }
   const clean = {}
-  for (const k of LOG_FIELDS) if (input[k] !== undefined) clean[k] = input[k]
+  for (const k of LOG_FIELDS) if (input[k] !== undefined) clean[k] = input[k]   // v1.62.0: + items (a batch: each item's fields are checked by splitBatch)
   return activityLog({ ...ident, host: HOSTNAME }, clean, { script: true })
 }
 
@@ -1220,7 +1240,7 @@ const actLegacy = () => process.env.AI_BRIDGE_TEST_GOSSIP === 'legacy'   // test
 const hostOfGw = gw => String(gw || '').split('/')[0]
 function tapRec(dir, rec) { if (!ACT_TAP) return; const a = actTap[dir]; a.push({ ts: Date.now(), ...rec }); if (a.length > 500) a.shift() }
 const tapSlice = f => ({ kind: f.full ? 'full' : f.beat ? 'beat' : 'delta', seq: f.seq, base: f.base, truncated: !!f.truncated, bytes: JSON.stringify(f).length,
-  agents: (f.sessions || []).flatMap(s => (s.agents || []).map(a => `${s.session}/${a.path}`)), sessions: (f.sessions || []).map(s => s.session), remove: (f.remove || []).length })
+  nodes: (f.sessions || []).flatMap(s => (s.nodes || []).filter(n => n && n.path).map(n => `${s.session}/${n.path}`)), sessions: (f.sessions || []).map(s => s.session), remove: (f.remove || []).length, v: f.v })   // v1.62.0: the non-root NODES a frame carries
 /** The local board changed: kick every peer link (and the dashboards). Never sends synchronously — see actKick. */
 function actChanged() {
   actVer++
@@ -1232,7 +1252,7 @@ function actUnitsNow() { if (!actUnits || actUnitsVer !== actVer) { actUnits = A
 // adoptPeer: a fresh link state; a 1.60+ peer gets a FULL slice right away (#63 rule: a full slice on every (re)link)
 function actLinkInit(p, gw, hello) {
   if (!p) return
-  p.act = { gw, host: hostOfGw(gw), cap: !actLegacy() && !!(hello && hello.activity_gossip), seq: 0, pub: Act.createPub(), needFull: true, last: 0, timer: null, beat: false,
+  p.act = { gw, host: hostOfGw(gw), cap: !actLegacy() && !!(hello && hello.activity_gossip === Act.ACTIVITY_FORMAT), seq: 0, pub: Act.createPub(), needFull: true, last: 0, timer: null, beat: false,
     bucket: ACT_FETCH_RATE, bucketAt: Date.now(), resyncAt: 0 }
   if (p.act.cap) actKick(p)
 }
@@ -1252,8 +1272,8 @@ function actSendTo(p) {
   const full = a.needFull
   const plan = Act.planSlice(activity, a.pub, { full, maxBytes: ACT_SLICE_MAX_BYTES, units: actUnitsNow() })
   let frame = null
-  if (plan.body) frame = { t: 'ACTIVITY_SLICE', v: 1, origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq + 1, ...(full ? {} : { base: a.seq }), ...plan.body }
-  else if (a.beat) frame = { t: 'ACTIVITY_SLICE', v: 1, origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq, base: a.seq, sessions: [], beat: true }   // the #63 heartbeat: lets the receiver check it is in sync
+  if (plan.body) frame = { t: 'ACTIVITY_SLICE', origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq + 1, ...(full ? {} : { base: a.seq }), ...plan.body }   // the body carries v:2 (#70 step 6a)
+  else if (a.beat) frame = { t: 'ACTIVITY_SLICE', v: Act.ACTIVITY_FORMAT, origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq, base: a.seq, sessions: [], beat: true }   // the #63 heartbeat: lets the receiver check it is in sync
   a.beat = false
   if (!frame) return
   if (plan.body) a.seq++
@@ -1277,6 +1297,10 @@ function onActivityFrame(sock, f) {
   if (!gw || !p) return                           // only an ADOPTED peer-hub link (HELLO token + PEER_HELLO) speaks activity
   const host = hostOfGw(gw)
   p.seen = Date.now()
+  if (!p.act || !p.act.cap) {   // v1.62.0 (#70 step 6a): a peer that didn't declare THIS activity format (a 1.60/1.61 hub: v1) — its frames are skipped, never misread
+    if (p.act && !p.act.skipNoted) { p.act.skipNoted = true; log(`activity: ${host} speaks another activity format (${f.v != null ? 'v' + f.v : 'none'}) — its ${f.t} frames are ignored`) }
+    tapRec('recv', { peer: host, kind: 'skipped-format', t: f.t, v: f.v }); return
+  }
   if (f.origin != null && lc(String(f.origin)) !== lc(host)) {   // a frame claiming another host's slice: ownership is the link's
     log(`activity: dropped a ${f.t} from ${gw} claiming origin "${String(f.origin).slice(0, 80)}"`)
     tapRec('recv', { peer: host, kind: 'forged', t: f.t }); return
@@ -1286,7 +1310,7 @@ function onActivityFrame(sock, f) {
     if (!f.full && actOwner.get(host) !== gw) { actAskResync(p, host); return }   // a delta from a link that never sent us a full slice
     const r = Act.applySlice(activity, host, f)
     if (ACT_TAP) tapRec('recv', { peer: host, ...tapSlice(f), ok: r.ok, code: r.code })
-    if (!r.ok) { if (r.code === 'out-of-sync') actAskResync(p, host); else log(`activity: slice from ${host} refused: ${r.code}`); return }
+    if (!r.ok) { if (r.code === 'out-of-sync') actAskResync(p, host); else if (r.code !== 'bad-version' || !p.act || !p.act.badVer) { if (r.code === 'bad-version' && p.act) p.act.badVer = true; log(`activity: slice from ${host} refused: ${r.code}`) } ; return }   // v1.62.0: an old-format (v1) slice is skipped, logged once per link
     if (f.full) actOwner.set(host, gw)
     if (r.changed) actDashKick()
   } else if (f.t === 'ACTIVITY_DOWN') {
@@ -1349,7 +1373,7 @@ const actWaitMs = (o, pos) => Math.max(0, o.hold - Date.now(), Math.ceil(((pos -
 function activityRemote(host, op, q, ctx = {}) {
   const gw = actOwner.get(host), p = gw ? peerGw.get(gw) : null
   if (!p || !p.sock || p.sock.destroyed) return Promise.resolve({ ok: false, code: 'owner-unreachable', host, what: `host ${host} is down or unreachable right now — its history can't be fetched (its last-known lines show as gone)` })
-  if (!p.act || !p.act.cap) return Promise.resolve({ ok: false, code: 'owner-unsupported', host, what: `host ${host} runs a bridge without remote activity fetch (needs 1.60.0+)` })
+  if (!p.act || !p.act.cap) return Promise.resolve({ ok: false, code: 'owner-unsupported', host, what: `host ${host} runs a bridge without this activity format (needs 1.62.0+)` })
   const o = actOut(p.act), ws = ctx && ctx.ws, wait = actWaitMs(o, o.q.length + 1)
   const busy = (why, after) => Promise.resolve({ ok: false, code: 'busy', host, retry_after_ms: Math.max(100, after), what: `too many history fetches are waiting (${why}) — retry in a moment` })
   if (ws && (ws.actFetches || 0) >= ACT_QUEUE_DASH) return busy(`${ACT_QUEUE_DASH} for this dashboard`, actWaitMs(o, o.q.length))
@@ -2095,9 +2119,10 @@ const refreshCap = () => TEST_GOSSIP === 'legacy' ? {} : { gossip_refresh: true,
 // ≤1.46 receiver ignores it.
 // #71: `project_names` = the canonical project-spelling map (same transitive spread; a ≤1.56 receiver ignores it).
 const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), pn = projectNames.list()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, realm_defaults: rd, project_names: pn, ...refreshCap() })
-// #70 step 4 (v1.60.0): `activity_gossip:1` = this hub sends + understands ACTIVITY_SLICE / _DOWN / _REQ / _RES (a ≤1.59 peer
-// ignores the field, never gets the frames, and ignores them if it did; 'legacy' test gossip mimics that)
-const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap(), ...(TEST_GOSSIP === 'legacy' ? {} : { activity_gossip: 1 }) })
+// #70 step 4 (v1.60.0): `activity_gossip:N` = this hub sends + understands ACTIVITY_SLICE / _DOWN / _REQ / _RES in format N (a ≤1.59
+// peer ignores the field, never gets the frames, and ignores them if it did; 'legacy' test gossip mimics that). v1.62.0 (#70
+// step 6a, the node tree): N = 2 — a 1.60/1.61 peer (N = 1) and this hub exchange no slices or fetches (owner-unsupported)
+const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap(), ...(TEST_GOSSIP === 'legacy' ? {} : { activity_gossip: Act.ACTIVITY_FORMAT }) })
 // #66c: `retained` (the replicated retained-value set) is NOT in gossipFrame — it can be MBs and the roster is re-gossiped
 // on every unread-count change — so it rides a PEER_ROSTER only when that link hasn't had the set's current version yet
 // (a fresh link has none → it gets the whole set). LWW makes a repeat harmless; a ≤1.47 receiver ignores the field.
@@ -2369,6 +2394,7 @@ function onControlConn(sock) {
       } else if (f.t === 'ACTIVITY') {                      // #70: a follower's log / activity call (it authenticated its own sub-peer)
         const reply = result => { try { sendFrame(sock, { t: 'ACTIVITY_R', rid: f.rid, result }) } catch { } }
         if (!who || !f.session || followers.get(f.session) !== sock) { reply({ ok: false, code: 'unauthorized', what: 'activity frames are accepted only from a registered follower' }); return }
+        tapRec('recv', { peer: 'follower', kind: 'fwd', op: f.op, items: f.input && Array.isArray(f.input.items) ? f.input.items.length : null })   // test-only: v1.62.0 — a batch arrives as ONE frame
         if (f.op === 'log') {
           const id = f.ident || {}, fr = roster.get(f.session)
           const known = !!fr && (fr.subpeers || []).some(sp => ciEq(sp.name, id.session) && projKey(sp.project) === projKey(id.project) && lc(sp.user) === lc(id.user) && (sp.realm || REALM) === (id.realm || REALM))
@@ -3227,7 +3253,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (!ACT_CFG.enabled) return ok(actDisabled())
       const input = {}
       for (const k of LOG_FIELDS) if (a[k] !== undefined) input[k] = a[k]
-      const pre = Act.parseMessage(input, { now: Date.now(), tzOffsetMin: tzOff(Date.now()) })   // validate here: a bad call costs no round trip
+      const pre = input.items !== undefined ? Act.splitBatch(input) : Act.parseMessage(input, { now: Date.now(), tzOffsetMin: tzOff(Date.now()) })   // validate here: a bad call costs no round trip (v1.62.0: a batch's bounds; its items are answered one by one)
       if (!pre.ok) return ok(pre)
       const ident = { realm: sp.identity?.realm || REALM, project: sp.identity?.project || 'unclassified', user: sp.identity?.user || null, session: sp.name, host: HOSTNAME }
       return ok(await activityCall('log', { ident, input }))

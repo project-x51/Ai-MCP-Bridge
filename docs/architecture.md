@@ -1183,6 +1183,92 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.62.0):** *the agent activity board, step 6a of the revised step 6 — the UNIFIED NODE TREE plus batch
+  logging (#70).* Decisions of 2026-10-02 ("Step 6 redesign"). Nothing of #70 was deployed, so record and wire formats
+  changed freely (no converters; old-format data is skipped). **The model (`lib/activity.js`):** a session holds ONE tree
+  of nodes — `sess.nodes` (a flat Map keyed by the node key = `lc(canonical path)`) + `sess.kids` (parent key → child
+  keys, insertion order) + `nAgents`; the session itself is the ROOT node (key `''`, kind agent — what `session.self`
+  was). Every other node is an **agent** (starts, finishes on its own done/failed current line, stale, gone,
+  `stale_after`) or a **context** (current line, progress, ETA; never stale by itself); either kind may contain either.
+  **Paths** (`parsePath` / `formatPath` / `resolveAddress`): `/`-separated; a segment starting with `@` is a context,
+  anything else an agent (`spec-70`, `spec-70/research`, `spec-70/@Tharsis`, `spec-70/@Tharsis/@z12`, `@#70/spec-70`,
+  `@#70/@step4/spec-70`); `@"CTX strip 17"` quotes (the `path` field also takes unquoted spaces; the canonical spelling
+  quotes a name with whitespace or a leading `~`); `@~` only on the LAST segment = set that node's current line; `@root`
+  / `@~root` only last = the node itself; depth ≤ 6; context names may no longer contain `/`. **The old notation maps
+  onto it:** `agent` (agent segments only) + `path` + ONE trailing context — the `context` param (old syntax, one name)
+  or else a leading `@…` text prefix, itself a relative path (`@Tharsis/@~z12 …`); context beats a prefix, agent and path
+  concatenate; so `agent:"a/b"` + `"@~Ctx …"` ≡ `path:"a/b/@~Ctx"`, and no address + `@~root` = the root. The message
+  (`ActivityMsg`) carries `segs` / `path` / `key` plus the old-shaped `agent` (its OWNER's path), `context` and `root`.
+  Intermediates are created **implicit** (no line); a node stops being implicit when a message targets or is OWNED by it
+  (the owner = the nearest agent at or above the target, else the root; the root itself is implicit until the session
+  reports). **Activity:** a message moves `last_activity` / `stale_after` on target..owner only (a context keeps its agent
+  fresh; a sub-agent doesn't refresh its parent); the session header on every message; it clears gone on the session +
+  its owner. **Staleness (decided here):** agents only (and the root); an implicit agent never goes stale; a CONTEXT shows
+  its nearest agent ancestor's stale / gone / finished — only while it has a live current line of its own (a context
+  without one is a grouping node: no state, never stale) — and a context directly under the session follows the
+  **session's own** reports (anything it owns, at any depth not crossing an agent), exactly like the session row before.
+  `effectiveState(item, now, staleMin, owner)` / `staleAt(item, staleMin, owner)` take the owner for a context.
+  **Limits:** depth 6 replaces "agent path depth 3", and per session 128 agents + a budget of 4096 nodes replace "32
+  contexts per agent"; a message that needs room evicts the oldest FINISHED agents with their WHOLE subtree (never an
+  ancestor of its target; simulated first, so a rejection changes nothing) and is refused `too-many-agents` /
+  `too-many-nodes` only when that can't make room or it is `log:false`. Expiry and `enforceBudget` also remove subtrees.
+  **Rollup** (`rollup(sess, node, memo)`) recurses: reported progress, else the children's bars summed when they share a
+  unit, else their mean % — `rollupStrategies` is the hook for 6b's "N of M todos done". **Logs:** every node keeps its
+  own log (`log_entries_per_agent` per node), kept in (ts, seq) order, with `log_floor` = the newest entry it holds only
+  in the files (moved by the cap, the budget and the replay window). `logView` addresses a node by path / agent / context
+  and returns its SUBTREE merged newest first (a binary-search cut per node + a k-way merge; `own:true` for the node
+  alone), each entry with `path` + `rel`; a cursor is any entry id (its time + sequence), so it survives the entry's drop;
+  with `files:true` memory serves the subtree only down to its FLOOR (the max of its nodes' floors; else the oldest
+  memory entry) and the `files` descriptor (`target:{…identity, key, own}`, `before:{ts, ids-at-ts}`) continues below it —
+  `fileEntryMatches` matches the node and (own:false) anything under it by path key. Unknown node → `unknown-node`.
+  **Records — FORMAT v2:** entries `{v:2, id, ts, path, current, text, state, …, identity, details, data, new_from?,
+  evicted?, finished_at? (agents)}`, checkpoints `{v:2, kind:"cp", k, path, …}` per node, repeat lines `{v:2, rep, …}`;
+  `new_from: i` marks the first persisted record touching each node of the chain [root, …segments] (0 = a new session).
+  `recordKind` returns null for anything not v2, so a 1.58–1.61 record is SKIPPED (counted), never misread; the bridge's
+  id index and entry lookup accept v2 entries only. **Replay** (still newest-first, phase 1 / phase 2) works per node:
+  a `new_from` marker SEALS that node with its subtree (any older record whose chain passes a sealed node is an older
+  instance), `evicted` paths not seen newer are dead with their subtree, phase 1 waits only for nodes a record TOUCHED
+  (target..owner), and a node whose instance began before the window gets `log_floor` = the window start. The seeded
+  random replay ≡ chronological-apply test now runs over nested paths (depth 5, agents under contexts, sub-agents, text
+  prefixes that are relative paths) and compares every node incl. implicit, floors and logs. **Gossip — FORMAT v2:** one
+  unit per NODE (its own fields; never children, rollup, log, details/data); `snapshot` → `{v:2, sessions:[{…header,
+  nodes:[…]}]}`; deltas carry changed nodes + `remove:[{…identity, path}]` (a node removal takes its subtree on the
+  receiver); `mergeSnapshot` / `applySlice` refuse a non-v2 body (`bad-version`); a receiver stores nodes flat, so a child
+  that arrives before its parent (a truncated frame) is held and linked when the parent arrives. Hubs declare
+  `activity_gossip: 2` in PEER_HELLO; a link whose peer declared anything else (a 1.60/1.61 hub: 1) has ALL its activity
+  frames ignored (logged once, tapped `skipped-format`; no resync loop) and remote fetches to it answer
+  `owner-unsupported`. **Views:** the tool's board lists each group's `self` (root) and a FLAT `nodes` list (`path`,
+  `kind`, `depth`, `parent`, `host`, effective state, `progress` = the bar, `implicit`, log counts); `path` (or the old
+  `agent`) filters a subtree; `active_only` drops inactive agents with their subtrees; the headline (`self`) is now the most
+  recently active host's root that HAS a current line (else the most recent). Dashboard units are one per session group +
+  one per node (`kind:"node"`, `nkind`, `key`, `parent_key`, `depth`, own `progress` + the rolled-up `bar`), sessions then
+  parents before children. **Batch:** `splitBatch` (1..64 items, ≤64 KB of items JSON → else `too-many-items` /
+  `batch-too-large` for the whole call; `bad-batch`; per item `bad-item` / `bad-field` / `not-yet` for `plan`) and
+  `withDefaults` (beside `items`, `log` is a default; `path` / `agent` / `context` are ADDRESS defaults, all-or-nothing: an
+  item naming its own `path` or `agent` takes none of them; one with only a `context` keeps the default path / agent).
+  The bridge: `log` takes `items` (tool, follower, logger WS); `activityLog` checks the bounds before any wait, applies
+  each item in order through `actApplyOne` (awaiting each append, so the file keeps the order), answers `{ok:true,
+  results:[…+ref], applied, failed}` and calls `actChanged` / `syncActivityBells` ONCE — one coalesced gossip and dashboard
+  update. A follower forwards a batch in ONE `ACTIVITY` frame (the test tap records `fwd` frames with their item count);
+  the logger accepts `{type:"log", input:{items}}`. The script: `--path`, `--batch <file|->` (one call, one result line;
+  exit 0 / 4 when any item failed / 64 for a bad file or the bounds), and a `--stream` line may be an array (a batch, one
+  result line). **The dashboard** renders the node tree to any depth: session rows + their top-level nodes by default; each
+  node expands on its own into its subtree **Log** ("N entries, this node and below"; entry tags relative to it —
+  `@~root`, `@Tharsis/@~z12`, `research/@~root`) and its children (creation order, 16 px per level, readable at depth 6;
+  narrower on a small screen); agents keep the ring glyph, contexts get a smaller state mark without a ring, coloured
+  `@name`, and inherit stale / gone from their owner in the page's own stale computation (the slider moves them too);
+  implicit nodes show a hollow mark; Projects / Sessions / **Nodes** (formerly Agents) = expand down to the top-level
+  nodes; Expand all opens every node at any depth. **Tests:** `test_activity_unit` 448 → **516** (path forms, old-notation
+  equivalence, tree + implicit + spelling, depth / agent / node limits + subtree eviction, recursive rollup, context
+  staleness inheritance, the subtree-merged log + floors + the files descriptor, v1 records skipped / v1 slices refused,
+  nested deltas + orphans + subtree removal, node dash units, splitBatch / withDefaults; sections now run independently
+  and `AIMB_TEST_ACTIVITY_LIB` points it at another library) — against the 1.61 library 59 FAIL (33 of them whole
+  sections that need the new API); `test_log_live` 52 → **66**; `test_log_script_live` 40 → **50**;
+  `test_activity_gossip_live` 44 → **48**; `test_activity_dashboard_live` 36 → **41**; `test_dashboard_activity` 62 → **85**.
+  Against the 1.61 bridge / page / script: `test_log_live` 11 FAIL (then crashes on the old board shape), `test_log_script_live`
+  10 FAIL (crash), `test_activity_gossip_live` 7 FAIL (crash), `test_activity_dashboard_live` 14 of 41 FAIL,
+  `test_dashboard_activity` 8 FAIL (then crashes: no `entryTag`).
+  Full suite 1911 passed, 0 failed (51 files, typecheck clean, first run; no flakes).
 - **Built (v1.61.0):** *the agent activity board, build-plan step 5 — the dashboard's Activity tree, plus deltas to
   dashboards, history paging into the day files, queued remote fetches, read access, the doorbell flag, host down vs gone
   and the duplicate-hostname warning (#70).* Decisions of 2026-10-02 ("Decisions before step 5"; the layout Robin approved

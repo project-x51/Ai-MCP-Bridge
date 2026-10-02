@@ -6,12 +6,24 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-02, v1.61.0) — read this first after a compact
-**Current version: v1.61.0** (#70 step 5: the dashboard's Activity tree + deltas to dashboards, paging into the day
-files, queued remote fetches, read access, bell / host down, the duplicate-hostname warning; code done, NOT yet deployed
-— live hosts run v1.54.0). v1.60.0 (#70 step 4) is committed (`6ed091f`); v1.61.0 is in the working tree for review. The
-rebuilt tray (`PrepareShutdown()` before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs
-`tray/windows/build.cmd`. Everything below is durable; nothing important is only in chat.
+## RESUME STATE (updated 2026-10-02, v1.62.0) — read this first after a compact
+**Current version: v1.62.0** (#70 step 6a: the UNIFIED NODE TREE — agents + contexts to any depth, `path` addressing,
+subtree logs, recursive rollup, contexts inheriting their agent's staleness — plus BATCH logging; record / slice format v2;
+code done, NOT yet deployed — live hosts run v1.54.0). v1.61.0 (#70 step 5) is committed (`2a167b2`); v1.62.0 is in the
+working tree for review. The rebuilt tray (`PrepareShutdown()` before the kill) is NOT installed: only a scratch build
+proved it compiles; Robin runs `tray/windows/build.cmd`. Everything below is durable; nothing important is only in chat.
+
+**2026-10-02 (v1.62.0):** Built **#70 step 6a** (the revised step 6, "Step 6 redesign") — one tree of NODES per
+session (the session = the root; agents start / finish / go stale / gone; contexts carry a line, progress and an ETA;
+either contains either; intermediates implicit), the `/`-path grammar (`@` = context, `@"a b"` quotes, `@~` on the last
+segment = current line, `@root` = the node itself, depth ≤ 6) with the old `agent` + `@~Ctx` notation mapping onto it,
+128 agents + 4096 nodes per session (subtree eviction), recursive rollup, per-node logs merged per subtree (paging into
+the day files for any node, local and remote), contexts showing their nearest agent's staleness (directly under the
+session: the session's own reports), and **batch** logging (`items:[…]` ≤64 / ≤64 KB, one result each, one follower frame,
+the logger WS, `--batch`, `--stream` arrays). JSONL records and gossip slices are format **v2** (a 1.58–1.61 record is
+skipped; a 1.61 hub's activity frames are ignored — hubs declare `activity_gossip:2`). The dashboard renders the tree to
+any depth (Projects / Sessions / Nodes). Deploy = restart every host's gateway on 1.62.0 together (1.61 and 1.62 hubs
+don't exchange activity). See architecture.md §13 "Built (v1.62.0)". **Open before 6b:** "Questions before 6b" in #70.
 
 **2026-10-02 (v1.61.0):** Built **#70 step 5** — the dashboard's **Activity** section (collapsed by default; a tree:
 project → session → agent → context → log entry; status glyph with a stale ring, hover times, pills incl. a distinct
@@ -288,7 +300,7 @@ accepted); `allow_project` let a caller declared `UNCLASSIFIED` grant (compared 
   it in grants, `access`, the roster, `list_sessions` and the dashboard, while matching stays case-insensitive.
   Verify that no path really treats different cases as different projects (topics, consent, parked mail).
 
-## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–5 built, v1.61.0; next: step 6 `{log_snippet}` + the connect reminder — Robin + Bridget)**
+## #70 — agent activity board: live agent status by session, mesh-wide  ·  **OPEN (steps 1–5 built, v1.61.0; step 6a — the node tree + batch logging — built, v1.62.0; next: 6b todos + plans, then 6c `{log_snippet}` + the connect reminder — Robin + Bridget)**
 **Why:** sessions increasingly act as **orchestrators** and their **agents do the work**, but nothing shows what those
 agents are doing right now. **What:** a new dashboard page showing, across the whole mesh, sessions grouped by project,
 each session's agents under it, and each agent's progress. Agents report it themselves with a doorbell-style script (or
@@ -391,8 +403,8 @@ node aimb-log.mjs --session <name> --project <P> [--user U] [--agent <label>] [-
 |---|---|
 | Message text | 240 chars |
 | Context name | 60 chars |
-| Agent path depth | 3 (`a/b/c`) |
-| Contexts per agent | 32 |
+| Agent path depth | 3 (`a/b/c`) — **6a (v1.62.0): any path, depth ≤ 6** |
+| Contexts per agent | 32 — **6a: replaced by 4096 nodes per session** |
 | Agents per session | 128 |
 | `details` | 4 KB |
 | `data` | 16 KB |
@@ -600,10 +612,60 @@ Any node may contain either kind, so agents can be grouped under the task they s
 6. The connect reminder goes to Cowork too; its version points at the `log` tool instead of the script.
 
 **Revised step 6:**
-- **6a:** the unified tree (core, wire, JSONL, dashboard) plus batch logging.
+- **6a:** the unified tree (core, wire, JSONL, dashboard) plus batch logging. **BUILT (v1.62.0, 2026-10-02)** — see
+  "6a as built" below and architecture.md §13 "Built (v1.62.0)".
 - **6b:** todos and plans (states, `--plan`, rollup, lifetime and carry-forward, the ☐/☑ display).
 - **6c:** `{log_snippet}` plus the connect reminder (`client:code` with the script; Cowork with the tool), the
   default-open section, gossiped entry counts, and the run-boundary history view.
+
+**6a as built (v1.62.0, 2026-10-02):**
+- **Model** (`lib/activity.js`): `sess.nodes` (flat, keyed by `lc(canonical path)`) + `sess.kids`; the session is the
+  root node (agent-like). Agents and contexts as specified; intermediates a path names are created **implicit** (no
+  line); the OWNER of a message = its nearest agent (else the session).
+- **Paths** exactly as the table above (`parsePath` / `resolveAddress`); `@~` / `@root` only on the last segment;
+  quoting canonicalised; a context name may no longer contain `/`. **Old notation:** `agent` (agent segments only) +
+  `path` + ONE trailing context (the `context` param, else a leading `@…` text prefix — itself a relative path);
+  context beats a prefix, agent and path concatenate. New `path` field in the tool and `--path` in the script.
+- **Staleness decision:** agents only (and the session; an implicit agent — or a session that only reports through its
+  agents — never goes stale). A context shows its nearest agent ancestor's stale / gone, only while it has a live current
+  line of its own (a grouping context with no line shows no state). **Contexts directly under the session follow the
+  session's own reports** (any message the session owns, at any depth not crossing an agent) — as the session row always
+  has. A message refreshes target..owner only, so a sub-agent doesn't keep its parent agent fresh.
+- **Limits:** depth 6; 128 agents + 4096 nodes per session; room by evicting the oldest finished agent with its whole
+  subtree (never an ancestor of the target); else `too-many-agents` / `too-many-nodes`.
+- **Rollup** recursive (`rollupStrategies` = the hook for 6b's "N of M todos done").
+- **Logs:** one bounded log per node; a node's Log = its subtree merged (k-way, cursor = any entry id); `own:true` for
+  the node alone; memory is complete down to the subtree's floor, then the day files (local + remote).
+- **Batch:** `items:[…]` (≤64, ≤64 KB) in order, `{ok, results, applied, failed}`; `log` beside items is a default,
+  `path`/`agent`/`context` are address defaults only for items naming no path/agent of their own; follower = one frame;
+  logger WS; `--batch <file|->`; `--stream` array lines; `plan` → `not-yet`.
+- **Formats:** JSONL records v2 (`path`, `new_from`); v1 (1.58–1.61) records skipped. Gossip v2 (one unit per node);
+  hubs declare `activity_gossip:2`; a 1.61 hub's frames are ignored and fetches to it are `owner-unsupported`.
+- **Dashboard:** sessions + top-level nodes by default; every node expands into its subtree Log + its children (16 px per
+  level); agents keep the ring, contexts a ring-less state mark; Projects / Sessions / **Nodes**.
+
+### Questions before 6b (raised by the 6a build, 2026-10-02 — not decided)
+- **Todos as contexts.** 6b's todos are context nodes with the new `todo` / `skipped` states. Should a todo be its own
+  node kind (a third kind, with its own rules: never stale, `skipped` valid only there, creation order kept), or a
+  context flagged `todo`? A flag keeps the path grammar unchanged (`@B`); a kind would need a marker in the path.
+- **Who may tick a todo.** "The session itself or any agent under it": a todo under `@#70` (session-owned) ticked by
+  agent `spec-70` (`@#70/spec-70`) addresses `@#70/@~B` — but the script reports as the SESSION identity, so any
+  report naming that path can tick it today. Is that enough, or should the tick be restricted to the session or an
+  agent whose path is under the plan's parent?
+- **Plan expiry vs node eviction.** A plan "expires 24h after its last item is done/skipped, or when its parent
+  finishes". With subtree eviction, a finished agent's plans go with it at once when room is needed — fine? And should
+  an open plan count against the 4096-node budget (a long plan could crowd out agents)?
+- **Carry-forward + the replay window.** A plan open for weeks is re-checkpointed at each day rollover; its todos'
+  `log_floor` will then be the window start (older entries only in files). OK for the history view (6c stops at the
+  run boundary anyway)?
+- **Default ordering.** 6a lists children in CREATION order (stable; what plans need). Robin may prefer A→Z for agents
+  and creation order only for todos.
+- **The multi-host headline.** 6a picks the most recently active host's root **that has a line** (an agents-only host
+  no longer blanks the headline). Confirm.
+- **Batch address defaults.** Beside `items`, `path`/`agent`/`context` are address defaults only for items that name no
+  `path`/`agent` of their own (an item's own path does NOT nest under the default path). `--plan` in 6b is "a batch of
+  todos under the target context" — it will want the opposite (each title nested under the target). Keep the rule and
+  let `--plan` build its own paths?
 
 ### Build plan
 Each step is its own version.
@@ -663,7 +725,10 @@ Each step is its own version.
    connection), `host_down` / `hosts_down`, the `bell` (doorbell listeners → `setBells`, gossiped in the header) and the
    duplicate-hostname WARN. `test_activity_unit` 448, new `test_dashboard_activity` (62, jsdom) and
    `test_activity_dashboard_live` (36; 28 FAIL pre-change). See architecture.md §13 "Built (v1.61.0)".
-6. `{log_snippet}` plus a connect reminder.
+6. Revised into 6a / 6b / 6c (above). **6a BUILT (v1.62.0, 2026-10-02)** — the unified node tree + batch logging;
+   `test_activity_unit` 516, `test_log_live` 66, `test_log_script_live` 50, `test_activity_gossip_live` 48,
+   `test_activity_dashboard_live` 41, `test_dashboard_activity` 85. Next: 6b (todos + plans), 6c (`{log_snippet}` + the
+   connect reminder, default-open section, gossiped entry counts, the run-boundary history view).
 
 ### Questions before step 6 (raised by the step-5 build, 2026-10-02 — not decided)
 - **Who sees the board.** The WS rule is "dashboards only", but a dashboard is just a token holder that says

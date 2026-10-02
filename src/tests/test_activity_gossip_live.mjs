@@ -13,8 +13,10 @@
 // per link; the bare-session user rule; a link restart (B's gateway killed, F takes over) → full slices, C's TRUNCATED newest-first and completed by later
 // deltas; a forged slice (another origin; host fields) ignored; remote log paging over ≥3 pages; remote entry
 // details/data; the fetch rate limit (queued by the requester since v1.61.0); prepare-shutdown on A → gone at once, cleared when A returns; C killed →
-// owner-unreachable + gone; the legacy hub breaks nothing. Ports 14100–14199. AIMB_TEST_BRIDGE=<file> runs it against
-// another bridge copy (the pre-change proof).
+// owner-unreachable + gone; the legacy hub breaks nothing. v1.62.0 (#70 step 6a): slices are format v2 (one unit per NODE) —
+// a nested tree logged on A reaches B node by node, a deep change sends only the changed nodes, a remote SUBTREE log is
+// paged by the owner, and a peer declaring the 1.61 format (activity_gossip:1) has its v1 slices skipped. Ports
+// 14100–14199. AIMB_TEST_BRIDGE=<file> runs it against another bridge copy (the pre-change proof).
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { fileURLToPath } from 'node:url'
@@ -62,7 +64,7 @@ async function until(fn, want, ms = 8000, step = 100) {
 }
 const board = async h => (await call(h, 'activity')).sessions || []
 const group = (b, name) => b.find(s => String(s.session).toLowerCase() === name.toLowerCase())
-const agentsOf = (b, name, path) => (group(b, name)?.agents || []).filter(x => x.agent === path)
+const agentsOf = (b, name, path) => (group(b, name)?.nodes || []).filter(x => x.path === path)   // v1.62.0: every node by path (one per host)
 const tap = async h => (await call(h, 'activity', { tap: true, session: '-none-' })).tap || { sent: [], recv: [] }
 async function hardKill(h) {   // TerminateProcess: no exit handlers run (like the tray's kill)
   const pid = h.transport.pid
@@ -95,18 +97,20 @@ function logger(host, wsPort, ident) {
 }
 // a raw peer-hub link (HELLO + PEER_HELLO) for the forgery checks
 const frameOf = o => { const b = Buffer.from(J(o)); const h = Buffer.alloc(4); h.writeUInt32BE(b.length); return Buffer.concat([h, b]) }
-function rawPeer(host, port, session) {
+function rawPeer(host, port, session, fmt = 2) {
   return new Promise(resolve => {
     const s = net.connect(Number(port), host, () => {
       s.write(frameOf({ t: 'HELLO', ver: 1, fromBridge: session, fromSession: session, name: 'fake', auth: TOKEN }))
-      s.write(frameOf({ t: 'PEER_HELLO', session, name: 'fake', host: '127.0.0.9', port: 1, realm: 'default', gossip_refresh: true, refresh_ms: 60000, activity_gossip: 1 }))
+      s.write(frameOf({ t: 'PEER_HELLO', session, name: 'fake', host: '127.0.0.9', port: 1, realm: 'default', gossip_refresh: true, refresh_ms: 60000, activity_gossip: fmt }))
       setTimeout(() => resolve(s), 400)
     })
     s.on('error', () => resolve(s)); s.on('data', () => { })
   })
 }
 const forgedSession = (name, host) => ({ session: name, project: 'AIMB', user: 'robin', realm: 'default', host, created_at: Date.now(), last_activity: Date.now(),
-  self: { started_at: Date.now(), last_activity: Date.now(), contexts: [{ name: 'root', created_at: Date.now(), last_activity: Date.now(), current: { id: 'forged-1', ts: Date.now(), text: `forged ${name}`, state: 'running' } }] } })
+  nodes: [{ path: '', created_at: Date.now(), last_activity: Date.now(), current: { id: 'forged-1', ts: Date.now(), text: `forged ${name}`, state: 'running' } }] })
+const v1Session = name => ({ session: name, project: 'AIMB', user: 'robin', realm: 'default', created_at: Date.now(), last_activity: Date.now(),
+  self: { started_at: Date.now(), last_activity: Date.now(), contexts: [{ name: 'root', created_at: Date.now(), last_activity: Date.now(), current: { id: 'v1-1', ts: Date.now(), text: `v1 ${name}`, state: 'running' } }] }, agents: [{ path: 'old-agent', contexts: [] }] })
 
 const all = []
 const drop = h => { const i = all.indexOf(h); if (i >= 0) all.splice(i, 1) }
@@ -165,7 +169,7 @@ check('dashboard: {type:"activity", query} → the mesh board (A\'s agent, tagge
 dash.ws.send(J({ type: 'activity_sub' }))
 await until(async () => dash.msgs.some(m => m.type === 'activity_board'), x => x, 3000)
 await call(A, 'log', { as: 'Orch', secret: 'or', agent: 'dash-probe', text: '@~root seen on a dashboard' })
-const probeUnit = m => (m.upsert || []).find(u => u.kind === 'agent' && u.agent === 'dash-probe')
+const probeUnit = m => (m.upsert || []).find(u => u.kind === 'node' && u.path === 'dash-probe')
 await until(async () => dash.msgs.some(m => m.type === 'activity_delta' && probeUnit(m)), x => x, 4000)
 check('dashboard: a subscribed dashboard gets a delta after a remote change (the agent, tagged with its host)', dash.msgs.some(m => m.type === 'activity_board' && m.full)
   && dash.msgs.some(m => m.type === 'activity_delta' && probeUnit(m)?.host === HA), J(dash.msgs.filter(m => m.type.startsWith('activity_')).map(m => m.type)))
@@ -193,43 +197,71 @@ await sleep(1500)
 const sentAB = (await tap(A)).sent.filter(x => x.peer === HB && ['full', 'delta', 'beat'].includes(x.kind) && x.ts >= tStart && x.ts <= tEnd + 1200)
 const gaps = sentAB.slice(1).map((x, i) => x.ts - sentAB[i].ts)
 const secs = (tEnd - tStart) / 1000
-check(`rate: ${n} board updates in ${secs.toFixed(1)} s → ≤1 frame/s on the A→B link (${sentAB.length} frames)`, sentAB.length >= 2 && sentAB.length <= Math.ceil(secs) + 2, J(sentAB.map(x => [x.ts - tStart, x.kind, x.agents.length])))
+check(`rate: ${n} board updates in ${secs.toFixed(1)} s → ≤1 frame/s on the A→B link (${sentAB.length} frames)`, sentAB.length >= 2 && sentAB.length <= Math.ceil(secs) + 2, J(sentAB.map(x => [x.ts - tStart, x.kind, x.nodes.length])))
 check('rate: consecutive frames on one link are ≥ ~1 s apart (coalesced)', gaps.every(g => g >= 900), J(gaps))
-check('rate: ... carrying only what changed (≤ the 3 pumped agents per frame)', sentAB.every(x => x.agents.length <= 3 && x.agents.every(a => a.startsWith('Pump/'))), J(sentAB.map(x => x.agents)))
-const b4 = await until(() => board(B), b => ['p1', 'p2', 'p3'].every(p => agentsOf(b, 'Pump', p)[0]?.contexts?.find(c => c.name === 'bar')?.progress?.done === 80), 4000)
-check('rate: B ends with the final bars (80/80 on all three)', ['p1', 'p2', 'p3'].every(p => agentsOf(b4, 'Pump', p)[0]?.contexts?.find(c => c.name === 'bar')?.progress?.done === 80), J(group(b4, 'Pump')))
+check('rate: ... carrying only what changed (≤ the 3 pumped agents + their @bar nodes per frame)', sentAB.every(x => x.nodes.length <= 6 && x.nodes.every(a => /^Pump\/p[123](\/@bar)?$/.test(a))), J(sentAB.map(x => x.nodes)))
+const b4 = await until(() => board(B), b => ['p1', 'p2', 'p3'].every(p => agentsOf(b, 'Pump', `${p}/@bar`)[0]?.progress?.done === 80), 4000)
+check('rate: B ends with the final bars (80/80 on all three)', ['p1', 'p2', 'p3'].every(p => agentsOf(b4, 'Pump', `${p}/@bar`)[0]?.progress?.done === 80), J(group(b4, 'Pump')))
 pump.close()
 
 // ---- 5. C (a 1500-byte cap) has 10 agents; then a LINK RESTART: B's gateway dies, F takes over → full slices
 await call(C, 'register_self', { name: 'Tiler', secret: 'ti', project: 'AIMB' })
 for (let i = 1; i <= 10; i++) { await call(C, 'log', { as: 'Tiler', secret: 'ti', agent: `c${String(i).padStart(2, '0')}`, text: `@~root tile batch ${i} ${'x'.repeat(150)}` }); await sleep(15) }
-await until(() => board(B), b => (group(b, 'Tiler')?.agents || []).length === 10, 15000, 250)
+await until(() => board(B), b => (group(b, 'Tiler')?.nodes || []).length === 10, 15000, 250)
 await hardKill(B); drop(B)
 const fRole = await until(() => call(F, 'my_identity'), r => r.role === 'gateway', 10000, 200)
 check('link restart: B\'s gateway is gone; F (same host) took over as gateway', fRole.role === 'gateway', J(fRole.role))
-const bF = await until(() => board(F), b => (group(b, 'Tiler')?.agents || []).length === 10 && agentsOf(b, 'Orch', 'research').length === 1 && agentsOf(b, 'Twin', 'worker').length === 2, 15000, 200)
-check('link restart: the new gateway gets FULL slices — A\'s and C\'s agents are back on its board', (group(bF, 'Tiler')?.agents || []).length === 10 && agentsOf(bF, 'Orch', 'research')[0]?.host === HA, J(bF.map(g => [g.session, g.hosts || g.host, (g.agents || []).length])))
+const bF = await until(() => board(F), b => (group(b, 'Tiler')?.nodes || []).length === 10 && agentsOf(b, 'Orch', 'research').length === 1 && agentsOf(b, 'Twin', 'worker').length === 2, 15000, 200)
+check('link restart: the new gateway gets FULL slices — A\'s and C\'s agents are back on its board', (group(bF, 'Tiler')?.nodes || []).length === 10 && agentsOf(bF, 'Orch', 'research')[0]?.host === HA, J(bF.map(g => [g.session, g.hosts || g.host, (g.nodes || []).length])))
 check('link restart: ... and host B\'s own Twin worker was replayed from B\'s files', agentsOf(bF, 'Twin', 'worker').some(x => x.host === HB && x.current?.text === 'twin on B'), J(group(bF, 'Twin')))
 const tF = await tap(F)
 const fromA = tF.recv.filter(x => x.peer === HA && ['full', 'delta', 'beat'].includes(x.kind)), fromC = tF.recv.filter(x => x.peer === HC && ['full', 'delta', 'beat'].includes(x.kind))
 check('link restart: the first frame on each new link is a full slice', fromA[0]?.kind === 'full' && fromC[0]?.kind === 'full', J([fromA[0], fromC[0]]))
-const firstC = fromC[0] || { agents: [] }
-const cNums = firstC.agents.map(a => Number(a.split('/c')[1]))
+const firstC = fromC[0] || { nodes: [] }
+const cNums = firstC.nodes.map(a => Number(a.split('/c')[1]))
 check('truncation: C\'s full slice is over its 1500-byte cap → TRUNCATED, newest-active first', firstC.truncated === true && cNums.length >= 1 && cNums.length < 10 && J(cNums) === J([...cNums].sort((x, y) => y - x)) && cNums[0] === 10, J(firstC))
-check('truncation: ... the rest followed in later frames (≥1 s apart) until all 10 were held', fromC.length >= 2 && fromC.slice(1).every((x, i) => x.ts - fromC[i].ts >= 900), J(fromC.map(x => [x.kind, x.agents.length, x.truncated])))
+check('truncation: ... the rest followed in later frames (≥1 s apart) until all 10 were held', fromC.length >= 2 && fromC.slice(1).every((x, i) => x.ts - fromC[i].ts >= 900), J(fromC.map(x => [x.kind, x.nodes.length, x.truncated])))
 
 // ---- 6. forged slices: another origin's name in the frame is refused; host fields inside never decide ownership
 const fake = await rawPeer('127.0.0.1', B_PORT, 'FAKE-HOST/0001')
-fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 1, origin: HA, epoch: 'f', seq: 1, full: true, sessions: [forgedSession('ForgedA', HA)] }))
+fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 2, origin: HA, epoch: 'f', seq: 1, full: true, sessions: [forgedSession('ForgedA', HA)] }))
 await sleep(300)
-fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 1, epoch: 'f', seq: 2, full: true, sessions: [forgedSession('ForgedB', HA)] }))
+fake.write(frameOf({ t: 'ACTIVITY_SLICE', v: 2, epoch: 'f', seq: 2, full: true, sessions: [forgedSession('ForgedB', HA)] }))
 const b6 = await until(() => board(F), b => !!group(b, 'ForgedB'), 3000)
-check('forged: a slice naming another origin (A) is dropped — nothing of it on the board', !group(b6, 'ForgedA') && !b6.some(g => (g.agents || []).concat(g.self || []).some(e => e.current?.text === 'forged ForgedA')), J(b6.map(g => g.session)))
+check('forged: a slice naming another origin (A) is dropped — nothing of it on the board', !group(b6, 'ForgedA') && !b6.some(g => (g.nodes || []).concat(g.self || []).some(e => e.current?.text === 'forged ForgedA')), J(b6.map(g => g.session)))
 check('forged: a slice\'s own host fields are ignored — it is tagged with the LINK\'s host, never A', group(b6, 'ForgedB')?.host === 'FAKE-HOST' && group(b6, 'ForgedB')?.self?.host === 'FAKE-HOST', J(group(b6, 'ForgedB')))
 check('forged: A\'s own entities are untouched', agentsOf(b6, 'Orch', 'research')[0]?.host === HA && agentsOf(b6, 'Orch', 'research')[0]?.current?.text === 'reading the spec')
 fake.destroy()
 const b6b = await until(() => board(F), b => group(b, 'ForgedB')?.self?.state === 'gone', 3000)
 check('forged: when that link drops, its entities show gone', group(b6b, 'ForgedB')?.self?.state === 'gone', J(group(b6b, 'ForgedB')?.self))
+// 6a: a peer that declares the 1.61 format (activity_gossip:1) — its v1 slices are SKIPPED (never misread), full or delta
+const old161 = await rawPeer('127.0.0.1', B_PORT, 'OLD-HUB/0001', 1)
+old161.write(frameOf({ t: 'ACTIVITY_SLICE', v: 1, origin: 'OLD-HUB', epoch: 'o', seq: 1, full: true, sessions: [v1Session('Old161')] }))
+old161.write(frameOf({ t: 'ACTIVITY_SLICE', v: 1, origin: 'OLD-HUB', epoch: 'o', seq: 2, base: 1, sessions: [v1Session('Old161b')] }))
+await sleep(1200)
+const b6c = await board(F), tOld = await tap(F)
+check('1.61 peer (6a): its v1 slices are skipped — nothing on the board, the frames tapped as skipped-format, no resync asked of it', !group(b6c, 'Old161') && !group(b6c, 'Old161b') && !J(b6c).includes('v1 Old161')
+  && tOld.recv.filter(x => x.peer === 'OLD-HUB' && x.kind === 'skipped-format').length >= 2 && !tOld.sent.some(x => x.peer === 'OLD-HUB'), J(tOld.recv.filter(x => x.peer === 'OLD-HUB')))
+old161.destroy()
+
+// ---- 6a: a NESTED tree on A reaches F node by node; a deep change carries only the changed nodes; the remote subtree log
+const deepPaths = ['@#70/@step4/spec-70', '@#70/@step4/spec-70/@Tharsis/@z12', '@#70/@step4/spec-70/research']
+await call(A, 'log', { as: 'Orch', secret: 'or', path: '@#70/@step4/spec-70', text: '@~root agent under a task' })
+await call(A, 'log', { as: 'Orch', secret: 'or', path: '@#70/@step4/spec-70/@Tharsis/@~z12', text: 'deep context', progress: '1/4 tiles' })
+await call(A, 'log', { as: 'Orch', secret: 'or', path: '@#70/@step4/spec-70/research', text: '@~root a sub-agent' })
+const bN = await until(() => board(F), b => deepPaths.every(p => agentsOf(b, 'Orch', p)[0]?.host === HA), 6000)
+check('nested (6a): a depth-5 tree logged on A is on F\'s board node by node (kinds, implicit intermediates, A\'s host, rollup)', deepPaths.every(p => agentsOf(bN, 'Orch', p)[0]?.host === HA)
+  && agentsOf(bN, 'Orch', '@#70')[0]?.implicit === true && agentsOf(bN, 'Orch', '@#70/@step4/spec-70/@Tharsis')[0]?.kind === 'context' && agentsOf(bN, 'Orch', '@#70')[0]?.progress?.done === 1, J((group(bN, 'Orch')?.nodes || []).map(n => n.path)))
+const tN0 = Date.now()
+await call(A, 'log', { as: 'Orch', secret: 'or', path: '@#70/@step4/spec-70/@Tharsis/@z12', progress: '3/4 tiles', log: false })
+await until(() => board(F), b => agentsOf(b, 'Orch', '@#70/@step4/spec-70/@Tharsis/@z12')[0]?.progress?.done === 3, 5000)
+const sentN = (await tap(A)).sent.filter(x => x.peer === HB && x.ts >= tN0 && x.kind === 'delta' && x.nodes.some(n => n.includes('@z12')))
+check('nested (6a): a deep bar update travels as ONE delta carrying only the nodes on its chain up to its agent (not the whole tree)', sentN.length >= 1 && sentN[0].nodes.every(n => /^Orch\/@#70\/@step4\/spec-70(\/@Tharsis(\/@z12)?)?$/.test(n)) && sentN[0].nodes.length <= 3, J(sentN))
+await sleep(1100)
+const rsub = await call(F, 'activity', { log: { session: 'Orch', path: '@#70/@step4/spec-70', limit: 50 } })
+check('nested (6a): the remote SUBTREE log of a nested agent is fetched from its owner (its contexts + sub-agent, rel paths)', rsub.ok && rsub.from_host === HA && rsub.log?.entries?.length === 3
+  && J(rsub.log.entries.map(e => e.rel).sort()) === J(['', '@Tharsis/@z12', 'research']), J(rsub.log?.entries?.map(e => [e.rel, e.text])))
+await sleep(1100)
 
 // ---- 7. remote history: A's log paged (3 per page on A) across ≥3 pages, from F (host B's gateway now)
 const ids7 = []
