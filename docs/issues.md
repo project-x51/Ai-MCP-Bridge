@@ -253,6 +253,16 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
+## #76 — a parent's merged log can miss a removed child's earlier-run entries  ·  **OPEN (low)**
+Found during #70 6a/6c.
+- **The gap:** a node's subtree log merges each node's in-memory entries, then continues into the day files below
+  the subtree's floor. When a child was evicted or expired and later reappears, entries of its EARLIER run that are
+  newer than the oldest in-memory entry of the merge can be skipped.
+- **Impact:** rare (it needs eviction or expiry plus a re-used name) and cosmetic, since the history is still in
+  the files.
+- **Fix idea:** track per-subtree floors including removed children, or fall back to a file scan when a removed
+  child's interval overlaps the in-memory range.
+
 ## #75 — doorbell can't find the realm token when the bridge reads it from a FILE  ·  **DONE (part 1 script; part 2 v1.64.0)**
 Reported by Architect (Marz, Robins-Mac, 2026-10-02).
 - **What happens:** the doorbell always exits 64 ("no realm token").
@@ -950,6 +960,33 @@ Any node may contain either kind, so agents can be grouped under the task they s
 - **Deploy:** 1.63 and 1.64 hubs don't exchange activity (format v4); publish the realm block (new `updated_at`) only once
   every host runs 1.64 (the `id` field); a host whose MCP config passes the token as `AI_BRIDGE_TOKEN` gets no --token-file
   in its reminders (switch it to `AI_BRIDGE_TOKEN_FILE`).
+
+### Decisions after 6c, for 6d (Robin, 2026-10-02)
+1. **Finishing an agent never silently completes its plan.** Open items stay open until someone resolves them, and
+   the plan ends only per the 6c rule. This reverses 6c's "an agent finishing done completes its plan".
+2. **"Abandon plan" on an agent or session** abandons only its OPEN plan items and leaves the agent or session
+   running. Normally this is the orchestrating session's call; the dashboard action is the manual override.
+3. Skipped items stay out of M in "N of M".
+4. The auto-abandon scope is confirmed: todo/running/blocked items, once the session is off the roster and silent
+   for 90 days.
+5. The 6a merged-log gap is logged as #76.
+6. **Open plans also open their ANCESTORS by default,** so a plan under a collapsed agent is visible.
+7. **Logs move out of the tree into a LOG PANEL.**
+   - Selecting (clicking) a session, agent or context shows its log (its subtree's merged log, with paging, "show
+     earlier runs" and "earlier history pruned") in a separate panel.
+   - On narrow screens the panel goes below the tree.
+   - No more "Log" rows in the tree.
+8. The day-rollover carry-forward record carries the node's entry count, so counts stay exact across restarts
+   (no "N+").
+9. **Header and project counts ignore the filters**, so they always show the real totals.
+10. **The "plans open" slider range is 0–7 days.**
+11. **6d actions:**
+    - They travel over the existing authenticated hub link (like remote fetches).
+    - They are carried out by the owning host's gateway.
+    - They are logged with the dashboard user's name.
+    - They use the dashboard's realm-token connection.
+
+    Also fix: the abandoned glyph is too faint in dark mode.
 
 ### Build plan
 Each step is its own version.
