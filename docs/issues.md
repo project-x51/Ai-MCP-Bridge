@@ -157,7 +157,7 @@ host's board, one agent's log, one entry's details/data). The host's gateway own
 control link; a new gateway replays the files newest-first. Deploy = restart each bridge on 1.58.0 (a follower needs a
 1.58 gateway; it says `gateway-unsupported` otherwise).
 
-**Still open:** #80 dashboard-change notices to the owning session, #79 --plan text footgun + 3-part progress (v1.66.0), #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
+**Still open:** #81 node:test migration + dashboard test reporter (after #79), #80 dashboard-change notices to the owning session, #79 --plan text footgun + 3-part progress (v1.66.0), #78 making use of latest Claude features (channels / plugin / hook; after the #70 deploy), #77 topic tags + By-topic view (after the #70 deploy), #74 federation test flakes, #70 agent activity board (built through 6d, v1.65.0 — next: the deploy above, then close it), #76 merged-log gap (low), #65 self-updating bridge (desirable, spec first — would automate host upgrades), #53 Cowork doorbell,
 #50(c), #48 (after full rollout), #49 (deferred). Offered, not requested: a receiver-side check that a `from_topic`
 sender is a gossiped owner of that topic (#54 hardening).
 
@@ -296,6 +296,35 @@ the returned `peer_id` for inbox/send; re-claim `Bridge` (exclusive, icon 🌉) 
 whenever a send returns `unknown-subpeer`.
 
 ---
+
+## #81 — move the test suite to Node's built-in test runner (node:test), with live dashboard progress  ·  **OPEN (starts after #79)**
+Robin, 2026-10-03. No runner script and no CI for now: go straight to `node:test`, incrementally.
+
+**Today:** `npm test` is `typecheck` plus 54 plain Node scripts chained with `&&`. Each script has its own `check()`
+helper and prints PASS/FAIL lines. It stops at the first failure, runs strictly one file at a time (20–40 min),
+and has no timing or summary.
+
+**Step 1:**
+- **`tests/suite.test.mjs`,** a single node:test file. It runs the CURRENT test files in the current order, each
+  as a named sub-test that spawns `node tests/<file>.mjs` and passes on exit 0. Each file's PASS/FAIL counts are
+  attached as diagnostics.
+  - Files still run one at a time; parallelism comes after a port audit.
+  - One failing file no longer stops the rest.
+  - `npm test` becomes typecheck plus `node --test tests/suite.test.mjs`. The old chain stays as `test:legacy`
+    until the move is done.
+- **`tests/reporters/aimb-dashboard.mjs`,** a custom node:test reporter, used alongside `spec`:
+  - it keeps one `aimb-log --stream` connection open for the whole run;
+  - one plan item per test file (☐ → in progress → ☑ / failed);
+  - a `log:false` progress update about every 10 s ("checks N · file i/54 · <file>"), with the three-part bar from
+    #79 (passed / skipped / total);
+  - a logged entry per failing file with its FAIL lines in details, and a final summary.
+  - Session and path come from env (`AIMB_TEST_LOG_SESSION`, `AIMB_TEST_LOG_PATH`, `AIMB_TEST_LOG_PROJECT`), so an
+    agent's run nests under that agent.
+  - It is silent if no bridge is reachable.
+
+**Later:** convert files to native node:test one by one (describe/it, before/after cleanup, `mock.timers` instead
+of the clock env hooks, per-test timeouts). Turn on `--test-concurrency` once the ports are audited. The reporter
+gets per-test detail as files convert.
 
 ## #80 — tell the owning session when the dashboard changes its activity  ·  **OPEN (next, after #79)**
 Robin, 2026-10-03.
