@@ -605,6 +605,10 @@ export function create(ctx) {
     /** The host's directory listing by the exact-name rules (+ each odd name's WARN line once per `seen`). */
     scan: (host, seen) => A2F.scanHostDir(root, host, { seen }),
     scanViews: seen => A2F.scanViewsDir(root, { seen }),
+    /** #88 step 8: every views/*.json by the exact-name rule (own + other hosts', read only) → [{ name, data }] */
+    readViews: () => A2F.readViews(root),
+    /** #88 step 8: this host's view-state image, written whole + atomically to views/<lslug(host)>.json (its file only) */
+    writeView: (host, obj) => A2F.writeView(root, host, obj),
     days: host => A2F.days(root, host),
     daySize: (host, day) => { try { return fs.statSync(A2F.dayFile(root, host, day)).size } catch { return -1 } },
     /** A CLOSED day's index (rebuilt + written when missing or stale) → { index, rebuilt }. */

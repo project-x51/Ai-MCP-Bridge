@@ -103,6 +103,23 @@ export function scanViewsDir(dir, o = {}) {
   return { views: views.sort(), odd: odd.sort(), warnings, fs_warnings: odd.map(w) }
 }
 
+/** Step 8 (§5.6, §10.1): this host's view-state file, `<dir>/views/<lslug(host)>.json` — written by this host only. */
+export const viewFile = (dir, host) => path.join(dir, 'views', `${lslug(host || 'host', 80)}.json`)
+/** Write this host's view-state image WHOLE and atomically (§10.2). */
+export function writeView(dir, host, obj) { writeAtomic(viewFile(dir, host), JSON.stringify(obj)) }
+/**
+ * Read every view file of `<dir>/views/` by the EXACT-name rule (`^[a-z0-9._-]+\.json$`: this host's and, on a shared
+ * folder, the other hosts' — read only); a conflicted copy / odd name is never read (scanViewsDir warns about it). A file
+ * that does not parse is skipped. → [{ name, data }]
+ */
+export function readViews(dir) {
+  const out = []
+  for (const n of scanViewsDir(dir).views) {
+    try { out.push({ name: n, data: JSON.parse(fs.readFileSync(path.join(dir, 'views', n), 'utf8')) }) } catch { out.push({ name: n, data: null }) }
+  }
+  return out
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // reading
 

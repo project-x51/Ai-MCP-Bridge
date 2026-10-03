@@ -37,6 +37,7 @@ import * as Act from './lib/activity.js'
 import * as A2 from './lib/activity2.js'
 import { createStore2, LOG2_FIELDS } from './lib/activity2-store.js'
 import * as G2 from './lib/activity2-gossip.js'
+import { createViewSet, viewUser, VIEW_TTL_MS, VIEW_GOSSIP_MAX_BYTES } from './lib/view-state.js'
 import { logSnippet, logToolHint, logCmd, guideText } from './lib/log-snippet.js'
 import { create as createEgress } from './services/egress.js'
 
@@ -961,7 +962,162 @@ function startActivity2() {
   act2.rollover(actNow(), 'startup')
   act2.expire(actNow())
   scheduleActivityCheckpoints()
+  startView2()
 }
+
+// ---- #88 build step 8 (2.0): PER-USER VIEW STATE (docs/spec-88.md §5.6; lib/view-state.js) — behind the same switch.
+// What a viewer chooses about the board (pins, hidden, open / closed, Expand / Collapse all, the selection, the DETAILS
+// fold, last seen, the options incl. "show removed", Reset view) is kept per USER — the OS LOGIN of this gateway, which
+// serves the dashboard page (Q29: OS_USER, never PROC_USER / AI_BRIDGE_USER; AIMB_TEST_VIEW_USER is the tests' hook) — as
+// a last-writer-wins set keyed by node id, replicated across the realm:
+//   PAGE ↔ GATEWAY (dashboard sockets only): the welcome carries view:{ user, recs } (that user's live records); the page
+//     sends {type:"view_set", recs:[{k, v}]} — the gateway stamps ts / origin / user, merges, answers only a refusal
+//     ({type:"view_refused", ref, refused:[{ k, code, what }]}), and pushes {type:"view", recs} (the changed records,
+//     tombstones included) to every OTHER dashboard socket here (the same user: one gateway = one login).
+//   GATEWAY ↔ GATEWAY (the v6 activity links only — activity_gossip:6 implies it, §6.2): on link adoption each side sends
+//     its WHOLE set (every user of the realm) as VIEW {full:true, recs} (newest first within 1 MB); then each local or
+//     learned CHANGE goes on as VIEW {recs} within ≤ ACT_GOSSIP_MS (one batch per link per tick; not back to the link it
+//     came from); LWW makes the transitive re-gossip safe and an idempotent merge ends the loop. ANTI-ENTROPY: PEER_ROSTER
+//     carries view_v (count + hash of the newest 64); a peer showing another view_v on the #63 refresh gets the full set
+//     once (per pair of view_v values; not during the link's first seconds, while the adoption exchange is in flight).
+//   FILES: the set this gateway holds (own + learned) → views/<lslug(host)>.json, whole + atomic, ≤ every VIEW_SAVE_MS
+//     while it changes (and at prepare-shutdown / a clean exit); at start every views/*.json is merged (other hosts' files
+//     read only; a conflicted copy is never read — the store's scan warns about it, fs_warnings).
+//   PRUNING: a node that LEFT the board (a remove / merge this store applied — the result's `left` —, or a v6 delta's
+//     removal — applySlice2's `left`) → a tombstone for every user's records of it. GC every VIEW_GC_MS: tombstones and
+//     reset-voided records past the TTL, and live records past it whose node no board here holds.
+//   A PIN keeps a transient context (§3.8): a live pin:<id> (any user) on one of THIS host's transient contexts → its keep
+//     record (by the pinning user, act "pin"), at start for every pin held and then for each pin that arrives.
+// Followers serve no dashboard (the WS ingress is the gateway's): they neither hold nor forward the set.
+const VIEW_USER = viewUser(process.env.AIMB_TEST_VIEW_USER || OS_USER || '') || 'unknown'
+const VIEW_TTL = Number(process.env.AI_BRIDGE_VIEW_TOMBSTONE_TTL_MS) || VIEW_TTL_MS
+const VIEW_SAVE_MS = Number(process.env.AI_BRIDGE_VIEW_SAVE_MS) || 10000
+const VIEW_GC_MS = Number(process.env.AI_BRIDGE_VIEW_GC_MS) || 600000
+const VIEW_FULL_SETTLE_MS = 5000   // a link's adoption exchange is in flight this long: no anti-entropy resend meanwhile
+const viewSet = createViewSet({ realm: REALM, origin: HOSTNAME, ttlMs: VIEW_TTL, log: l => log(l) })
+const viewOn = () => ACT_V2 && role === 'gateway' && !!act2
+let viewPending = /** @type {{ rec: any, from: string|null }[]} */ ([]), viewTimer = /** @type {any} */ (null), viewSaveTimer = /** @type {any} */ (null), viewLastSave = 0, viewDirty = false
+const viewWire = r => ({ k: r.k, v: r.v, ts: r.ts, origin: r.origin })   // what a page gets (no realm / user / generation)
+function startView2() {
+  if (!ACT_V2 || !act2) return
+  let rh = { files: 0, merged: 0, bad: 0 }
+  if (PERSIST && persistence.activity2 && persistence.activity2.readViews) {
+    try { rh = viewSet.rehydrate(persistence.activity2.readViews(), Date.now()) } catch (e) { log(`view: reading views/ failed: ${(e && e.message) || e}`) }
+  }
+  log(`view (2.0): user "${VIEW_USER}" (this gateway's OS login${process.env.AIMB_TEST_VIEW_USER ? ', AIMB_TEST_VIEW_USER' : ''}); ${viewSet.size()} view record(s) from ${rh.files} file(s)${rh.bad ? ` (${rh.bad} unreadable)` : ''}`)
+  viewKeepPins(viewSet.pinned())
+}
+/** Records that CHANGED the set (a page's view_set, a peer's VIEW, a pruning tombstone): saved, gossiped on (not back to
+ * `fromGw`), pushed to this gateway's dashboards (not `fromWs`) when they are this gateway's user's, and a new pin keeps
+ * a transient context of this host. */
+function viewApplied(changed, fromGw = null, fromWs = null) {
+  if (!changed || !changed.length) return
+  viewSaveSoon()
+  for (const r of changed) viewPending.push({ rec: r, from: fromGw })
+  viewKick()
+  const mine = changed.filter(r => r.user === VIEW_USER).map(viewWire)
+  if (mine.length) { const msg = JSON.stringify({ type: 'view', recs: mine }); for (const ws of leaves) if (ws.kind === 'dashboard' && ws !== fromWs) { try { ws.send(msg) } catch { } } }
+  const pins = changed.filter(r => r.k.startsWith('pin:') && r.v === 1).map(r => r.k.slice(4))
+  if (pins.length) viewKeepPins(pins)
+}
+function viewKeepPins(ids) {
+  if (!act2 || role !== 'gateway') return
+  const list = [...ids]
+  if (!list.length) return
+  const by = r => ({ kind: 'dashboard', user: (r && r.user) || VIEW_USER, host: (r && r.origin) || HOSTNAME })
+  // each pinned target's newest live pin names who pinned it
+  const pinner = id => { let best = null; for (const r of viewSet.all()) if (r.k === `pin:${id}` && r.v === 1 && (!best || r.ts > best.ts)) best = r; return best }
+  let kept = 0
+  for (const id of list) {
+    try { const k = act2.keepPinned([id], actNow(), { by: by(pinner(id)) }); if (k.kept.length) { kept++; log(`activity: pinned ${k.kept[0].path || id} — the transient context is permanent now (keep)`) } } catch (e) { log(`activity: keep on pin failed: ${(e && e.message) || e}`) }
+  }
+  if (kept) actChanged()
+}
+/** PRUNING: the board's nodes `ids` left it → tombstones for every user's records of them. */
+function viewPrune(ids) {
+  if (!viewOn() || !ids || !ids.length) return
+  const t = viewSet.tombstone(new Set(ids), Date.now())
+  if (t.length) { tapRec('sent', { kind: 'view-prune', ids: ids.length, tombstones: t.length }); viewApplied(t) }
+}
+function viewSaveSoon() {
+  viewDirty = true
+  if (!PERSIST || !persistence.activity2 || !persistence.activity2.writeView || viewSaveTimer) return
+  viewSaveTimer = setTimeout(() => { viewSaveTimer = null; viewSaveNow() }, Math.max(0, viewLastSave + VIEW_SAVE_MS - Date.now()))
+  viewSaveTimer.unref()
+}
+function viewSaveNow() {
+  if (!viewDirty || !ACT_V2 || !PERSIST || !persistence.activity2 || !persistence.activity2.writeView) return
+  viewDirty = false; viewLastSave = Date.now()
+  try { persistence.activity2.writeView(HOSTNAME, viewSet.toFile(HOSTNAME, Date.now())) } catch (e) { viewDirty = true; log(`view: writing views/ failed: ${(e && e.message) || e}`) }
+}
+/** One gossip tick (≤ every ACT_GOSSIP_MS): each v6 link gets its full set (adoption / anti-entropy) or the pending
+ * changes it did not send us, within the VIEW budget (the rest waits for the next tick). */
+function viewKick() {
+  if (viewTimer) return
+  viewTimer = setTimeout(viewFlush, ACT_GOSSIP_MS)
+  viewTimer.unref()
+}
+function viewFlush() {
+  viewTimer = null
+  if (!viewOn() || process.env.AI_BRIDGE_TEST_GOSSIP === 'silent') { viewPending = []; return }
+  const pending = viewPending
+  viewPending = []
+  for (const [gw, p] of peerGw) {
+    const a = p.act
+    if (!a || !a.cap || !p.sock || p.sock.destroyed) continue
+    if (a.viewFull) {
+      a.viewFull = false; a.viewFullAt = Date.now()
+      const L = viewSet.list()
+      sendFrame(p.sock, { t: 'VIEW', full: true, recs: L.recs })
+      tapRec('sent', { peer: a.host, kind: 'view', full: true, n: L.recs.length, why: a.viewWhy || 'link' })
+      continue
+    }
+    const out = []
+    let bytes = 0, rest = false
+    for (const x of pending) {
+      if (x.from === gw) continue
+      const b = JSON.stringify(x.rec).length + 1
+      if (out.length && bytes + b > VIEW_GOSSIP_MAX_BYTES) { rest = true; break }
+      bytes += b; out.push(x.rec)
+    }
+    if (rest) { a.viewFull = true; a.viewWhy = 'backlog' }   // a backlog past the budget: the full set next tick
+    if (!out.length) continue
+    sendFrame(p.sock, { t: 'VIEW', recs: out })
+    tapRec('sent', { peer: a.host, kind: 'view', n: out.length, keys: out.slice(0, 20).map(r => `${r.user}:${r.k}=${JSON.stringify(r.v)}`) })
+  }
+  if ([...peerGw.values()].some(p => p.act && p.act.cap && p.act.viewFull)) viewKick()
+}
+/** A VIEW frame from an adopted v6 peer-hub link (the switch on, gateway only). */
+function onViewFrame(sock, f) {
+  if (!ACT_V2 || actLegacy()) return
+  const [gw, p] = peerEntryOf(sock)
+  if (!gw || !p || !p.act || !p.act.cap) { tapRec('recv', { kind: 'view-refused', why: 'not an adopted v6 link' }); return }
+  if (!viewOn() || !Array.isArray(f.recs)) return
+  if (!f.full && process.env.AI_BRIDGE_TEST_VIEW_DROP_DELTAS === '1') { tapRec('recv', { peer: p.act.host, kind: 'view-dropped' }); return }   // test-only: lose the deltas (anti-entropy must repair)
+  p.seen = Date.now()
+  const changed = viewSet.merge(f.recs.slice(0, 50000), Date.now())
+  tapRec('recv', { peer: p.act.host, kind: 'view', full: !!f.full, n: f.recs.length, changed: changed.length })
+  viewApplied(changed, gw)
+}
+/** Anti-entropy: the peer's PEER_ROSTER view_v differs from ours → our full set once (per pair of values). */
+function viewCheckPeer(p, theirs) {
+  if (!viewOn() || !p || !p.act || !p.act.cap || !theirs || typeof theirs !== 'object') return
+  const ours = viewSet.viewV()
+  if (Number(theirs.n) === ours.n && theirs.h === ours.h) return
+  if (Date.now() - (p.act.viewFullAt || 0) < VIEW_FULL_SETTLE_MS || p.act.viewFull) return
+  const pair = JSON.stringify([theirs.n, theirs.h, ours.n, ours.h])
+  if (p.act.viewPair === pair) return
+  p.act.viewPair = pair; p.act.viewFull = true; p.act.viewWhy = 'view_v'
+  viewKick()
+}
+setInterval(() => {   // GC: tombstones / voided records past the TTL; records past it whose node no board here holds
+  if (!viewOn()) return
+  const held = new Set()
+  for (const s of act2.state.sessions.values()) for (const id of s.nodes.keys()) held.add(id)
+  for (const h of actRemote2.hosts.values()) for (const s of h.sessions.values()) for (const id of s.nodes.keys()) held.add(id)
+  const g = viewSet.gc(Date.now(), { isHeld: id => held.has(id) })
+  if (g.dropped) { viewSaveSoon(); log(`view: gc dropped ${g.dropped} record(s) (${g.tombstones} tombstone(s), ${g.voided} voided by a reset, ${g.orphans} of nodes no board holds)`) }
+}, VIEW_GC_MS).unref()
 /** §7.5: the 2.0 gateway refuses to start — one line on stderr (written synchronously), the same message in the TRAY's
  * file (the OS temp dir, `aimb-start-refused-<ws port>.txt`: the Windows tray reads it when the gateway it launched exits
  * 78, shows it and stops relaunching until Restart Bridges…), then exit 78. A gateway that starts removes that file. */
@@ -1044,6 +1200,7 @@ async function flushActivityNow() {
   const out = /** @type {any} */ ({ cp: 0, rep: 0, files_drained: 0 })
   if (act2 && role === 'gateway') {   // #88 step 6: the 2.0 store's writes are synchronous — nothing is queued
     if (!PERSIST) return { ...out, skipped: 'no-persistence' }
+    viewSaveNow()   // #88 step 8: the view-state file too
     if (!actCheckpointMs()) return { ...out, skipped: 'checkpoints-off' }
     return { ...out, cp: act2.flush(actNow()) }
   }
@@ -1060,7 +1217,7 @@ async function flushActivityNow() {
   return out
 }
 process.on('exit', () => {   // a clean shutdown flushes the pending checkpoints (sync appends; a kill skips this — one interval lost)
-  if (act2) { if (PERSIST && actCheckpointMs() && role === 'gateway') try { act2.flush(actNow()) } catch { } return }   // #88 step 6: the 2.0 store (synchronous)
+  if (act2) { if (PERSIST && actCheckpointMs() && role === 'gateway') try { act2.flush(actNow()) } catch { } viewSaveNow(); return }   // #88 step 6: the 2.0 store (synchronous); step 8: + the view-state file
   if (!activity || !PERSIST || !actCheckpointMs() || (actReplay && actReplay.phase !== 'done')) return
   try { for (const w of Act.flushCheckpoints(activity, actNow())) persistence.activity.appendSync(HOSTNAME, activity.cp.day, JSON.stringify(w.rec)) } catch { }
 })
@@ -1101,7 +1258,7 @@ function actBudget() {
 setInterval(() => {   // expiry (finished/gone agents past finished_visible_hours leave the board) + the memory budget
   if (act2 && role === 'gateway') {   // #88 step 6: the 2.0 pass writes its removals
     let changed = false
-    try { changed = act2.expire(actNow()).changed } catch (e) { log(`activity: expiry failed: ${(e && e.message) || e}`) }
+    try { const x = act2.expire(actNow()); changed = x.changed; if (x.left) viewPrune(x.left) } catch (e) { log(`activity: expiry failed: ${(e && e.message) || e}`) }   // step 8: + the view records of what expired
     for (const o of G2.expireRemote2(actRemote2, actNow(), ACT_CFG.finished_visible_hours * 3600000)) { actOwner.delete(o); log(`activity: ${o} has been down for ${ACT_CFG.finished_visible_hours} h — its board leaves this one`) }   // #88 step 7
     if (changed) actChanged()   // #88 step 7: the removals reach the peer hubs as a delta
     return
@@ -1177,8 +1334,11 @@ async function activityLog2(ident, input) {
   if (input.items !== undefined) return actNotYet2(9, 'a batch (items)')
   const now = actNow()
   const r = act2.apply({ realm: ident.realm || REALM, project: ident.project, user: ident.user, session: ident.session }, input, now, { tzOffsetMin: tzOff(now) })
-  if (r.ok) actChanged()
-  return r.ok ? { ...r, session: ident.session } : r
+  if (!r.ok) return r
+  actChanged()
+  const { left, ...res } = r
+  if (left) viewPrune(left)   // #88 step 8: nodes that left the board (a transient vanish, a merge) → their view records tombstoned
+  return { ...res, session: ident.session }
 }
 /** #88 step 6: the `activity` read on the 2.0 board — the sessions, a node's log page (via the index files; `removed` = "show
  * removed"), or one entry. Step 7 (gossip v6): the board holds the other 2.0 hosts' sessions too (each row tagged with its
@@ -1186,9 +1346,12 @@ async function activityLog2(ident, input) {
  * OWNER over the hub link (ACTIVITY_REQ, paged and rate-limited there; queued here, as 1.7x). */
 async function activityRead2(q, ctx = {}) {
   const now = actNow()
-  const head = { ok: true, host: HOSTNAME, now, format: 6, stale_after_min: ACT_CFG.stale_after_min, ...act2.head(),
+  const unshared = actUnsharedHosts()
+  const head = { ok: true, host: HOSTNAME, now, format: 6, stale_after_min: ACT_CFG.stale_after_min, ...act2.head(), view_user: VIEW_USER,   // #88 step 8: whose view this gateway serves (Q29 / Q41: "view: robin")
     ...(actRemote2.hosts.size ? { remote_hosts: actRemoteInfo2() } : {}),
-    ...(ACT_TAP && q.tap ? { tap: { files: PERSIST && persistence.activity2 ? { ...persistence.activity2.stats } : null, open: act2.openStats, carry_forward: act2.lastCarryForward, cf_day: act2.cfDay, sent: actTap.sent, recv: actTap.recv } } : {}) }
+    ...(unshared.length ? { unshared_hosts: unshared } : {}),   // #88 Q70: linked hosts NOT on this board (still on 1.7x) — the dashboard shows each in red
+    ...(ACT_TAP && q.tap ? { tap: { files: PERSIST && persistence.activity2 ? { ...persistence.activity2.stats } : null, open: act2.openStats, carry_forward: act2.lastCarryForward, cf_day: act2.cfDay, sent: actTap.sent, recv: actTap.recv,
+      view: { user: VIEW_USER, size: viewSet.size(), view_v: viewSet.viewV(), users: viewSet.users(), recs: viewSet.all().slice(0, 2000) } } } : {}) }
   const wantHost = q.host != null && String(q.host).trim() ? String(q.host).trim() : null
   if (q.entry != null) {   // a remote entry: entry:{ id, host } — or a remote CURRENT line, found by its id in the held boards
     const e = q.entry && typeof q.entry === 'object' ? q.entry : { id: q.entry }
@@ -1402,6 +1565,7 @@ async function actApplyAction2(q, by) {
   const r = act2.action({ ...q, realm: REALM }, now, { by })
   if (!r.ok) return { ...r, host: HOSTNAME }
   actChanged()
+  if (r.left) { viewPrune(r.left); delete r.left }   // #88 step 8: a dismissal / merge → the view records of what left the board
   log(`activity: ${r.action} on ${q.session}/${r.path || '(root)'} (${projName(q.project || 'unclassified')}) ${Act.byText(by)}${r.dismissed ? ` — ${r.dismissed.nodes || ''} node(s) off the board` : ''}`)
   let delivery = null
   if (r.ident) {
@@ -1787,9 +1951,50 @@ function actLinkInit(p, gw, hello) {
     const v = hello && hello.activity_gossip != null ? `activity_gossip:${String(hello.activity_gossip).slice(0, 8)}` : 'no activity format'
     log(`activity: ${p.act.host} declares ${v} — a 2.0 gateway shares activity only with 2.0 hosts (activity_gossip:${G2.GOSSIP2_FORMAT}); nothing is shared with it until it is upgraded (docs/spec-88.md §6.2)`)
     tapRec('recv', { peer: p.act.host, kind: 'format-mismatch', v: hello ? hello.activity_gossip : null })
-  }
+    // #88 Q70 (Robin: "a serious issue — show in RED"): the board head lists it (unshared_hosts), on every 2.0 host
+    if (!actUnshared.has(gw)) actUnshared.set(gw, { host: p.act.host, since: Date.now(), activity_gossip: hello && hello.activity_gossip != null ? hello.activity_gossip : null })
+    actUnsharedChanged()
+  } else if (actUnshared.delete(gw)) actUnsharedChanged()   // the same gateway back on v6
+  if (v2) for (const [g, u] of [...actUnshared]) if (g !== gw && lc(u.host) === lc(p.act.host) && p.act.cap) { actUnshared.delete(g); actUnsharedChanged() }   // that HOST is back, upgraded (a new gateway session)
   if (p.act.cap) actKick(p)
+  if (p.act.cap && v2) { p.act.viewFull = true; p.act.viewWhy = 'link'; viewKick() }   // #88 step 8: the whole view set on every (re)link
 }
+// #88 Q70 (2.0, the switch on): UNSHARED HOSTS — the linked peer hubs whose activity format check failed (a host still on
+// 1.7x: nothing is shared with it, §6.2). Robin: "a serious issue — show in RED". This gateway's own list (by link) goes
+// to every v6 peer in its slices (`unshared` on a full slice, and on a delta when it changed), so every 2.0 host shows
+// it (the board head's `unshared_hosts`: [{ host, bridge_version?, since, seen_by:[hosts] }]); an entry goes when the link
+// drops or the host comes back on v6. The dashboard (step 10) shows each one as a red warning at the top of the board.
+const actUnshared = new Map()        // peer gateway session -> { host, since, activity_gossip }
+const actUnsharedRemote = new Map()  // a v6 peer's host -> the entries it reports
+function actUnsharedOwn() {
+  return [...actUnshared].map(([gw, u]) => { const bv = roster.get(gw)?.bridge_version; return { host: u.host, ...(bv ? { bridge_version: String(bv).slice(0, 32) } : {}), since: u.since, ...(u.activity_gossip != null ? { activity_gossip: u.activity_gossip } : {}) } })
+    .sort((a, b) => (a.host < b.host ? -1 : a.host > b.host ? 1 : 0))
+}
+function actUnsharedWire(list, from) {
+  const out = []
+  for (const u of list.slice(0, 64)) {
+    if (!u || typeof u !== 'object' || typeof u.host !== 'string' || !u.host.trim()) continue
+    out.push({ host: u.host.trim().slice(0, 120), ...(typeof u.bridge_version === 'string' ? { bridge_version: u.bridge_version.slice(0, 32) } : {}), since: Number.isFinite(Number(u.since)) ? Number(u.since) : null,
+      ...(typeof u.activity_gossip === 'number' || typeof u.activity_gossip === 'string' ? { activity_gossip: u.activity_gossip } : {}), from })
+  }
+  return out
+}
+/** The board head's unshared_hosts: this gateway's own + what its v6 peers report — never this host, never a host held
+ * here as a LINKED v6 board (a peer's stale report). */
+function actUnsharedHosts() {
+  const by = new Map()
+  const linkedV6 = h => [...peerGw.values()].some(p => p.act && p.act.cap && lc(p.act.host) === lc(h) && p.sock && !p.sock.destroyed)
+  const add = (u, seenBy) => {
+    if (lc(u.host) === lc(HOSTNAME) || linkedV6(u.host)) return
+    const k = lc(u.host), x = by.get(k)
+    if (!x) by.set(k, { host: u.host, ...(u.bridge_version ? { bridge_version: u.bridge_version } : {}), since: u.since, ...(u.activity_gossip != null ? { activity_gossip: u.activity_gossip } : {}), seen_by: [seenBy] })
+    else { if (!x.seen_by.includes(seenBy)) x.seen_by.push(seenBy); if (!x.bridge_version && u.bridge_version) x.bridge_version = u.bridge_version; if (u.since != null && (x.since == null || u.since < x.since)) x.since = u.since }
+  }
+  for (const u of actUnsharedOwn()) add(u, HOSTNAME)
+  for (const [h, list] of actUnsharedRemote) for (const u of list) add(u, h)
+  return [...by.values()].sort((a, b) => (a.host < b.host ? -1 : 1))
+}
+function actUnsharedChanged() { if (role === 'gateway') for (const p of peerGw.values()) actKick(p) }
 // coalescing: one timer per link, due ACT_GOSSIP_MS after that link's last frame — every change before it fires rides it
 function actKick(p) {
   const a = p && p.act
@@ -1807,11 +2012,15 @@ function actSendTo(p) {
   const plan = act2 ? G2.planSlice2(act2.state, a.pub, { full, maxBytes: ACT_SLICE_MAX_BYTES, units: actUnitsNow() })   // #88 step 7: the v6 slice (one unit per node, by id)
     : Act.planSlice(activity, a.pub, { full, maxBytes: ACT_SLICE_MAX_BYTES, units: actUnitsNow() })
   let frame = null
+  // #88 Q70 (2.0): the 1.7x hosts this gateway is linked to ride the v6 slices — on a full one, and on a delta when the list changed
+  const us = act2 ? actUnsharedOwn() : null, usSig = us ? JSON.stringify(us) : null, usDue = !!us && (full || a.usSig !== usSig)
   if (plan.body) frame = { t: 'ACTIVITY_SLICE', origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq + 1, ...(full ? { log_cmd: actLogCmd() } : { base: a.seq }), ...plan.body }   // the body carries v (#70 step 6a); v1.65.0 (6d): a full one our aimb-log paths
+  else if (usDue) frame = { t: 'ACTIVITY_SLICE', v: actFormat(), origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq + 1, base: a.seq, sessions: [] }   // Q70: only the list changed — an empty delta carries it
   else if (a.beat) frame = { t: 'ACTIVITY_SLICE', v: actFormat(), origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq, base: a.seq, sessions: [], beat: true }   // the #63 heartbeat: lets the receiver check it is in sync
   a.beat = false
   if (!frame) return
-  if (plan.body) a.seq++
+  if (usDue) { frame.unshared = us; a.usSig = usSig }
+  if (plan.body || (usDue && !frame.beat)) a.seq++
   a.needFull = false; a.last = now
   sendFrame(p.sock, frame)
   if (ACT_TAP) tapRec('sent', { peer: a.host, ...tapSlice(frame) })
@@ -1871,6 +2080,8 @@ function onActivityFrame2(sock, gw, p, host, f, refuse) {
     if (ACT_TAP) tapRec('recv', { peer: host, ...tapSlice(f), ok: r.ok, code: r.code })
     if (!r.ok) { if (r.code === 'out-of-sync') actAskResync(p, host); else if (r.code !== 'bad-version' || !p.act.badVer) { if (r.code === 'bad-version') p.act.badVer = true; log(`activity: slice from ${host} refused: ${r.code}`) } ; return }
     if (f.full) { actOwner.set(host, gw); const lc2 = wLogCmd(f.log_cmd); if (lc2) actHostCmd.set(host, lc2); else actHostCmd.delete(host) }
+    if (Array.isArray(f.unshared)) actUnsharedRemote.set(host, actUnsharedWire(f.unshared, host)); else if (f.full) actUnsharedRemote.delete(host)   // #88 Q70: the 1.7x hosts IT is linked to
+    if (r.left) viewPrune(r.left)   // #88 step 8: nodes this delta removed → their view records tombstoned (the owner does too; LWW converges)
   } else if (f.t === 'ACTIVITY_DOWN') {
     tapRec('recv', { peer: host, kind: 'down' })
     if (actOwner.get(host) === gw && G2.markOriginDown2(actRemote2, host, actNow())) log(`activity: ${host} is going down (${String(f.reason || 'notice').slice(0, 40)}) — its agents show as gone`)
@@ -2038,6 +2249,8 @@ function actLinkLost(gw, p, why) {
   if (p && p.act) actFailQueue(p.act, 'the link to the owning host dropped while the fetch was queued')   // v1.61.0: its queued fetches too
   for (const [rid, q] of [...actRemotePending]) if (p && q.sock === p.sock) { clearTimeout(q.timer); actRemotePending.delete(rid); q.resolve({ ok: false, code: 'owner-unreachable', host: hostOfGw(gw), what: 'the link to the owning host dropped mid-request' }) }
   const host = hostOfGw(gw)
+  if (actUnshared.delete(gw)) actUnsharedChanged()   // #88 Q70: the 1.7x host's link dropped → off the list
+  if (actUnsharedRemote.delete(host)) actUnsharedChanged()   // … and what this peer reported goes with its link
   if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, actNow())) { log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`); actDashKick() }
   if (act2 && actOwner.get(host) === gw && G2.markOriginDown2(actRemote2, host, actNow())) log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`)   // #88 step 7
 }
@@ -2732,7 +2945,9 @@ const refreshCap = () => TEST_GOSSIP === 'legacy' ? {} : { gossip_refresh: true,
 // #66b: `realm_defaults` = the winning realm-wide default-reminders record (or null) — same transitive LWW spread; a
 // ≤1.46 receiver ignores it.
 // #71: `project_names` = the canonical project-spelling map (same transitive spread; a ≤1.56 receiver ignores it).
-const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), pn = projectNames.list()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, realm_defaults: rd, project_names: pn, ...refreshCap() })
+// #88 step 8 (2.0, the switch on): `view_v` = the view set's anti-entropy summary (count + hash of the newest 64); a v6 peer
+// whose own differs sends its full set once (viewCheckPeer). A 1.7x receiver ignores the field.
+const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), pn = projectNames.list()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, realm_defaults: rd, project_names: pn, ...refreshCap(), ...(viewOn() ? { view_v: viewSet.viewV() } : {}) })
 // #70 step 4 (v1.60.0): `activity_gossip:N` = this hub sends + understands ACTIVITY_SLICE / _DOWN / _REQ / _RES in format N (a ≤1.59
 // peer ignores the field, never gets the frames, and ignores them if it did; 'legacy' test gossip mimics that). v1.62.0 (#70
 // step 6a, the node tree): N = 2 — a 1.60/1.61 peer (N = 1) and this hub exchange no slices or fetches (owner-unsupported)
@@ -2766,13 +2981,14 @@ function gossipToPeers(force) {
   const frame = gossipFrame(slice, pg, gr, rd, pn)
   for (const p of peerGw.values()) sendGossip(p, frame)
 }
-function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, realmDefs, retained, projNames) {
+function mergeRemoteRoster(fromGw, host, port, sessions, pages, sock, grants, realmDefs, retained, projNames, viewV) {
   if (!fromGw || fromGw === SESSION) return
   // #63: only the CURRENT link for that gateway may write its slice — a late frame on a retired/replaced socket
   // would otherwise resurrect entries that no peerGw entry owns, and nothing would ever clean them up again.
   const peer = peerGw.get(fromGw)
   if (!peer || peer.sock !== sock) return
   peer.seen = Date.now()
+  if (viewV) viewCheckPeer(peer, viewV)   // #88 step 8: anti-entropy — another view_v → our full view set once
   // #62: fold the peer's grant set in BEFORE the slice dedupe — a grant-only change arrives with an unchanged slice.
   // A change re-broadcasts (followers get it in ROSTER) and re-gossips it onward; an idempotent merge ends the loop.
   const grantsChanged = consent.merge(grants) > 0
@@ -2878,8 +3094,9 @@ function connectToPeer(host, port) {
       linked = true; clearTimeout(giveUp); peerSession = f.session; adoptPeer(f.session, sock, f.host || host, f.port || port, f.name, f, true)
       sendGossip(peerGw.get(f.session), gossipFrame())   // #63: the connect-time frame may predate a change gossipToPeers sent before this link was adopted (#66c: + the retained set)
     }
-    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained, f.project_names)
+    else if (f.t === 'PEER_ROSTER') mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained, f.project_names, f.view_v)
     else if (f.t === 'ACTIVITY_SLICE' || f.t === 'ACTIVITY_DOWN' || f.t === 'ACTIVITY_REQ' || f.t === 'ACTIVITY_RES' || f.t === 'ACTIVITY_ACT') onActivityFrame(sock, f)   // #70 step 4; v1.65.0: + ACTIVITY_ACT (6d)
+    else if (f.t === 'VIEW') onViewFrame(sock, f)   // #88 step 8: the per-user view state (2.0 links only)
     else if (f.t === 'PING') { if (!TEST_GOSSIP) sendFrame(sock, { t: 'PONG', seq: f.seq }) }   // #63: the accepting hub probes us too (<=1.43 dialers ignore PING — 'legacy' mimics that)
     else if (f.t === 'PONG') touchPeer(sock)
     else if (f.t === 'REJECT') { try { sock.destroy() } catch {} }
@@ -3067,9 +3284,11 @@ function onControlConn(sock) {
         sendGossip(peerGw.get(f.session), gossipFrame())   // #63: full slice on every (re)link, independent of lastGossip (#66c: + the retained set)
         sock.on('close', () => { if (peerGw.get(f.session)?.sock === sock) dropPeer(f.session) })
       } else if (f.t === 'PEER_ROSTER') {
-        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained, f.project_names)
+        mergeRemoteRoster(f.gateway, f.host, f.port, f.sessions, f.pages, sock, f.grants, f.realm_defaults, f.retained, f.project_names, f.view_v)
       } else if (f.t === 'ACTIVITY_SLICE' || f.t === 'ACTIVITY_DOWN' || f.t === 'ACTIVITY_REQ' || f.t === 'ACTIVITY_RES' || f.t === 'ACTIVITY_ACT') {   // #70 step 4: only from an adopted peer-hub link (v1.65.0: + ACTIVITY_ACT, refused elsewhere)
         onActivityFrame(sock, f)
+      } else if (f.t === 'VIEW') {   // #88 step 8: the per-user view state (2.0 links only)
+        onViewFrame(sock, f)
       } else if (f.t === 'PONG') {
         touchPeer(sock)
       } else if (f.t === 'PING') { if (TEST_GOSSIP !== 'silent') sendFrame(sock, { t: 'PONG', seq: f.seq }) }
@@ -3179,7 +3398,8 @@ function onWsConnection(ws) {
           leaves.add(ws)
           log(`${ws.kind} connected: ${m.page_kind || ws.kind} "${m.title || ''}" (${ws.instance})`)
           if (ws.kind === 'page') emitTraceRaw({ dir: 'con', verb: 'connect', from: `page:${ws.instance}`, from_name: m.title || m.page_kind || 'page', to: SESSION, size: 0, note: `page joined (${m.page_kind || 'page'})`, envelope_id: null })
-          ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, profile: profile.names, capabilities: CAPS, realm: REALM, ...rosterFor(ws) }))
+          ws.send(JSON.stringify({ type: 'welcome', instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, profile: profile.names, capabilities: CAPS, realm: REALM, ...rosterFor(ws),
+            ...(ws.kind === 'dashboard' && viewOn() ? { view: { user: VIEW_USER, recs: viewSet.forUser(VIEW_USER).map(viewWire) } } : {}) }))   // #88 step 8: this gateway's user's view state (Q29)
           if (ws.kind === 'dashboard') { ws.send(JSON.stringify({ type: 'trace_history', traces: traces.history() })); pushPersistence(ws) }
           broadcastRoster()
         } else if (m.type === 'log' && ws.kind === 'logger') {   // #70 step 3: one report → { type:'logged', ref, result } (the `log` tool's result shape)
@@ -3203,6 +3423,15 @@ function onWsConnection(ws) {
           actDashSubscribe(ws)
         } else if (m.type === 'activity_unsub') {
           ws.actSub = null
+        } else if (m.type === 'view_set') {   // #88 step 8: a dashboard's view choices (§5.6) — stamped, merged, pushed to the other dashboards, gossiped; answers only a refusal
+          const ref = m.ref != null ? m.ref : null
+          const no = (code, what) => { try { ws.send(JSON.stringify({ type: 'view_refused', ref, refused: [{ k: null, code, what }] })) } catch { } }
+          if (ws.kind !== 'dashboard') return no('dashboard-only', 'view state is kept for dashboards only')
+          if (!ACT_V2) return no('not-in-this-version', 'the per-user view state is the 2.0 board\'s (AI_BRIDGE_ACTIVITY_V2)')
+          if (!viewOn()) return no('not-gateway', 'this bridge does not hold the activity board')
+          const r = viewSet.set(VIEW_USER, Array.isArray(m.recs) ? m.recs : [], Date.now())
+          if (r.refused.length) { try { ws.send(JSON.stringify({ type: 'view_refused', ref, refused: r.refused })) } catch { } }
+          viewApplied(r.changed, null, ws)
         } else if (m.type === 'activity_action') {   // v1.65.0 (#70 6d): a dashboard's WRITE — only an authenticated dashboard socket (never a page leaf, a logger or a socket without a hello)
           const ref = m.ref != null ? m.ref : null
           let result

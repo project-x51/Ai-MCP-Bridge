@@ -746,6 +746,27 @@ export function keepNode(t, node) {
   return true
 }
 
+/**
+ * Step 8 (§3.8, §5.6): a PIN makes a transient context permanent. The OWNER calls this with the targets that have a live
+ * `pin:` record of any user in the view set it holds; each of ITS transient contexts among them gets one `keep` record
+ * (by = the pinning dashboard's user, act "pin"). → { writes, kept:[{ id, path }] }
+ * @param {any} state @param {Iterable<string>} ids @param {number} now @param {{ by?: any }} [opts]
+ */
+export function keepPinned2(state, ids, now, opts = {}) {
+  const out = { records: [], writes: [], kept: [] }
+  const want = new Set(ids || [])
+  if (!want.size) return out
+  for (const sess of state.sessions.values()) {
+    for (const id of want) {
+      const n = sess.nodes.get(id)
+      if (!n || n.kind !== 'context' || !n.transient || n.merged_into) continue
+      const t = newTx(state, sess, now, { by: opts.by, act: 'pin' })
+      if (keepNode(t, n)) { out.records.push(...t.records); out.writes.push(...t.writes); out.kept.push({ id, path: pathOf(sess, n) }) }
+    }
+  }
+  return out
+}
+
 /** RENAME (§1.6: a clash → duplicate-label, nothing written): one `label` record; the old path becomes an alias. */
 function renameNode(t, node, label) {
   const { sess } = t

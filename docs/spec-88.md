@@ -13,7 +13,8 @@ tests bar) and Q57 (with Q61 / Q62: state is progress, result is outcome — a t
 TIME in the logs (§5.7); step 3 built the v6 records + replay, the day / index files and the time; step 4 built the
 conversion library — Robin accepted its Q63 – Q65 as built; step 5 the migration script — Robin accepted its Q66 – Q68 as built; step 6 wired
 the bridge files into the gateway behind the pre-cutover switch `AI_BRIDGE_ACTIVITY_V2` — Robin accepted its Q69 as built; step 7
-built gossip v6 behind the same switch — its Q70 is open).
+built gossip v6 behind the same switch — Robin changed its Q70 (a 1.7x host is a serious issue, shown in red); step 8 built
+the per-user view state (and Q70's `unshared_hosts`) behind the same switch — its Q71 is open).
 The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
@@ -700,6 +701,10 @@ an old prompt pasted into a tool call).
   `--id <id>` when the node has no key path).
 - The view state (pins, hidden, open / closed, selection, DETAILS fold, last seen) is per USER on the bridge (§5.6), no longer
   per browser.
+- **Unshared hosts in RED (Q70, Robin: "a serious issue — show in RED"):** each entry of the board head's `unshared_hosts`
+  (a linked host whose activity format check failed — a host still on 1.7x, §6.2) is shown as a RED warning at the top of
+  the board, naming the host and why: "LITTLE-001 is still on 1.7x (1.75.1): not on this board" (the version when known).
+  The entry goes when that host's link drops or it comes back on 2.0 (built in step 8; the page shows it in step 10).
 - No path fallback in the page: after the cutover every host is 2.0 and every unit carries an id (§6).
 
 ### 5.5 Notice subjects
@@ -892,7 +897,9 @@ no handling of a stray 1.7x peer. **Every host is upgraded together**, with the 
   `activity_ids` flag, no `view_state` flag, no v5 fallback.
 - Not a supported state, and nothing is built for it: a host left on 1.7x by mistake fails that same equality check in both
   directions, so it shares no activity with the 2.0 hosts (its board and theirs simply don't meet) until it is upgraded.
-  #88 does not change the message mesh.
+  #88 does not change the message mesh. **Q70 (changed):** it is shown as a serious issue — the 2.0 gateway lists such a
+  linked host in the board head's `unshared_hosts` (replicated to every 2.0 host in the v6 slices) and the dashboard shows
+  it in RED (§5.4).
 
 ### 6.3 Requests and actions by id
 - `ACTIVITY_REQ {op:"log", q:{id, removed?, …}}` — the owner pages the subtree by id (§5.2); entries carry `n` and `at`.
@@ -1527,6 +1534,96 @@ existing checks keep passing while the core is written.
    C, a close on B survives new activity on A (badge "N new"), Reset view everywhere, a selection change NOT applied live
    in a second window but applied at its next load (Q30), a dismissed node's records tombstoned on all, a host restarted
    with its peers down keeps the set, `AI_BRIDGE_USER` set to another name does not change whose view it is.
+
+   **8 as built** (2026-10-03): THE STAGING — still behind step 6's pre-cutover switch `AI_BRIDGE_ACTIVITY_V2=1`: with it
+   on, a 2.0 gateway holds the view set, speaks `VIEW` / `view_v` on its v6 links and serves `view_set` / `view` to its
+   dashboards; without it (the default, and every live bridge) nothing changes (a `view_set` is answered `view_refused`
+   `not-in-this-version`; no `view_v` in PEER_ROSTER). No version bump (2.0.0 is step 12). New env knobs (no config key,
+   §10.5): `AI_BRIDGE_VIEW_TOMBSTONE_TTL_MS` (30 days), `AI_BRIDGE_VIEW_SAVE_MS` (10 s), `AI_BRIDGE_VIEW_GC_MS` (10 min);
+   test-only `AIMB_TEST_VIEW_USER` and `AI_BRIDGE_TEST_VIEW_DROP_DELTAS` (a host that loses every VIEW delta).
+   NEW `src/lib/view-state.js` (pure; the bridge only calls it): the keys and values of §5.6 validated (`parseViewKey`,
+   `normViewValue`: pin / hide 1; open `{o:1}` | `{o:0, n, q}`; all `{o:0|1}`; sel a target; fold:details 1 | 0; seen an
+   entry id; `opt:<name>` ([a-z0-9_]{1,32}: show_removed, log_order, active_only, plans_only …) a scalar; reset 1 — a reset
+   has no tombstone; ≤ 128 bytes of JSON; a `<t>` is a node id or a non-node row's unit id string ≤ 200 chars), the record
+   `{ realm, user, k, v, ts, origin[, g] }` (another realm is dropped), `beatsView` (§5.6's total order) and
+   `createViewSet` → `set` (a page's records, ≤ 256 per view_set, STAMPED here), `merge`, `forUser`, `tombstone`, `gc`,
+   `rehydrate`, `list`, `viewV`, `toFile`, `pinned`, plus `openState` (the `all` vs `open:` rule, for step 10's page).
+   MECHANICS DECIDED HERE: (1) `seen:` is a max register that can still be PRUNED: its records carry a GENERATION `g`, the
+   order is (g, then the entry's time / sequence / id — not the id string, whose `act_<hex>_` prefix changes with every
+   gateway start —, then ts, origin); a tombstone (the node left, or the page forgot it) and the first seen after a Reset
+   view are written one generation up, so they beat every older value, and a later seen of that generation beats the
+   tombstone again; a concurrent write of an older generation (a host that had not heard of the tombstone) loses. (2) A
+   local write stamps `max(now, known + 1)` AND above the user's reset; a RESET is stamped above every record of the user
+   the host holds (so it voids a far-future one too) and is never "already so". Writing what is already so — or forgetting
+   what is not set — writes nothing (no echo, no gossip). (3) Reset-voided records are not served (forUser), are kept and
+   gossiped until gc drops them past the TTL (§5.6), and the reset record itself is exempt from the budget. (4) The BUDGET
+   (≤ 4 000 live records per user) is enforced on every merge / set: the oldest (ts, then k) are dropped locally with a log
+   line and not reported as changed (every host applies the same rule, so they converge). (5) GC orphans: only node-id
+   targets (a non-node row's records are bounded by the budget). (6) `view_v` = `{ n: records held (tombstones and voided
+   included), h: 16 hex of sha1 over the newest 64 (user, k, ts) }`.
+   THE STORE (`lib/activity2-store.js`): `apply` / `action` / `expire` results carry `left` — the node ids that LEFT this
+   host's board in that call (a `remove` with the subtree that went into the ghost table with it, a `merge`'s merged node;
+   a dismissed SESSION's ids are collected before it leaves memory; a node back on the board in the same call — a vanish +
+   resurrect — is not listed); the bridge strips it from tool results. `keepPinned(ids, now, { by })` →
+   `lib/activity2.js keepPinned2`: each of this host's TRANSIENT contexts among the ids gets ONE `keep` record (by = the
+   newest pin's user and host, act "pin"); the replay keeps it permanent. `lib/activity2-gossip.js applySlice2`: a delta's
+   removals → `left` (minus what the same frame put back: a merge's children are removed with it and re-sent).
+   FILES (`lib/activity2-files.js` + the facet's `activity2.readViews` / `writeView`): `views/<lslug(host)>.json` =
+   `{ v:1, host, realm, written_at, recs }` (the whole set held, own + learned), written whole through `writeAtomic` by
+   this host only; `readViews` reads every exact-name file (`^[a-z0-9._-]+\.json$`; another host's on a shared folder, read
+   only); a conflicted copy or odd name is never read — step 6's scan already lists `views/` (WARN once, `fs_warnings`).
+   No persistence (the `none` facet) → a memory-only set.
+   THE GATEWAY (`bridge.mjs`, the switch on): the USER = `lc(AIMB_TEST_VIEW_USER || OS_USER)` — never `PROC_USER` /
+   `AI_BRIDGE_USER`; the head's `view_user` and the welcome's `view.user` name it. At the 2.0 start (`startActivity2`, after
+   the store opened): `rehydrate` from every `views/*.json`, then every live pin keeps its transient context. PAGE ↔
+   GATEWAY (dashboard sockets only): the dashboard's `welcome` carries `view:{ user, recs:[{ k, v, ts, origin }] }` (the
+   user's live records + its reset record); `{type:"view_set", ref, recs:[{k, v}]}` is stamped and merged and answered ONLY
+   with a refusal — `{type:"view_refused", ref, refused:[{ k, code: bad-key | bad-value | too-many | dashboard-only |
+   not-gateway | not-in-this-version, what }]}`; the changed records (tombstones included) are pushed as `{type:"view",
+   recs}` to every OTHER dashboard socket of this gateway (one gateway = one login = one user) — and a change LEARNED from
+   a peer to all of them. Every record is pushed, `sel` and `fold:details` too: Q30's live-vs-load rule is the PAGE's (step
+   10 applies the tree choices live and keeps `sel` / the fold for its next load; a new load's welcome serves them).
+   GATEWAY ↔ GATEWAY (only links whose peer announced `activity_gossip:6` — nothing to a 1.7x peer): on every (re)link the
+   whole set as `VIEW {full:true, recs}` (newest first within 1 MB; the rest stays local, logged once); then one batch of
+   the changed records per link per `ACT_GOSSIP_MS` tick as `VIEW {recs}` — never back to the link a change came from; a
+   backlog past 1 MB sends the full set next tick instead; an idempotent merge ends the transitive re-gossip. A VIEW frame
+   is taken only from an adopted v6 peer-hub link. ANTI-ENTROPY: PEER_ROSTER carries `view_v`; a peer showing another one
+   gets our full set ONCE per pair of values, and not within 5 s of the link's last full exchange (the adoption exchange is
+   still in flight). PERSISTENCE: `views/<host>.json` ≤ every 10 s while the set changes, and at prepare-shutdown / a clean
+   exit. PRUNING: the store's `left` (a log call, a dashboard action, the expiry pass) and a v6 delta's `left` → a tombstone
+   for every user's records of those nodes (both the owner and every receiver write one; LWW converges). GC every 10 min:
+   tombstones / voided records past the TTL, and live records past it whose node no board here holds (own or remote).
+   PINS: a live pin arriving (a page here or a peer) → `keepPinned` on this host's nodes → the gossip carries the node no
+   longer transient. The saved "show removed" (step 6) is `opt:show_removed` — the gateway keeps it; the toggle is step 10.
+   Q70 (Robin, during this step: "a serious issue — show in RED"): `unshared_hosts` in the 2.0 board head —
+   `[{ host, bridge_version? (the peer gateway's roster entry), since, activity_gossip, seen_by:[hosts] }]` — one entry per
+   LINKED peer whose format check failed; this gateway's own list rides its v6 slices (`unshared` on every full slice, and
+   on a delta when it changed — an empty delta carries it alone), so every 2.0 host shows it; an entry goes when that
+   link drops or the host comes back on v6 (a new link that announces 6); a host held here as a linked v6 board is never
+   listed (a peer's stale report). The dashboard's red warning is step 10 (§5.4).
+   Tests: `tests/unit/test_view_state_unit.mjs` (keys / values / the 128-byte bound / realms; the order and its ties; a
+   seeded history merged in 30 random orders and chunks = one set, merged again = no change, two halves exchanged
+   converge; the stamp under clock skew; seen as a max register across hosts, its generations — tombstone, a stale
+   old-generation write, a seen after the tombstone and after a reset; Reset view (a far-future record voided, another user
+   untouched, a write after it counts); `all` vs a newer `open:` and a node created after it; `tombstone` / `pinned`; gc —
+   tombstones, voided, orphans, an expired tombstone never taken back; the budget; the gossip list's budget; view_v; the
+   file image + rehydrate; the views/ files with a conflicted copy and a `.tmp`; the store's `left` on a merge, a transient
+   vanish (not on a resurrect) and a dismissal; `keepPinned` with its record on file and the replay; applySlice2's `left`
+   on a merge and a dismissal). `tests/activity/test_view_state_live.mjs` — four 2.0 gateways + a 1.7x one, everything
+   linked through A (C "a third via the first"); B without the test hook and with `AI_BRIDGE_USER=builder`; D = user
+   "alice", dropping every VIEW delta: whose view (Q29); a pin pushed live to A's second window (no echo to the first), to
+   B and to C; two users kept apart (alice's records replicated but never pushed or served to robin, and the other way);
+   refusals; the pin surviving a RENAME and a MOVE; a close made on B surviving new activity on A; the selection pushed and
+   served at a new load; seen never moving back; a dismissed agent's and a merged context's records tombstoned on A, B, C
+   — and on D through anti-entropy alone; a pin made on B keeping A's transient bucket (it stays when emptied); Q70 on A
+   and B and cleared when the 1.7x host's link drops; Reset view from C on every host (alice's untouched; a later choice
+   counts); one views file per host; C restarted with every peer down keeps the set, merges another host's file (read
+   only), never reads a conflicted copy, warns about it (fs_warnings + the log) and never deletes it. No existing test
+   changed. Left for later: the 2.0 script / batches / waits and removing the switch (9); the dashboard — the welcome's
+   `view`, `view_set` (debounced), applying pushes (tree choices live, `sel` / the fold at load), the badges ("? N" /
+   "N new" from `open:`'s `n` / `q`), the "new since you last looked" divider (`seen:`), Expand / Collapse all
+   (`openState`), Reset view, "show removed" (`opt:show_removed`), the one-time `localStorage` import, "view: <user>" in
+   the board head and the RED unshared hosts (10). Question Q71 (§9).
 9. **Tool, script, guides** (§4). The 2.0 flags + fields, the leading-`@` rule, `label-required` / `relabelled`, every §4.5
    `legacy-form` error (script AND gateway), results, `gateway-unsupported` against < 2.0.0, `--guide agent` as the first
    report (with `--label`), `{log_snippet}` / `agentGuide` / `sessionGuide` / `{log_tool_hint}` rewritten for 2.0 (finish
@@ -1537,7 +1634,8 @@ existing checks keep passing while the core is written.
    lines), the tool schema.
 10. **Dashboard** (§5.4, §5.6). Units / rows / actions by id, Rename…, Merge into…, the clash dialog (merge them / a
     pre-filled "Notes (2)", Q32), the `at` tooltip, the copy command, "show removed", the view state (badges, "new since
-    you last looked", Reset view, live vs load-time application, the one-time `localStorage` import). *Tests:*
+    you last looked", Reset view, live vs load-time application, the one-time `localStorage` import), the board head's
+    unshared hosts as RED warnings at the top of the board (Q70, §5.4). *Tests:*
     `test_dashboard_activity` (jsdom) — ids through deltas, a rename / move keeping selection, open / closed beating
     defaults, a closed node gaining activity → badge not reopen, Expand all then a new node → default, the divider, Reset
     view, the import, drag-and-drop by id, a drop onto a same-label sibling opening the dialog (both answers; "merge them"
@@ -1563,7 +1661,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built) and Q69 that of step 6 (accepted as built) — step 7's Q70 is under "Open questions"; GROUPS, ROLLUP and TYPES are decisions
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built), Q69 that of step 6 (accepted as built) and Q70 that of step 7 (changed: built in step 8) — step 8's Q71 is under "Open questions"; GROUPS, ROLLUP and TYPES are decisions
 Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
@@ -1639,6 +1737,7 @@ answer overrides an earlier one (noted in the earlier row).
 | 67 | (build step 5) The `--backup <dir>` option of §7.2 | **Accepted as built (Robin):** not built — the backup always lives at `persistence/activity-v5-backup/<host>/`, where the 2.0 gateway's start check looks for an unfinished migration (§7.2, §7.5). |
 | 68 | (build step 5) What a failed migration run leaves | **Accepted as built (Robin):** the v5 files are restored from the backup and the backup removed — the directory exactly as before, exit 3 (only a failed restore keeps the backup, named); §7.2 had the backup kept and the directory half-converted until the next run (§7.2, §8 step 5). |
 | 69 | (build step 6) What the Windows tray does when the 2.0 gateway it launched refuses to start (exit 78, §7.5) | **Accepted as built (Robin):** it shows the message once in a balloon, keeps it in a "Bridge refused to start - details..." menu item, and stops relaunching the gateway (until now it relaunched every 3 s) until Restart Bridges... is chosen (§8 step 6). |
+| 70 | (build step 7) A host left on 1.7x by mistake, as a 2.0 gateway sees it | **Changed (Robin): "As a serious issue. Show in RED."** The 2.0 board head lists each linked host whose activity format check failed in `unshared_hosts` (`host`, `bridge_version` when known, `since`, `seen_by`), replicated to every 2.0 host in the v6 slices; an entry goes when that link drops or the host comes back on 2.0. The dashboard shows each as a red warning at the top of the board naming the host and why ("still on 1.7x: not on this board") (§5.4, §6.2; built in step 8, the page in step 10). |
 | TIME | (Robin, 2026-10-03) Time in the logs | **Accepted into 2.0 (built in step 3):** a node times each attempt from running to done / failed / skipped / abandoned (`took`, on the node and the ending entry); a reopen / restart is a new attempt (latest `took` + `took_total` / `attempts`); no start → no took; a test-result's duration is its took; plans, test runs and agents get their own start-to-end time; it survives checkpoints and the replay and shows in `displayOf2` ("took 4m 12s") (§2.2, §5.7). |
 | GROUPS | (Robin, 2026-10-03, new) Lists that are not plans | **Accepted into 2.0 (step 2b):** a context can be a GROUP — a list, not a plan: no bar, no plan-end, nothing added to its parent's rollup; where the bar would be, an optional COUNT ("4 items" / "3 open · 1 done"; abandoned and hidden items not counted). Set at creation (`--group` / `group:true`) or toggled from the dashboard (Show as group / Show as plan); its items keep their states. Candidates: Potential changes, Planned changes, Deployed releases, Questions; Next release stays a plan (§1.3, §2.1, §5.7). *The flag was then folded into TYPES: a group is `--context-type=group`.* |
 | TYPES | (Robin, 2026-10-03, "typed nodes and entries") | **Accepted into 2.0:** every node has a `type` from a small built-in REGISTRY held as data — per type its allowed fields, display (glyph, what shows in place of a bar), rollup behaviour, allowed children and menu actions (the slot the context-aware menu, #92, folds into). Types: `context` (the default, plan-capable), `plan`, `group`, `agent`, `question`, and `test-run` (reserved; built in step 2d). The flag is `--context-type=<type>` (tool `context_type`; kebab-case flag, values case-insensitive); it REPLACES `--group` / `group:true`; a question is a node of type `question`. ENTRIES are typed too: `--message-type=<type>` (tool `message_type`; default `note`), each type declaring typed fields that are validated so the bridge can count them (later: `--message-type=test-result --result pass --checks 22 --duration 4.1s`); `--data` stays free-form. Answers are `answer` entries; the node state still drives plans and progress. 2b builds the registries, the mechanism and the types questions need (`note`, `question`, `answer`, `withdrawal`, `expiry`, + `event` for structural entries); a new step 2d builds `test-run` + `test-result`; #81's test reporter is the first user of `test-run`. QUESTIONS read naturally: state the question, its options listed below it as the answers; the text never restates the options; choices stay structured (`--choice`) — in §5.8, the Answer dialog (§5.4) and the agent guide (§4.3) (§1.7, §2, §4, §5.7, §5.8, §8). |
@@ -1709,14 +1808,16 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q69, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). Open — raised by build step 7 (posted on
-the board under Questions / "Step 7 (Q70)"):
-- **Q70** (build step 7) A host left on 1.7x by mistake, as a 2.0 gateway sees it. *As built:* nothing is shared either
-  way (§6.2) and the 2.0 gateway writes ONE log line per link naming the host and the reason; the board shows nothing of
-  it — the host is simply missing from it, as Q39 decided ("nothing is built for it"). *The alternative:* also list such
-  hosts in the board head (`unshared_hosts: [{ host, activity_gossip }]`), so the dashboard (step 10) can show "LITTLE-001
-  runs 1.7x — not on this board" instead of a silently missing host. Recommendation: accept as built (the runbook stops
-  and upgrades every host together, and the log line names the culprit).
+Q40 – Q70, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). Open — raised by build step 8 (posted on
+the board under Questions / "Step 8 (Q71)"):
+- **Q71** (build step 8) A transient bucket's view choices when it vanishes and comes back. *As built (§5.6's "pruned
+  when the node is gone"):* a transient context that empties is REMOVED (§3.8), so the owner and every receiver tombstone
+  every user's records of it — closed / open, hidden, last seen; a pinned one never vanishes (the pin keeps it). When it
+  comes back (the same id, a new run) it shows the DEFAULTS: in a sequential test run "In progress" vanishes between tests,
+  so a user who collapsed it sees it open again at the next test. *The alternative:* a TRANSIENT vanish does not prune —
+  the choices wait for the bucket to come back, and the 30-day GC drops them if it never does (only a dismissal, an expiry
+  and a merge prune). Recommendation: accept as built (one rule for every removal; a user who wants a bucket's choices to
+  stick pins it, which also keeps it on the board).
 
 ---
 

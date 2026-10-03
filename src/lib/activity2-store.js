@@ -105,6 +105,28 @@ export function createStore2(o) {
     }
     return A2.pruneGhosts(state, dayStart(retainFromDay(now)))
   }
+  /**
+   * Step 8 (§5.6 "pruned when the node is gone"): the node ids that LEFT this host's board in a call's records — a
+   * `remove` takes its node and the subtree that went into the ghost table with it (through gkids), a `merge` the merged
+   * node; `pre` = a dismissed session's ids (collected before the session left memory). → string[]
+   */
+  function leftOf(records, pre) {
+    const out = new Set(pre || [])
+    for (const r of records || []) {
+      if (!r || r.kind !== 'node') continue
+      if (r.op === 'merge') out.add(r.n)
+      else if (r.op === 'remove') {
+        out.add(r.n)
+        for (const sess of state.sessions.values()) {
+          if (!sess.ghosts.has(r.n)) continue
+          const stack = [r.n]
+          while (stack.length) { const x = stack.pop(); out.add(x); for (const g of sess.gkids.get(x) || []) if (!out.has(g)) stack.push(g) }
+        }
+      }
+    }
+    for (const sess of state.sessions.values()) for (const id of [...out]) { const n = sess.nodes.get(id); if (n && !n.merged_into) out.delete(id) }   // back on the board (a vanish + resurrect in one call)
+    return [...out]
+  }
   function retention(now) {
     if (!writer) return []
     const gone = writer.prune(retainFromDay(now))
@@ -154,17 +176,31 @@ export function createStore2(o) {
       const r = A2.applyCall(state, ident, input, now, opts)
       if (!r.ok) return r
       const p = persist(r.writes)
+      const left = leftOf(r.records)
       const { records: _r, entries: _e, writes: _w, ...rest } = r
-      return { ...rest, ...(p === false ? { persisted: false } : {}) }
+      return { ...rest, ...(p === false ? { persisted: false } : {}), ...(left.length ? { left } : {}) }
     },
     /** One dashboard action on ids (lib/activity2.js applyAction2), its writes appended in order (step 10 wires the
      * dashboard to it; the tests use it for dismissals). → the result without its records */
     action(q, now, opts = {}) {
+      let pre = null   // a dismissed SESSION leaves memory whole: its ids are collected first (step 8's pruning)
+      if (q && typeof q === 'object' && String(q.action || '').trim().toLowerCase() === 'dismiss' && typeof q.session === 'string') {
+        const s = A2.getSession2(state, { session: q.session, project: q.project, user: q.user, realm: q.realm })
+        if (s && q.id === s.rootId) pre = [...s.nodes.keys()]
+      }
       const r = A2.applyAction2(state, q, now, opts)
       if (!r.ok) return r
       const p = persist(r.writes)
+      const left = leftOf(r.records, pre)
       const { records: _r, entries: _e, writes: _w, ...rest } = r
-      return { ...rest, ...(p === false ? { persisted: false } : {}) }
+      return { ...rest, ...(p === false ? { persisted: false } : {}), ...(left.length ? { left } : {}) }
+    },
+    /** Step 8 (§3.8): the targets with a live pin (any user) → this host's transient contexts among them become permanent
+     * (one `keep` record each, written). → { kept:[{ id, path }] } */
+    keepPinned(ids, now, opts = {}) {
+      const r = A2.keepPinned2(state, ids, now, opts)
+      persist(r.writes)
+      return { kept: r.kept }
     },
     /** The checkpoint plan due now (cp lines + the repeat line, rewritten in place) → how many lines. */
     checkpoint(now) { const w = A2.planCheckpoints2(state, now); persist(w); return w.length },
@@ -175,7 +211,8 @@ export function createStore2(o) {
       const p = A2.expirePass2(state, now)
       persist(p.writes)
       A2.expireAliases(state, now)
-      return { changed: p.writes.length > 0, expired: p.expired, removed: p.removed }
+      const left = leftOf(p.writes)
+      return { changed: p.writes.length > 0, expired: p.expired, removed: p.removed, ...(left.length ? { left } : {}) }
     },
     /** Is a rollover due (a new local day since the last one, or none yet)? */
     rolloverDue(now) { return rollDay !== localDay(now) },

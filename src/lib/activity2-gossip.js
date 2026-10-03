@@ -315,13 +315,16 @@ export function applySlice2(remote, fromOrigin, body) {
   const held = remote.hosts.get(origin)
   if (!held || held.down_at || held.epoch !== epoch || held.seq !== Number(body.base)) return bad('out-of-sync', 'this delta does not follow the held slice — ask for a full one')
   let changed = false
+  const gone = new Map()   // step 8: node id -> its session key, for the ids this delta REMOVED (the view state's pruning)
   for (const r of body.remove || []) {
     const h = wIdent2(r, origin)
     if (!h) continue
     const s = held.sessions.get(h.key)
     if (!s) continue
-    if (r.id == null) { held.sessions.delete(h.key); changed = true; continue }
-    if (typeof r.id === 'string' && wRemove2(s, r.id)) changed = true
+    if (r.id == null) { for (const id of s.nodes.keys()) gone.set(id, null); held.sessions.delete(h.key); changed = true; continue }
+    if (typeof r.id !== 'string') continue
+    const before = new Set(s.nodes.keys())
+    if (wRemove2(s, r.id)) { changed = true; for (const id of before) if (!s.nodes.has(id)) gone.set(id, h.key) }
   }
   for (const r of body.sessions || []) {
     const h = wHeader2(r, origin)
@@ -342,7 +345,9 @@ export function applySlice2(remote, fromOrigin, body) {
   }
   held.seq = seq
   held.truncated = !!body.truncated
-  return { ok: true, changed, full: false, sessions: held.sessions.size }
+  // the removed ids that did not come back in the same frame (a merge's children are removed with it, then re-sent)
+  const left = [...gone].filter(([id, sk]) => !(sk != null && held.sessions.get(sk) && held.sessions.get(sk).nodes.has(id))).map(([id]) => id)
+  return { ok: true, changed, full: false, sessions: held.sessions.size, ...(left.length ? { left } : {}) }
 }
 /**
  * The origin went DOWN or became unreachable (its link dropped, a retired / expired peer, its ACTIVITY_DOWN notice): every
