@@ -482,20 +482,27 @@ replay rewriting older records through later moves, re-keying day files). Agreed
   hash(host, session, path) so every host derives the same ids and replay is reproducible.
 - **Compatibility:** a v2 host can still feed v5 (path-based) slices, projected from its current tree, to ≤1.72 hosts;
   they see a move as remove + add, as today. The break is mainly inside `activity.js` and the dashboard tree.
+  *(Superseded by the spec's final pass: no v5 projection at all — every host upgrades together; and the migration is a
+  standalone script, not a first-start conversion.)*
 - **Reusing a finished key** reopens that node; new work needs a new key (`docs-2`). The snippet says so.
 - Complements #77 (topic tags): ids give the structure, tags the cross-cutting views.
 
 **Plan:** spec first (record formats, the key/path/alias resolution rules, migration, wire projection, the API and
 snippet, the dashboard changes, a build in steps), reviewed by Robin; then build step by step as v2.0.0.
 
-### #88 spec (revised with Robin's answers)
-The full spec is **[docs/spec-88.md](spec-88.md)** (2026-10-03; nothing built). Robin answered all 28 questions (spec §9
-"Decisions"); **2.0 is a clean cutover**. In short:
+### #88 spec (final pass)
+The full spec is **[docs/spec-88.md](spec-88.md)** (2026-10-03; nothing built). Robin answered Q01 – Q39 and confirmed two
+follow-ups (spec §9 "Decisions"); **2.0 is a clean, no-legacy cutover**. In short:
 - **Ids:** 16 base32 chars of sha256(host, session, creator chain, key) — minted once, stored; migrated nodes get
-  sha256(host, session, final path). Keys: today's agent-name charset minus `:`, ≤ 48, case-insensitive, unique per creator.
-- **Labels and lines:** *label* = the node's name, *current line* = its status text. Sibling labels are UNIQUE: a create,
-  rename, move, merge or unmerge that would duplicate one is refused `duplicate-label`.
-- **Text:** plain `--text` only logs; a LEADING `@` also sets the node's line (`@@` = a literal `@`). `@~` is gone.
+  sha256(host, session, final path). Keys: today's agent-name charset minus `:`, ≤ 48, case-insensitive, unique per creator
+  (two agents can each have `notes`); a duplicate key within one creator is never accepted.
+- **Labels and lines:** *label* = the node's name, *current line* = its status text. A create REQUIRES a label (never the
+  key; `label-required`). Sibling labels are UNIQUE: a clashing CREATE is auto-renamed `"notes (2)"`, `"(3)"` … and the
+  result reports the label it got; a deliberate rename / move / merge / unmerge through the tool or script that clashes is
+  refused `duplicate-label`; on the dashboard a clashing move / merge asks "merge them, or a different label" (pre-filled
+  "Notes (2)").
+- **Text:** plain `--text` only logs; a LEADING `@` also sets the node's line (`@@` = a literal `@`). `@~` is gone. No
+  implied line for finishing states; the 2.0 guides say finish with `--text "@<summary>"`.
 - **Records v6:** `kind:"node"` records (create / label / move / rank / item / merge / unmerge / remove) carry ALL structure;
   entries, cp and cf name the node by `n` (+ `at`, the full path at the time); `cf` also carries structure; a per-day index
   file `YYYY-MM-DD.idx.json` (id → offsets + that day's node records) drives paging and a GHOST table (removed nodes) that
@@ -505,20 +512,26 @@ The full spec is **[docs/spec-88.md](spec-88.md)** (2026-10-03; nothing built). 
   scope, then your creator's, up to the session's (`chain:key` to be exact); `--path` (no `@`; segments are labels) = current
   tree → aliases → create (contexts only). `--path` stays after 2.0 as a shorthand.
 - **No legacy in the API:** positional text, `--plan`, `--move … --to`, `@` in paths and `@~` are removed; each is refused
-  `legacy-form` with a message naming the 2.0 form. Agents create their own node: `--agent <key> --under <item> --guide agent`
-  prints the guide AND registers the agent ("reading the guide").
-- **Per-user view state:** pins, hidden rows, open / closed, the log selection, the DETAILS fold and "last seen" are stored per
-  user on the bridge and replicated realm-wide (#62's LWW set + tombstones, a `VIEW` frame, one `views/<host>.json` per host).
-  Explicit open / close beats defaults; new activity never reopens a closed node ("? N" / "N new" badges); Reset view; choices
-  are pruned with their node.
-- **Cutover (spec §7):** stop every bridge on every host → run `src/tools/aimb-migrate-v2.mjs` (`--dry-run` first) on each
-  host: it converts only that host's `activity/<host>/` in place, from a one-off backup in `activity-v5-backup/<host>/`, writes
-  index files, then `format.json` last → start the bridges in any order. A 2.0 bridge refuses to start on unconverted history
-  and names the script. No rollback, no side-by-side `v6/`, no maps, no legacy reader. Still kept (spec §10): per-host writes
-  only, conflicted copies WARNed and never read or deleted, nothing writes `config.json`.
-- **Compat:** only the v5 network projection stays, for the cutover window (a host upgraded late): PEER_HELLO keeps
-  `activity_gossip:5` and adds `activity_ids:1` + `view_state:1`; deleted in 2.1.
-- **Holes:** H1 – H18 in the spec §9. **New questions:** Q29 – Q39, each with a recommendation (spec §9).
+  `legacy-form` with a message naming the 2.0 form. Agents create their own node: `--agent <key> --label "<name>" --under
+  <item> --guide agent` prints the guide AND registers the agent ("reading the guide"). The built-in guides and any realm
+  guides are rewritten for 2.0 at the cutover (no `min_bridge` gating, no fallback).
+- **Per-user view state:** pins, hidden rows, open / closed, the log selection, the DETAILS fold, "last seen" and the log
+  options are stored per user on the bridge and replicated realm-wide (#62's LWW set + tombstones, a `VIEW` frame, one
+  `views/<host>.json` per host). "The user" = the OS login of the gateway serving the page (not `AI_BRIDGE_USER`). Tree
+  choices apply live; selection and the DETAILS fold at page load. Explicit open / close beats defaults; new activity never
+  reopens a closed node ("? N" / "N new" badges); Reset view; choices are pruned with their node.
+- **Cutover (spec §7):** stop every bridge on every host → rewrite realm guides for 2.0 → run
+  `src/tools/aimb-migrate-v2.mjs` (`--dry-run` first) on each host: it converts only that host's `activity/<host>/` in place
+  from a backup in `activity-v5-backup/<host>/`, writes index files and `format.json`, VERIFIES, then deletes the backup (it
+  exists only during the migration, so a crashed run resumes from it) → start the bridges in any order. A 2.0 bridge refuses
+  to start on unconverted or half-migrated history and names the script. No rollback, no side-by-side `v6/`, no maps, no
+  legacy reader. Still kept (spec §10): per-host writes only, conflicted copies WARNed and never read or deleted, nothing
+  writes `config.json`.
+- **No old bridges at all:** 2.0 speaks only 2.0 on the wire too — PEER_HELLO announces `activity_gossip:6`; no v5
+  projection, no dual handshake, no 2.1 cleanup step, no stray-v5 handling. **Every host is upgraded together** with the
+  stop-all runbook; a host left on 1.7x shares no activity until it is upgraded.
+- **Holes:** H1 – H21 in the spec §9. **New questions:** Q40 (do agents need a label too?) and Q41 (hosts whose OS logins
+  differ), each with a recommendation (spec §9), posted to the board.
 
 ## #87 — log panel order: oldest first, auto-scroll to the bottom  ·  **DONE (v1.72.0)**
 Robin, 2026-10-03, asking whether the log panel should run the other way.

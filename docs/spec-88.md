@@ -1,9 +1,9 @@
-# #88 spec (revised with Robin's answers) — stable node identity, v2.0
+# #88 spec (final pass) — stable node identity, v2.0
 
-Status: REVISED, 2026-10-03. Robin has answered all 28 open questions of the first draft; his decisions are in §9
-"Decisions (Robin, 2026-10-03)", and the new questions this revision raises are Q29 – Q39 (§9). Nothing is built. The build
-(§8) starts once the new questions are answered. The agreed design is in `docs/issues.md` "#88"; this spec makes it exact.
-Code references are to v1.72.0 (`src/lib/activity.js` unless another file is named); the guide references (#89) are to v1.74.0.
+Status: FINAL PASS, 2026-10-03. Robin has answered Q01 – Q39 and confirmed two follow-ups (no v5 network projection; how
+duplicate labels behave). All his decisions are in §9 "Decisions"; the few questions this pass raises are Q40 + (§9). Nothing
+is built. The agreed design is in `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0
+(`src/lib/activity.js` unless another file is named); the guide references (#89) are to v1.74.0.
 
 **One paragraph.** Today a node's PATH is its key (`newNode`: `key = lc(path)`), so a move rewrites history: `applyMove` /
 `rekeySubtree` re-key memory, the replay remaps every older record through later moves (`createReplay`: `remapSegs`, `foreign`,
@@ -11,11 +11,11 @@ Code references are to v1.72.0 (`src/lib/activity.js` unless another file is nam
 node a stable INTERNAL ID, minted once from (owner host, session, creator, key). Label, parent, rank and kind become attributes
 set by small NODE RECORDS; log entries, checkpoints, gossip and the dashboard name the id. A move or rename is one record and
 nothing is rewritten; a node's log is "entries whose id is in this subtree now". Paths stay as a shorthand (no `@` any more)
-that resolves against the current tree, then aliases, then creates. **2.0 is a clean cutover:** every bridge on every host
-stops, a standalone script converts each host's own history in place (with a one-off backup), and the bridges start again in
-any order. A 2.0 bridge refuses to start on unconverted history. The 1.7x command forms are gone from the API (an old form gets
-an error naming the new one); only the v5 network projection stays, for the cutover window, so a host that is upgraded late
-still sees and is seen.
+that resolves against the current tree, then aliases, then creates. **2.0 is a clean, no-legacy cutover:** every bridge on
+every host stops, a standalone script converts each host's own history in place (from a backup that exists only while the
+script runs), and the bridges start again in any order. A 2.0 bridge refuses to start on unconverted history. The 1.7x
+command forms are gone from the API (an old form gets an error naming the new one), and 2.0 speaks only 2.0 on the wire: there
+is no v5 projection and no support for a 1.7x host, so **every host is upgraded together**, with the stop-all runbook (§7.1).
 
 ---
 
@@ -38,7 +38,10 @@ still sees and is seen.
   - A key never changes. A label does (§1.3).
 - **Scope:** keys are unique per (owner host, session, creator). Contexts and agents share the creator's one namespace (so
   `--key spec-88` from the session finds the agent `spec-88`). The same key under two creators is two nodes (`spec-88:docs`,
-  `spec-89:docs`).
+  `spec-89:docs`): two agents can each have a `notes` key.
+- **A duplicate key is never accepted** (Q31). Within one creator a key names ONE node: a create with a key that exists
+  reaches that node (§3.5, idempotent), `--item <k>` for a key that exists elsewhere in the scope makes nothing new
+  (`exists-elsewhere`), and a slug-made key gets `-2`, `-3` … Keys are never auto-renamed the way labels are (§1.6).
 - **Slug** (a key made from a label, for path-created nodes and label-only `--item`): NFC, whitespace runs → `-`, drop
   everything outside `[\p{L}\p{N}_.-]`, collapse `--`, strip leading non-`[\p{L}\p{N}_]` and trailing `-` / `.`, ≤ 40 code
   points; empty or `root` → `node`. On a clash in that scope: `-2`, `-3` … (prototyped: "#88 stable node identity (v2.0)" →
@@ -53,9 +56,7 @@ still sees and is seen.
   `pathKey` = the v5 key (`lc` canonical path) of the node's FINAL path in the converted history. The two prefixes keep the
   two families apart.
 - **Why a hash and not a counter:** no allocator state to persist; a retried create mints the same id; re-running the
-  migration gives the same ids; during the cutover window a 2.0 host derives the same legacy id for a late 1.7x host's node
-  (from its v5 slice, §6.2) as that host will get when it is converted, so the viewer's pins / open state survive the peer's
-  upgrade (§5.6).
+  migration gives the same ids (a crashed run resumes to the same bytes, §7.2).
 - **Collisions:** at 80 bits and ≤ 10⁶ nodes per host over retention, p ≈ 4·10⁻¹³. A mint that hits a DIFFERENT live node's
   id (creator / key differ) is refused `id-collision` and logged; nothing silently merges.
 - Prototyped (scratch, Node's `crypto`): Bridget's root on ROBIN-Z790 = `mkjhhu3kyjf2gbcv`, `:spec-88` = `uytyq4e6wsmtqsfq`,
@@ -64,7 +65,7 @@ still sees and is seen.
 ### 1.3 Attributes (all set by node records, §2.1)
 | Attribute | Rule |
 |---|---|
-| `label` | the node's NAME, what is shown; 1 – 60 code points, no control characters (today's context-name rule `normContextName` minus the `/` and `"` bans). Default: the key (agents) / the key or the path segment (contexts). **Unique among its siblings** (§1.6). |
+| `label` | the node's NAME, what is shown; 1 – 60 code points, no control characters (today's context-name rule `normContextName` minus the `/` and `"` bans). **Required at creation, never defaulted from the key** (Q31): `--label` / `label`, the `--item` label, or the path segment that creates it; only bridge-made nodes (the session root, questions `?N`) are labelled by the bridge, as today. **Unique among its siblings** (§1.6). |
 | `parent` | an id in the same session on the same host (cross-session moves: later, Q14). Never the node itself or below it. |
 | `rank` | #82's fractional base-36 rank, unchanged (`rankBetween`, `placeRanks`, `derivedRank`, `siblingCmp`): stored only when placed, else derived from created_at + plan_ix. |
 | `kind` | fixed at creation: `agent` or `context`. Never changes. |
@@ -91,22 +92,38 @@ node's log. A report LOGS an entry; it SETS the line only when asked to (§4.0).
 ### 1.5 How agents and sessions are identified
 - A **session** is unchanged: realm + project + user + session name (+ host for ownership). The script's `--session` /
   `--project` / `--user`, the tool's `as`.
-- An **agent** is named by its key chain from the session: `--agent spec-88`, `--agent spec-88/research`. A chain step that
-  doesn't exist yet is CREATED (an agent, label = key, under its creator unless `--under` places it — §4.1). A step that names
-  a context → `not-an-agent`.
+- An **agent** is named by its key chain from the session: `--agent spec-88`, `--agent spec-88/research`. The LAST step, when
+  it doesn't exist yet, is CREATED by a call that targets the agent itself — `--guide agent` (§4.4), or a report with no
+  `--key` / `--id` / `--path` — and that call must give its label (`--label "Spec final pass"`; the label never defaults to
+  the key, Q31 → `label-required`). It goes under its creator unless `--under` places it (§4.1). A missing EARLIER step, or a
+  missing agent on a call that targets another node, → `unknown-agent` ("start it first: --agent <chain> --label "…" --guide
+  agent"). A step that names a context → `not-an-agent`. (Q40: should agents be exempt from the label rule?)
 - Migrated agents (§7.3) get creator = their OWNER at the time (§3.4), key = their v5 segment — so `--agent a/b` names the
   node the old `--agent a/b` path named, and it keeps naming it after a move.
 - **Moving a running agent** is allowed (Q15) — within its session only. Its next report (`--agent` / `--key`) lands in the
   moved node. A move to another session is refused `cross-session` even once cross-session moves of contexts arrive (Q14):
   an agent's identity includes its session.
 
-### 1.6 Labels are unique among siblings (Q05)
+### 1.6 Labels are unique among siblings (Q05, reconciled by Q31 / Q32)
 - Two children of one parent never have the same label, compared like keys (NFC, case-insensitive). Agents and contexts share
-  this (a path segment no longer says which kind it means, §3.3).
-- A **create**, **rename** (`--rename`, Rename…), **move** (`--move`, drag-and-drop, Move to…), **merge** (A's children land
-  under B) or **unmerge** (A goes back to its old parent) that would give a node a label one of its new siblings already has is
-  REFUSED `duplicate-label`, naming the sibling (`{label, key, id}`) and suggesting `--label` / `--rename`. Nothing is
-  written. Q31 / Q32 ask about default labels and the dashboard dialogs.
+  this (a path segment no longer says which kind it means, §3.3). How a clash is settled depends on how deliberate the label is:
+- **Create → AUTO-RENAME.** A new node whose label a sibling already has gets the first free `"<label> (2)"`, `"(3)"` … (the
+  suffix counts in the same comparison; a label that would pass 60 code points is cut before the suffix). The node is created,
+  the result reports the label it GOT (`node.label`) with warning `relabelled` `{asked, got, sibling:{label, key, id}}`, and
+  the create record keeps `asked` (§2.1). This covers `--key` / `--agent` creates, `--item` and `--guide agent`; a path never
+  clashes with itself (below).
+- **A deliberate change through the tool or the script → REFUSED.** A **rename** (`--rename`), **move** (`--move`), **merge**
+  (A's children land under B) or **unmerge** (A goes back to its old parent) that would give a node a label one of its new
+  siblings already has is refused `duplicate-label`, naming the sibling (`{label, key, id}`) and the free suggestion
+  (`"Notes (2)"`). Nothing is written. `--move <ref> --rename "<label>"` in one call is one checked change (both records or
+  neither), so a caller can move and relabel at once.
+- **On the dashboard → a dialog (Q32).** A Move to… / drag-and-drop / Merge into… that would clash asks, per clash: **merge
+  them** (the moved node is merged into its same-label sibling, §3.6) or **use a different label** (a field pre-filled with
+  the suggestion, e.g. "Notes (2)"). "Merge them" is offered only where a merge is allowed (two contexts / plan items, §3.6);
+  for an agent only the label choice is. A merge whose children clash lists each clash — and the clashes a "merge them" choice
+  would create one level down — in the same dialog. The whole answer is sent as ONE action, checked by the owner before
+  anything is written, and refused as a whole if the tree changed meanwhile (the dialog reopens with the new state). Rename…
+  onto a sibling's label shows the error inline with the suggestion.
 - Not counted: GHOSTS (removed nodes, §5.1) and hidden MERGED nodes (§3.6). A label freed by a removal can be used again.
 - Path resolution finds an existing child by label (§3.3), so a path never collides with itself: a second `--path "88/notes"`
   reports into the first `notes`.
@@ -122,8 +139,7 @@ Day files, retention, one writer per host, the backwards reader and the cp / rep
 files as today — `activity/<host>/YYYY-MM-DD.jsonl` — converted in place by the migration (§7). Every v6 record keeps the
 identity fields today's records carry (`origin realm session project user host s0`) so a file stays self-describing; they are
 shown as `…ident` below. The bridge's `RECORD_FORMATS` becomes {6}: v2 – v5 records are read ONLY by the migration script's
-library (§7.3); a v2 – v5 record met by the 2.0 bridge is skipped with one WARN per file (§7.5 — someone ran a 1.7x bridge
-on converted history).
+library (§7.3). The 2.0 bridge has no v5 detection: any other record is skipped like any line it can't read (§7.5).
 
 ```json
 …ident = "realm":"default","project":"AIMB","user":"robin","session":"Bridget","host":"ROBIN-Z790","origin":"ROBIN-Z790","s0":1790900000000
@@ -147,7 +163,8 @@ path BEFORE the change (it seeds the alias table, §3.3, and lets a log say "mov
 ```
 - `create`: `n` id, `c` creator id (the session root's id for the session), `key`, `nk` (agent | context), `label`, `p` parent,
   `rank` (null = derived), `plan_item` / `plan_ix` when born a plan item, `run:true` (it BEGINS a run — replaces `new_from`;
-  §5.3). A create for a key whose node is a GHOST (§5.1) re-uses its id and starts a new run.
+  §5.3), and `asked` when the label was auto-renamed (§1.6: `"label":"notes (2)","asked":"notes"`). A create for a key whose
+  node is a GHOST (§5.1) re-uses its id and starts a new run.
 - `move`: new `p` (+ the rank it got there). `label`, `rank`, `item`: the one attribute.
 - `merge`: A (`n`) into B (`into`); `from` = A's parent then (for an unmerge); `kids` = A's children at that moment, which
   move under B (no separate move records).
@@ -211,8 +228,9 @@ Every call has a SCOPE: the session, or the agent `--agent` / `agent` names (§1
 `--id`'s, else `--path`'s, else the `--agent` node, else the session root.
 
 ### 3.1 `--key` (your own node)
-- Looks in YOUR scope only. Found → that node. Not found → CREATED there (a context; `--under` / `--label` / a position apply,
-  §3.5). Never looks in another scope: an agent's `--key docs` never lands in the session's `docs`.
+- Looks in YOUR scope only. Found → that node. Not found → CREATED there (a context; `--label` is REQUIRED — `label-required`
+  without it, Q31; `--under` / a position apply, §3.5; a sibling with that label → auto-renamed, §1.6). Never looks in another
+  scope: an agent's `--key docs` never lands in the session's `docs`.
 
 ### 3.2 References (`--under`, `--before`, `--after`, `--move`, `--merge`)
 A reference is, by its syntax (keys can't contain `/` or `:` outside the chain, or spaces):
@@ -230,8 +248,8 @@ A reference is, by its syntax (keys can't contain `/` or `:` outside the chain, 
   inside for a literal `"` (Q37). A path walks from the session root, or from the `--agent` node when one is given (the old
   `agent` + `path` concatenation, `resolveAddress`).
 1. **The current tree.** Each segment matches the CHILD whose label equals it (case-insensitive; §1.6 makes it unique). No
-   label matches → an AGENT child whose key equals it (agents created by `--agent x` have label = key anyway). A question
-   child also matches by its key (`?3`).
+   label matches → an AGENT child whose key equals it (so `spec-88/…` still finds the agent `spec-88` labelled "Spec final
+   pass"). A question child also matches by its key (`?3`).
 2. **Aliases.** No match → the session's ALIAS table: `lc(old display path) → id`, filled by every move / label / merge
    (`was`) and by the migration (§7.3: each node's earlier v5 paths, written without `@`). The longest alias that is a prefix
    of the path wins; the rest of the path resolves below that node. Warning `alias` ("#88/Docs is now Later/Docs") so a caller
@@ -253,8 +271,10 @@ A reference is, by its syntax (keys can't contain `/` or `:` outside the chain, 
 ### 3.5 Create is idempotent; location only at creation (Q02)
 - `--key docs --under X --label L` on an EXISTING node changes NOTHING structural: `--under`, `--label`, `--before` / `--after`
   are ignored with warning `exists` when they differ (hole H2: re-applying them would let an agent's retry, or a prompt
-  replayed after a compaction, undo a human's dashboard move or rename). Changes are explicit verbs: `--move`, `--rename`,
-  a position alone (reorder: no `--under`, existing node — as #82).
+  replayed after a compaction, undo a human's dashboard move or rename). A `--label` equal to the create's `asked` label (the
+  node was auto-renamed, §1.6) is not a difference — so a snippet that repeats `--label "notes"` on every call raises no
+  warning on its `notes (2)`. Changes are explicit verbs: `--move`, `--rename`, a position alone (reorder: no `--under`,
+  existing node — as #82).
 - So a retry after a lost response never duplicates and never moves anything; the text / state / bar of the retry apply as a
   normal report (a logged retry logs twice — as today; `--stream`'s "not resent" rule is unchanged).
 - `--item docs "…"` when `docs` exists ELSEWHERE in your scope: no new item; result `{key, created:false, path, warning:
@@ -266,8 +286,9 @@ A reference is, by its syntax (keys can't contain `/` or `:` outside the chain, 
   A's entries with no rewrite (§5.1). A's key and A's paths become aliases of B (`--key A` in A's scope now targets B, warning
   `merged`) until unmerged.
 - Allowed: context → context, plan item → plan item or context, same session and host. Refused `bad-merge`: A = B, B under A,
-  A or B an agent (an agent is a key namespace), the session root, A holding an OPEN question. Refused `duplicate-label` when
-  one of A's children has the label of one of B's (§1.6; the error lists every clash — Q32).
+  A or B an agent (an agent is a key namespace), the session root, A holding an OPEN question. From the tool / script: refused
+  `duplicate-label` when one of A's children has the label of one of B's (§1.6; the error lists every clash with its
+  suggested label). On the dashboard the Merge dialog settles each clash instead (merge them too, or relabel — §1.6, Q32).
 - Plans: A leaves its plan ("N of M" drops it); if A was the last open item, the plan may end as usual.
 - **Reversible:** `--key A --unmerge` puts A back under its pre-merge parent (the merge record's `from`) as a plain context,
   line-less; its children stay with B (move them back if wanted). The scope index still maps A's key to A's id — only target
@@ -297,23 +318,24 @@ Q19 FINAL).
   anywhere else is just a character.
 - `--state`, `--progress`, `--eta`, `--done`, `--stale-after` change the node whatever the text (they are not line text);
   `--ask` always sets the line (a question IS a line, #85). A state change with plain text logs the text and leaves the old
-  line text in place — Q33 asks whether finishing states should imply a line.
+  line text in place: the bridge keeps ONE rule, no implied line, for finishing states too (Q33). The 2.0 guides tell agents
+  to finish with `--state done --text "@<summary>"` (§4.3); the result's `line:false` shows a caller that it only logged.
 - The same rule for the `log` tool's `text`, batch items and `--stream` lines.
 - PowerShell note for the guide: always quote the text (`"@Writing the docs"`) — an unquoted `@word` is a splat there.
 
 ### 4.1 Script flags (`tools/aimb-log.mjs`)
 | Flag | Meaning |
 |---|---|
-| `--agent <chain>` | the agent you report as (your scope); created if new (§1.5) |
-| `--key <k>` | your node (§3.1); created if new (a context) |
+| `--agent <chain>` | the agent you report as (your scope); created if new by a call that targets it, with `--label` (§1.5) |
+| `--key <k>` | your node (§3.1); created if new (a context, with `--label`) |
 | `--id <id>` | a node by internal id (the dashboard's copied command) |
 | `--path "<label>/<label>"` | the shorthand (§3.3); no `@` |
 | `--under <ref>` | where a NEW target goes (default: under the scope — the session root or your agent node) |
-| `--label "<text>"` | a NEW target's label (default: the key) |
+| `--label "<text>"` | a NEW target's label — REQUIRED when the call creates it (`label-required`; never the key, Q31); a sibling clash → `"<text> (2)"`, reported (§1.6); on an existing node ignored (`exists` unless equal to the label asked at creation, §3.5) |
 | `--item <k> "<label>"` | a ☐ plan item under the target, repeatable, in order; `--item "<label>"` (one value) = label only, key = slug, matched by LABEL under the target first (today's re-plan rule) |
 | `--before <ref>` / `--after <ref>` / `--first` / `--last` | place new items or a new target; on an existing target alone = reorder (#82) |
-| `--move <ref>` | move the TARGET under `<ref>` (+ a position) |
-| `--rename "<label>"` | the target's new label (§1.6) |
+| `--move <ref>` | move the TARGET under `<ref>` (+ a position); a label clash → `duplicate-label` (§1.6) |
+| `--rename "<label>"` | the target's new label; a clash → `duplicate-label`; with `--move`, one checked change (§1.6) |
 | `--merge <ref>` / `--unmerge` | §3.6 |
 | `--text "<text>"` | log an entry; a leading `@` also sets the line (§4.0) |
 | `--guide agent\|session` | print the guide; with `--agent` it is also the agent's first report (§4.4) |
@@ -332,39 +354,46 @@ Q19 FINAL).
 - **Results always name the node:** `{ ok, id:<ENTRY id, as today>, ts, node:{ id, key, scope:"spec-88", label, path, kind,
   created? }, state, current, line:<true when the line was set>, logged, stale_at, … }`; `plan:[{ key, id, label, path,
   created, plan_item, state, warning? }]`; `moved:{ from, to, parent_id }`, `merged:{ into_id, path }`, `warnings` (`exists`,
-  `exists-elsewhere`, `alias`, `merged`). The top-level `id` stays the entry id (hole H10) — the node id is `node.id`.
+  `exists-elsewhere`, `alias`, `merged`, `relabelled` — §1.6: `node.label` / `plan[].label` is the label the node GOT). The
+  top-level `id` stays the entry id (hole H10) — the node id is `node.id`. A create without a label → `label-required`.
 - `activity` board nodes gain `id`, `parent_id`, `key`, `scope`, `label`; `path` (computed now, no `@`), `parent` (path) and
   `kind` stay; `log:{ id | path …, earlier?, removed? }`; `entry:{ id }` unchanged. The logger WS `wait_answer` takes `node_id`
   (its `path` form is the 2.0 path).
 
 ### 4.3 `{log_snippet}` and the guides
 - `{log_snippet}` keeps its 1.73 shape — the command + ONE line — with the 2.0 command: `Report your status with: "<node>"
-  "<script>" --session "S" --project "P" [--token-file "…"] --agent <your-key> --under <item-key>` and "First run it with
-  --guide agent in place of --text: that puts you on the board and prints the rules." The orchestrator fills `--agent` and
-  `--under`.
+  "<script>" --session "S" --project "P" [--token-file "…"] --agent <your-key> --label "<your name>" --under <item-key>` and
+  "First run it with --guide agent in place of --text: that puts you on the board and prints the rules." The orchestrator
+  fills `--agent`, `--label` and `--under` (the label is required to create the agent, Q31; repeating it on later calls is
+  harmless, §3.5).
 - `agentGuide` (`lib/log-snippet.js`) gets the 2.0 rules (each line ≤ 110 characters):
 ```
-- --key <k> names YOUR node: made on first use (--under <k> sets where, --label "…" its name); then --key <k>.
+- --key <k> names YOUR node. Make it once with --label "<name>" (needed) and --under <k>; then just --key <k>.
 - --text "@<what>" sets the node's line; plain --text "…" only logs. No --key = your own node.
 - Make your checklist first: --item <k> "<label>" (repeat it); tick one with --key <k> --done.
+- A name a sibling already has becomes "<name> (2)": the result says which label you got.
 - Report at milestones only (calls cost tokens); add --stale-after 60m before a long silent step.
 - A used key reopens its node: new work gets a new key (docs-2). Keys: letters, digits and _ . # + -
-- Finish with --state done --text "@<summary>" (or failed). Never put secrets in status text.
+- Finish with --state done --text "@<summary>" (or failed): the @ makes the summary your line.
+- Never put secrets in status text.
 - Need a decision? --ask "…" --choice "A" --choice "B" --wait 30m waits for the answer (exit 0 = answered).
 ```
   `sessionGuide` gets the session's version (its own `--key` items; "give each agent `--agent <key> --under <item key>`");
   `{log_tool_hint}` the same rules in tool form (`key:"…"`, `plan:[{key, label}]`, `text:"@…"`). The realm reminders'
   orchestrator briefing ships in `config.example.json` (Robin publishes it, §10).
-- **Realm-published guides (#89 part 2)** written for 1.7x teach removed forms: a 2.0 gateway serves a realm guide only when
-  its `min_bridge` is ≥ 2.0.0, else `text:null` and the script prints its built-in text (Q34).
+- **Realm-published guides (#89 part 2)** are REWRITTEN for 2.0 as part of the cutover (Q34), like the built-in ones: there
+  is no 2.0-specific `min_bridge` gating and no fallback logic — a 2.0 gateway serves realm guides by 1.74's rules (an
+  author's optional `min_bridge` works as today). Rewriting any realm guide in the shared `config.json` is a step of the
+  runbook (§7.1), done while every bridge is stopped.
 
 ### 4.4 `--guide agent` is the agent's first report (Q17)
-- `aimb-log --session S --project P --agent <key> --under <item> --guide agent` prints the guide AND, when the agent node
-  does not exist yet, creates it under `<item>` (label = `--label` or the key) with state running and the line "reading the
-  guide" — so an agent appears on the board the moment it starts, with no extra call.
+- `aimb-log --session S --project P --agent <key> --label "<name>" --under <item> --guide agent` prints the guide AND, when the
+  agent node does not exist yet, creates it under `<item>` (label = `--label`, required; a sibling clash → `"<name> (2)"`,
+  §1.6) with state running and the line "reading the guide" — so an agent appears on the board the moment it starts, with no
+  extra call. The result line names the label it got.
 - The node already exists (a re-read mid-work, a retry) → print only, nothing written (result line `(already on the board as
   …)`), so a re-read never clobbers a running line (the spirit of §3.5: "location only at creation").
-- A refused create (`duplicate-label`, `unknown-node` for `--under`) prints the guide, then the error, exit 64 — the agent
+- A refused create (`label-required`, `unknown-node` for `--under`) prints the guide, then the error, exit 64 — the agent
   sees how to fix it.
 - Without `--agent` (or with `--guide session`): print only, as in 1.74. Not back-ported to 1.7x: 2.0 is the next release.
 
@@ -427,13 +456,13 @@ an old prompt pasted into a tool call).
 - Actions send `{type:"activity_action", ref, host, session, project, user, id, action, args}` with id-valued args (`to_id`,
   `before_id`, `after_id`, `into_id`) — no path quoting, no `sibRef` names.
 - New menu items: **Rename…** (label ≤ 60), **Merge into…** (picker: contexts of the same session and host, then confirm).
-  Unmerge: not on the dashboard in 2.0 (Q06). A move or merge refused `duplicate-label` shows the clash in the dialog (Q32).
+  Unmerge: not on the dashboard in 2.0 (Q06). A move or merge onto a same-label sibling opens the clash dialog — merge them,
+  or a different label pre-filled with the suggestion ("Notes (2)") — and sends the answer as one action (§1.6, Q32).
 - Log entries show `at` on hover when it differs from the node's path now. Copy command = `--agent <scope> --key <key>` (or
   `--id <id>` when the node has no key path).
 - The view state (pins, hidden, open / closed, selection, DETAILS fold, last seen) is per USER on the bridge (§5.6), no longer
   per browser.
-- No path fallback in the page: after the cutover every gateway that serves a dashboard is 2.0, and a late 1.7x host's units
-  reach a 2.0 page as id-carrying units (§6.2).
+- No path fallback in the page: after the cutover every host is 2.0 and every unit carries an id (§6).
 
 ### 5.5 Notice subjects
 - #80 / #83 / #84 / #85 subjects use `displayPath` of the node's CURRENT path at SEND time (a batch is flushed seconds later:
@@ -463,7 +492,13 @@ sees the same board on ROBIN-Z790, LITTLE-001 and the Mac. It follows the realm-
 are not remembered (Q28). Values are bounded (≤ 128 bytes JSON); a user holds ≤ 4 000 live records (newest kept, a log line
 when trimmed).
 
-**Record and order (the #62 shape):** `{ realm, user, k, v, ts, origin }` — `user` = lc(the dashboard's user, Q29), `ts` = ms,
+**Whose view (Q29):** "the user" is the OS LOGIN of the gateway that serves the dashboard page (`OS_USER` in `bridge.mjs`,
+`os.userInfo().username`), standing in for the person at that machine — NOT `PROC_USER` and never the `AI_BRIDGE_USER`
+override. A browser page can't reveal its own OS user, so the serving gateway's login is the proxy. The welcome names it
+(`view.user`) and the board head shows it ("view: robin"). Tests that need two users set a test-only env hook
+(`AIMB_TEST_VIEW_USER`). Action attribution (`by.user`) is unchanged (`PROC_USER`).
+
+**Record and order (the #62 shape):** `{ realm, user, k, v, ts, origin }` — `user` = lc(that OS login), `ts` = ms,
 `origin` = the host that wrote it; `v:null` is a TOMBSTONE ("back to the default"; unpin, unhide, forget). `beatsView`: greater
 `ts`; on a tie the tombstone, then the greater origin, then the greater canonical JSON of `v` — a total order, so merge is
 idempotent and commutative. `seen:` merges as a max of `v` instead. A local write stamps `max(now, known + 1)` for that key, so
@@ -475,15 +510,15 @@ it beats what the host knows even under clock skew. New `lib/view-state.js` hold
 - The page sends `{type:"view_set", recs:[{k, v}]}` (debounced ~1 s; a click on a pin is one record). The gateway stamps
   `ts` / `origin` / `user`, merges, answers nothing, and pushes `{type:"view", recs}` (the changed records) to every OTHER
   dashboard socket of the same user on that gateway, and gossips them (below).
-- How a page applies a remote change: pins, hidden, open / closed, `all`, `reset` and options apply LIVE; `sel` and
-  `fold:details` apply only at page load, so two open windows don't steal each other's selection (Q30); `seen:` is merged
-  silently (the divider moves at the next refresh).
+- How a page applies a remote change (Q30, decided): the TREE choices — pins, hidden, open / closed, `all`, `reset` and
+  options — apply LIVE in every open window; `sel` and `fold:details` apply only when a page LOADS (newest wins), so two open
+  windows don't steal each other's selection; `seen:` is merged silently (the divider moves at the next refresh).
 - One-time import (Q13): on its first 2.0 load the page maps its `localStorage` `aimb.act.pins` / `aimb.act.hidden` (path-keyed
   unit ids) to node ids by the units' paths, sends them as `view_set`, then deletes those keys (try/catch throughout).
 
 **Replication between gateways:**
-- Capability `view_state:1` in `PEER_HELLO`; nothing is sent to a link without it (a late 1.7x host keeps its own browser-only
-  pins).
+- Sent on every activity link: every host is 2.0, and `activity_gossip:6` (§6.2) includes the `VIEW` frame — no separate
+  capability flag.
 - On link adoption each side sends its whole set (all users of the realm) in a new hub↔hub frame `VIEW {recs, full:true}`,
   newest first within a 1 MB budget (the rest stays local, logged; the next refresh retries). Afterwards each local or learned
   CHANGE goes on as `VIEW {recs}` within ≤ 1 s (batched, as the activity frames' 1 frame/s rule). LWW makes transitive re-gossip
@@ -508,7 +543,10 @@ it beats what the host knows even under clock skew. New `lib/view-state.js` hold
 
 ---
 
-## 6. Gossip and compatibility
+## 6. Gossip (2.0 only)
+
+2.0 speaks only 2.0 between hosts (Q39, confirmed): no v5 projection, no dual handshake, no translation toward an old owner,
+no handling of a stray 1.7x peer. **Every host is upgraded together**, with the stop-all runbook (§7.1).
 
 ### 6.1 The v6 slice
 - `ACTIVITY_SLICE` body `v:6`: one unit per node (`snapNode`), `path` replaced by `id`, `p` (parent id), `c` (creator id),
@@ -517,65 +555,45 @@ it beats what the host knows even under clock skew. New `lib/view-state.js` hold
   `root:true`. Merged nodes are not sent. `remove:[{…session, id}]` (a node and its subtree, as today).
 - Deltas, epochs, the byte cap, newest-active first, the 1 frame/s rule: unchanged (`planSlice` / `applySlice`).
 
-### 6.2 The v5 projection — for the cutover window only (Q10)
-After the cutover every host runs 2.0. A host upgraded LATE (its own checkout — the Mac, phub-lnx-01 — or one that was missed)
-still runs 1.7x for a while; for that window only, a 2.0 gateway keeps speaking v5 to it. All of §6.2 – §6.5 is deleted in
-2.1, once every host runs ≥ 2.0.
-- A link to a peer WITHOUT `activity_ids` gets v5 slices computed from the current tree (`snapNode` v5 shape): `path` = each
-  node's v5 PROJECTION — agent segment = its KEY (keys are valid agent segments), context segment = `@` + its label sanitised
-  to v5 rules (`/` → `∕`, `"` → `”`, control → space, > 60 → cut). Two siblings whose projections collide after sanitising →
-  ` (2)`, ` (3)` by created order. Hidden merged nodes are left out.
-- A v5 slice FROM an old host is converted on receipt: id = legacy id (§1.2) of each path, parent id from the parent path,
-  key = slug(segment), label = the segment without `@`. Stable while the path is; a move there is remove + add, as today. The
-  ids equal what that host's own migration will mint (final path = its path now), so view-state records survive its upgrade.
+### 6.2 The handshake: `activity_gossip:6`
+- **Hole H3:** a peer adopts activity only when `hello.activity_gossip` EQUALS its own `ACTIVITY_FORMAT` (`bridge.mjs`
+  `actLinkInit`). 2.0 announces `activity_gossip:6` and needs 6 from its peer. That one number now means "v6 slices,
+  id-addressed `ACTIVITY_REQ` / `ACTIVITY_ACT`, the rename / merge / unmerge actions and the `VIEW` frame (§5.6)"; the 1.7x
+  feature flags it implies (`activity_plan:1`, `activity_msg:1`, `activity_ask:1`) are no longer sent or read. No
+  `activity_ids` flag, no `view_state` flag, no v5 fallback.
+- Not a supported state, and nothing is built for it: a host left on 1.7x by mistake fails that same equality check in both
+  directions, so it shares no activity with the 2.0 hosts (its board and theirs simply don't meet) until it is upgraded.
+  #88 does not change the message mesh.
 
-### 6.3 What an old host sees
-- **Move / rename** on a 2.0 host: the node's v5 path changes → the old host gets a removal at the old path + a new node at the
-  new path (`planSlice`'s per-unit diff does it) — the same as an old host's own moves look to it today.
-- **Merge:** A disappears; B's counts / log grow.
-- **History:** a 1.7x dashboard asks `ACTIVITY_REQ {op:"log", q:{path…}}` with a v5 path → the 2.0 owner maps it through its
-  projection (v5 path → id) and serves the id-based page; entries carry `path` = the node's projected path now and `rel` (v5
-  shape). `entry:{id}`: entry ids are unchanged.
-- **Actions from a 1.7x dashboard** (`ACTIVITY_ACT` with a v5 `path`, `args.to` a path, `before` / `after` names): the 2.0
-  owner maps them to ids through the same projection — they keep working for the window. (This is the network protocol of a
-  peer, not the API: §4.5's `legacy-form` applies to the tool and the script.)
-
-### 6.4 Capability flags (Q10)
-- **Hole H3:** a 1.7x peer adopts activity only when `hello.activity_gossip === 5` (`bridge.mjs` `actLinkInit`: `cap: …
-  hello.activity_gossip === Act.ACTIVITY_FORMAT`). A 2.0 hello saying `activity_gossip:6` would cut every old peer off. So the
-  2.0 `peerHello` KEEPS `activity_gossip:5` (plus `activity_plan:1`, `activity_msg:1`, `activity_ask:1`) and ADDS
-  `activity_ids:1` = "I speak v6 slices, id-addressed ACTIVITY_REQ / ACTIVITY_ACT and the rename / merge actions" and
-  `view_state:1` (§5.6). 2.1 announces `activity_gossip:6` and drops the rest.
-- Per link: both `activity_ids` → v6 frames; else v5 projection both ways. A 2.0 receiver accepts body `v:5` (window only) and
-  `v:6`.
-
-### 6.5 Mixed-mesh actions (window only)
-- 2.0 dashboard → 2.0 owner: by id.
-- 2.0 dashboard → OLD owner (its units came from v5 slices): the 2.0 gateway translates to the v5 form from the units it holds —
-  `path`, `args.to` = the target's path, `before` / `after` = `sibRef`-style names. `rename`, `merge`, `unmerge` → refused
-  `owner-unsupported` ("… runs a bridge older than 2.0.0") before anything is queued (as #82 / #83 / #85 gate theirs).
-- Old dashboard → 2.0 owner: §6.3.
+### 6.3 Requests and actions by id
+- `ACTIVITY_REQ {op:"log", q:{id, removed?, …}}` — the owner pages the subtree by id (§5.2); entries carry `n` and `at`.
+  `entry:{id}` is unchanged (entry ids are unchanged).
+- `ACTIVITY_ACT {…session, id, action, args}` with id-valued args (`to_id`, `before_id`, `after_id`, `into_id`, `label`,
+  `merges:[…]` for the clash dialog's answer, §1.6) — the dashboard's §5.4 message, forwarded to the owner as today. No path
+  quoting, no `sibRef` names, no translation.
 
 ---
 
 ## 7. Migration and cutover
 
-**The cutover (Q09, Q16, Q21, Q22, Q24 – Q26).** 1.7 was experimental, so 2.0 has no rollback, no side-by-side layout and no
-legacy reader. Every bridge stops; each host converts its OWN history in place with a standalone script; then the bridges
-start in any order.
+**The cutover (Q09, Q16, Q21, Q22, Q24 – Q26, Q34, Q35, Q39).** 1.7 was experimental, so 2.0 has no rollback, no
+side-by-side layout, no legacy reader and no support for old bridges. Every bridge stops; each host converts its OWN history
+in place with a standalone script; then the bridges start in any order. **All hosts are upgraded together:** 2.0 shares no
+activity with a 1.7x host (§6.2), so there is no "late host" window.
 
 ### 7.1 The runbook (the RESUME STATE deploy notes say this)
 1. **Stop every bridge on every host** — gateways and followers, ROBIN-Z790, LITTLE-001, the Mac, phub-lnx-01 (tray,
    services, auto-start). On the Dropbox pair (`src/` is shared) this also keeps a still-running 1.7x process from meeting
    2.0 code.
-2. **Update the code** on each host (the Dropbox pair: once).
+2. **Update the code** on each host (the Dropbox pair: once). **Rewrite the realm guides** for 2.0, if any are published in
+   `config.json` (Robin's manual step, Q34; the built-in guides are already 2.0).
 3. **On each host:** `node src/tools/aimb-migrate-v2.mjs --dry-run` (reads, reports, writes nothing), then
    `node src/tools/aimb-migrate-v2.mjs`. Each converts only `persistence/activity/<that host>/`. The hosts can do this in any
-   order, at the same time, or minutes apart.
-4. **Start the bridges in any order.** A host that is not converted yet refuses to start and says which command to run
-   (§7.5), so a forgotten step fails loudly instead of showing an empty board.
-- A host left on 1.7x past the window still works with the 2.0 hosts through the v5 projection (§6.2) until 2.1; its own
-  history converts whenever it does step 1 – 4.
+   order, at the same time, or minutes apart. When it finishes, the host's history is v6 and its backup is gone (Q35) — a
+   person who wants a lasting copy of the v5 files takes one by hand before this step.
+4. **Start the bridges in any order** — all of them, in the same window. A host that is not converted yet (or whose
+   migration did not finish) refuses to start and says which command to run (§7.5), so a forgotten step fails loudly
+   instead of showing an empty board.
 
 ### 7.2 The script: `src/tools/aimb-migrate-v2.mjs`
 ```
@@ -588,25 +606,33 @@ node src/tools/aimb-migrate-v2.mjs [--dry-run] [--dir <persistence dir>] [--host
   - the host's gateway must NOT be running: the script dials the bridge's well-known port on this machine; an answer →
     "a bridge is running on this host — stop it first". It also refuses if any `*.tmp` newer than 10 s sits in the host's
     directory (a writer is active).
-  - `activity/<host>/format.json` with `v:6` exists → "already converted (format v6, 2026-10-04 by aimb-migrate-v2 2.0.0) —
-    nothing to do", exit 0 (the idempotent re-run).
+  - `activity/<host>/format.json` with `v:6` exists and NO backup directory → "already converted (format v6, 2026-10-04 by
+    aimb-migrate-v2 2.0.0) — nothing to do", exit 0 (the idempotent re-run). With a backup directory still there, the run
+    RESUMES at step 5 (a crash after the marker).
   - no `YYYY-MM-DD.jsonl` in the directory → a fresh host: write the marker, exit 0.
-- **Steps** (each step's output is complete before the next starts; a crash anywhere leaves a state the next run handles):
-  1. **Backup (one-off).** Copy every exact-name day file of the directory to `persistence/activity-v5-backup/<host>/`
-     (outside `activity/`, so no reader ever lists it), then write `activity-v5-backup/<host>/COMPLETE` with the files' names, sizes and
-     sha256. A backup with `COMPLETE` is never overwritten — a re-run after a crash reuses it, so the backup always holds the
-     PRISTINE v5 files. A backup without `COMPLETE` (a crash while copying) is redone. (Q35.)
+- **Steps** (each step's output is complete before the next starts; a crash anywhere leaves a state the next run handles).
+  **The backup exists only DURING the migration (Q35):**
+  1. **Backup.** Copy every exact-name day file of the directory to `persistence/activity-v5-backup/<host>/` (outside
+     `activity/`, so no reader ever lists it), then write `activity-v5-backup/<host>/COMPLETE` with the files' names, sizes
+     and sha256. A backup with `COMPLETE` is never overwritten — a re-run after a crash reuses it, so the backup always holds
+     the PRISTINE v5 files. A backup without `COMPLETE` (a crash while copying) is redone.
   2. **Convert.** Read the v5 days from the BACKUP, oldest first, run the forward pass (§7.3), and write each converted day as
      `<day>.jsonl.tmp`, then rename it over `activity/<host>/<day>.jsonl` (the host's own file; every bridge is stopped).
      Converting from the backup, never from the half-converted directory, makes a re-run after a crash produce the same bytes.
   3. **Index files.** Write `<day>.idx.json` for every converted day (§2.4).
-  4. **Marker, LAST:** `activity/<host>/format.json` = `{"v":6,"by":"aimb-migrate-v2 2.0.0","at":"<ISO>","host":"ROBIN-Z790",
+  4. **Marker:** `activity/<host>/format.json` = `{"v":6,"by":"aimb-migrate-v2 2.0.0","at":"<ISO>","host":"ROBIN-Z790",
      "days":{"2026-10-01":{"size":…,"sha256":…},…},"records":41233,"nodes":812,"ghosts":17,"relabelled":2}`.
+  5. **Verify.** Re-read every converted day from disk: its size and sha256 equal the marker's, every line is a v6 record,
+     every index file parses and matches its day (`size`, entry counts), and a fresh 2.0 replay of the converted days builds
+     a tree with the report's node count. Any mismatch → exit 3 "verification failed", the marker removed and the backup
+     KEPT (the next run redoes steps 2 – 5 from it).
+  6. **Delete the backup**, `COMPLETE` LAST. A crash mid-delete: the next run finds files missing from `COMPLETE`'s list —
+     the delete had begun, so verification had passed — and just finishes it. Then the report.
 - **`--dry-run`:** runs the preconditions and the whole forward pass in memory and prints the report — days, records, nodes,
   ghosts, the relabelled duplicate labels, keys slugged from names with `:`, conflicted copies seen, bytes it would write —
   and writes NOTHING (no backup, no `.tmp`, no marker). Exit 0, or 2 on a refused precondition.
 - **Report** (both modes): "activity/ROBIN-Z790: 7 day files, 41 233 records → 812 nodes (17 ghosts), 2 labels made unique,
-  backup in persistence/activity-v5-backup/ROBIN-Z790 (12.4 MB), 1.4 s".
+  verified, backup (12.4 MB) removed, 1.4 s" (dry-run: "would write …").
 - Conflicted copies in the directory (`… (LITTLE-001's conflicted copy …).jsonl`) are listed as WARNs, never read, never
   converted, never deleted (Q23, Q27: warn only — they stay for a person to inspect).
 - Stale `*.tmp` (older than 10 s) in the host's own directory are deleted before step 2.
@@ -617,8 +643,8 @@ One CHRONOLOGICAL forward pass, far simpler than #82's newest-first remapping:
   whose `new_from` is at or above a held node starts a NEW run there (the old one ended unseen — expiry). `moved_from` re-keys
   the run (and its subtree) to the new path. `dismiss:true` and `evicted:[…]` end the runs at / under that path.
 - At the end every run has a FINAL path. **Id = legacy id of the final path** (hole H7: a moved node has several paths; the
-  final one is what a peer derives from the last v5 slice, §6.2). Runs that share a final path share the id — earlier runs of
-  one node, exactly as today's run boundary treats a re-used name.
+  final one is the path it has when converted, the one the one-time pins import maps by, §5.6). Runs that share a final path
+  share the id — earlier runs of one node, exactly as today's run boundary treats a re-used name.
 - Keys: agents get key = their segment (slugged if it has `:`); contexts key = slug(segment) in their owner's scope, `-2` … on
   a clash, in created order. Labels = the segment without `@`. Where an agent `x` and a context `@x` share a parent (the one
   duplicate v5 allowed), the younger gets the label `x (2)` (§1.6), listed in the report.
@@ -646,23 +672,26 @@ One CHRONOLOGICAL forward pass, far simpler than #82's newest-first remapping:
 - **Ids can't collide across hosts:** every id hashes `lc(host)` (§1.2).
 - The full rule set is §10.
 
-### 7.5 The 2.0 bridge on unconverted (or reconverted) history
+### 7.5 The 2.0 bridge on unconverted (or half-converted) history
 - At start, before the replay, a 2.0 GATEWAY lists its own `activity/<host>/`. Exact-name day files present and no
   `format.json` with `v:6` → it REFUSES TO START: exit 78 with "activity history in persistence/activity/ROBIN-Z790 is format
   v5 (pre-2.0). Stop every bridge, then run: node src/tools/aimb-migrate-v2.mjs (see docs/spec-88.md §7.1)". The tray shows
   the same line. Followers own no activity: no check.
+- `activity-v5-backup/<host>/` still present (a migration that crashed or failed verification) → it REFUSES TO START the
+  same way: "the migration of persistence/activity/ROBIN-Z790 did not finish — run node src/tools/aimb-migrate-v2.mjs again".
+  The re-run resumes from the backup (§7.2).
 - No day files and no marker (a fresh install, or persistence just enabled) → the gateway writes the marker and starts.
-- A v2 – v5 record inside a v6 day file (someone started a 1.7x bridge on converted history) → skipped, one WARN per file
-  per start ("activity: a pre-2.0 record in 2026-10-05.jsonl — a 1.7x bridge wrote here after the migration; ignored"). No
-  rollback is planned (Q09, Q25): the way back is by hand — stop, copy the backup over `activity/<host>/`, delete
-  `format.json`, start 1.7x — and it loses the 2.0-era history (Q39).
+- There is no way back to 1.7x and no stray-v5 handling (Q09, Q25, Q39): old bridges are not supported, and once the
+  migration has verified, the v5 files are gone (Q35). The 2.0 reader takes v6 records only; any other line is skipped by
+  the reader's generic rule (`recordKind` → null, as an unreadable line is today), with no special detection or WARN.
 
 ### 7.6 How long it takes
 - Prototype (scratch, this machine): parse + legacy-id + stringify of synthetic v5 records ran at ~230 – 260 MB/s — 10 000
   records (3.9 MB) 17 ms, 50 000 (19 MB) 80 ms, 200 000 (77 MB) 300 ms. The forward pass adds a Map lookup per record.
 - Realistic: 7 days of retention at 1 – 10 MB a day = 7 – 70 MB read → under 1 s CPU. It writes the converted days (about the
-  same size: `n` + `at` replace `path`, node records add ~2 %), the index files and the backup copy — so Dropbox uploads
-  roughly twice the activity history of that host once. The bridges are stopped meanwhile; nothing waits on it at start.
+  same size: `n` + `at` replace `path`, node records add ~2 %), the index files and the short-lived backup copy (Dropbox may
+  upload it before the script deletes it) — so Dropbox moves up to twice the activity history of that host once. The bridges
+  are stopped meanwhile; nothing waits on it at start.
 
 ---
 
@@ -677,11 +706,15 @@ existing checks keep passing while the core is written.
    table (`@x`, `@@x`, `@@@x`, `x@`), path quoting, `@`-paths refused as `legacy-form` with the converted path in the message.
 2. **The id-keyed model.** `sess.nodes` keyed by id; `sess.kids` by parent id; the scope index (creator id + lc(key) → id);
    the sibling label index; aliases; ghosts (+ their lifetime, §5.1). `apply` resolves the target (§3) and writes node records
-   + entries; move / rename / merge / unmerge / item / remove become pointer changes + one record each, with the
-   `duplicate-label` and `cross-session` refusals; plans, questions, cascade, ranks, plan-end, eviction, expiry, `applyAction`
-   on ids. 2a structure + resolution, 2b lines (§4.0) / plans / questions, 2c actions + notices. *Tests:* new resolution /
-   idempotency / label-uniqueness / merge (incl. clashes) / unmerge / alias / ghost / running-agent-move checks, and the
-   existing `test_activity_unit` behaviours re-expressed in 2.0 forms.
+   + entries; move / rename / merge / unmerge / item / remove become pointer changes + one record each. The label rules
+   (§1.6): `label-required` on create, AUTO-RENAME on create (`"x (2)"`, `asked`, warning `relabelled`), `duplicate-label`
+   on a tool / script rename / move / merge / unmerge, move + rename as one checked change, the dashboard's clash answer
+   (`merges` / `label`) applied as one all-or-nothing action; `cross-session` / `unknown-agent` refusals; plans, questions,
+   cascade, ranks, plan-end, eviction, expiry, `applyAction` on ids. 2a structure + resolution, 2b lines (§4.0) / plans /
+   questions, 2c actions + notices. *Tests:* new resolution / idempotency / label-uniqueness (auto-rename incl. the
+   60-code-point cut, a retry not making `(3)`, `--label` = `asked` raising no `exists`; refusals; a clash answer that went
+   stale) / duplicate-key / merge (incl. clashes) / unmerge / alias / ghost / running-agent-move checks, and the existing
+   `test_activity_unit` behaviours re-expressed in 2.0 forms.
 3. **v6 records + replay.** `recordKind` v6 only; `createReplay` folds node records (newest wins per field, `create` seals
    the run) and attaches entries by `n` — no remapping. cp / cf / rep v6; `planCarryForward` carries structure. *Tests:* a
    seeded REPLAY FUZZ like #82's (400 random sequences of reports, plans, moves, renames, merges, unmerges, dismissals,
@@ -695,77 +728,87 @@ existing checks keep passing while the core is written.
    `test_migrate_v2`, temp persistence dirs, fixture days WRITTEN BY A REAL 1.7x GATEWAY — `git archive v1.74.0` build,
    `AIMB_TEST_OLD_BRIDGE` — with moves, plans, questions, dismissals over 3 days):
    - **dry-run:** report correct, the directory's file list + every file's sha256 unchanged, no backup directory, no `.tmp`.
-   - **run:** backup holds byte-identical copies of every v5 day + `COMPLETE`; day files are v6; index files exist; marker
-     last (its mtime ≥ every day file's); a 2.0 gateway then starts and its board + log pages equal the 1.7x gateway's.
-   - **idempotent re-run:** a second run exits 0 "already converted" and changes no byte; a forced crash after converting
-     2 of 3 days (test hook) → the next run completes from the backup and the days equal a clean run's, byte for byte.
-   - **backup:** never overwritten once `COMPLETE`; a backup without `COMPLETE` is redone.
+   - **run:** day files are v6; index files exist; the marker's sizes / sha256 match the files; verification passed; the
+     backup directory is GONE; a 2.0 gateway then starts and its board + log pages equal the 1.7x gateway's.
+   - **backup during the run** (test hooks that stop the script after each step): after step 1 it holds byte-identical
+     copies of every v5 day + `COMPLETE`; it is never overwritten once `COMPLETE`; a backup without `COMPLETE` is redone.
+   - **resume:** a forced crash after converting 2 of 3 days → the next run completes from the backup and the days equal a
+     clean run's, byte for byte; a crash after the marker → the next run verifies and deletes; a crash mid-delete → the next
+     run finishes the delete; a planted corruption → exit 3, marker removed, backup kept, the next run repairs it.
+   - **idempotent re-run:** a run after a finished one exits 0 "already converted" and changes no byte.
    - **refusals:** a 2.0 gateway on unconverted days exits 78 with the command in its message (and starts after the script);
-     the script refuses while a gateway answers on this host; a fresh empty directory → marker, gateway starts.
+     a 2.0 gateway with a leftover backup directory exits 78 "did not finish"; the script refuses while a gateway answers on
+     this host; a fresh empty directory → marker, gateway starts.
    - **shared folder:** two hosts' directories (two `--host` names) converted at once in one persistence dir touch only
      their own; a planted `2026-10-01 (LITTLE-001's conflicted copy 2026-10-03).jsonl` is warned about, left in place, and
-     not converted; a v5 record appended after the migration is skipped with one WARN.
+     not converted.
 6. **Bridge files** (§2.4, §5). Index files at rollover + rebuild, `prune` deleting `<day>.idx.json` with its day,
    `actLogPage` via the index, the ghost table at startup, "show removed", the conflicted-copy check at start / rollover.
    *Tests:* paging reads only indexed ranges (a counter in the facet), ghost entries appear only with `removed:true`, a ghost
    leaves when its last day is pruned, a rebuilt index equals the written one.
-7. **Gossip v6 + the window's v5 projection** (§6). `activity_ids:1`, v6 frames, v5 projection, v5 receive → legacy ids,
-   v5-path ACTIVITY_REQ / ACTIVITY_ACT on a 2.0 owner, translation + `owner-unsupported` toward old owners. *Tests:* unit
-   (projection: sanitising, collisions, depth); live mixed against the 1.74 `git archive` build — boards both ways, a move /
-   rename / merge on the 2.0 host as remove + add on 1.74, a 1.74 dashboard's skip / move on a 2.0 node, a 2.0 dashboard's
-   skip on a 1.74 node, rename on it `owner-unsupported`, remote log pages both ways; a late host's legacy ids equal its own
-   migration's.
+7. **Gossip v6** (§6). `activity_gossip:6` (the 1.7x feature flags no longer sent or read), v6 slices, id-addressed
+   `ACTIVITY_REQ` / `ACTIVITY_ACT`, the rename / merge / unmerge actions and the clash answer across hosts. No projection, no
+   translation, no mixed-version code. *Tests:* unit (slice deltas by id: a rename / move changes one unit); live between
+   2.0 gateways only — boards both ways, a move / rename / merge on one host seen as one changed unit on the other, a
+   dashboard's skip / move / rename / merge on a remote node, remote log pages both ways.
 8. **Per-user view state** (§5.6). `lib/view-state.js` (LWW set, max register for `seen:`, `reset`, `all`, GC, budget),
-   `view_set` / `view` WS messages, the `VIEW` frame + `view_state:1` + `view_v`, `views/<host>.json` persistence +
-   rehydrate, pruning on remove. *Tests:* unit (order + ties, idempotent + commutative merge, stamp bump under skew, max
-   register, reset voids older, `all` vs newer `open:`, tombstone GC, budget); live `test_view_state_live` — two gateways
-   + a third via the first: a pin on A shows on C, a close on B survives new activity on A (badge "N new"), Reset view
-   everywhere, a dismissed node's records tombstoned on all, a host restarted with its peers down keeps the set, a 1.74
-   peer gets no `VIEW` frame.
-9. **Tool, script, guides** (§4). The 2.0 flags + fields, the leading-`@` rule, every §4.5 `legacy-form` error (script AND
-   gateway), results, `gateway-unsupported` against < 2.0.0, `--guide agent` as the first report, `{log_snippet}` /
-   `agentGuide` / `sessionGuide` / `{log_tool_hint}` / the briefing in `config.example.json`, realm guides gated by
-   `min_bridge` ≥ 2.0.0, server instructions, README. The bridge switches to the 2.0 model here. *Tests:*
-   `test_log_script_live` rewritten for 2.0 forms, one check per removed form (message names the new form),
-   `--guide agent` creates once and prints only on the second run, `test_activity_6c_live` (the pinned guide lines), the tool
-   schema.
-10. **Dashboard** (§5.4, §5.6). Units / rows / actions by id, Rename…, Merge into…, `duplicate-label` in the dialogs, the `at`
-    tooltip, the copy command, "show removed", the view state (badges, "new since you last looked", Reset view, live vs
-    load-time application, the one-time `localStorage` import). *Tests:* `test_dashboard_activity` (jsdom) — ids through
-    deltas, a rename / move keeping selection, open / closed beating defaults, a closed node gaining activity → badge not
-    reopen, Expand all then a new node → default, the divider, Reset view, the import, drag-and-drop by id, a board with a
-    late 1.74 host's nodes.
+   `view_set` / `view` WS messages, the `VIEW` frame + `view_v`, the user = the serving gateway's OS login (Q29; the
+   `AIMB_TEST_VIEW_USER` hook for tests), `views/<host>.json` persistence + rehydrate, pruning on remove. *Tests:* unit
+   (order + ties, idempotent + commutative merge, stamp bump under skew, max register, reset voids older, `all` vs newer
+   `open:`, tombstone GC, budget); live `test_view_state_live` — two gateways + a third via the first: a pin on A shows on
+   C, a close on B survives new activity on A (badge "N new"), Reset view everywhere, a selection change NOT applied live
+   in a second window but applied at its next load (Q30), a dismissed node's records tombstoned on all, a host restarted
+   with its peers down keeps the set, `AI_BRIDGE_USER` set to another name does not change whose view it is.
+9. **Tool, script, guides** (§4). The 2.0 flags + fields, the leading-`@` rule, `label-required` / `relabelled`, every §4.5
+   `legacy-form` error (script AND gateway), results, `gateway-unsupported` against < 2.0.0, `--guide agent` as the first
+   report (with `--label`), `{log_snippet}` / `agentGuide` / `sessionGuide` / `{log_tool_hint}` rewritten for 2.0 (finish
+   with `"@<summary>"`, Q33), the briefing in `config.example.json`, server instructions, README. No realm-guide gating or
+   fallback (Q34). The bridge switches to the 2.0 model here. *Tests:* `test_log_script_live` rewritten for 2.0 forms, one
+   check per removed form (message names the new form), a create without `--label` refused, a clashing create reported as
+   `"… (2)"`, `--guide agent` creates once and prints only on the second run, `test_activity_6c_live` (the pinned guide
+   lines), the tool schema.
+10. **Dashboard** (§5.4, §5.6). Units / rows / actions by id, Rename…, Merge into…, the clash dialog (merge them / a
+    pre-filled "Notes (2)", Q32), the `at` tooltip, the copy command, "show removed", the view state (badges, "new since
+    you last looked", Reset view, live vs load-time application, the one-time `localStorage` import). *Tests:*
+    `test_dashboard_activity` (jsdom) — ids through deltas, a rename / move keeping selection, open / closed beating
+    defaults, a closed node gaining activity → badge not reopen, Expand all then a new node → default, the divider, Reset
+    view, the import, drag-and-drop by id, a drop onto a same-label sibling opening the dialog (both answers; "merge them"
+    hidden for an agent; a nested clash listed).
 11. **Delete the old machinery** (unused by now): #82's path code — `rekeySubtree`, `applyMove`'s re-keying, `remapSegs`,
     `remapGone`, `ensureIn`'s move use, `foreign`, `goneAt`, `deadAt`'s move clause, `sealRuns` / `sealNode`'s `except` /
     `recTs` / `own`, `movedAt`, `mv` / `mvAlias`, `node.moved` + `pt.m`, `nodeAliases`, `matchAlias`, `fileEntryMatches`' path
     match, `fileEntryView`'s alias remap, `fileRunStart`'s move clause, `moved_from` writers, the `cpLive` re-key — and the
-    v2 – v5 readers in the bridge (they live on only in `lib/activity-v5.js` for the script), `@` / `@~` path parsing, the
-    positional / `--plan` / `--to` handling (only the §4.5 detector that names the new form is left), the page's
-    `localStorage` pins. KEPT from #82: ranks (`rankBetween`, `placeRanks`, `siblingCmp`, `derivedRank`), the cascade,
-    positions, the actions. *Tests:* the full suite; a grep check that no `moved_from` reader and no `@~` parser is left
-    outside `activity-v5.js` and the `legacy-form` detector.
-12. **Release 2.0.0**: architecture.md §12 (the v6 layout, `views/`, `activity-v5-backup/`) + §13, README (2.0 forms, the
-    removed-forms table), the RESUME STATE deploy notes = the §7.1 runbook, the live cutover on the real hosts (dry-run on
-    each first). Nothing to publish in `config.json` beyond the briefing and, if wanted, 2.0 realm guides (Robin's step).
-13. **2.1 (later, not 2.0):** delete the v5 projection and `activity_gossip:5` (§6.2 – §6.5) once every host runs ≥ 2.0.
+    v2 – v5 readers in the bridge (they live on only in `lib/activity-v5.js` for the script), the v5 slice code and the
+    path-addressed `ACTIVITY_REQ` / `ACTIVITY_ACT` handling (`sibRef` names, the `activity_plan` / `activity_msg` /
+    `activity_ask` gates), `@` / `@~` path parsing, the positional / `--plan` / `--to` handling (only the §4.5 detector that
+    names the new form is left), the page's `localStorage` pins. KEPT from #82: ranks (`rankBetween`, `placeRanks`,
+    `siblingCmp`, `derivedRank`), the cascade, positions, the actions. *Tests:* the full suite; a grep check that no
+    `moved_from` reader and no `@~` parser is left outside `activity-v5.js` and the `legacy-form` detector.
+12. **Release 2.0.0**: architecture.md §12 (the v6 layout, `views/`, the migration's temporary `activity-v5-backup/`) + §13,
+    README (2.0 forms, the removed-forms table, "all hosts upgrade together"), the RESUME STATE deploy notes = the §7.1
+    runbook, the live cutover on EVERY host in one window (dry-run on each first). In `config.json`: the briefing and the
+    realm guides rewritten for 2.0 (Robin's step, during the stop).
 
 ---
 
 ## 9. Decisions, holes and questions
 
 ### Decisions (Robin, 2026-10-03)
-| Q | Question (first draft) | Decision |
+Q01 – Q28 answer the first draft, Q29 – Q39 the revision; C1 / C2 are the two follow-ups Robin confirmed in chat. A later
+answer overrides an earlier one (noted in the earlier row).
+
+| Q | Question | Decision |
 |---|---|---|
 | 01 | Does `--text` set the line in key mode? | **Changed.** No `@` in paths. A LEADING `@` in the text sets the node's current line (it replaces `@~`, which goes); plain text only logs; `@@` = a literal leading `@`. Terms: label = the node's name, line = its status text (§4.0, §1.3). |
 | 02 | Idempotent create ignores location / label on an existing node? | **Accepted** — warning `exists` (§3.5). |
 | 03 | Key charset | **Accepted** — agent-name chars minus `:`, ≤ 48, case-insensitive (§1.1). |
 | 04 | Creator of a path-created node = its owner | **Accepted** — nearest agent above. Note for Robin: not purely transitional — `--path` stays after 2.0 as a shorthand (quick logging by hand), just rarer (§3.3). |
-| 05 | Labels unique among siblings? | **Changed** — yes: a create / rename / move (and merge / unmerge) that duplicates a sibling label is refused (§1.6). |
+| 05 | Labels unique among siblings? | **Changed** — yes, unique. How a clash is settled was then refined by Q31 / Q32 and confirmation C2: auto-rename on create, refuse a deliberate rename / move, a dialog on the dashboard (§1.6). |
 | 06 | Merge scope | **Accepted** — contexts / plan items only; unmerge by tool / script only in 2.0 (§3.6). |
 | 07 | Subtree log runs per member | **Accepted** — each child shows its own whole current run (§5.3). |
 | 08 | `at` on every entry | **Accepted** — the full path at the time (§2.2). |
 | 09 | Rollback | **Changed** — none ("1.7 was experimental"): no state files, tail maps or newer-wins (§7). |
-| 10 | Hello: keep `activity_gossip:5`, add `activity_ids:1` | **Accepted** — v5 dropped once every host is ≥ 2.0 (2.1) (§6.4). |
+| 10 | Hello: keep `activity_gossip:5`, add `activity_ids:1` | Accepted at first; **superseded by Q39 / C1:** no v5 at all — 2.0 announces `activity_gossip:6` only, no dual handshake, no 2.1 step (§6.2). |
 | 11 | Depth limit 6 | **Accepted** (§1.3). |
 | 12 | Id = 16 base32 chars | **Accepted** (§1.2). |
 | 13 | Pins / hidden mapped to node ids once | **Accepted, then extended (FINAL):** view state is stored per USER on the bridge and replicated across the realm; the browser's pins / hidden are imported once (§5.6). |
@@ -774,9 +817,9 @@ existing checks keep passing while the core is written.
 | 16 | Version 2.0.0, any order, all hosts within a day | **Accepted**, with Q26's change: stop all, migrate, start in any order (§7.1). |
 | 17 | Agents create themselves | **Accepted** — and `--guide agent` is the agent's first report: it registers the node under its item with the line "reading the guide" (§4.4). |
 | 18 | Ghosts + index files in 2.0 | **Option 1 (FINAL):** ghosts + per-day index files; removed children's entries behind a "show removed" toggle (off by default); a ghost lives until retention drops its last entry (§5.1). |
-| 19 | Keep the old `--move --to`? | **Changed (FINAL):** drop ALL 1.7x command forms — positional text, `--plan`, `--move … --to`, `@` in paths, `@~`; each gets an error naming the new form. Only the v5 network format stays, for the cutover (§4.5, §6.2). |
+| 19 | Keep the old `--move --to`? | **Changed (FINAL):** drop ALL 1.7x command forms — positional text, `--plan`, `--move … --to`, `@` in paths, `@~`; each gets an error naming the new form (§4.5). (The v5 network format it kept for the cutover went too: Q39 / C1.) |
 | 20 | A merged key resolves to B | **Accepted** — until unmerged (§3.6). |
-| 21 | Side-by-side v6 directory vs in place | **Changed** — in place, each host its own directory, a one-off backup; no `v6/`, no map reader (§7). |
+| 21 | Side-by-side v6 directory vs in place | **Changed** — in place, each host its own directory, a backup that lives only during the migration (Q35); no `v6/`, no map reader (§7). |
 | 22 | The map's grain | **Changed** — moot: a standalone migration script converts the days in place (`--dry-run`, backup, format marker); 2.0 refuses unconverted data (§7.2, §7.5). |
 | 23 | Conflicted copies | **Accepted** — warn + show, never read or delete (§10). |
 | 24 | Keep the legacy reader in 2.0? | **Changed** — no legacy reader after the cutover; the script converts everything (§7.3). |
@@ -784,13 +827,27 @@ existing checks keep passing while the core is written.
 | 26 | Restart the Dropbox pair together? | **Changed** — stop ALL bridges on every host, migrate, then start in any order (§7.1). |
 | 27 | Refuse to convert on conflicted copies? | **Accepted** — warn only (§7.2). |
 | 28 | (Robin, new) Tree / log view-state rules | **Accepted into 2.0:** explicit open / close beats defaults, per user; new activity never reopens a closed node ("? N" / "N new" badges); Expand / Collapse all are choices; Reset view; choices pruned with their node; the log keeps selection + DETAILS fold, not entries; a "new since you last looked" divider; nothing steals selection or scroll (§5.6). |
+| 29 | Who is "the user" of the view state? | **Changed:** the OS LOGIN of the gateway that serves the dashboard page (standing in for the person at that machine) — not `AI_BRIDGE_USER` / `PROC_USER`. A page can't reveal its OS user; the serving gateway's login is the proxy (§5.6). |
+| 30 | Live vs at-load across open windows | **Accepted** — tree choices (pins, hidden, open / closed, Expand / Collapse all, Reset view, options) apply live; the selection and the DETAILS fold only at page load (§5.6). |
+| 31 | Default labels and uniqueness | **Changed:** a label NEVER defaults to the key — creating a node requires one (`label-required`). On create, a clashing sibling label is AUTO-RENAMED ("notes (2)", "(3)" …) and the result reports the label it got. Duplicate keys within one creator are never accepted; keys are per creator, so two agents can each have `notes` (§1.1, §1.3, §1.6). |
+| 32 | Moves / merges onto a same-label sibling (dashboard) | **Changed:** the dialog asks — MERGE them, or use a different label, pre-filled with the suggestion ("Notes (2)"); the tool / script refuse (§1.6, §5.4). |
+| 33 | Finishing states and the line | **Accepted (in effect):** one rule in the bridge, no implied line; the 2.0 guide tells agents to finish with `"@<summary>"`. Revisit only if it becomes an ongoing issue (§4.0, §4.3). |
+| 34 | Realm guides written for 1.7x | **Changed:** no `min_bridge` gating or fallback logic; the built-in guides and any realm guides are rewritten for 2.0 as part of the cutover (§4.3, §7.1). |
+| 35 | Backup location and lifetime | **Changed:** the backup exists only DURING the migration — the script deletes it once the conversion has completed and been verified, so a crashed run can still resume from it (§7.2, §7.5). |
+| 36 | The `@` escape | **Accepted** — `@@` = a literal `@`; an odd leading `@` sets the line (§4.0). |
+| 37 | Labels containing `/` | **Accepted** — double-quoted path segments (`""` = `"`) (§3.3). |
+| 38 | Other per-browser settings | **Accepted** — log order, Active only, Plans only into the view state as `opt:` records; the depth slider stays per browser (§5.6). |
+| 39 | Starting 1.7x on converted history by mistake | **Changed:** old bridges are NOT supported; 2.0 is a clean, no-legacy cutover — no stray-v5 handling, no way back (§7.5). |
+| C1 | (confirmation) Drop the v5 network projection? | **Yes** — 2.0 speaks only 2.0; no `activity_gossip:5` / `activity_ids:1` dual handshake, no 2.1 cleanup step; every host is upgraded together with the stop-all runbook (§6, §7.1). |
+| C2 | (confirmation) Duplicate labels, all cases | **Yes** — auto-rename on CREATE; refuse a deliberate rename / move through the tool or script (`duplicate-label`); the dashboard's clash dialog offers merge or a suggested label — "see how it plays out" (§1.6). |
 
 ### Holes found in the #88 design (and the fixes above)
 - **H1** `:` is legal in agent names today (`SEGMENT`), so `fix-79:docs` is ambiguous → keys exclude `:` (§1.1).
 - **H2** "registering an existing key updates it" lets a retry or a replayed prompt undo a dashboard move / rename → create
   attributes apply only at creation; changes are explicit verbs (§3.5).
-- **H3** the PEER_HELLO check is an equality on `activity_gossip`, so announcing 6 would disconnect every 1.7x peer → keep 5,
-  add `activity_ids:1` for the window (§6.4).
+- **H3** the PEER_HELLO check is an equality on `activity_gossip`, so announcing 6 cuts every 1.7x peer off activity → the
+  first revision kept 5 plus `activity_ids:1` for a cutover window; with Q39 / C1 there is no window: every host upgrades
+  together and 2.0 announces 6 (§6.2).
 - **H4** "a path creates a node whose key is the last segment": segments have spaces / `#` / `(`, and a path caller reports
   as the session, so whose key? → slug + creator = owner (§1.1, §3.4).
 - **H5** a log "computed from the current tree" loses removed children's history → ghosts (§5.1); this also closes #76.
@@ -799,7 +856,7 @@ existing checks keep passing while the core is written.
   as earlier runs (§7.3).
 - **H8** "a per-host index (id → day files)": today's `actIndex` is entry-id → offset, in memory, capped → persisted per-day
   index files (§2.4).
-- **H9** free-text labels can't always be v5 path segments → the window's projection rules (§6.2); depth stays ≤ 6.
+- **H9** free-text labels can't always be v5 path segments → moot since Q39 / C1 (no v5 projection); depth stays ≤ 6.
 - **H10** the tool result's `id` is already the ENTRY id → the node id goes in `node.id` (§4.2).
 - **H11** `--item <key> "<label>"` vs the one-value `--item "A"` → the parse rule in §4.1.
 - **H12** (revised) the persistence folder is Dropbox-shared (ROBIN-Z790 + LITTLE-001) and the project's rule was "no
@@ -809,56 +866,57 @@ existing checks keep passing while the core is written.
   the 2.0 start check refuses it with the fix (§7.5). The first draft's dashboard path fallback is no longer needed (§5.4).
 - **H14** (new) with no `@`, a path segment no longer says agent or context → labels unique across both kinds (§1.6), label
   before agent key in matching (§3.3), and the migration relabels the one v5 duplicate (§7.3).
-- **H15** (new) the dashboard has no per-person identity: actions are attributed to the gateway's `PROC_USER` → Q29.
+- **H15** (new) the dashboard has no per-person identity: actions are attributed to the gateway's `PROC_USER` → Q29: the
+  view state belongs to the serving gateway's OS login (§5.6).
 - **H16** (new) a closed node's "N new" badge needs a baseline → the close record stores the subtree count and open questions
   at close (§5.6).
 - **H17** (new) "Expand all" as one record per row would write hundreds of replicated records and freeze new nodes open → one
   `all` record that covers only nodes created before it (§5.6).
 - **H18** (new) `{log_snippet}` already shrank to one line in 1.73 (#89); the first draft's 7-line snippet belongs in
-  `agentGuide` now, and realm guides written for 1.7x would teach removed forms → §4.3, Q34.
+  `agentGuide` now, and realm guides written for 1.7x would teach removed forms → all guides rewritten at the cutover (§4.3,
+  Q34).
+- **H19** (final pass) an auto-renamed node ("notes (2)") would raise `exists` on every later call of a snippet that repeats
+  `--label "notes"` → the create keeps `asked`, and a `--label` equal to it is no difference (§2.1, §3.5).
+- **H20** (final pass) with a required label, a missing agent can no longer be created as a side effect of a call aimed at
+  another node (it would have no label) → only a call that targets the agent creates it; earlier chain steps must exist
+  (§1.5) — Q40.
+- **H21** (final pass) the OS login is per machine: if a host's gateway runs under another login (a service account, a
+  Linux user), its "robin" is a different user and the view does not follow him there → shown in the board head; Q41.
 
 ### Risks
 - The replay and the conversion are the risky parts; both get seeded fuzzing against a ground truth (chronological apply; the
-  frozen 1.74 library). The live mixed test runs against a real 1.74 build, as every release since 1.69 has.
-- A botched conversion is recoverable: the backup holds the pristine v5 days; delete the marker, copy the backup back, fix,
-  re-run. A host that refuses to start is the visible failure mode, not a silently empty board.
-- The cutover needs every bridge down at once — a few minutes of no mesh. Messages are parked as usual (durable mailboxes).
+  frozen 1.74 library), and the migration test converts days written by a real 1.74 gateway. There is no mixed-version live
+  test any more: 2.0 never meets 1.7x.
+- A conversion fault is caught by the script's own verification while the backup still exists (§7.2: exit 3, backup kept,
+  re-run). Once verified, the backup is gone (Q35): a fault found later is fixed forward in 2.0 — the converted days are
+  still a complete record — or from a copy a person took before step 3 (on the Dropbox pair, Dropbox's version history
+  also holds the v5 files for a while). A host that refuses to start is the visible failure mode, not a silently empty board.
+- **All hosts must be upgraded together.** The cutover needs every bridge down at once — a few minutes of no mesh; messages
+  are parked as usual (durable mailboxes). A host that is missed stays off the shared board (no activity either way, §6.2)
+  until it is upgraded; nothing degrades gracefully, by design (Q39).
 - Duplicate host names on two machines would make two writers of one host directory — today's files have the same risk
   (#70's duplicate-hostname WARN); §10's conflicted-copy check makes it visible.
 - Bigger dashboard change than #82 (ids + the view state); the id-keyed units keep the delta machinery as is.
-- Label uniqueness turns some silent successes into refusals (two agents both defaulting to `notes` under one item) — Q31.
+- Labels: a create that clashes is auto-renamed ("notes (2)"), which a caller may not notice — the result and the guide say
+  so, and the board shows it; a deliberate rename / move that clashes is refused. Robin: "see how it plays out" (C2).
+- The required label adds one flag to every first call (`--label`); a briefing that forgets it gets `label-required` on the
+  agent's first report — loud, and the guide names the fix.
 
-### New questions for Robin (answer by number; my recommendation after each)
-29. **Who is "the user" of the view state?** A dashboard socket has no per-person identity: actions are attributed to the
-    gateway's `PROC_USER` (AI_BRIDGE_USER, else the OS login). So "per user" = per gateway user, and two people using one
-    gateway's dashboard share one view. *Recommend: accept for 2.0* (robin is robin on every host); a per-person dashboard
-    login is its own issue.
-30. **Live vs at-load for the view state across open windows.** *Recommend:* pins, hidden, open / closed, Expand / Collapse
-    all, Reset view and options apply LIVE in every window; the log SELECTION and the DETAILS fold apply only at page load
-    (newest wins), so two open windows never steal each other's selection; `seen` merges silently.
-31. **Default labels and uniqueness.** Two agents doing `--key notes --under 88` (label defaults to the key) — the second is
-    refused `duplicate-label`. Alternative: suffix a DEFAULT label automatically ("notes (2)") and refuse only a label that
-    was given (`--label`, `--rename`, a move). *Recommend: refuse in both cases* — one rule, as you decided; the error names
-    the sibling and says `--label "…"`, and the guide tells agents to give a label when they make a node under a shared item.
-32. **Moves and merges onto a same-label sibling (dashboard).** *Recommend:* the Move / Merge dialogs show the clash and offer
-    "rename and move" (a new label field, pre-filled "Docs (2)") — one action, two records; the tool / script just refuse.
-33. **Finishing states and the line.** `--state done --text "summary"` without `@` logs the summary but leaves the last
-    running text as the line. *Recommend: keep the one rule* (no implied line) — the result carries `line:false` and the
-    guide's finish line shows `--text "@<summary>"`. Alternative: `--state done|failed|skipped` with text implies `@`.
-34. **Realm guides from 1.7x.** *Recommend:* a 2.0 gateway serves a realm guide only when its `min_bridge` ≥ 2.0.0; older ones
-    fall back to the built-in text. You re-publish guides with `"min_bridge": "2.0"` if you want custom ones.
-35. **Backup location and lifetime.** *Recommend:* `persistence/activity-v5-backup/<host>/` (beside `activity/`, follows the
-    host, ~10 – 70 MB each, Dropbox-synced on the pair), deleted by hand; a 2.0 gateway logs one reminder per start once the
-    backup is older than `log_retention_days`. Alternative: outside the persistence folder (not synced).
-36. **The `@` escape.** *Recommend* the rule in §4.0: in the leading run of `@`, each pair is a literal `@` and an odd one left
-    over sets the line (`@@x` logs "@x", `@@@x` sets the line "@x").
-37. **Labels containing `/`.** Labels may now hold `/` (no longer parsed). *Recommend:* a path segment may be double-quoted
-    (`"a/b"`, `""` = `"`) — the quoting today's `@"…"` has, without the `@`; otherwise such nodes are reachable only by key / id.
-38. **Other per-browser settings.** The #87 log order, "Active only", "Plans only" are in `localStorage` today. *Recommend:*
-    move them into the view state as `opt:` records (tiny), so the board looks the same on every host; the depth slider stays
-    per browser (it depends on the screen).
-39. **Starting 1.7x on converted history by mistake.** *Recommend: document only* — 2.0 skips the v5 records it finds with a
-    WARN; the manual way back (copy the backup over, delete `format.json`) loses the 2.0-era history. No machinery.
+### New questions for Robin (final pass; answer by number; my recommendation after each)
+Q29 – Q39 are answered (Decisions above). This pass raises two; nothing else is open, and the build (§8) can start with the
+recommendations below if you accept them.
+
+40. **Do agents need a label too?** "Creation requires a label" (Q31) is applied to EVERY create, agents included: the
+    orchestrator's `{log_snippet}` carries `--agent <key> --label "<name>" --under <item>`, the agent's `--guide agent`
+    first report creates it with that label, and a missing agent can no longer be made as a side effect of a call aimed at
+    another node (it would have no label → `unknown-agent`, §1.5). Alternative: exempt agents — an agent's label is its key
+    (as in 1.7x), and `--agent` keeps creating missing chain steps. *Recommend: agents need a label too* — one rule, and the
+    board shows "Spec final pass" rather than "spec88-final"; the orchestrator fills it, so it costs the agent nothing.
+41. **Hosts whose OS logins differ.** The view state belongs to the serving gateway's OS login (Q29). If a gateway runs under
+    another account — a Linux `systemd --user` service as `ubuntu`, a Mac login `robinalden`, a Windows service account —
+    robin's pins and open / closed choices don't follow him to that host's dashboard (a different user). *Recommend: accept
+    for 2.0* — show "view: <login>" in the board head so a mismatch is visible, and add a realm-level login alias map only if
+    it bites. Alternative: an optional per-host `view_user` setting in config now.
 
 ---
 
@@ -872,7 +930,7 @@ shared config is read-only to the bridge (architecture.md "Policy file disciplin
 
 1. **Per-host writes only.** Every file #88 writes lives under the WRITING host's own name and only that host writes it: its
    day files and index files (`activity/<lslug(host)>/`), its marker (`activity/<host>/format.json`), its backup
-   (`activity-v5-backup/<host>/`) and its view-state copy (`views/<lslug(host)>.json`). Node records and aliases live inside
+   (`activity-v5-backup/<host>/`, which exists only while the migration runs) and its view-state copy (`views/<lslug(host)>.json`). Node records and aliases live inside
    the host's own day files and `cf`s; the ghost and alias tables are in-memory, rebuilt from those files. No host ever writes
    another host's file; reading another host's `views/*.json` at rehydrate is read-only.
 2. **Atomic always.** Day files are appended (single writer, as today, with the in-place rewrite of the trailing `rep` line).
@@ -884,8 +942,8 @@ shared config is read-only to the bridge (architecture.md "Policy file disciplin
 5. **Nothing in #88 writes `config.json`.** The bridge never writes the shared `src/config.json` (unchanged policy); the
    migration script only READS it, to find `persistence.dir`. #88's text changes (the guides, `{log_snippet}`,
    `{log_tool_hint}`, the tool descriptions) are code; the briefing change in the realm reminders ships in
-   `config.example.json`, and publishing it — and any 2.0 realm guide (Q34) — into the shared `config.json` stays Robin's
-   manual step, as every release. No new config key is needed.
+   `config.example.json`, and publishing it — and rewriting any realm guide for 2.0 (Q34, runbook step 2) — into the shared
+   `config.json` stays Robin's manual step, as every release. No new config key is needed.
 6. **Conflicted copies are detected and ignored (Q23, Q27).**
    - Dropbox names them like `2026-10-02 (LITTLE-001's conflicted copy 2026-10-03).jsonl` (also "Case Conflict" variants) —
      the original name with a parenthesised note before the extension.
