@@ -79,11 +79,26 @@ await section(() => {
   const n = w.get('t1')
   check('the node KEEPS it as `test` { result, checks, duration, ts, entry, state } — the state the report left it in', n.test && n.test.result === 'pass' && n.test.checks === 22 && n.test.duration === 4100 && n.test.entry === e.id && n.test.state === 'done' && n.test.ts === e.ts)
   check('…and the result names it (node.test)', r.node.test && r.node.test.result === 'pass')
-  check('the state drives the line and the bar — no state is implied by a result', (() => { w.call({ key: 'n1', label: 'N1' }); const x = w.call({ key: 'n1', text: 'ran', message_type: 'test-result', fields: { result: 'fail' } }); return x.ok && w.get('n1').current === null && M.testOutcome2(w.get('n1')) === 'fail' })())
-  const lf = w.call({ key: 't1', message_type: 'test-result', fields: { result: 'fail', checks: 22, failed: 2 }, state: 'failed', log: false })
-  check('log:false: no entry, but the node still keeps the result (entry null; the checkpoint carries it, step 3)', lf.ok && !lf.entries.length && w.get('t1').test.result === 'fail' && w.get('t1').test.entry === null && w.get('t1').cp_dirty)
-  const ws = w.call({ key: 't1', state: 'done', message_type: 'test-result', fields: { result: 'fail' } })
-  check('a result that contradicts the call\'s own state → warning result-state (the count shows the result)', ws.ok && codes(ws).includes('result-state') && M.testOutcome2(w.get('t1')) === 'fail')
+  check('Q57 / Q62 (Robin: "state is progress, result is outcome"): a test-result means the test FINISHED — it sets the state to DONE, also for a fail (the line keeps its text; the outcome is the result)',
+    (() => { w.call({ key: 'n1', label: 'N1' }); const x = w.call({ key: 'n1', text: 'ran', message_type: 'test-result', fields: { result: 'fail' } }); return x.ok && x.current && w.get('n1').current.state === 'done' && w.get('n1').current.text === 'N1' && M.testOutcome2(w.get('n1')) === 'fail' })())
+  check('Q61 (C): any context that takes a test-result is a test — pass and skip set done too, a skip works on a plan item AND on an ordinary context (no not-a-plan-item)', (() => {
+    w.call({ key: 'n2', label: 'N2' }); const a = w.call({ key: 'n2', text: 'ran', message_type: 'test-result', fields: { result: 'pass' } })
+    w.call({ key: 'box2', label: 'Box2', plan: [{ key: 'n3', label: 'N3' }] }); const b = w.call({ key: 'n3', text: 'skipped', message_type: 'test-result', fields: { result: 'skip' } })
+    w.call({ key: 'n4', label: 'N4' }); const c = w.call({ key: 'n4', text: 'x', message_type: 'test-result', fields: { result: 'skip' } })
+    return a.ok && w.get('n2').current.state === 'done' && M.testOutcome2(w.get('n2')) === 'pass' && b.ok && w.get('n3').current.state === 'done' && M.testOutcome2(w.get('n3')) === 'skip'
+      && c.ok && w.get('n4').current.state === 'done' && M.testOutcome2(w.get('n4')) === 'skip'
+  })())
+  check('Q61: an AGENT (or the session) can\'t take a test-result — it runs tests, it isn\'t one (not-a-test)', (() => {
+    const a = w.call({ agent: 'runner', label: 'Runner', text: 'x', message_type: 'test-result', fields: { result: 'pass' } })
+    w.call({ agent: 'runner', label: 'Runner', text: '@up' })
+    const b = w.call({ agent: 'runner', text: 'x', message_type: 'test-result', fields: { result: 'pass' } }), c = w.call({ text: 'x', message_type: 'test-result', fields: { result: 'pass' } })
+    return a.code === 'not-a-test' && b.code === 'not-a-test' && /runs tests, it isn't one/.test(b.what) && c.code === 'not-a-test'
+  })())
+  const lf = w.call({ key: 't1', message_type: 'test-result', fields: { result: 'fail', checks: 22, failed: 2 }, state: 'done', log: false })
+  check('Q62: --state done with a result is consistent; log:false: no entry, the node still keeps the result (entry null; the checkpoint carries it, step 3)', lf.ok && !lf.entries.length && w.get('t1').test.result === 'fail' && w.get('t1').test.entry === null && w.get('t1').cp_dirty && w.get('t1').current.state === 'done')
+  check('Q62: a result with an unfinished (or another) state is REFUSED — running / todo / blocked / abandoned / failed / skipped: "a test-result means the test finished"',
+    ['running', 'todo', 'blocked', 'abandoned', 'failed', 'skipped'].every(s => { const r = w.call({ key: 't1', state: s, message_type: 'test-result', fields: { result: 'pass' } }); return r.code === 'bad-state' && /means the test finished: its state is done/.test(r.what) })
+    && w.get('t1').test.result === 'fail' && w.get('t1').current.state === 'done')
   w.call({ key: 't1', state: 'skipped' })
   check('the LATEST word wins: a later state change (no test-result) — the outcome follows the state (skipped → skip), the checks stay', (() => { const t = w.get('t1'); return M.testOutcome2(t) === 'skip' && t.test && t.test.result === 'fail' })())
   w.call({ key: 't1', text: '@still skipped' })
@@ -93,7 +108,9 @@ await section(() => {
   const s0 = J([...w.sess().nodes.values()].map(x => [x.id, x.test]))
   check('a refused call keeps nothing (all-or-nothing): a bad field, or a test-result with ask', w.call({ key: 't1', text: 'x', message_type: 'test-result', fields: { result: 'meh' } }).code === 'bad-fields'
     && w.call({ key: 't1', ask: 'Ok?', message_type: 'test-result', fields: { result: 'pass' } }).code === 'bad-ask' && J([...w.sess().nodes.values()].map(x => [x.id, x.test])) === s0)
-  check('a test-result with no report around it → bad-input (it rides on a report)', w.call({ key: 't1', message_type: 'test-result', fields: { result: 'pass' } }).code === 'bad-input')
+  check('a test-result ALONE is a report (Q62: the test finished — done, the line keeps its text); other typed fields alone still need a report (bad-input)',
+    (r => r.ok && r.current && w.get('t1').current.state === 'done' && w.get('t1').test.result === 'pass')(w.call({ key: 't1', message_type: 'test-result', fields: { result: 'pass' } }))
+    && w.call({ key: 't1', details: 'x' }).code === 'bad-input')
   check('a question takes no test-result (bad-field: message_type)', (() => { w.call({ key: 'q', label: 'Q', ask: 'Ship it?', choices: ['Yes', 'No'] }); return w.call({ key: 'q', text: 'x', message_type: 'test-result', fields: { result: 'pass' } }).code === 'bad-field' })())
   check('testOutcome2 by state alone: done → pass, failed → fail, skipped / abandoned → skip, running / blocked → running, todo / idle → pending',
     J(['done', 'failed', 'skipped', 'abandoned', 'running', 'blocked', 'todo', 'idle'].map(s => M.testOutcome2({ current: { state: s } }))) === J(['pass', 'fail', 'skip', 'skip', 'running', 'running', 'pending', 'pending']))
@@ -116,26 +133,39 @@ await section(() => {
   const ok1 = w.call({ key: 't1', state: 'done', text: '@22 passed', message_type: 'test-result', fields: { result: 'pass', checks: 22, failed: 0, duration: '4.1s' }, move_to: '../Passed' })
   check('a pass: ONE call reports, records the result and moves it to Passed; In progress vanished (emptied)', ok1.ok && J(w.kids('Release/Tests')) === J(['Pending', 'Passed']) && ok1.entries.some(e => e.type === 'test-result'), J(w.kids('Release/Tests')))
   w.call({ key: 't2', state: 'running', move_to: '../In progress' })
-  const f2 = w.call({ key: 't2', state: 'failed', text: '@FAILED: 3 passed, 2 failed', details: 'FAIL x\nFAIL y', message_type: 'test-result', fields: { result: 'fail', checks: 5, failed: 2, duration: 1500 }, move_to: '../Failed' })
-  w.call({ key: 't3', state: 'skipped', message_type: 'test-result', fields: { result: 'skip' }, move_to: '../Skipped' })
+  const f2 = w.call({ key: 't2', state: 'done', text: '@FAILED: 3 passed, 2 failed', details: 'FAIL x\nFAIL y', message_type: 'test-result', fields: { result: 'fail', checks: 5, failed: 2, duration: 1500 }, move_to: '../Failed' })
+  w.call({ key: 't3', message_type: 'test-result', fields: { result: 'skip' }, move_to: '../Skipped' })
   check('a fail goes to Failed, a skip to Skipped; Pending still holds the last one', f2.ok && J(w.kids('Release/Tests')) === J(['Pending', 'Passed', 'Failed', 'Skipped']) && J(w.kids('Release/Tests/Pending')) === J(['test_d']))
   const b1 = w.bar('tests'), c1 = w.counts('tests')
-  check('the run\'s bar across the buckets: 1 done, 1 skipped, of 4 (a failed test is remaining, as any failed item)', b1.done === 1 && b1.skipped === 1 && b1.total === 4, J(b1))
+  check('the run\'s ITEMS bar across the buckets (what it adds to its parent): 3 of 4 done — a finished test is DONE whatever its result (Q62: state is progress); pass / fail / skip is in its counts and testBar2',
+    b1.done === 3 && b1.skipped === 0 && b1.total === 4 && ['t1', 't2', 't3'].every(k => w.get(k).current.state === 'done'), J(b1))
   check('its counts: 1 passed · 1 failed · 1 skipped · 1 to go of 4 · 27 checks (2 failed); duration 5600 ms', c1.passed === 1 && c1.failed === 1 && c1.skipped === 1 && c1.pending === 1 && c1.checks === 27 && c1.failed_checks === 2 && c1.duration_ms === 5600
     && c1.text === '1 passed · 1 failed · 1 skipped · 1 to go of 4 · 27 checks (2 failed)', J(c1))
-  check('each bucket rolls up its own items (Passed 1 of 1, Failed 0 of 1)', (s => M.bar2(s, w.byPath('Release/Tests/Passed')).done === 1 && M.bar2(s, w.byPath('Release/Tests/Failed')).total === 1)(w.sess()))
+  check('each bucket rolls up its own items (Passed 1 of 1, Failed 1 of 1 — its failed test is done)', (s => M.bar2(s, w.byPath('Release/Tests/Passed')).done === 1 && M.bar2(s, w.byPath('Release/Tests/Failed')).done === 1)(w.sess()))
+  check('side effect (Q62): the FAILED bucket\'s own plan ENDS (all its items done) — yet it is not evicted / expired alone (a bucket goes with its run)',
+    (s => M.planEndHow2(s, w.byPath('Release/Tests/Failed')) === 'all-done')(w.sess()))
   const d = M.displayOf2(w.sess(), w.get('tests'))
-  check('displayOf2: a test-run shows its glyph, its bar AND its counts (show: tests)', d.show === 'tests' && d.glyph === '⚑' && d.bar.total === 4 && d.tests.passed === 1 && d.tests.failed === 1)
+  check('displayOf2 (Q56 CHANGED): a test-run shows its glyph and ONE bar of its tests — passed (green) vs failed (red) vs total — the counts in its tooltip; no items bar beside it',
+    d.show === 'tests' && d.glyph === '⚑' && !('bar' in d) && d.tests.passed === 1 && d.tests.failed === 1 && d.tests.total === 4 && d.tests.pct_passed === 25 && d.tests.pct_failed === 25
+    && d.tests.tooltip === '1 passed · 1 failed · 1 skipped · 1 to go of 4 · 27 checks (2 failed)' && d.tests.counts.checks === 27, J(d))
+  check('testBar2: null while a node holds no test', (() => { w.call({ key: 'empty', label: 'Empty', text: 'x' }); return M.testBar2(w.sess(), w.get('empty')) === null })())
   check('the run adds its BAR to its parent\'s rollup (Release holds plan items: it rolls up only those — ROLLUP; a plain parent sums it)', (() => {
     const r = w.bar('rel'); w.call({ key: 'box', label: 'Box' }); w.call({ key: 'tests', move: 'box' }); const b = w.bar('box'); w.call({ key: 'tests', move: 'rel' })
-    return r.total === 1 && b && b.total === 4 && b.done === 1
+    return r.total === 1 && b && b.total === 4 && b.done === 3
   })())
   w.call({ key: 't4', state: 'done', message_type: 'test-result', fields: { result: 'pass', checks: 3 }, move_to: '../Passed' })
   check('Pending vanished once it emptied; Passed / Failed / Skipped stay', J(w.kids('Release/Tests')) === J(['Passed', 'Failed', 'Skipped']) && w.sess().ghosts.has(pd.node.id))
   const p = M.planOf2(w.sess(), w.get('tests'))
-  check('the run\'s PLAN is its items across the buckets (4), open while one failed', p && p.total === 4 && p.done === 2 && M.planEndAt2(w.sess(), w.get('tests')) === null)
+  check('the run\'s PLAN is its items across the buckets (4); every test FINISHED (a failed one too) → it ended, all done', p && p.total === 4 && p.done === 4 && M.planEndHow2(w.sess(), w.get('tests')) === 'all-done')
   const end = w.call({ key: 'tests', state: 'failed', text: '@TESTS FAILED: 2 passed, 1 failed, 1 skipped' })
-  check('a FAILED line on the run ENDS its plan (planEndHow2 failed) — the run is over', end.ok && M.planEndAt2(w.sess(), w.get('tests')) != null && M.planEndHow2(w.sess(), w.get('tests')) === 'failed')
+  check('the run\'s own line can still say failed (non-test work keeps the failed state)', end.ok && w.get('tests').current.state === 'failed')
+  check('a FAILED line on a run whose tests are not all finished ENDS its plan (planEndHow2 failed) — the run is over', (() => {
+    w.call({ key: 'r2', label: 'Run 2', context_type: 'test-run', state: 'running', plan: [{ key: 'u1', label: 'u_1' }, { key: 'u2', label: 'u_2' }] })
+    w.call({ key: 'u1', message_type: 'test-result', fields: { result: 'fail' }, text: 'x' })
+    const before = M.planEndAt2(w.sess(), w.get('r2'))
+    w.call({ key: 'r2', state: 'failed', text: '@aborted' })
+    return before === null && M.planEndHow2(w.sess(), w.get('r2')) === 'failed'
+  })())
   check('…a plain context\'s failed line does not end its plan (ends: done | abandoned)', (() => { w.call({ key: 'pc', label: 'PC', plan: ['x'] }); w.call({ key: 'pc', state: 'failed', text: '@no' }); return M.planEndAt2(w.sess(), w.get('pc')) === null })())
   // what a run does NOT walk into
   w.call({ agent: 'helper', label: 'Helper', under: 'tests' })
@@ -163,7 +193,7 @@ await section(() => {
   w.call({ key: 'pending', label: 'Pending', under: 'tests', transient: true, plan: [{ key: 'a', label: 'test_a' }, { key: 'b', label: 'test_b' }] })
   const pendingId = w.get('pending').id
   w.call({ key: 'a', state: 'done', message_type: 'test-result', fields: { result: 'pass', checks: 2 }, move_to: '../Passed' })
-  w.call({ key: 'b', state: 'failed', message_type: 'test-result', fields: { result: 'fail', checks: 2, failed: 1 }, move_to: '../Failed' })
+  w.call({ key: 'b', state: 'done', message_type: 'test-result', fields: { result: 'fail', checks: 2, failed: 1 }, move_to: '../Failed' })
   w.call({ key: 'tests', state: 'failed', text: '@run 1 failed' })
   const passedId = w.byPath('Tests/Passed').id
   check('run 1 ends: Passed + Failed, 1 passed · 1 failed', J(w.kids('Tests')) === J(['Passed', 'Failed']) && w.counts('tests').text === '1 passed · 1 failed of 2 · 4 checks (1 failed)', w.counts('tests').text)
@@ -252,7 +282,7 @@ await section(() => {
     onStart: (name, group) => ({ key: name, state: 'running', text: `@running · ${group}`, move_to: '../In progress', log: false }),
     onEnd: (name, r) => r.ok
       ? { key: name, state: 'done', text: `@${r.pass} passed, ${r.fail} failed · ${r.ms / 1000}s`, message_type: 'test-result', fields: { result: 'pass', checks: r.pass + r.fail, failed: r.fail, duration: r.ms }, move_to: '../Passed' }
-      : { key: name, state: 'failed', text: `@FAILED: ${r.pass} passed, ${r.fail} failed`, details: r.fails.join('\n'), message_type: 'test-result', fields: { result: 'fail', checks: r.pass + r.fail, failed: r.fail, duration: r.ms }, move_to: '../Failed' },
+      : { key: name, state: 'done', text: `@FAILED: ${r.pass} passed, ${r.fail} failed`, details: r.fails.join('\n'), message_type: 'test-result', fields: { result: 'fail', checks: r.pass + r.fail, failed: r.fail, duration: r.ms }, move_to: '../Failed' },
     tick: text => ({ key: RUN.key, text: `@${text}`, log: false }),   // the bar and counts come from the run's items now: no progress needed
     final: (ok, summary, details) => ({ key: RUN.key, state: ok ? 'done' : 'failed', text: `@${ok ? 'tests passed' : 'TESTS FAILED'}: ${summary}`, ...(details ? { details } : {}) }),
   }
@@ -274,9 +304,11 @@ await section(() => {
   send(reporter.onStart('test_dash', 'dashboard'))
   send(reporter.onEnd('test_dash', { ok: true, pass: 50, fail: 0, ms: 2000 }))
   check('Pending and In progress are gone; the run reads 2 passed · 1 failed of 3 · 782 checks (2 failed)', J(w.kids('Tests')) === J(['Passed', 'Failed']) && w.counts('tests').text === '2 passed · 1 failed of 3 · 782 checks (2 failed)', w.counts('tests').text)
-  check('the run\'s bar: 2 of 3 (the items across its buckets)', (b => b.done === 2 && b.total === 3 && b.items)(w.bar('tests')))
+  check('the run\'s items bar: 3 of 3 (every script finished — the failed one too, Q62); its tests bar: 2 passed, 1 failed', (b => b.done === 3 && b.total === 3 && b.items)(w.bar('tests'))
+    && (t => t.passed === 2 && t.failed === 1 && t.total === 3)(M.testBar2(w.sess(), w.get('tests'))))
   const fin = send(reporter.final(false, '2 passed, 1 failed (test_mesh) · 15s', 'test_mesh: 30 passed, 2 failed\nFAIL relay drops\nFAIL heal'))
-  check('final: a failed line on the run ends it (planEndHow2 failed); its summary is a logged entry with the details', M.planEndHow2(w.sess(), w.get('tests')) === 'failed' && fin.entries[0].details.startsWith('test_mesh') && fin.entries[0].text.startsWith('TESTS FAILED'))
+  check('final: the run\'s plan ended when its last script finished (all done); the failed line says how the run went; its summary is a logged entry with the details',
+    M.planEndHow2(w.sess(), w.get('tests')) === 'all-done' && w.get('tests').current.state === 'failed' && fin.entries[0].details.startsWith('test_mesh') && fin.entries[0].text.startsWith('TESTS FAILED'))
   // ---- run 2: the same scripts + a new one; the earlier ones are moved back to Pending
   const st2 = reporter.start([...names, 'test_new']).map(send)
   const again = st2[1].plan.filter(i => i.warning === 'exists-elsewhere').map(i => i.key)

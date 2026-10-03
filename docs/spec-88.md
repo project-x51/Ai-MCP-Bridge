@@ -8,7 +8,10 @@ list, not a plan), reversed 6c decision 7 for bars (ROLLUP: a plan node's bar is
 TYPED (§1.7: a built-in registry of node types — a group is `--context-type=group`, a question a node of type `question` —
 and of message types — an answer is an `answer` entry). All his decisions
 are in §9 "Decisions". The build (§8) has started (steps 1, 2a and 2b done; 2c and 2d built, see §8 — 2d made `test-run` and
-`test-result` real types and filled the registry's `menu` slot for #92; its questions Q56 – Q60 are open). The agreed design is in
+`test-result` real types and filled the registry's `menu` slot for #92; Robin then answered Q50 – Q60, changing Q56 (one
+tests bar) and Q57 (with Q61 / Q62: state is progress, result is outcome — a test-result sets the state to done) and added
+TIME in the logs (§5.7); step 3 built the v6 records + replay, the day / index files and the time — no question is open).
+The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
 
@@ -170,7 +173,7 @@ apply to a node now; Q60).
 | `question` | context | `--ask` (§5.8) | `status` (asked / answered / …) | one ITEM | holds no children; takes no `plan` / `progress` |
 | `agent` | agent | `--agent` | `auto` | its bar | |
 | `session` | session | the bridge (the root) | `auto` | — | |
-| `test-run` | context | `--context-type=test-run` (step 2d) | `items` over its items across its BUCKETS (`items: tree`), shown WITH its counts (`show: tests`: "2 passed · 1 failed · 1 to go of 4 · 27 checks", Q56) | its bar | its plan also ends on a `failed` line; #81's dashboard test reporter is its first user (§3.8, Q59) |
+| `test-run` | context | `--context-type=test-run` (step 2d) | `items` over its items across its BUCKETS (`items: tree`) — what it adds to its parent; its ROW shows ONE bar of its tests, passed (green) vs failed (red) vs total, the counts in its tooltip (`show: tests`, Q56 CHANGED, §5.7) | its bar | its plan also ends on a `failed` line; #81's dashboard test reporter is its first user (§3.8, Q59) |
 - **The flag** is `--context-type=<type>` (the tool's `context_type`), lower-case kebab-case flag style, values
   case-insensitive. It gives a NEW context its type (on an existing node it is ignored with `exists`, §3.5); only the
   settable context types are taken (`bad-type` otherwise; `question` only with `--ask`); a reserved one → `type-reserved`.
@@ -201,8 +204,15 @@ not interpret.
   the state the report left it in) — so the bridge COUNTS them per run (a test-run's counts, §5.7) after the entry has left
   the in-memory log, and with `log:false` too (the checkpoint carries it, step 3). The result stands while the node is in
   that state: a later state change wins (the latest word), and a restart (todo / running / blocked without a test-result)
-  clears it, so a second run starts clean. A result never implies a state; a result that contradicts its call's own state →
-  warning `result-state` (Q57).
+  clears it, so a second run starts clean. **State is progress, result is outcome** (Q57 / Q61 / Q62, Robin): a test's
+  STATE is its progress (todo / running / blocked / done / abandoned), its test-result (pass / fail / skip) its OUTCOME.
+  Logging a test-result means the test FINISHED: it sets the state to **done** for all three results (a test-result alone
+  is a report); the colour, the Passed / Failed bucket and the tests bar (`testBar2`) come from the result. `--state done`
+  with a result is consistent; any other state with it (running / todo / blocked / abandoned / failed / skipped) is refused
+  `bad-state` ("a test-result means the test finished"). ANY context that takes a test-result is a test — a skip works on
+  it whether or not it is a plan item; an agent or the session can't take one (`not-a-test`: an agent runs tests, it isn't
+  one). The `failed` state stays for non-test work (a failed deploy, a run that ended failed). The 2d warning
+  `result-state` is gone. Other information — the names of the failing checks — goes in `--details` (Q58).
 - Answers are entries of type `answer`; the node's STATE (done / failed …) still drives plans and progress.
 
 ---
@@ -241,15 +251,19 @@ path BEFORE the change (it seeds the alias table, §3.3, and lets a log say "mov
   §5.3), and `asked` when the label was auto-renamed (§1.6: `"label":"notes (2)","asked":"notes"`). A create for a key whose
   node is a GHOST (§5.1) re-uses its id and starts a new run. `transient:true` marks a transient context (§3.8), with
   `grace_ms` when it was created with a grace period (Q44). It also carries the node's `type` (§1.7; `nk` stays the kind).
+  Step 3 added what the replay needs: `scope` (the creator's chain, so an agent's chain is known even when its creator is
+  gone), `implicit:true` (a path's intermediate) and `runs` (> 1: a resurrected ghost's run number).
 - `type`: `{"op":"type","n":…,"type":"group"}` — the dashboard's Show as group / Show as plan, or `--ask` turning a
   line-less context into a `question` (§1.7); nothing else changes (its children keep their states).
 - `move`: new `p` (+ the rank it got there). `label`, `rank`, `item`: the one attribute. `keep`: a transient context becomes
   permanent (§3.8), with no other field.
 - `merge`: A (`n`) into B (`into`); `from` = A's parent then (for an unmerge); `kids` = A's children at that moment, which
-  move under B (no separate move records).
-- `remove`: the node and its subtree leave memory (`why`: dismiss | evict | transient, §3.8). Replaces 6d's `dismiss:true` replay rule and the
+  move under B (no separate move records), and `kid_ranks` (step 3) = the rank each got under B.
+- `remove`: the node and its subtree leave memory (`why`: dismiss | evict | expire | transient, §3.8). Replaces 6d's `dismiss:true` replay rule and the
   entry's `evicted:[paths]`. The 6d dismissal ENTRY ("dismissed from the board by …") is still written, on the PARENT (§2.2).
-  Expiry writes nothing (as today; the replay re-runs `expire`).
+  **Expiry writes its removals too** (step 3, changed from "expiry writes nothing"): the owner's pass (`expire2`) writes a
+  `remove` with why `expire`, so the replay folds it where it happened instead of re-deciding it later — a removal it
+  decided late would let a later record (a new run of that key, a new item under that plan) land on the wrong tree.
 
 ### 2.2 Entries — keyed by id
 ```json
@@ -266,21 +280,37 @@ path BEFORE the change (it seeds the alias table, §3.3, and lets a log say "mov
   the line's text when the entry's own text differs, as 6d's ticks); `false` = logged only. Kept: `current text state progress eta_at
   stale_after_ms details data by act line_text line_by question plan_end finished_at`, and `dismiss:true` on the parent-log
   dismissal entry (`n` = the PARENT, `of` = the removed id). `rank` leaves entries: a placement writes a `rank` node record
-  plus its "placed before Build" entry.
+  plus its "placed before Build" entry. Step 3 added what the replay needs to rebuild the line exactly: `line:true` (the entry
+  SET the line's text — its details / data are the line's; without it a state change keeps the line's text, details and
+  data), `test_cleared:true` (a restart dropped the node's kept test-result) and `caller` (the calling agent the report also
+  refreshed, when it is not on target..owner, §1.4). **TIME** (§5.7): the entry that ENDS an attempt carries `took` (ms),
+  and after a re-run also `took_total` and `attempts` — written by the bridge beside the message type's own `fields` (any
+  entry type can end an attempt, so it is not one type's typed field), and the replay re-derives the node's times from
+  the same state changes.
 - A move / rename / merge also writes a normal ENTRY on the node ("moved by robin via dashboard (ROBIN-Z790) from #88 to
   Later", `act`) so the log tells the story; the node record carries the structure. Two lines, one call.
 
 ### 2.3 Checkpoints and carry-forward
 - **cp** (`checkpointOf`): `path` → `n`. `{"v":6,"kind":"cp","k":17,"ts":…,"n":"rtam3yvgwkzx5zbp","current":{…},"state":"running","progress":{…},"eta_at":null,"created_at":…,"rank":null,…ident}`.
   `rep` lines unchanged (`{"v":6,"rep":[17,18],"n":245,"since":…,"last":…}` — keys per file, as today; a rep's `n` is its
-  repeat COUNT, as today, never a node id — `recordKind` tells a rep by its `rep` array).
+  repeat COUNT, as today, never a node id — `recordKind` tells a rep by its `rep` array). As built (step 3,
+  `planCheckpoints2`): a cp also carries the node's kept `test` (2d), `last_activity`, `stale_after_ms` and — an agent / the
+  root — `finished_at` + `plan_end`, and the node's TIME as `timing: { started_at, ended_at, first_started_at, took,
+  took_total, attempts }` (when it ever started or ended a timed attempt); a node is "unchanged" (→ the rep line) when its line state equals what its newest record
+  left (`cp_sig`); a log:false report through a calling agent outside target..owner checkpoints that agent too.
 - **cf** (`planCarryForward` / `carryOf`) carries STRUCTURE too, because a node's `create` may be older than the replay window:
   `{"v":6,"kind":"cf","ts":…,"n":…,"c":…,"key":"docs","nk":"context","label":"Write the README","p":…,"rank":"0fi","plan_item":true,"plan_ix":3,
   "aliases":[{"path":"next release/#88/write the docs","at":1790986000000}],"merged_into":null,"current":{…},"state":…,"progress":…,"eta_at":…,"created_at":…,"last_activity":…,"stale_after_ms":null,"implicit":false,"log_n":12,"run_at":1790984000000,…ident}`.
 - **What is carried** (`carryDue`): every node whose state OR structure (its newest create / move / label / rank / item record)
   would fall out of the window before the next rollover, every open plan item, and every ANCESTOR of a carried node (parents
   first, as today). `run_at` = when its current run began (its create's ts), so the run boundary survives (§5.3). `pt` gains
-  `s` (structure persisted).
+  `s` (structure persisted). **As built (step 3, `planCarryForward2`): EVERY node in memory is carried** at each rollover — a
+  daily snapshot of the whole board (parents first, hidden merged nodes after their visible siblings; no `pt` bookkeeping).
+  Carrying only what would fall out is not enough: an ancestor created inside the window would miss the activity a child
+  whose run began earlier gave it before that child's cf (the window fuzz found it); with the whole board in each cf, every
+  node alive at the newest rollover is known from there on. A cf also carries `scope`, `asked`, `type`, `transient` +
+  `grace_ms` + `empty_since`, `merged_from`, `runs`, the line state and `timing` as a cp does, and — the root's — the
+  session's `session_last_activity`.
 - Unchanged: `cf` written at the local day rollover and after a restart without one (`actRollover`, `cf_today`).
 
 ### 2.4 The per-day index files (id → offsets)
@@ -296,7 +326,10 @@ path BEFORE the change (it seeds the alias table, §3.3, and lets a log say "mov
            {"op":"move","ts":1790986000000,"n":"rtam3yvgwkzx5zbp","p":"2lneiezs5pgo7ghf"}]}
 ```
   `nodes[id]` = [first entry offset, last entry offset, entry count] (entries only; cp / cf not counted); `struct` = that
-  day's node records, compact. Today's file has the same map in memory, updated on every append.
+  day's node records, compact. Today's file has the same map in memory, updated on every append. As built (step 3,
+  `lib/activity2-files.js`): the index also has `sessions` (each `{ realm, project, user, session, s0 }`) and every `struct`
+  entry an `s` (its session there — a ghost needs its session); `struct` also holds the STRUCTURE of the day's cf lines
+  (`op:"cf"`), so a node created before retention and removed later still has its key / label / parent for the ghost table.
 - Uses: paging (§5.2 — read only the days and byte ranges that hold the subtree's ids), the GHOST table (§5.1 — structure of
   nodes no longer in memory, read from `struct` across retention at startup), and the entry index (an entry id's day is still
   in the id itself, `entryTime`).
@@ -778,11 +811,36 @@ it beats what the host knows even under clock skew. New `lib/view-state.js` hold
     (`bad-field`: it has no bar).
 - **Test runs** (step 2d; §3.8's `Tests`): a context of TYPE `test-run`. Its ITEMS are every plan item (and question) BELOW
   it reached through contexts — its BUCKETS (`Pending` / `In progress` / `Passed` / `Failed`) and nested test-runs — never
-  through an agent or a group. Its bar is "N of M" over them (a failed test is remaining, as any failed item); its plan ends
-  when every item is done or when its own line is done, abandoned or FAILED; where the bar is, its row also shows its COUNTS:
-  its TESTS (those items, minus questions, plus any other context there holding a test-result) by outcome — passed /
-  failed / skipped / running / pending — with the checks, failed checks and duration their test-results add up to (§1.7's
-  kept `test`). It adds its bar to its parent. A bucket is not evicted alone: an ended run goes whole (Q56, Q59).
+  through an agent or a group. Its bar is "N of M" over them — a FINISHED test is done whatever its result (Q62), so a
+  failed test counts as done here — that is what it adds to its parent's rollup; its plan ends when every item is done (every
+  test finished) or when its own line is done, abandoned or FAILED (the reporter ends a run with a failed line when any test
+  failed). A bucket's own plan can end too (the Failed bucket's tests are done items) — it is still never evicted or
+  expired alone: it goes with its run.
+  **Its ROW shows ONE bar of its TESTS** (Q56 CHANGED, Robin): passed (green) vs failed (red) vs total — the rest (skipped,
+  running, to go) neither — with the pass / fail counts in its TOOLTIP ("2 passed · 1 failed · 1 to go of 4 · 27 checks (2
+  failed)"), in place of the items bar + counts text of 2d. Its TESTS are those items, minus questions, plus any other context
+  there holding a test-result, each by outcome — passed / failed / skipped / running / pending — with the checks, failed
+  checks and duration their test-results add up to (§1.7's kept `test`); `displayOf2` → `tests: testBar2(…)` = { passed,
+  failed, total, pct_passed, pct_failed, tooltip, counts }. A bucket is not evicted alone: an ended run goes whole (Q59).
+- **Time** (Robin, 2026-10-03: "when the task is finished the time between it being started and finished should be
+  recorded in the task"; built in step 3). Every node times its ATTEMPTS from its line's state changes:
+  - an attempt STARTS when the line goes `running` (and no attempt is open); blocked / idle keep it open;
+  - it ENDS when the line reaches done / failed / skipped / abandoned: `took` = end − start (ms) on the node, and the
+    ending entry carries `took` (§2.2). A test-result's `duration`, when given, IS the test's took (it also times a test
+    that reports a duration without ever going running);
+  - a REOPEN / restart (running again after an end) is a new attempt: the node keeps the LATEST `took`, plus `took_total`
+    and `attempts` over every finished attempt (a test re-run is the main case; the entry carries the total once there are
+    two);
+  - back to `todo` mid-attempt drops that attempt (no took); an item ticked straight from todo (never running) has no
+    start, so no took — none is invented;
+  - a PLAN (a plan node, a test-run, an agent or the session holding plan items) also gets its own start-to-end time: from
+    the first start among it and its items (`first_started_at`, kept across attempts) to the plan's end (`planEndAt2`); an
+    agent's own line times its work like any node.
+  The node holds `started_at`, `ended_at`, `first_started_at`, `took`, `took_total`, `attempts`; a cp / cf carries them
+  (`timing`, so `log:false` and the replay window keep them). `displayOf2` gives `took: timing2(…)` = { started_at,
+  ended_at, took, took_total, attempts, running_ms (an open attempt, with `now`), plan?: { started_at, ended_at, took },
+  text: "took 4m 12s" | "took 30s (4m 42s over 2 runs)" | "running 3m" } — the plan's took when it has one — for the
+  dashboard (step 10).
 
 ### 5.8 Questions (#85 / #90 on ids; TYPES)
 - **Ask:** `--ask "<question>" --choice "A" --choice "B" [--free] [--expires 2h] [--details …]`. The question goes on the
@@ -1094,18 +1152,68 @@ existing checks keep passing while the core is written.
    now (the `when` predicates mirror `applyAction2`'s own checks; Pin / Hide / Copy command stay dashboard-side). #81's
    reporter is NOT rewired (cutover, step 9+); `test_activity2d_unit` shows its calls mapped onto the model: run start =
    `--key tests --context-type=test-run` + a transient `Pending` holding one plan item per script; a script start =
-   `--state running --move-to "../In progress"`; its end = `--state done|failed --message-type=test-result --result …
+   `--state running --move-to "../In progress"`; its end = `--state done --message-type=test-result --result …
    --checks … --failed … --duration … --move-to "../Passed"|"../Failed"` (FAIL lines in `--details`); the tick = a
    `log:false` line on the run (no progress needed: the bar and counts come from the items); the end = a `done` / `failed`
    line on the run. A second run: the known scripts answer `exists-elsewhere` to the re-plan, so the reporter moves them
    back with `--state todo --move-to "../Pending"` (their kept results drop; every bucket keeps its id). Left for later:
    checkpoints carrying `test` (step 3), the script's field flags (step 9), the dashboard's use of `tests` and `menuOf2`
    (step 10). Questions Q56 – Q60 (§9). Tests: `tests/unit/test_activity2d_unit.mjs` (+ 2b's reserved-name checks
-   updated).
+   updated). *Changed during step 3 by Robin's answers:* Q56 — a test-run row shows ONE tests bar (passed / failed / total,
+   counts in the tooltip: `testBar2`), not the items bar + counts; Q57 / Q61 / Q62 — state is progress, result is outcome:
+   a test-result sets the state to DONE whatever the result (`--state done` with it is fine, any other state → `bad-state`;
+   any context can take one, a skip too; an agent can't: `not-a-test`), and the `result-state` warning is gone. So a failed
+   test is a done item: the reporter's fail end is `--state done` (or none), a run's items bar counts it done, and the
+   Failed bucket's own plan ends (it still goes only with its run).
 3. **v6 records + replay.** `recordKind` v6 only; `createReplay` folds node records (newest wins per field, `create` seals
    the run) and attaches entries by `n` — no remapping. cp / cf / rep v6; `planCarryForward` carries structure. *Tests:* a
    seeded REPLAY FUZZ like #82's (400 random sequences of reports, plans, moves, `--move-to` with transient vanish /
    resurrect / keep, renames, merges, unmerges, dismissals, evictions, expiry, day rollovers with cf) — replay ≡ chronological apply (lines, bars, structure, logs, counts, runs).
+
+   **3 as built** (2026-10-03): in `src/lib/activity2.js` (the section at its end) + the new `src/lib/activity2-files.js`,
+   still wired into nothing. RECORDS — what the replay needs, added to the v6 writers (§2.1 – §2.4): `create` + `scope` /
+   `implicit` / `runs`, `merge` + `kid_ranks`, entries + `line` / `test_cleared` / `caller`; EXPIRY WRITES its removals
+   (`expire2`, `remove` why `expire`; `expirePass2` = question expiry + the grace sweep + expiry, in that order) instead of
+   the replay re-running it. `recordKind2` reads v6 only. CHECKPOINTS: `planCheckpoints2` / `flushCheckpoints2` (cp / rep on
+   ids; a cp carries the kept `test`, 2d's note; "unchanged" = its line state equals what its newest record left,
+   `cp_sig`); CARRY-FORWARD: `planCarryForward2` (structure too; every node in memory, each rollover).
+   REPLAY: `createReplay2(state, { now, from })` — `feed(rec, day)` newest first (answers `old` before the window; keeps
+   reading a day while a rep line there still needs an older cp's key: `wantsOlder`), `finish()` folds CHRONOLOGICALLY into
+   fresh sessions and installs them: node records change one thing each (a `create` begins a run — of a ghost: same id, its
+   leftover children gone; `remove` of the root drops the session), entries attach by `n` (line, state, bar, ETA,
+   finished_at, plan-end marker, kept test-result, activity of target..owner + `caller`; the node's bounded log), cp / rep /
+   cf restate; no expiry, eviction or grace sweep is re-run (they are records). The window: a node whose run began earlier is
+   restated by the window's cf; its entries fed before that cf become its log's head and it gets `log_floor` = the window
+   start (step 6's paging). `replayRecords2` = the convenience. `state.seq` continues past the replayed entry ids; today's cp
+   keys are re-derived. GHOSTS: `rebuildGhosts2(state, indexes)` folds the index files' `struct` across retention and adds
+   the ghosts the window did not see (key held, `last_ts` = the start of the newest retained day holding its entries).
+   FILES (`lib/activity2-files.js`, synchronous, every call takes the persistence dir): `hostDir` = `activity/<lslug(host)>`;
+   `createDayWriter({ dir, host })` (`append` / `replaceTail` / `writeAll` of a plan or a call's `writes`, today's index in
+   memory, `rollover` writes each closed day's index, `prune` deletes a day with its index); `buildIndex` / `ensureIndex`
+   (rebuilt when missing or its `size` is stale) / `readIndexes`; `readBackwards`, `readDay`, `readSpan` + `spansOf` (paging
+   reads only the byte ranges the index names); the Dropbox rule — `classifyNames` (exact names; `.tmp`; "conflicted copy" /
+   "Case Conflict"; unknown), `scanHostDir` / `scanViewsDir` (each odd name's WARN line once per name with a `seen` set,
+   `fs_warnings` = all), conflicted copies never read and never pruned; `writeAtomic`. The REPLAY FUZZ found a 2a bug, fixed:
+   `--move-to` (and a path) could RESURRECT an AGENT's ghost as a transient bucket — `ghostUnder` now takes context ghosts
+   only. Robin's answers to Q56 (one tests bar: `testBar2`) and Q57 / Q61 / Q62 (a test-result sets the state to done; any
+   context can take one, an agent can't; only `--state done` goes with it) were built here too,
+   and his TIME requirement (§5.7): `timingStep` on every line-state change (attempts: start on running, end on done /
+   failed / skipped / abandoned, a test-result's duration as its took, re-runs adding up), `took` (+ `took_total` /
+   `attempts`) on the ending entry, `timing` in cp / cf, the replay re-deriving it, `timing2` / `fmtTook` and `took` in
+   `displayOf2`. The window fuzz also changed the carry-forward to the WHOLE board each day (§2.3).
+   Left for later: wiring all of it into the bridge (step 6: the facet appends through the writer, the index at rollover,
+   paging via `spansOf`, `rebuildGhosts2` + `pruneGhosts` at startup and rollover, the conflicted-copy WARN at start /
+   rollover, `fs_warnings` in the board head); the conversion that writes these records from v5 (steps 4 – 5). Its questions
+   Q61 / Q62 are answered (§9). Tests: `tests/unit/test_activity3_unit.mjs` — the record fields, `recordKind2`, checkpoints (the kept result,
+   rep lines in place, a new day's keys, the caller's cp), expiry records, cf + the window (`log_floor`, exact `log_n`, old
+   aliases), TIME (start / end / took on the node and its ending entry, a reopen's new attempt + total, no took for a
+   straight tick or a dropped attempt, a test-result's duration, a plan's / test-run's / agent's time, log:false via cp,
+   cf, replay, `fmtTook`), the files (index written = rebuilt, stale size, paging spans, rep rewrite in place, a garbled tail, two hosts in
+   one dir, conflicted copies warned once and never read or pruned, `views/`), the ghost rebuild (+ resurrection after it,
+   pruning), and three seeded REPLAY FUZZES — 400 whole histories (everything equal: structure, lines, bars, test counts,
+   logs, runs, ghosts, the scope index, labels, aliases, activity; every node op, cf and every entry type covered), 200
+   windowed 4-day histories with cf at each rollover (equal but for entries older than the window), 100 with 45 % log:false
+   (lines, bars, states, kept results equal; activity within one checkpoint interval).
 4. **Conversion library** (`lib/activity-v5.js`: the v5 record reader moved out of `activity.js` + `convertV5`, pure).
    *Tests:* a CONVERSION FUZZ — random histories applied with a FROZEN copy of the last 1.7x library
    (`tests/fixtures/activity-v174.js`, from `git show`), then (a) its own replay and (b) the converted days through the 2.0
@@ -1183,7 +1291,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built); GROUPS, ROLLUP and TYPES are decisions
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built) and Q56 – Q60 those of step 2d (Q56 and Q57 changed); GROUPS, ROLLUP and TYPES are decisions
 Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
@@ -1239,6 +1347,20 @@ answer overrides an earlier one (noted in the earlier row).
 | 47 | (build step 2b) Type `plan` vs a plan-capable `context` | **Accepted as built:** a `plan`'s bar is ALWAYS its items ("N of M"; ordinary children never mix in, even before it has items); a `context` rolls up its items only once it holds any, else its children's bars; Show as plan sets type `plan` (§1.7, §5.7). |
 | 48 | (build step 2b) A question whose text repeats its choices | **Accepted as built:** the ask succeeds with warning `choices-in-question`; it is not refused (§5.8). |
 | 49 | (build step 2b) A `@` line with no `--state` on a FINISHED agent | **Accepted as built (as 1.7x):** it keeps the node's state (still done) — it does not revive the agent; reviving takes `--state running` (§4.0). |
+| 50 | (build step 2c) How `--before` / `--after` find their anchor | **Accepted as built** (Robin: "use your recommendations"): a §3.2 reference; a bare key that names no sibling is also tried as the label (or agent key) of a child of the destination, as is a one-segment path; `*_id` exact (§3.2, §4.1). |
+| 51 | (build step 2c) A position on an EXISTING target | **Accepted as built:** it reorders (a `rank` record + its entry); a reorder to where the node already is writes nothing (retry-safe); only a call that also gives `--under` ignores it with `exists` (§3.5, §4.1). |
+| 52 | (build step 2c) The tool's form of `--first` / `--last` | **Accepted as built:** `position: "first" \| "last"` (1.7x's field; the script maps its flags onto it). |
+| 53 | (build step 2c) The clash dialog's answer format | **Accepted as built:** the move / merge action carries `label` and `merges:[{ id, into_id } \| { id, label }]`; an unanswered clash → `duplicate-label`, an answer that no longer fits → `clash-changed`, both with the fresh list (§1.6, §6.3). |
+| 54 | (build step 2c) The dismissal entry on the parent | **Accepted as built:** type `event`, `dismiss:true`, `of` = the removed id, state = the dismissed node's, `at` = the PARENT's path; the session root's on itself (§2.1, §2.2). |
+| 55 | (build step 2c) Message types of the dashboard's entries | **Accepted as built:** a state tick and a dashboard message are `note` entries carrying `act`; only structural changes are `event` (§1.7). |
+| 56 | (build step 2d) What a test-run row shows | **Changed (Robin):** ONE bar of its tests — passed (green) vs failed (red) vs total — with the pass / fail counts in its tooltip, replacing the items bar + counts text (`testBar2`, built in step 3; §1.7, §5.7). Its items bar stays what it adds to its parent. |
+| 57 | (build step 2d) A test-result vs the test's state | **Changed (Robin, revised with Q61 / Q62: "state is progress, result is outcome"):** logging a test-result means the test FINISHED — it sets the state to DONE for pass, fail and skip; the result is the outcome (colour, Passed / Failed bucket, `testBar2`); a restart (todo / running) still clears the old result; the `result-state` warning is dropped; `failed` stays for non-test work (built in step 3; §1.7, §5.7). |
+| 58 | (build step 2d) The test-result fields | **Accepted as built:** `result` (required), `checks`, `failed` (≤ `checks`), `duration`; other information, such as the names of the failing checks, goes in `--details` (§1.7). |
+| 59 | (build step 2d) A test-run's tests and plan | **Accepted as built:** its items are the plan items below it through context buckets and nested runs; any other context there with a test-result is a test too; its plan also ends on a `failed` line; an ended run is evicted whole (§5.7). |
+| 60 | (build step 2d) The per-type menus | **Accepted as built:** the registry lists the model's actions only; Robin gives feedback once he uses the menus; Kick comes after 2.0 (§1.7, §5.4). |
+| 61 | (build step 3) A test-result `skip` on a test that is not a plan item | **Option C (Robin):** any CONTEXT that receives a test-result counts as a test; a skip works on it whether or not it is a plan item (no `not-a-plan-item` refusal — the state is just done). An agent or the session can't take a test-result at all (`not-a-test`: an agent runs tests, it isn't one) (§1.7). |
+| 62 | (build step 3) A test-result whose call also gives a `--state` | **Decided (Robin):** `--state done` with a result is consistent and accepted; a result with `--state` running / todo / blocked / abandoned (or failed / skipped) is refused `bad-state` — a test can't have an outcome while unfinished; the error says a result means done (§1.7). |
+| TIME | (Robin, 2026-10-03) Time in the logs | **Accepted into 2.0 (built in step 3):** a node times each attempt from running to done / failed / skipped / abandoned (`took`, on the node and the ending entry); a reopen / restart is a new attempt (latest `took` + `took_total` / `attempts`); no start → no took; a test-result's duration is its took; plans, test runs and agents get their own start-to-end time; it survives checkpoints and the replay and shows in `displayOf2` ("took 4m 12s") (§2.2, §5.7). |
 | GROUPS | (Robin, 2026-10-03, new) Lists that are not plans | **Accepted into 2.0 (step 2b):** a context can be a GROUP — a list, not a plan: no bar, no plan-end, nothing added to its parent's rollup; where the bar would be, an optional COUNT ("4 items" / "3 open · 1 done"; abandoned and hidden items not counted). Set at creation (`--group` / `group:true`) or toggled from the dashboard (Show as group / Show as plan); its items keep their states. Candidates: Potential changes, Planned changes, Deployed releases, Questions; Next release stays a plan (§1.3, §2.1, §5.7). *The flag was then folded into TYPES: a group is `--context-type=group`.* |
 | TYPES | (Robin, 2026-10-03, "typed nodes and entries") | **Accepted into 2.0:** every node has a `type` from a small built-in REGISTRY held as data — per type its allowed fields, display (glyph, what shows in place of a bar), rollup behaviour, allowed children and menu actions (the slot the context-aware menu, #92, folds into). Types: `context` (the default, plan-capable), `plan`, `group`, `agent`, `question`, and `test-run` (reserved; built in step 2d). The flag is `--context-type=<type>` (tool `context_type`; kebab-case flag, values case-insensitive); it REPLACES `--group` / `group:true`; a question is a node of type `question`. ENTRIES are typed too: `--message-type=<type>` (tool `message_type`; default `note`), each type declaring typed fields that are validated so the bridge can count them (later: `--message-type=test-result --result pass --checks 22 --duration 4.1s`); `--data` stays free-form. Answers are `answer` entries; the node state still drives plans and progress. 2b builds the registries, the mechanism and the types questions need (`note`, `question`, `answer`, `withdrawal`, `expiry`, + `event` for structural entries); a new step 2d builds `test-run` + `test-result`; #81's test reporter is the first user of `test-run`. QUESTIONS read naturally: state the question, its options listed below it as the answers; the text never restates the options; choices stay structured (`--choice`) — in §5.8, the Answer dialog (§5.4) and the agent guide (§4.3) (§1.7, §2, §4, §5.7, §5.8, §8). |
 | ROLLUP | (Robin, 2026-10-03) A plan node's bar beside finished helpers | **Changed — reverses 6c decision 7 ("ordinary children win"):** a node holding plan items rolls up ONLY its items ("N of M"); helper agents and contexts keep their own bars on their own rows; a node with no plan items rolls up as before. Shipped for 1.7x as v1.75.1 (`rollup` + the dashboard's `rollKids`); 2.0 ports the same rule in step 2b (§5.7). |
@@ -1308,46 +1430,7 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q49, Q11b, GROUPS, ROLLUP and TYPES are decided (Decisions above). Build steps 2c (Q50 – Q55) and 2d (Q56 – Q60)
-raised the questions below; the build follows the recommendation for each until Robin answers.
-
-50. **How `--before` / `--after` find their anchor** (§3.2, §4.1). *Recommend (built):* a §3.2 reference, but since an
-    anchor is always a sibling, a bare key that names no sibling (or names a node elsewhere) is also tried as the label (or
-    agent key) of a child of the destination, as is a one-segment path; `*_id` exact. Alternative: strictly §3.2 (a label
-    needs `./Label`).
-51. **A position on an EXISTING target** (§3.5 vs §4.1). *Recommend (built):* it reorders (a `rank` record + its entry),
-    and a reorder to where the node already is writes nothing (retry-safe); only a call that also gives `--under` (a
-    create-shaped retry) ignores it with `exists`. Alternative: §3.5 literally — also ignored whenever `--label` is given.
-52. **The tool's form of `--first` / `--last`.** *Recommend (built):* `position: "first" | "last"` (1.7x's field; the
-    script maps its flags onto it). Alternative: `first: true` / `last: true`.
-53. **The clash dialog's answer format** (§1.6, §6.3). *Recommend (built):* the move / merge action carries `label` (the
-    moved node's new label) and `merges:[{ id, into_id } | { id, label }]` — one answer per clash, nested clashes included;
-    an unanswered clash → `duplicate-label`, an answer that no longer fits the tree → `clash-changed`, both with the fresh
-    list from `clashes2`. Alternative: separate `merges` (pairs only) and `labels` lists.
-54. **The dismissal entry on the parent** (§2.1, §2.2). *Recommend (built):* type `event`, text naming the label
-    ("dismissed "Helper" from the board by …"), `dismiss:true`, `of` = the removed id, state = the dismissed node's, `at` =
-    the PARENT's path; dismissing the session root writes it on the root and the whole session leaves. Alternative: `at` =
-    the dismissed node's path.
-55. **Message types of the dashboard's entries** (§1.7). *Recommend (built):* a state tick (done / skip / complete …) and a
-    dashboard message are `note` entries carrying `act`; only structural changes are `event`. Alternative: a bridge
-    `message` type for dashboard messages, and `event` for ticks.
-56. **What a test-run row shows** (§1.7, §5.7). *Recommend (built):* `show: tests` — its items bar across the buckets AND
-    its counts ("2 passed · 1 failed · 1 to go of 4 · 27 checks (2 failed)"); the dashboard lays them out. Alternative:
-    the counts instead of the bar.
-57. **A test-result vs the test's state** (§1.7). *Recommend (built):* the latest word wins — the kept result counts while
-    the node stays in the state that report left it in; a later state change wins; a restart (todo / running / blocked)
-    clears it; no state is implied by a result; a contradiction within one call → warning `result-state`. Alternatives: the
-    result always wins, or the state always wins (the result only adds checks / duration).
-58. **The test-result fields** (§1.7). *Recommend (built):* `result` (pass | fail | skip, required), `checks`, `failed`
-    (≤ `checks`; added beyond the draft so #81's failed-check count maps across), `duration` (ms; a number is ms, a string
-    needs a unit). Alternative: the draft's three fields only, `result` optional.
-59. **A test-run's tests and plan** (§5.7). *Recommend (built):* its items are the plan items below it through context
-    buckets and nested runs (not agents, not groups); any other context there with a test-result is a test too; its plan
-    also ends on a `failed` line; an ended run is evicted whole. Alternative: direct children only (no buckets), or buckets
-    of their own type.
-60. **The per-type menus** (#92, §1.7, §5.4). *Recommend (built):* the menus listed in `NODE_TYPES` (model actions only,
-    shown when they apply; Pin / Hide / Copy command stay in the dashboard). Alternative: also list the dashboard-only
-    entries in the registry.
+Q40 – Q62, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). No question is open.
 
 ---
 

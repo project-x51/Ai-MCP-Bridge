@@ -76,34 +76,49 @@
 //
 // BUILD STEP 2d (docs/spec-88.md §1.7, §3.8, §8 step 2d) — the first USER types on 2b's registries:
 // - the `test-run` node type (context-settable: --context-type=test-run): its bar is its ITEMS across its BUCKETS
-//   (`items: 'tree'`, runItems2 — §3.8's Pending / In progress / Passed / Failed), and its row shows that bar AND its
-//   counts (`show: 'tests'`, testCounts2: passed / failed / skipped / to go of N, + checks); its plan also ends on a FAILED
+//   (`items: 'tree'`, runItems2 — §3.8's Pending / In progress / Passed / Failed; what it adds to its parent's rollup), and
+//   its row shows its TESTS (`show: 'tests'`: testBar2 over testCounts2 — passed / failed / skipped / to go of N, + checks;
+//   one passed / failed / total bar since Q56 CHANGED); its plan also ends on a FAILED
 //   line (`ends`); planRemoval2 takes a run whole when only buckets and items are below it.
 // - the `test-result` message type (--message-type=test-result + fields result (required) / checks / failed (≤ checks) /
 //   duration (ms; "4.1s", "250ms")): the node KEEPS its latest one (`keep: 'test'` → node.test, with the state it left), so
 //   the bridge counts them; the result stands while that state does (testOutcome2) — a later state change wins, a restart
-//   (todo / running / blocked) clears it; a result that contradicts the call's own state → warning `result-state`.
+//   (todo / running / blocked) clears it. Q57 / Q61 / Q62 (Robin, during step 3: "state is progress, result is outcome"):
+//   logging a test-result means the test FINISHED — its state becomes DONE whatever the result (a test-result alone is a
+//   report); `--state done` with it is fine, any other state is refused `bad-state`; any context can take one (a skip too,
+//   plan item or not); an agent / the session can't (`not-a-test`).
+//   Q56 CHANGED: a test-run row shows ONE bar of its tests, passed vs failed vs total, the counts in its tooltip (testBar2).
 // - #92 folded in: every type's context-aware MENU as data (`menu`: { action, label, group, when }), menuOf2 = the entries
 //   that apply to a node now (WHEN2 mirrors applyAction2's checks).
 //
+// BUILD STEP 3 (docs/spec-88.md §2, §5.1 – §5.3, §8 step 3, §10) — v6 records + replay (the section at the end):
+// - what the records carry for the replay: `create` + scope (the creator's chain) / implicit / runs, `merge` + kid_ranks,
+//   entries + line (set the line's text) / test_cleared / caller (the calling agent it refreshed);
+// - recordKind2 (v6 only); expire2 / expirePass2 (expiry WRITES its removals: `remove` why "expire");
+//   planCheckpoints2 / flushCheckpoints2 (cp / rep; a cp carries the kept test-result); planCarryForward2 (cf carries
+//   STRUCTURE, the whole board each rollover); createReplay2 / replayRecords2 (a chronological fold; the window + cf);
+//   rebuildGhosts2 (the ghost table from the index files' struct). The day files and index files: lib/activity2-files.js.
+// - TIME in the logs (Robin): timingStep times each node's attempts (running → done / failed / skipped / abandoned; a
+//   test-result's duration is its took; re-runs add up), the ending entry carries `took`, cp / cf carry `timing`, the
+//   replay re-derives it; timing2 / fmtTook, and `took` in displayOf2 ("took 4m 12s").
+//
 // STUBS LEFT FOR LATER STEPS (said where they bite):
-// - Step 3 (records + replay): records are produced here (v:6, kind:"node") but not replayed; the session ROOT writes no
-//   record (its id is mintId(session, "", "") — derivable). `log:false` writes no entry and only marks the node `cp_dirty`
-//   (checkpoints are step 3 — they must carry `test`, 2d, as a log:false test-result keeps it with no entry). Step 6
-//   rebuilds the ghost table at startup.
+// - Step 6 wires the bridge: the facet appends `writes` / cp / cf through it, index files at rollover, paging via the
+//   index (log_floor marks a replayed node whose older entries are only in the files), rebuildGhosts2 + pruneGhosts at
+//   startup / rollover, the conflicted-copy WARN. The session ROOT writes no create record (its id is derivable).
 // - Step 9 wires the script's typed-field flags (--result / --checks / --failed / --duration → `fields`); step 10 the
-//   dashboard's use of displayOf2 (`tests`) and menuOf2.
+//   dashboard's use of displayOf2 (`tests`: testBar2) and menuOf2.
 import { lc } from './keys.js'
 import { DEPTH2, ACTIVITY_LIMITS, ACTIVITY_STATES, mintId, validKey, slugKey, uniqueKey, normLabel, labelKey, parsePath2, parseRef, formatPath2,
   parseDuration, parseProgress, parseEta, parseText, sessionKey, rankOf, rankGroup, rankBetween, derivedRank, resolveConfig, normBy, byText,
   normQuestion, questionView, questionEntryDetails, answerEntryText, sameAnswer, QUESTION_LIMITS, fmtEta, progressPct, forceBar, stateOf, validRank,
-  MESSAGE_LIMITS, firstWords, NOTICE_VERB, EDIT_NOTICE_VERB, MESSAGE_NOTICE_VERB, ANSWER_NOTICE_VERB } from './activity.js'
+  MESSAGE_LIMITS, firstWords, NOTICE_VERB, EDIT_NOTICE_VERB, MESSAGE_NOTICE_VERB, ANSWER_NOTICE_VERB, localDay } from './activity.js'
 
 /** The v6 record format this model writes (spec §2). */
 export const ACTIVITY2_FORMAT = 6
 /** 2a's limits: depth (Q11b), the label length (§1.3), the `at` cap (Q11b), aliases per node (§3.3), the longest grace. */
 export const LIMITS2 = Object.freeze({ depthMax: DEPTH2.max, depthWarn: DEPTH2.warn, label: ACTIVITY_LIMITS.context, atBytes: 1024, aliasesPerNode: 16, graceMaxMs: 24 * 3600000 })
-const DAY = 86400000, MIN = 60000
+const DAY = 86400000, HOUR = 3600000, MIN = 60000
 const ID_RE = /^[a-z2-7]{16}$/
 const LIVE = new Set(['running', 'blocked'])                     // the states that can go stale
 const FINAL = new Set(['done', 'failed', 'abandoned'])           // an agent's line in one of them finishes it; the ETA is dropped
@@ -112,6 +127,7 @@ const PLAN_END = new Set(['done', 'abandoned'])                  // the plan-end
 const PLAN_STATES = new Set(['todo', 'skipped'])                 // contexts only (skipped: plan items only)
 const QSTATE = Object.freeze({ asked: 'blocked', answered: 'done', expired: 'abandoned', withdrawn: 'abandoned' })
 const STATE_OUTCOME = Object.freeze({ done: 'pass', failed: 'fail', skipped: 'skip', abandoned: 'skip' })   // 2d: a test's outcome by its state
+const RESULT_STATE = 'done'   // Q57 / Q62 (Robin): the state a test-result sets, whatever the result — it is the test's progress; the result its outcome
 
 // ---------------------------------------------------------------------------------------------------------------
 // small helpers
@@ -183,7 +199,36 @@ function newNode({ id, key, creator, chain, scope, kind, label, parent, now, ask
   return { id, key, creator, chain, scope, kind, type: type || (kind === 'context' ? 'context' : kind), label, asked, parent, rank, created_at: now, run_at: now, runs, last_activity: now,
     transient: !!transient, grace_ms: transient && grace_ms ? grace_ms : null, empty_since: null, merged_into: null, merged_from: null,
     implicit: !!implicit, plan: plan_ix != null, plan_ix, current: null, progress: null, eta_at: null, stale_after_ms: null, finished_at: null,
-    gone_at: null, plan_end: null, log: [], log_dropped: 0, cp_dirty: false, test: null }
+    gone_at: null, plan_end: null, log: [], log_dropped: 0, cp_dirty: false, cp_sig: null, test: null,
+    started_at: null, ended_at: null, first_started_at: null, took: null, took_total: 0, attempts: 0 }   // step 3: TIME (timingStep)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// step 3: TIME IN THE LOGS (Robin, 2026-10-03: "when the task is finished the time between it being started and finished
+// should be recorded in the task") — an ATTEMPT begins when the node's line goes `running` (not already in an open attempt)
+// and ends when it reaches done / failed / skipped / abandoned: `took` = end − start (a test-result's `duration`, when
+// given, IS the took); `took_total` / `attempts` add up the finished attempts (a reopen / restart / test re-run is a new
+// attempt); back to `todo` mid-attempt drops it (no took). Ticked straight from todo (never running): no start, no took.
+const END_STATES = new Set(['done', 'failed', 'skipped', 'abandoned'])
+/** The timing change a line-state change makes (s1 = the new state; durMs = a test-result's duration) → a patch. */
+function timingStep(n, s1, ts, durMs) {
+  const open = n.started_at != null && n.ended_at == null, p = /** @type {any} */ ({})
+  if (s1 === 'running' && !open) { p.started_at = ts; p.ended_at = null; if (n.first_started_at == null) p.first_started_at = ts }
+  else if (END_STATES.has(s1) && (open || durMs != null)) {
+    const took = durMs != null ? durMs : Math.max(0, ts - n.started_at)
+    Object.assign(p, { took, took_total: (n.took_total || 0) + took, attempts: (n.attempts || 0) + 1, ended_at: ts, ...(open ? {} : { started_at: null }) })
+  } else if (s1 === 'todo' && open) { p.started_at = null; p.ended_at = null }
+  return p
+}
+/** A short duration: "850ms", "4.1s", "4m 12s", "1h 3m", "2d 3h". */
+export function fmtTook(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '?'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60000) return `${(Math.round(ms / 100) / 10).toString()}s`
+  const s = Math.round(ms / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
+  if (d) return `${d}d${h ? ` ${h}h` : ''}`
+  if (h) return `${h}h${m ? ` ${m}m` : ''}`
+  return `${m}m${sec ? ` ${sec}s` : ''}`
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -230,7 +275,7 @@ const M_AGENT = [
  * - `reserved`  named, not built yet — refused `type-reserved` (none since 2d built test-run; kept for later types)
  * - `fields`    the report fields a node of this type takes (a group takes no progress: it has no bar; a question no plan)
  * - `glyph`, `show`  display: the row's glyph and what shows where a bar would ('bar' | 'count' | 'status' | 'tests':
- *               a test-run's bar AND its pass / fail counts, testCounts2)
+ *               a test-run's ONE bar of its tests, passed vs failed vs total, its counts in the tooltip: testBar2, Q56)
  * - `bar`       its own bar: 'auto' (its plan items only when it holds any — ROLLUP — else its children's bars), 'items'
  *               (always "N of M" over its items), 'none'
  * - `items`     (2d) where its plan ITEMS are: 'children' (its own plan-item children, + its questions), or 'tree' (a
@@ -481,9 +526,12 @@ const identOf = sess => ({ realm: sess.ident.realm, session: sess.ident.session,
 function record(t, op, n, fields = {}) {
   const r = { v: ACTIVITY2_FORMAT, kind: 'node', op, ts: t.now, n: n.id, ...fields, ...(t.by ? { by: t.by } : {}), ...(t.act ? { act: t.act } : {}), ...identOf(t.sess) }
   t.records.push(r); t.writes.push(r)
+  if (t.state.cp) t.state.cp.rep = null   // step 3: any other write closes the open repeat line (planCheckpoints2)
   return r
 }
 const newEntryId = (state, now) => `${state.idPrefix}${now.toString(36)}-${(++state.seq).toString(36)}`
+/** Step 3: a node's LINE STATE as one string — what a checkpoint restates (planCheckpoints2: changed → a cp line, else a repeat). */
+const cpSig = n => JSON.stringify([n.current, n.progress, n.eta_at, n.finished_at, n.plan_end, n.test, n.started_at, n.ended_at, n.took, n.took_total])
 /** The small form a node's in-memory log keeps (no details / data, no identity). */
 const smallOf = e => compact({ id: e.id, ts: e.ts, type: e.type, fields: e.fields, current: !!e.current, text: e.text, state: e.state, progress: e.progress, eta_at: e.eta_at,
   stale_after_ms: e.stale_after_ms, has_details: e.details ? true : undefined, has_data: e.data != null ? true : undefined, by: e.by, act: e.act })
@@ -507,6 +555,10 @@ function writeEntry(t, node, f) {
   const drop = Math.max(0, log.length - cap)
   fset(t, node, 'log', drop ? log.slice(drop) : log)
   if (drop) fset(t, node, 'log_dropped', node.log_dropped + drop)
+  // step 3: the node's line state as its newest record left it (a later log:false report that changes nothing → a repeat
+  // line) — only while no log:false change is pending: then the replay's node equals this one (else its checkpoint decides)
+  if (!node.cp_dirty) fset(t, node, 'cp_sig', cpSig(node))
+  if (state.cp) state.cp.rep = null
   return e
 }
 /**
@@ -622,9 +674,11 @@ function createNode(t, { creator, key, kind, label, parent, transient = false, g
     plan_ix: kind === 'context' ? plan_ix : null, rank, type })
   addLive(t, node)
   if (fl.sibling) warn(t, { code: 'relabelled', asked: label, got: fl.label, sibling: brief(fl.sibling), what: `"${label}" is taken under "${pathOf(sess, sess.nodes.get(parent.id)) || sess.ident.session}": created as "${fl.label}"` })
-  record(t, 'create', node, { c: cId, key: node.key, nk: kind, type: node.type, label: node.label, p: parent.id, rank: node.rank, run: true,
+  // step 3: + `scope` (the creator's chain: the replay derives an agent's chain from it even when the creator is gone),
+  // `implicit` (a path's intermediate) and `runs` (> 1: the run number of a resurrected ghost)
+  record(t, 'create', node, { c: cId, scope: cChain, key: node.key, nk: kind, type: node.type, label: node.label, p: parent.id, rank: node.rank, run: true,
     ...(node.asked ? { asked: node.asked } : {}), ...(node.transient ? { transient: true, ...(node.grace_ms ? { grace_ms: node.grace_ms } : {}) } : {}),
-    ...(node.plan ? { plan_item: true, plan_ix: node.plan_ix } : {}) })
+    ...(node.plan ? { plan_item: true, plan_ix: node.plan_ix } : {}), ...(node.implicit ? { implicit: true } : {}), ...(node.runs > 1 ? { runs: node.runs } : {}) })
   return node
 }
 
@@ -801,7 +855,7 @@ function mergeNode(t, a, b, ans = null) {
   fset(t, a, 'merged_into', b.id); fset(t, a, 'merged_from', from)
   attach(t, a, b)
   const e = checkDepth(t, a); if (e) return e
-  record(t, 'merge', a, { into: b.id, from, was, kids: moved.map(k => k.id) })
+  record(t, 'merge', a, { into: b.id, from, was, kids: moved.map(k => k.id), kid_ranks: moved.map(k => k.rank) })   // step 3: the rank each kid got under B
   addAlias(t, was, a.id)
   entryStub(t, a, 'merge', `merged into ${pathOf(sess, b)}`, was)
   left(t, from)
@@ -1050,12 +1104,14 @@ function walkPath(t, base, segs, create, o = {}) {
 }
 /** The first of slug(label), -2, -3 … that NO node in `creator`'s scope holds, live or ghost (§3.3, §3.8). */
 const freeKey = (sess, creator, label) => uniqueKey(slugKey(label), k => sess.scope.has(scopeKey(creator.id, k)))
-/** The newest GHOST whose last parent is `parent` and whose label matches (labelKey) — §3.8 step 2. */
+/** The newest CONTEXT GHOST whose last parent is `parent` and whose label matches (labelKey) — §3.8 step 2. Never an agent's
+ * ghost: a path (and a --move-to bucket) never makes an agent (§3.3) — step 3's replay fuzz found one brought back as a
+ * transient "bucket". */
 function ghostUnder(sess, parent, label) {
   const ids = sess.gkids.get(parent.id)
   if (!ids) return null
   let best = null
-  for (const id of ids) { const g = sess.ghosts.get(id); if (g && labelKey(g.label) === labelKey(label) && (!best || g.removed_at > best.removed_at)) best = g }
+  for (const id of ids) { const g = sess.ghosts.get(id); if (g && g.kind === 'context' && labelKey(g.label) === labelKey(label) && (!best || g.removed_at > best.removed_at)) best = g }
   return best
 }
 
@@ -1263,6 +1319,15 @@ function applyReport(t, node, m, o = {}) {
     qEntry = cut(`withdrawn${by ? ' ' + byText(by) : ''}${m.withdraw.note ? ': ' + m.withdraw.note : ''}`)
     mtype = 'withdrawal'; mfields = m.withdraw.note ? { note: m.withdraw.note } : null
   }
+  // Q57 / Q61 / Q62 (Robin: "state is progress, result is outcome"): logging a test-result means the test FINISHED — it
+  // sets the state to DONE whatever the result (pass / fail / skip is the outcome: the colour, the bucket, testBar2);
+  // `--state done` with it is consistent, any other state is refused (a test has no outcome while unfinished). Any
+  // CONTEXT that takes a test-result is a test (a plan item or not); an agent / the session runs tests, it isn't one.
+  if (mtype === 'test-result' && mfields && mfields.result) {
+    if (!ctx) return bad('not-a-test', `"${where()}" is ${node.parent == null ? 'the session' : 'an agent'} — an agent runs tests, it isn't one: log the test-result on the test's own node (--key / --path)`)
+    if (st && st !== RESULT_STATE) return bad('bad-state', `a test-result means the test finished: its state is done (the result ${mfields.result} is its outcome) — drop --state ${st}, or send done`)
+    st = RESULT_STATE
+  }
   const changes = !!(m.line || st || qLine)
   if (q0 && changes && !qLine) {
     if (st === 'abandoned' && !m.line && q0.status === 'asked') { qLine = { ...q0, status: 'withdrawn', at: t.now, ...(by ? { by } : {}) }; keepQ = true; qWhy = o.entryText || null; mtype = 'withdrawal'; mfields = null }   // abandoned / cascaded: an open question is withdrawn
@@ -1292,6 +1357,13 @@ function applyReport(t, node, m, o = {}) {
       ...(lineBy ? { by: lineBy } : {}), ...(qLine ? { question: qLine } : {}) })
     if (!ctx) fset(t, node, 'finished_at', FINAL.has(entryState) ? node.finished_at || t.now : null)
   }
+  // step 3: TIME — the line's state change starts / ends an attempt (timingStep); a test-result's duration is its took
+  let tookNow = null
+  if (changes) {
+    const tp = timingStep(node, entryState, t.now, mtype === 'test-result' && mfields && Number.isFinite(mfields.duration) ? mfields.duration : null)
+    for (const k of Object.keys(tp)) fset(t, node, k, tp[k])
+    if ('took' in tp) tookNow = tp
+  }
   let planEnd = o.planEnd || null
   if (changes && !ctx && entryState === 'abandoned' && !planEnd) planEnd = 'abandoned'   // 6d: the tool's abandoned on an agent / the root ends the plan it holds
   if (planEnd) fset(t, node, 'plan_end', planEnd === 'open' ? null : { state: planEnd, ts: t.now })
@@ -1302,12 +1374,12 @@ function applyReport(t, node, m, o = {}) {
   // result stands while that state does, testOutcome2); a later report that STARTS it again (todo / running / blocked, with
   // no test-result) clears it — a new run of that test. No state is implied by a result (the state drives the bar).
   const keepAs = MESSAGE_TYPES[mtype] && MESSAGE_TYPES[mtype].keep
-  if (keepAs) {
-    fset(t, node, keepAs, { ...(mfields || {}), ts: t.now, entry: m.log !== false ? entryId : null, state: stateOf(node) })
-    const so = STATE_OUTCOME[st]
-    if (so && mfields && mfields.result && so !== mfields.result) warn(t, { code: 'result-state', result: mfields.result, state: st, what: `the result says ${mfields.result} but the state says ${st} — the count shows ${mfields.result} until the state changes` })
-  } else if (st && OPEN_ITEM.has(st) && node.test) fset(t, node, 'test', null)
+  let testCleared = false
+  if (keepAs) fset(t, node, keepAs, { ...(mfields || {}), ts: t.now, entry: m.log !== false ? entryId : null, state: stateOf(node) })
+  else if (st && OPEN_ITEM.has(st) && node.test) { fset(t, node, 'test', null); testCleared = true }
   fset(t, node, 'implicit', false)
+  // step 3: the CALLING agent the report also refreshes (§1.4) when it is not on target..owner — the entry names it (`caller`)
+  const callerId = !by && o.caller && o.caller.kind === 'agent' && o.caller !== ownerOf2(sess, node) ? o.caller.id : null
   if (!by) touch(t, node, m.stale_after_ms, o.caller)
   if (setText && node.transient) keepNode(t, node)   // its OWN line makes a transient context permanent (§3.8)
   let entry = null
@@ -1316,11 +1388,19 @@ function applyReport(t, node, m, o = {}) {
     const eDet = keepQ ? questionEntryDetails(q0, qLine, c0 ? c0.text : lineText, { now: t.now, note: m.withdraw ? m.withdraw.note : null, why: qWhy }) : m.details || null
     entry = writeEntry(t, node, { id: entryId, type: mtype, fields: mfields, current: changes, text, state: entryState, details: eDet, data: keepQ ? null : m.data,
       extra: { progress: 'progress' in m ? m.progress : undefined, eta_at: 'eta_at' in m ? m.eta_at : undefined, stale_after_ms: m.stale_after_ms || undefined,
+        // step 3 (the replay): `line` = this entry SET the line's text (its details / data are the line's; else the line kept
+        // its own), `test_cleared` = a restart dropped the node's kept test-result, `caller` = the calling agent refreshed too
+        line: setText || undefined, test_cleared: testCleared || undefined, caller: callerId || undefined,
+        // TIME: the entry that ENDS an attempt carries its took (ms) and, after a re-run, the total over its attempts
+        took: tookNow ? tookNow.took : undefined, took_total: tookNow && tookNow.attempts > 1 ? tookNow.took_total : undefined, attempts: tookNow && tookNow.attempts > 1 ? tookNow.attempts : undefined,
         line_text: changes && lineText !== text ? lineText : undefined, line_by: changes && node.current.by ? node.current.by : undefined,
         question: changes && qLine ? qLine : undefined, plan_end: planEnd || undefined,
         ...(keepQ && c0 ? { line_id: c0.id, line_details: c0.details || undefined, line_data: c0.data != null ? c0.data : undefined } : {}) } })
     if (changes && !ctx) entry.finished_at = node.finished_at   // an agent's line carries its resulting finished_at (null = revived)
-  } else fset(t, node, 'cp_dirty', true)
+  } else {   // log:false — its checkpoint (step 3) restates the node; a calling agent it refreshed gets one too (its activity)
+    fset(t, node, 'cp_dirty', true)
+    if (callerId) fset(t, sess.nodes.get(callerId), 'cp_dirty', true)
+  }
   const cascade = changes && entryState === 'abandoned' && o.cascade !== false ? cascadeAbandon2(t, node) : []
   return { entry, changes, line: setText, state: entryState, ...(cascade.length ? { cascade } : {}) }
 }
@@ -1472,7 +1552,7 @@ function parseReport(input, o, warnings) {
       rep.eta_at = at
     }
   }
-  if (!rep.text && !state && !('progress' in rep) && !('eta_at' in rep)) {
+  if (!rep.text && !state && !('progress' in rep) && !('eta_at' in rep) && mtype !== 'test-result') {   // a test-result alone IS a report: the test finished (Q62)
     if (common.details != null || common.data != null || common.stale_after_ms || typed) return bad('bad-input', 'details / data / stale_after / message_type / fields ride on a report: give text, a state, progress or eta too')
     return { ok: true, rep: null }
   }
@@ -1536,7 +1616,7 @@ function applyPlan2(t, target, items, scope) {
     fset(t, n, 'current', { id, ts: t.now, text: n.label, state: 'todo', details: null, data: null })
     fset(t, n, 'implicit', false)
     if (!t.by) touch(t, n, null, null)
-    writeEntry(t, n, { id, current: true, text: cut(n.label), state: 'todo' })
+    writeEntry(t, n, { id, current: true, text: cut(n.label), state: 'todo', extra: { line: true } })
   }
   const classify = c => (c.plan ? 'keep' : c.kind === 'context' && !c.current && countsAs(c) === 'bar' ? 'adopt' : 'other')   // a group / question is never adopted
   for (let ix = 0; ix < items.length; ix++) {
@@ -1676,12 +1756,52 @@ export function bar2(sess, node, memo) {
 }
 /**
  * What a row shows for its type (NODE_TYPES): { type, glyph, show:'bar'|'count'|'status'|'tests', bar?, count?, tests? } —
- * the dashboard's input. A test-run ('tests') shows its bar (its items across its buckets) AND its counts (testCounts2).
+ * the dashboard's input. A test-run ('tests', Q56 CHANGED by Robin) shows ONE bar of its TESTS — passed (green) vs failed
+ * (red) vs total (testBar2) — with the pass / fail counts in its tooltip; no items bar, no counts text beside it. (Its
+ * items bar, bar2, is still what it adds to its parent's rollup.)
  */
 export function displayOf2(sess, node, o = {}) {
-  const T = typeOf(node)
-  return { type: node.type, glyph: T.glyph, show: T.show, ...(T.show === 'bar' || T.show === 'tests' ? { bar: bar2(sess, node, o.memo) } : {}),
-    ...(T.show === 'count' ? { count: groupCount2(sess, node, o) } : {}), ...(T.show === 'tests' ? { tests: testCounts2(sess, node) } : {}) }
+  const T = typeOf(node), tk = timing2(sess, node, o.now)
+  return { type: node.type, glyph: T.glyph, show: T.show, ...(T.show === 'bar' ? { bar: bar2(sess, node, o.memo) } : {}),
+    ...(T.show === 'count' ? { count: groupCount2(sess, node, o) } : {}), ...(T.show === 'tests' ? { tests: testBar2(sess, node) } : {}), ...(tk ? { took: tk } : {}) }
+}
+/**
+ * A node's TIME (step 3, Robin: "time in the logs") — what the dashboard shows as "took 4m 12s": { started_at, ended_at,
+ * took (its latest finished attempt, ms), took_total + attempts (every finished attempt: re-runs add up), running_ms (an
+ * open attempt, when `now` is given), plan?: { started_at (the first start among the node and its plan's items),
+ * ended_at (planEndAt2), took } (a plan node, a test-run, an agent / the session holding a plan), text } — null when the
+ * node never started and holds no timed plan. text: the plan's took when it has one, else its own ("took 4m 12s", "took
+ * 2.1s (9.4s over 3 runs)", "running 3m" while open with `now`).
+ * @param {any} sess @param {any} node @param {number} [now]
+ */
+export function timing2(sess, node, now) {
+  if (!sess || !node) return null
+  const open = node.started_at != null && node.ended_at == null
+  let plan = null
+  const p = planOf2(sess, node)
+  if (p) {
+    let start = node.first_started_at
+    for (const it of p.items) if (it.first_started_at != null && (start == null || it.first_started_at < start)) start = it.first_started_at
+    const end = planEndAt2(sess, node, p)
+    if (start != null) plan = { started_at: start, ended_at: end, took: end != null && end >= start ? end - start : null }
+  }
+  if (node.first_started_at == null && !node.attempts && !plan) return null
+  const running = open && Number.isFinite(now) ? Math.max(0, now - node.started_at) : null
+  const text = plan && plan.took != null ? `took ${fmtTook(plan.took)}`
+    : node.took != null ? `took ${fmtTook(node.took)}${node.attempts > 1 ? ` (${fmtTook(node.took_total)} over ${node.attempts} runs)` : ''}`
+      : running != null ? `running ${fmtTook(running)}` : null
+  return { started_at: node.started_at, ended_at: node.ended_at, took: node.took, took_total: node.took_total, attempts: node.attempts, ...(running != null ? { running_ms: running } : {}), ...(plan ? { plan } : {}), text }
+}
+/**
+ * A test-run's ONE bar (Q56): its tests passed (green) vs failed (red) vs total — { passed, failed, total, pct_passed,
+ * pct_failed, tooltip ("2 passed · 1 failed · 1 to go of 4 · 27 checks (2 failed)"), counts (testCounts2) } — or null
+ * while it holds no test. The rest of the bar (skipped, running, to go) is neither green nor red.
+ */
+export function testBar2(sess, node) {
+  const c = testCounts2(sess, node)
+  if (!c) return null
+  return { passed: c.passed, failed: c.failed, total: c.tests, pct_passed: progressPct({ done: c.passed, total: c.tests }), pct_failed: progressPct({ done: c.failed, total: c.tests }),
+    tooltip: c.text, counts: c }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1712,7 +1832,7 @@ export function testOutcome2(node) {
   return STATE_OUTCOME[s] || (LIVE.has(s) ? 'running' : 'pending')
 }
 /**
- * A test-run's COUNTS (what shows beside its bar, §1.7 `show: 'tests'`; any node can be asked): its TESTS are its items
+ * A test-run's COUNTS (its row's tests bar and tooltip, testBar2 — §1.7 `show: 'tests'`; any node can be asked): its TESTS are its items
  * (runItems2) plus every other context below it, through its buckets, that holds a test-result (`test`) — the run node's
  * own result is not one of them. Per test its outcome (testOutcome2); `checks` / `failed_checks` / `duration_ms` add up the
  * tests' latest test-results. "History follows the node": a test moved out of the run no longer counts, and a test started
@@ -2893,4 +3013,559 @@ export function removeById(state, sess, id, why, now) {
   const t = newTx(state, sess, now)
   removeNode(t, n, why)
   return { ok: true, records: t.records, entries: t.entries, writes: t.writes }
+}
+
+// ===============================================================================================================
+// BUILD STEP 3 (docs/spec-88.md §2, §5.1, §5.3, §8 step 3): the v6 RECORDS read back — recordKind2, the expiry pass that
+// writes its removals, checkpoints (cp / rep) and carry-forward (cf, which carries STRUCTURE too), and the REPLAY: a
+// chronological fold of node records (each changes one thing; `create` begins a run) and entries attached by `n` — no
+// path remapping. A replayed model equals the live one (tests/unit/test_activity3_unit.mjs fuzzes it). The day files, the
+// per-day index files and the conflicted-copy rule live in lib/activity2-files.js; rebuildGhosts2 (below) turns the index
+// files' `struct` into the ghost table.
+
+/** The node-record ops (§2.1). */
+export const NODE_OPS = Object.freeze(['create', 'label', 'move', 'rank', 'item', 'type', 'keep', 'merge', 'unmerge', 'remove'])
+const NODE_OP_SET = new Set(NODE_OPS)
+/**
+ * A JSONL record's kind (format v6 ONLY, §2 / §7.5): 'node' (a node record), 'entry' (a logged entry), 'cp' (a checkpoint),
+ * 'cf' (a carry-forward), 'rep' (a repeat line — told by its `rep` array; its `n` is a repeat COUNT, never a node id) — or
+ * null for anything else (a v2 – v5 record, a garbled line): skipped like any line the reader can't use.
+ * @param {any} r @returns {'node'|'entry'|'cp'|'cf'|'rep'|null}
+ */
+export function recordKind2(r) {
+  if (!r || typeof r !== 'object' || Array.isArray(r) || r.v !== ACTIVITY2_FORMAT) return null
+  if (Array.isArray(r.rep)) return Number.isFinite(r.last) && r.rep.every(k => Number.isInteger(k)) ? 'rep' : null
+  if (typeof r.session !== 'string' || !r.session.trim() || !Number.isFinite(r.ts) || typeof r.n !== 'string' || !ID_RE.test(r.n)) return null
+  if (r.kind === 'node') return NODE_OP_SET.has(r.op) ? 'node' : null
+  if (r.kind === 'cp') return Number.isInteger(r.k) ? 'cp' : null
+  if (r.kind === 'cf') return 'cf'
+  if (r.kind != null) return null
+  return typeof r.id === 'string' && typeof r.text === 'string' && ACTIVITY_STATES.includes(r.state) ? 'entry' : null
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// the owner's EXPIRY pass (1.7x `expire` on ids) — it WRITES its removals (`remove` why:"expire"), so the replay folds them
+// at the moment they happened instead of deciding them again later
+
+/**
+ * Remove LOCAL agents that finished more than `finished_visible_hours` ago (each with its subtree) and ENDED plans that
+ * long after they ended (planRemoval2: the plan node with its items when it is a plain context, else its items; a
+ * test-run's bucket goes with its run) — never anything holding part of an OPEN plan. Each removal is a `remove` record,
+ * why "expire" (+ the transient vanish it may cause). → { records, entries, writes, removed:[{ ident, id, key, label, path }] }
+ * @param {any} state @param {number} now
+ */
+export function expire2(state, now) {
+  const win = Math.max(0, Number(state.config.finished_visible_hours) || 0) * HOUR
+  const out = { records: [], entries: [], writes: [], removed: [] }
+  for (const sess of [...state.sessions.values()]) {
+    const t = newTx(state, sess, now)
+    let open = openPlanIds(sess)
+    const gone = n => { out.removed.push({ ident: { ...sess.ident }, id: n.id, key: n.key, label: n.label, path: pathOf(sess, n) }); removeNode(t, n, 'expire'); open = openPlanIds(sess) }
+    for (const n of [...sess.nodes.values()]) if (sess.nodes.get(n.id) === n && n.kind === 'agent' && !n.merged_into && n.finished_at && now - n.finished_at >= win && !open.has(n.id)) gone(n)
+    for (const n of [...sess.nodes.values()]) {
+      if (sess.nodes.get(n.id) !== n || n.merged_into) continue
+      const p = planOf2(sess, n), end = p ? planEndAt2(sess, n, p) : null
+      if (end == null || now - end < win || p.items.some(i => open.has(i.id)) || inRunPlan2(sess, n, p)) continue
+      for (const r of planRemoval2(sess, n, p)) if (sess.nodes.get(r.id) === r) gone(r)
+    }
+    out.records.push(...t.records); out.entries.push(...t.entries); out.writes.push(...t.writes)
+  }
+  return out
+}
+/**
+ * The whole owner's pass at `now`: question expiry (expireQuestions2), the transient grace sweep (sweepTransients) and the
+ * removals (expire2), in that order — every write to persist. → { writes, expired, removed }
+ * @param {any} state @param {number} now
+ */
+export function expirePass2(state, now) {
+  const q = expireQuestions2(state, now), s = sweepTransients(state, now), e = expire2(state, now)
+  return { writes: [...q.writes, ...s.writes, ...e.writes], expired: q.expired, removed: e.removed }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// checkpoints (§2.3: cp / rep — a log:false report writes no entry; its node is `cp_dirty` until the next checkpoint)
+
+const cloneJ = v => (v == null ? null : JSON.parse(JSON.stringify(v)))
+/** A node's LINE STATE as a cp / cf restates it: the line (details / data included), state, bar, ETA, its kept test-result
+ * (2d), its activity and — an agent / the root — finished_at + the plan-end marker. */
+const lineSnap = n => ({ current: cloneJ(n.current), state: stateOf(n), progress: cloneJ(n.progress), eta_at: n.eta_at || null, test: cloneJ(n.test),
+  last_activity: n.last_activity, stale_after_ms: n.stale_after_ms || null, ...(n.kind !== 'context' ? { finished_at: n.finished_at || null, plan_end: cloneJ(n.plan_end) } : {}),
+  ...(n.first_started_at != null || n.attempts ? { timing: { started_at: n.started_at, ended_at: n.ended_at, first_started_at: n.first_started_at, took: n.took, took_total: n.took_total, attempts: n.attempts } } : {}) })
+/** One node's checkpoint line (`k` = its key in today's file). */
+function checkpointOf2(sess, node, now, k) {
+  return { v: ACTIVITY2_FORMAT, kind: 'cp', k, ts: now, n: node.id, ...lineSnap(node), created_at: node.created_at, rank: node.rank || null, ...identOf(sess) }
+}
+const repRecord2 = r => ({ v: ACTIVITY2_FORMAT, rep: r.keys.slice(), n: r.n, since: r.since, last: r.last })
+/**
+ * The checkpoint writes due now (the gateway calls this every `progress_checkpoint_sec`, then appends / rewrites them in
+ * order) — 1.7x's planCheckpoints on ids. Every node a log:false report touched since the last call (`cp_dirty`) is either
+ * CHANGED (its line state differs from what its newest record left — `cp_sig` — or it has no key in today's file yet) → a
+ * full `cp` line, or UNCHANGED → its key joins this interval's repeat line (rewritten in place while the key set is exactly
+ * the same and nothing else was written since). A new local day starts a new file: keys restart at 1.
+ * @param {any} state @param {number} now @returns {{ kind:'cp'|'rep', rewrite?:boolean, rec:any }[]}
+ */
+export function planCheckpoints2(state, now) {
+  const day = localDay(now)
+  if (!state.cp || state.cp.day !== day) state.cp = { day, keys: new Map(), next: 1, rep: null }
+  const cp = state.cp, same = []
+  /** @type {{ kind:'cp'|'rep', rewrite?:boolean, rec:any }[]} */
+  const writes = []
+  for (const sess of state.sessions.values()) for (const n of sess.nodes.values()) {
+    if (!n.cp_dirty) continue
+    n.cp_dirty = false
+    let k = cp.keys.get(n.id)
+    if (k === undefined || cpSig(n) !== n.cp_sig) {
+      if (k === undefined) { k = cp.next++; cp.keys.set(n.id, k) }
+      writes.push({ kind: /** @type {'cp'} */ ('cp'), rec: checkpointOf2(sess, n, now, k) })
+      n.cp_sig = cpSig(n)
+    } else same.push(k)
+  }
+  if (writes.length || !same.length) cp.rep = null   // a cp line (or an interval with no unchanged node) closes it
+  if (!same.length) return writes
+  same.sort((a, b) => a - b)
+  if (cp.rep && cp.rep.keys.join() === same.join()) { cp.rep.n++; cp.rep.last = now; writes.push({ kind: 'rep', rewrite: true, rec: repRecord2(cp.rep) }) }
+  else { cp.rep = { keys: same, since: now, last: now, n: 1 }; writes.push({ kind: 'rep', rewrite: false, rec: repRecord2(cp.rep) }) }
+  return writes
+}
+/**
+ * Every dirty node's cp NOW (a clean shutdown's flush); `{ withRep: true }` returns the whole plan (the repeat line too).
+ * @param {any} state @param {number} now @param {{ withRep?: boolean }} [opts]
+ */
+export function flushCheckpoints2(state, now, opts = {}) {
+  const plan = planCheckpoints2(state, now)
+  return opts && opts.withRep ? plan : plan.filter(w => w.kind === 'cp')
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// carry-forward (§2.3: `cf` carries STRUCTURE too — a node's `create` may be older than the replay window)
+
+/** One node's carry-forward record: its structure (creator + its chain, key, kind, type, label, parent, rank, plan item,
+ * transient + grace + empty_since, merged_into / from, implicit, runs, created_at, run_at), its line state, its own entry
+ * count (`log_n`) and the aliases that name it. The root's also carries the session's last_activity. */
+function carryOf2(sess, node, now) {
+  const aliases = [...sess.aliases.values()].filter(a => a.id === node.id).map(a => ({ path: a.path, at: a.at, used: a.used }))
+  return { v: ACTIVITY2_FORMAT, kind: 'cf', ts: now, n: node.id, c: node.creator, scope: node.scope, key: node.key, nk: node.kind, type: node.type, label: node.label,
+    ...(node.asked ? { asked: node.asked } : {}), p: node.parent, rank: node.rank || null, ...(node.plan ? { plan_item: true, plan_ix: node.plan_ix } : {}),
+    ...(node.transient ? { transient: true, grace_ms: node.grace_ms || null, empty_since: node.empty_since } : {}),
+    ...(node.merged_into ? { merged_into: node.merged_into, merged_from: node.merged_from } : {}),
+    implicit: !!node.implicit, runs: node.runs || 1, created_at: node.created_at, run_at: node.run_at, ...lineSnap(node),
+    log_n: node.log.length + node.log_dropped, aliases, ...(node.parent == null ? { session_last_activity: sess.last_activity } : {}), ...identOf(sess) }
+}
+/**
+ * The CARRY-FORWARD records the gateway writes into the NEW day's file at each local day rollover (and once after a
+ * restart's replay when today's file has none yet): a full snapshot of EVERY node in memory (open plan items, agents,
+ * contexts, hidden merged nodes, the root) — parents first, hidden merged nodes after their visible siblings. Carrying only
+ * the nodes whose create would fall out of the window (§2.3's first rule) is not enough: an ancestor created inside the
+ * window would miss the activity its older (not yet restated) child gave it before the cf — the window fuzz found it. So
+ * the newest cf in the window restates the whole board, and every node alive at that rollover is known from there on.
+ * → [{ kind:'cf', rec }]
+ * @param {any} state @param {number} now
+ */
+export function planCarryForward2(state, now) {
+  const out = []
+  for (const s of [...state.sessions.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))) {
+    const walk = n => {
+      out.push({ kind: /** @type {'cf'} */ ('cf'), rec: carryOf2(s, n, now) })
+      const hidden = kidIds(s, n.id).map(id => s.nodes.get(id)).filter(c => c && c.merged_into).sort((a, b) => (a.id < b.id ? -1 : 1))
+      for (const c of [...childrenOf2(s, n), ...hidden]) walk(c)
+    }
+    walk(rootOf(s))
+  }
+  if (out.length && state.cp) state.cp.rep = null
+  return out
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// the REPLAY (§8 step 3): fold v6 records chronologically into a fresh set of sessions — no journal and no checks (the live
+// apply made them), no new records: a transient context that empties starts its grace (`empty_since`) but never vanishes
+// on its own (its `remove` record follows in the file)
+
+/** The replay's session for a record's identity (created with its root on first use: created_at = the record's s0). */
+function rSession(state, sessions, rec) {
+  const ident = { realm: (rec.realm && String(rec.realm).trim()) || 'default', project: rec.project == null ? '' : String(rec.project), user: rec.user == null ? '' : String(rec.user), session: String(rec.session).trim(), host: state.origin }
+  const key = sessionKey(ident)
+  let s = sessions.get(key)
+  if (!s) {
+    const at = Number.isFinite(rec.s0) && rec.s0 > 0 ? rec.s0 : rec.ts, rootId = mintId(ident, '', '')
+    s = { key, ident, created_at: at, last_activity: at, rootId, nodes: new Map(), kids: new Map(), scope: new Map(), labels: new Map(), aliases: new Map(), ghosts: new Map(), gkids: new Map() }
+    s.nodes.set(rootId, newNode({ id: rootId, key: '', creator: null, chain: '', scope: '', kind: 'session', label: ident.session, parent: null, now: at, implicit: true }))
+    sessions.set(key, s)
+  }
+  return s
+}
+const setOf = (map, id) => { let k = map.get(id); if (!k) map.set(id, k = new Set()); return k }
+const unGhost = (sess, id) => { const g = sess.ghosts.get(id); if (!g) return null; sess.ghosts.delete(id); const gk = sess.gkids.get(g.parent); if (gk) { gk.delete(id); if (!gk.size) sess.gkids.delete(g.parent) } return g }
+/** Hang `node` under its `parent` id (which may not be held yet: a node carried later): kids, the label index (never over a
+ * live sibling that holds the label — a move's relabel follows in its own record), and a grace mark cleared (an arrival). */
+function rAttach(sess, node) {
+  if (node.parent == null) return
+  setOf(sess.kids, node.parent).add(node.id)
+  if (!node.merged_into) { const ix = labelIx(node.parent, node.label), h = sess.labels.get(ix); if (!h || h === node.id || !sess.nodes.has(h)) sess.labels.set(ix, node.id) }
+  const p = sess.nodes.get(node.parent)
+  if (p && p.empty_since != null) p.empty_since = null
+}
+function rDetach(sess, node) {
+  if (node.parent == null) return
+  const k = sess.kids.get(node.parent); if (k) { k.delete(node.id); if (!k.size) sess.kids.delete(node.parent) }
+  const ix = labelIx(node.parent, node.label); if (sess.labels.get(ix) === node.id) sess.labels.delete(ix)
+}
+function rRelabel(sess, node, label) {
+  rDetach(sess, node)
+  node.label = label
+  if (node.parent != null) { setOf(sess.kids, node.parent).add(node.id); if (!node.merged_into) { const ix = labelIx(node.parent, label), h = sess.labels.get(ix); if (!h || h === node.id || !sess.nodes.has(h)) sess.labels.set(ix, node.id) } }
+}
+/** A transient context whose last live child left starts its grace period (Q44); without one its `remove` record follows. */
+function rLeft(sess, parentId, ts) {
+  const p = sess.nodes.get(parentId)
+  if (!p || p.kind !== 'context' || !p.transient || p.merged_into || !p.grace_ms || p.empty_since != null) return
+  if (!childrenOf2(sess, p).length) p.empty_since = ts
+}
+function rAlias(sess, path, id, ts) {
+  if (!path) return
+  sess.aliases.set(labelKey(path), { id, path, at: ts, used: ts })
+  const mine = [...sess.aliases].filter(([, a]) => a.id === id).sort((x, y) => x[1].used - y[1].used)
+  for (let i = 0; i < mine.length - LIMITS2.aliasesPerNode; i++) sess.aliases.delete(mine[i][0])
+}
+/** A node and its subtree leave memory into the ghost table (removeNode's state change; nothing written). An id the replay
+ * does not hold (its run began before the window and it was not carried) takes its held descendants with it. */
+function rRemove(sess, id, why, ts) {
+  const top = sess.nodes.get(id), ids = new Set(), stack = [id]
+  while (stack.length) { const x = stack.pop(); if (ids.has(x)) continue; ids.add(x); for (const c of sess.kids.get(x) || []) stack.push(c) }
+  if (top) rDetach(sess, top)
+  const parentId = top ? top.parent : null
+  for (const x of ids) {
+    const n = sess.nodes.get(x)
+    sess.kids.delete(x)
+    if (!n) continue
+    if (x !== id && !n.merged_into) { const ix = labelIx(n.parent, n.label); if (sess.labels.get(ix) === x) sess.labels.delete(ix) }
+    sess.nodes.delete(x)
+    sess.ghosts.set(x, { id: x, key: n.key, creator: n.creator, chain: n.chain, scope: n.scope, kind: n.kind, label: n.label, parent: n.parent,
+      removed_at: ts, last_ts: ts, why: x === id ? why : 'parent', transient: n.transient, grace_ms: n.grace_ms, runs: n.runs, type: n.type })
+    setOf(sess.gkids, n.parent).add(x)
+  }
+  for (const [k, a] of [...sess.aliases]) if (ids.has(a.id)) sess.aliases.delete(k)
+  if (parentId != null) rLeft(sess, parentId, ts)
+}
+/** A report's ACTIVITY (touch): target..owner and the calling agent; the owner stops being implicit; the session header. */
+function rTouch(sess, node, ts, staleMs, callerId, setStale = true) {
+  const owner = ownerOf2(sess, node)
+  const bump = n => { n.last_activity = Math.max(n.last_activity, ts); if (setStale) n.stale_after_ms = staleMs || null; n.gone_at = null }
+  for (let n = node; n; n = n.parent != null ? sess.nodes.get(n.parent) : null) { bump(n); if (n === owner) break }
+  const caller = callerId ? sess.nodes.get(callerId) : null
+  if (caller && caller.kind === 'agent' && caller !== owner) bump(caller)
+  owner.implicit = false
+  sess.last_activity = Math.max(sess.last_activity, ts)
+}
+/** The line state a cp / cf restates. */
+function rLineSnap(node, r) {
+  node.current = r.current && typeof r.current === 'object' && typeof r.current.text === 'string' ? cloneJ(r.current) : null
+  node.progress = r.progress && typeof r.progress === 'object' ? cloneJ(r.progress) : null
+  node.eta_at = Number.isFinite(r.eta_at) ? r.eta_at : null
+  node.test = r.test && typeof r.test === 'object' ? cloneJ(r.test) : null
+  if (node.kind !== 'context') { node.finished_at = Number.isFinite(r.finished_at) ? r.finished_at : null; node.plan_end = r.plan_end && typeof r.plan_end === 'object' ? cloneJ(r.plan_end) : null }
+  const tm = r.timing && typeof r.timing === 'object' ? r.timing : {}, num = v => (Number.isFinite(v) ? v : null)
+  node.started_at = num(tm.started_at); node.ended_at = num(tm.ended_at); node.first_started_at = num(tm.first_started_at); node.took = num(tm.took)
+  node.took_total = num(tm.took_total) || 0; node.attempts = Number.isInteger(tm.attempts) ? tm.attempts : 0
+}
+/** A node built from a record that restates it whole (a create, or a cf of a node the replay does not hold yet). */
+function rNewNode(rec, at, parent) {
+  const kind = rec.nk === 'agent' ? 'agent' : 'context', scope = typeof rec.scope === 'string' ? rec.scope : ''
+  return newNode({ id: rec.n, key: String(rec.key), creator: rec.c, chain: kind === 'agent' ? (scope ? scope + '/' : '') + rec.key : null, scope, kind,
+    label: String(rec.label), parent, now: at, asked: rec.asked || null, transient: rec.transient === true, grace_ms: rec.grace_ms || null, implicit: rec.implicit === true,
+    runs: Number.isInteger(rec.runs) && rec.runs > 0 ? rec.runs : 1, plan_ix: rec.plan_item === true && Number.isInteger(rec.plan_ix) ? rec.plan_ix : null, rank: rec.rank || null, type: rec.type || null })
+}
+
+/**
+ * The REPLAY of a host's v6 records (§8 step 3) — the 2.0 createReplay. feed() takes the records NEWEST FIRST, as the
+ * backwards reader yields them (today's file from its end, then earlier days), with the DAY of the file each came from
+ * (a cp key is per file); finish() folds them CHRONOLOGICALLY into a fresh set of sessions and installs it
+ * (state.sessions is replaced). The fold:
+ * - node records (§2.1) each change ONE thing — create (a new node, or a ghost's new RUN: same id), label, move, rank,
+ *   item, type, keep, merge (A hidden under B; its `kids` under B at their `kid_ranks`), unmerge, remove (the node and its
+ *   subtree into the ghost table; the session root's = the whole session) — plus the alias each `was` makes (§3.3) and a
+ *   transient context's grace mark (`empty_since`) when its last child leaves;
+ * - entries (§2.2) are attached by `n`: the node's own bounded log, its line (`current`: `line` says the entry SET the
+ *   text — else the line keeps its text / details / data —, `line_id` a question's kept line), state, bar, ETA,
+ *   finished_at, the plan-end marker, the kept test-result (`keep`) or its drop (`test_cleared`), and — a report, not a
+ *   system entry — the activity of target..owner and of the `caller`;
+ * - cp lines restate a node's line state (log:false), rep lines refresh the activity of the nodes they list (key → node
+ *   by the same file's cp lines), cf lines restate a node WHOLE (structure, line, its entry count `log_n`, aliases).
+ * The WINDOW: only records from `from` (default now − finished_visible_hours) are used — feed() answers 'old' before it
+ * (keep reading a day while wantsOlder(day): a cp that an in-window rep line of that file still needs, for its key only).
+ * A node whose run began earlier is restated by the window's cf lines; its entries fed before its first cf become its log's
+ * head, and it gets `log_floor` = the window start (older entries are only in the files: §5.3 paging, step 6). Expiry,
+ * eviction and the grace sweep are NOT re-run: their removals are records. The ghost table holds what the window removed;
+ * rebuildGhosts2 adds the rest from the index files.
+ * @param {any} state  createModel() — its sessions are REPLACED by finish()
+ * @param {{ now: number, from?: number }} opts
+ */
+export function createReplay2(state, { now, from } = /** @type {any} */ ({})) {
+  const cutoff = Number.isFinite(from) ? from : now - Math.max(0, Number(state.config.finished_visible_hours) || 0) * HOUR
+  const buf = [], repNeed = new Map()
+  let fed = 0, skipped = 0
+  /** One record (newest first) from the file of `day` (default: its own local day). @returns {'ok'|'skip'|'old'} */
+  function feed(rec, day) {
+    const kind = recordKind2(rec)
+    if (!kind) { skipped++; return 'skip' }
+    const d = day || localDay(kind === 'rep' ? rec.last : rec.ts)
+    if (kind === 'rep') {
+      if (rec.last < cutoff) return 'old'
+      let s = repNeed.get(d); if (!s) repNeed.set(d, s = new Set())
+      for (const k of rec.rep) s.add(k)
+    } else if (kind === 'cp') {
+      const s = repNeed.get(d), needed = !!(s && s.has(rec.k))
+      if (s) s.delete(rec.k)
+      if (rec.ts < cutoff) { if (!needed) return 'old'; buf.push({ rec, kind, day: d, mapOnly: true }); fed++; return 'ok' }
+    } else if (rec.ts < cutoff) return 'old'
+    buf.push({ rec, kind, day: d }); fed++
+    return 'ok'
+  }
+  /** Does `day`'s file still hold an older cp that an in-window rep line needs (keep reading it past the window)? */
+  const wantsOlder = day => { const s = repNeed.get(day); return !!(s && s.size) }
+  function finish() {
+    const N = state.config.log_entries_per_agent, sessions = new Map(), pend = new Map(), cpKeys = new Map(), today = localDay(now)
+    const st = { entries: 0, records: 0, cps: 0, reps: 0, cfs: 0, cf_today: false, pending_dropped: 0 }
+    let maxSeq = 0
+    const findNode = id => { for (const s of sessions.values()) { const n = s.nodes.get(id); if (n) return { sess: s, node: n } } return null }
+    const pushLog = (node, small) => { node.log.push(small); if (node.log.length > N) { const d = node.log.length - N; node.log.splice(0, d); node.log_dropped += d } }
+    for (let i = buf.length - 1; i >= 0; i--) {
+      const { rec, kind, day, mapOnly } = buf[i]
+      if (kind === 'cp') { let m = cpKeys.get(day); if (!m) cpKeys.set(day, m = new Map()); m.set(rec.k, rec.n); if (mapOnly) continue }
+      if (kind === 'rep') {
+        st.reps++
+        const m = cpKeys.get(day)
+        for (const k of rec.rep) { const id = m ? m.get(k) : null, f = id && findNode(id); if (f) rTouch(f.sess, f.node, rec.last, null, null, false) }
+        continue
+      }
+      const sess = rSession(state, sessions, rec)
+      if (kind === 'entry') {
+        st.entries++
+        if (typeof rec.id === 'string' && rec.id.startsWith(state.idPrefix)) { const m = /-([0-9a-z]+)$/.exec(rec.id); if (m) maxSeq = Math.max(maxSeq, parseInt(m[1], 36) || 0) }
+        const report = rec.type !== 'event', touches = report && !rec.by
+        const node = sess.nodes.get(rec.n)
+        if (!node) {   // not held (yet): its run began before the window — a cf restates it later (its log's head), else dropped
+          if (!sess.ghosts.has(rec.n)) { let p = pend.get(rec.n); if (!p) pend.set(rec.n, p = []); p.push(smallOf(rec)) }
+          if (touches) sess.last_activity = Math.max(sess.last_activity, rec.ts)
+          continue
+        }
+        if (rec.current) {
+          const c0 = node.current, kept = typeof rec.line_id === 'string', set = rec.line === true && !kept
+          node.current = { id: kept ? rec.line_id : rec.id, ts: rec.ts, text: typeof rec.line_text === 'string' && rec.line_text ? rec.line_text : rec.text, state: rec.state,
+            details: set ? (rec.details != null ? rec.details : null) : kept ? (rec.line_details != null ? rec.line_details : null) : c0 ? c0.details || null : null,
+            data: set ? (rec.data != null ? rec.data : null) : kept ? (rec.line_data != null ? rec.line_data : null) : c0 && c0.data != null ? c0.data : null,
+            ...(rec.line_by ? { by: rec.line_by } : {}), ...(rec.question ? { question: rec.question } : {}) }
+          if (node.kind !== 'context') node.finished_at = Number.isFinite(rec.finished_at) ? rec.finished_at : FINAL.has(rec.state) ? node.finished_at || rec.ts : null
+          Object.assign(node, timingStep(node, rec.state, rec.ts, rec.type === 'test-result' && rec.fields && Number.isFinite(rec.fields.duration) ? rec.fields.duration : null))
+        }
+        if (typeof rec.plan_end === 'string') node.plan_end = rec.plan_end === 'open' ? null : { state: rec.plan_end, ts: rec.ts }
+        if ('progress' in rec) node.progress = rec.progress ? { ...rec.progress } : null
+        if ('eta_at' in rec) node.eta_at = rec.eta_at || null
+        if (FINAL.has(stateOf(node))) node.eta_at = null
+        const keepAs = MESSAGE_TYPES[rec.type] && MESSAGE_TYPES[rec.type].keep
+        if (keepAs) node[keepAs] = { ...(rec.fields || {}), ts: rec.ts, entry: rec.id, state: stateOf(node) }
+        else if (rec.test_cleared) node.test = null
+        if (report) node.implicit = false
+        if (touches) rTouch(sess, node, rec.ts, rec.stale_after_ms, rec.caller || null)
+        pushLog(node, smallOf(rec))
+        node.cp_sig = cpSig(node)
+        continue
+      }
+      if (kind === 'cp') {
+        st.cps++
+        const node = sess.nodes.get(rec.n)
+        if (!node) continue   // its cf (later) restates it
+        rLineSnap(node, rec)
+        node.implicit = false
+        rTouch(sess, node, Number.isFinite(rec.last_activity) ? rec.last_activity : rec.ts, rec.stale_after_ms, null)
+        node.cp_sig = cpSig(node)
+        continue
+      }
+      if (kind === 'cf') {
+        st.cfs++
+        if (day === today) st.cf_today = true
+        let node = sess.nodes.get(rec.n)
+        if (rec.n === sess.rootId) {
+          if (Number.isFinite(rec.session_last_activity)) sess.last_activity = Math.max(sess.last_activity, rec.session_last_activity)
+        } else {
+          const fresh = !node
+          if (fresh) {
+            unGhost(sess, rec.n)
+            node = rNewNode(rec, Number.isFinite(rec.created_at) ? rec.created_at : rec.ts, rec.p)
+            sess.nodes.set(node.id, node)
+            if (node.creator != null) sess.scope.set(scopeKey(node.creator, node.key), node.id)
+            node.log = (pend.get(rec.n) || []).slice(-N)
+            pend.delete(rec.n)
+          } else rDetach(sess, node)
+          node.type = rec.type || node.type
+          node.asked = rec.asked || null
+          node.merged_into = rec.merged_into || null; node.merged_from = rec.merged_into ? rec.merged_from || null : null
+          node.parent = rec.p
+          node.label = String(rec.label)
+          rAttach(sess, node)
+          node.rank = rec.rank || null
+          node.plan = rec.plan_item === true; node.plan_ix = node.plan && Number.isInteger(rec.plan_ix) ? rec.plan_ix : null
+          node.transient = rec.transient === true; node.grace_ms = node.transient && rec.grace_ms ? rec.grace_ms : null; node.empty_since = node.transient && Number.isFinite(rec.empty_since) ? rec.empty_since : null
+          node.runs = Number.isInteger(rec.runs) && rec.runs > 0 ? rec.runs : node.runs
+          node.created_at = Number.isFinite(rec.created_at) ? rec.created_at : node.created_at
+          node.run_at = Number.isFinite(rec.run_at) ? rec.run_at : node.created_at
+          if (fresh && node.run_at < cutoff) node.log_floor = cutoff
+        }
+        node.implicit = rec.implicit === true
+        rLineSnap(node, rec)
+        node.last_activity = Number.isFinite(rec.last_activity) ? rec.last_activity : node.last_activity
+        node.stale_after_ms = rec.stale_after_ms > 0 ? rec.stale_after_ms : null
+        if (Number.isInteger(rec.log_n) && rec.log_n >= node.log.length) node.log_dropped = rec.log_n - node.log.length
+        for (const a of Array.isArray(rec.aliases) ? rec.aliases : []) {
+          if (!a || typeof a.path !== 'string') continue
+          const k = labelKey(a.path), had = sess.aliases.get(k)
+          if (!had || had.at <= a.at) sess.aliases.set(k, { id: rec.n, path: a.path, at: a.at, used: Number.isFinite(a.used) ? a.used : a.at })
+        }
+        node.cp_sig = cpSig(node)
+        continue
+      }
+      // ---- a node record (§2.1)
+      st.records++
+      const node = sess.nodes.get(rec.n)
+      if (rec.op === 'create') {
+        if (node) rRemove(sess, node.id, 'run', rec.ts)   // a new run of a node still held (never written so; defensive)
+        // a new run starts EMPTY: children hung under this id by the window's records while the replay did not hold it went
+        // with its earlier run (removed with an ancestor the replay never held)
+        for (const k of [...(sess.kids.get(rec.n) || [])]) rRemove(sess, k, 'parent', rec.ts)
+        sess.kids.delete(rec.n)
+        unGhost(sess, rec.n)
+        pend.delete(rec.n)   // entries before a create belong to an earlier run
+        const n = rNewNode(rec, rec.ts, rec.p)
+        sess.nodes.set(n.id, n)
+        rAttach(sess, n)
+        if (n.creator != null) sess.scope.set(scopeKey(n.creator, n.key), n.id)
+      } else if (rec.op === 'remove') {
+        if (rec.n === sess.rootId) sessions.delete(sess.key)
+        else rRemove(sess, rec.n, rec.why || 'dismiss', rec.ts)
+      } else if (!node) {
+        /* not held: its cf restates it (or it is gone) */
+      } else if (rec.op === 'label') { rRelabel(sess, node, String(rec.label)); if (rec.was) rAlias(sess, rec.was, node.id, rec.ts) }
+      else if (rec.op === 'move') { const from0 = node.parent; rDetach(sess, node); node.parent = rec.p; rAttach(sess, node); node.rank = rec.rank || null; if (rec.was) rAlias(sess, rec.was, node.id, rec.ts); rLeft(sess, from0, rec.ts) }
+      else if (rec.op === 'rank') node.rank = rec.rank || null
+      else if (rec.op === 'item') { node.plan = true; if (Number.isInteger(rec.plan_ix)) node.plan_ix = rec.plan_ix }
+      else if (rec.op === 'type') { if (typeof rec.type === 'string') node.type = rec.type }
+      else if (rec.op === 'keep') { node.transient = false; node.grace_ms = null; node.empty_since = null }
+      else if (rec.op === 'merge') {
+        const kids = Array.isArray(rec.kids) ? rec.kids : [], ranks = Array.isArray(rec.kid_ranks) ? rec.kid_ranks : []
+        kids.forEach((id, j) => { const k = sess.nodes.get(id); if (!k) return; rDetach(sess, k); k.parent = rec.into; rAttach(sess, k); if (j < ranks.length) k.rank = ranks[j] || null })
+        const from0 = node.parent
+        rDetach(sess, node)
+        node.merged_into = rec.into; node.merged_from = rec.from != null ? rec.from : from0; node.parent = rec.into
+        rAttach(sess, node)
+        if (rec.was) rAlias(sess, rec.was, node.id, rec.ts)
+        rLeft(sess, from0, rec.ts)
+      } else if (rec.op === 'unmerge') {
+        rDetach(sess, node)
+        node.merged_into = null; node.merged_from = null; node.parent = rec.p
+        rAttach(sess, node)
+        node.rank = rec.rank || null
+      }
+    }
+    // the tree holds only what hangs from a root (a node whose parent never came back is dropped, with its subtree)
+    for (const s of sessions.values()) {
+      const seen = new Set(), stack = [s.rootId]
+      while (stack.length) { const x = stack.pop(); if (seen.has(x)) continue; seen.add(x); for (const c of s.kids.get(x) || []) stack.push(c) }
+      for (const id of [...s.nodes.keys()]) {
+        if (seen.has(id)) continue
+        const n = s.nodes.get(id)
+        s.nodes.delete(id)
+        if (n.creator != null && s.scope.get(scopeKey(n.creator, n.key)) === id) s.scope.delete(scopeKey(n.creator, n.key))
+        const ix = labelIx(n.parent, n.label); if (s.labels.get(ix) === id) s.labels.delete(ix)
+      }
+      for (const [k, ids] of [...s.kids]) { if (!seen.has(k)) { s.kids.delete(k); continue } for (const id of [...ids]) if (!s.nodes.has(id)) ids.delete(id); if (!ids.size) s.kids.delete(k) }
+      for (const [k, a] of [...s.aliases]) if (!s.nodes.has(a.id)) s.aliases.delete(k)   // an alias names a node on the board (§3.3 (b))
+    }
+    st.pending_dropped = [...pend.values()].reduce((a, p) => a + p.length, 0)
+    state.sessions = sessions
+    state.seq = Math.max(state.seq, maxSeq)
+    const tk = cpKeys.get(today)
+    if (tk && tk.size) { const keys = new Map(); let next = 1; for (const [k, id] of tk) { keys.set(id, k); next = Math.max(next, k + 1) } state.cp = { day: today, keys, next, rep: null } }
+    else state.cp = null
+    let nodes = 0, ghosts = 0
+    for (const s of sessions.values()) { nodes += s.nodes.size; ghosts += s.ghosts.size }
+    return { fed, skipped, ...st, sessions: sessions.size, nodes, ghosts }
+  }
+  return { feed, wantsOlder, finish, stats: () => ({ fed, skipped, buffered: buf.length }) }
+}
+/**
+ * Convenience: replay `items` given CHRONOLOGICALLY (as written: oldest day first) — each a record, or { rec, day } (the
+ * file it came from) — through createReplay2 NEWEST FIRST, stopping at the window as the bridge's reader does, and
+ * install the result. → finish()'s stats.
+ * @param {any} state @param {any[]} items @param {number} now @param {{ from?: number }} [opts]
+ */
+export function replayRecords2(state, items, now, opts = {}) {
+  const rp = createReplay2(state, { now, from: opts.from })
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i], wrapped = !!(it && typeof it === 'object' && 'rec' in it && 'day' in it)
+    const rec = wrapped ? it.rec : it, day = wrapped ? it.day : undefined
+    const r = rp.feed(rec, day)
+    if (r === 'old' && !rp.wantsOlder(day || (rec && localDay(Array.isArray(rec.rep) ? rec.last : rec.ts)))) break
+  }
+  return rp.finish()
+}
+
+/** The local midnight (ms) of a "YYYY-MM-DD" day. */
+const dayStart = day => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day)); return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime() : null }
+/**
+ * The GHOST TABLE from the per-day index files (§5.1, §2.4: "rebuilt at startup from the index files' `struct` across
+ * retention plus the replay"): folds every retained day's `struct` (node records + the structure of cf lines) oldest first,
+ * and adds a ghost row for every node that ended REMOVED (with its subtree, as removeNode does) and that the replayed model
+ * holds neither live nor as a ghost — so a node removed before the replay window still keeps its key (the scope index),
+ * comes back as itself on a resurrection (§3.7, §3.8) and links a removed grandchild's entries to its live ancestor. Its
+ * `last_ts` = the start of the newest retained day holding one of its entries (null: none — kept only as a chain link):
+ * pruneGhosts(state, retainFrom) then drops it with that day (§5.1: "until retention drops its last entry"). Sessions the
+ * model does not hold are skipped. Call it after the replay. → { added }
+ * @param {any} state @param {any[]} indexes  index objects (lib/activity2-files.js: readIndexes / the writer's today)
+ */
+export function rebuildGhosts2(state, indexes) {
+  const list = [...(indexes || [])].filter(x => x && Array.isArray(x.struct)).sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
+  const T = new Map(), kids = new Map(), lastDay = new Map()
+  const setP = (x, p) => { if (x.p != null) { const k = kids.get(x.p); if (k) k.delete(x.id) } x.p = p; if (p != null) setOf(kids, p).add(x.id) }
+  for (const idx of list) {
+    for (const id of Object.keys(idx.nodes || {})) lastDay.set(id, idx.day)
+    for (const s of idx.struct) {
+      const ident = Array.isArray(idx.sessions) ? idx.sessions[s.s] : null
+      if (!ident || typeof s.n !== 'string') continue
+      let x = T.get(s.n)
+      if (s.op === 'create' || s.op === 'cf') {
+        if (!x) T.set(s.n, x = { id: s.n, p: null })
+        Object.assign(x, { ident, key: String(s.key), c: s.c == null ? null : s.c, scope: typeof s.scope === 'string' ? s.scope : '', nk: s.nk, type: s.type || null, label: String(s.label),
+          transient: !!s.transient, grace_ms: s.grace_ms || null, runs: Number.isInteger(s.runs) && s.runs > 0 ? s.runs : 1, removed: null })
+        setP(x, s.p == null ? null : s.p)
+        continue
+      }
+      if (!x) continue
+      if (s.op === 'label') x.label = String(s.label)
+      else if (s.op === 'move' || s.op === 'unmerge') setP(x, s.p)
+      else if (s.op === 'merge') { setP(x, s.into); for (const k of Array.isArray(s.kids) ? s.kids : []) { const y = T.get(k); if (y) setP(y, s.into) } }
+      else if (s.op === 'type') x.type = s.type || x.type
+      else if (s.op === 'keep') { x.transient = false; x.grace_ms = null }
+      else if (s.op === 'remove') {
+        const stack = [x.id], seen = new Set()
+        while (stack.length) {
+          const id = stack.pop(); if (seen.has(id)) continue; seen.add(id)
+          const y = T.get(id)
+          if (y && !y.removed) y.removed = { ts: s.ts, why: id === x.id ? s.why || 'dismiss' : 'parent' }
+          for (const c of kids.get(id) || []) stack.push(c)
+        }
+      }
+    }
+  }
+  let added = 0
+  for (const x of T.values()) {
+    if (!x.removed) continue
+    const sess = state.sessions.get(sessionKey({ ...x.ident, host: state.origin }))
+    if (!sess || sess.nodes.has(x.id) || sess.ghosts.has(x.id)) continue
+    const kind = x.nk === 'agent' ? 'agent' : 'context'
+    sess.ghosts.set(x.id, { id: x.id, key: x.key, creator: x.c, chain: kind === 'agent' ? (x.scope ? x.scope + '/' : '') + x.key : null, scope: x.scope, kind, label: x.label, parent: x.p,
+      removed_at: x.removed.ts, last_ts: lastDay.has(x.id) ? dayStart(lastDay.get(x.id)) : null, why: x.removed.why, transient: x.transient, grace_ms: x.grace_ms, runs: x.runs, type: x.type || kind })
+    setOf(sess.gkids, x.p).add(x.id)
+    if (x.c != null && !sess.scope.has(scopeKey(x.c, x.key))) sess.scope.set(scopeKey(x.c, x.key), x.id)
+    added++
+  }
+  return { added }
 }
