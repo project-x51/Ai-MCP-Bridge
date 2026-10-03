@@ -302,12 +302,14 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   const rr = renderGuide(G.agent.text, { cmd: '"node" "log.mjs" --session "S"', path: '@X/agent', gateway: '1.74.0', script: '1.74.0' })
   check('#89p2 render: {cmd} {path} {gateway} {script} filled; {other} / {CMD} left as written', rr === 'AGENT "node" "log.mjs" --session "S" --path "@X/agent" (gw 1.74.0, script 1.74.0) keep {other} and {CMD}', rr)
   check('#89p2 render: no path → "<your-path>", unknown gateway / script → "?"', renderGuide('{path} {gateway} {script}', { cmd: 'c' }) === '<your-path> ? ?')
-  check('#89p2 guideText: a realm template + the capability note for an OLD gateway (whatever the source)', (t => t.startsWith('AGENT ') && /This host's gateway runs 1\.65\.0, so do NOT use: --before .*; --ask/.test(t))(guideText({ kind: 'agent', template: G.agent.text, cmd: 'c', gateway: '1.65.0' })))
+  // #88 step 9 (2.0): the note is no longer per-flag (the 2.0 script talks only to a 2.0 gateway): a gateway that does not speak 2.0 gets ONE line
+  check('#89p2 guideText: a realm template + the note for a gateway that is not on 2.0 (whatever the source); {agent} filled (2.0)', (t => t.startsWith('AGENT ') && /This host's gateway runs 1\.75\.1, not 2\.0: reports are refused/.test(t))(guideText({ kind: 'agent', template: G.agent.text, cmd: 'c', gateway: '1.75.1', gateway2: false }))
+    && renderGuide('{agent} / {path}', { cmd: 'c', agent: 'spec-88' }) === 'spec-88 / <your-path>' && renderGuide('{agent}', { cmd: 'c' }) === '<your-key>')
   check('#89p2 guideText: a current gateway adds no note; no template → the built-in agentGuide / sessionGuide', guideText({ kind: 'agent', template: 'T', cmd: 'c', gateway: '1.74.0' }) === 'T'
     && guideText({ kind: 'agent', cmd: 'c', gateway: '1.74.0' }) === agentGuide({ cmd: 'c', gateway: '1.74.0' }) && guideText({ kind: 'session', cmd: 'c', gateway: '1.74.0' }) === sessionGuide({ cmd: 'c', gateway: '1.74.0' }))
   check('#89p2 guideSourceLine: one short line per source', /^\(Guide source: the realm's published agent guide, updated_at 2026-10-03T00:00:00\.000Z from HOST-A\.\)$/.test(guideSourceLine({ source: 'realm', kind: 'agent', updated_at: Date.parse('2026-10-03T00:00:00Z'), origin: 'HOST-A' }))
     && /built into aimb-log 1\.74\.0; the realm publishes no session guide/.test(guideSourceLine({ source: 'builtin', kind: 'session', by: 'aimb-log 1.74.0', reason: 'none' }))
-    && /needs 1\.75\.0\+/.test(guideSourceLine({ source: 'builtin', kind: 'agent', reason: 'min_bridge', min_bridge: '1.75.0' })) && /gateway 1\.73\.0 serves no realm guides/.test(guideSourceLine({ source: 'builtin', kind: 'agent', reason: 'old-gateway', gateway: '1.73.0' }))
+    && /needs 1\.75\.0\+/.test(guideSourceLine({ source: 'builtin', kind: 'agent', reason: 'min_bridge', min_bridge: '1.75.0' })) && /gateway 1\.73\.0 does not speak 2\.0/.test(guideSourceLine({ source: 'builtin', kind: 'agent', reason: 'old-gateway', gateway: '1.73.0' }))
     && ['realm', 'builtin'].every(s => !guideSourceLine({ source: s, kind: 'agent', updated_at: 1, reason: 'unreachable' }).includes('\n')))
 }
 // #66b effective defaults: realm defaults layered UNDER the local behaviors.default (local key wins; realm fills gaps)

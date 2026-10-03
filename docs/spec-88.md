@@ -14,7 +14,8 @@ TIME in the logs (§5.7); step 3 built the v6 records + replay, the day / index 
 conversion library — Robin accepted its Q63 – Q65 as built; step 5 the migration script — Robin accepted its Q66 – Q68 as built; step 6 wired
 the bridge files into the gateway behind the pre-cutover switch `AI_BRIDGE_ACTIVITY_V2` — Robin accepted its Q69 as built; step 7
 built gossip v6 behind the same switch — Robin changed its Q70 (a 1.7x host is a serious issue, shown in red); step 8 built
-the per-user view state (and Q70's `unshared_hosts`) behind the same switch — its Q71 is open).
+the per-user view state (and Q70's `unshared_hosts`) behind the same switch — Robin accepted its Q71 as built; step 9
+removed the switch (the gateway runs 2.0 only) and built the 2.0 tool, script and guides — its Q72 – Q73 are open).
 The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
@@ -1632,6 +1633,98 @@ existing checks keep passing while the core is written.
    check per removed form (message names the new form), a create without `--label` refused, a clashing create reported as
    `"… (2)"`, `--guide agent` creates once and prints only on the second run, `test_activity_6c_live` (the pinned guide
    lines), the tool schema.
+
+   **9 as built** (2026-10-04): THE STAGING — the pre-cutover switch is GONE: `AI_BRIDGE_ACTIVITY_V2` is no longer read and
+   every gateway holds the 2.0 store (`act2`), refusing to start on unconverted history (§7.5); the 1.7x board in
+   `lib/activity.js` and its bridge.mjs paths are no longer reached (step 11 deletes them). The dashboard's board pushes
+   still answer `not-in-2.0-yet` (step 10). No version bump: the bridge still says 1.75.1 until step 12's 2.0.0, so the
+   2.0 script recognises a 2.0 gateway by the logger welcome's new `activity_format: 6` (it stands in for `bridge_version ≥
+   2.0.0`, §4.1, until the bump). Test-only `AI_BRIDGE_TEST_GOSSIP=v5` makes a gateway announce `activity_gossip:5` (and
+   expect 5): the live tests' stand-in for "a host left on 1.7x" (Q70) now that no 1.7x gateway can be started from this tree.
+   THE TOOLS (`lib/tool-schemas.js`, bridge.mjs): `log` takes the 2.0 fields (`LOG2_FIELDS`, now exported by
+   `lib/activity2.js`) and passes the 1.7x `to` / `note` / `context` through only so the parser refuses them `legacy-form`
+   naming the 2.0 form (§4.5; `context` is refused too: the tool's form of `--ctx` was 1.7x's "old form"); it validates
+   before the round trip (`parseCall`, a batch's bounds). New read-only `resolve` tool (Q46). `guide:"agent"` with `agent`
+   (+ `label`, `under`) is the agent's first report (below). The `activity` read takes `project`, `session`, `user`,
+   `host`, `log:{ session, id | path, own, removed, earlier, limit, cursor }`, `entry` (1.7x's `agent` / `path` /
+   `active_only` filters are dropped); board rows gain `parent_id` (§4.2; `parent` stays: the same id). A follower forwards
+   the new ops `resolve` and `guide` over its ACTIVITY frame; its 1.7x per-version feature checks are gone (a 1.7x gateway
+   on the same host is not a supported state, §7.1). Server instructions: the 2.0 forms.
+   BATCHES (`lib/activity2.js splitBatch2`, the store's `batch`): ≤ 64 items, ≤ 64 KB, refused as a whole; beside `items`
+   only `agent` and `log` (defaults; an item's own value wins) — 1.7x's item paths RELATIVE to a batch-level path went
+   with `@`; each item is its own all-or-nothing call, applied in order (a bad one fails alone) → `{ ok, results:[…, ref
+   echoed], applied, failed }`, one gossip / dashboard change; the same for the tool, the logger link, `--batch` and a
+   `--stream` array line.
+   WAITS (bridge.mjs `loggerWait` / `actSettleWaiters`, on the 2.0 store): `wait_answer` takes `node_id` (§4.2) or an
+   address (`agent`, `key` | `id` | `path`) resolved READ-ONLY (`findTarget2`, new: no create, no resurrection; a 1.7x `@`
+   path → `legacy-form`); a waiter is released on every board change; the question EXPIRY now has its timer again
+   (`actScheduleExpiry` → the owner's 2.0 expiry pass `actExpire2`, also every `ACT_GC_MS` and at start) and the asker
+   hears an expiry at once (`activity_answer`, status expired — the 2.0 pass did not tell the session before).
+   `--guide agent` = THE FIRST REPORT (§4.4; the store's `guideAgent`): the logger `guide` request carries `agent` /
+   `label` / `under`; the gateway serves the guide AND, for an agent not on the board, creates it (running, the line
+   "reading the guide", a sibling clash → "(2)") — `board:{ created:true, node, … }`; already there → `board:{ created:false,
+   node }`, nothing written; a refusal (`label-required`, `unknown-node`, `unknown-agent`, `session-user-mismatch`) is
+   `board` = the refusal and the script prints the guide, then the error, exit 64 (4 for a mismatch).
+   THE SCRIPT (`tools/aimb-log.mjs`, rewritten): the §4.1 flags, validated locally by the gateway's own `parseCall` /
+   `splitBatch2`. Mechanics decided here: `--ctx "<label>"` is kept as ONE more path segment below `--agent` / `--path` (§4.5
+   "not removed"; `@…` there → `legacy-form`); the typed field flags are generated from `MESSAGE_TYPES` (today `--result`,
+   `--checks`, `--failed`, `--duration`) and need their `--message-type` (else `bad-fields` locally, naming the type);
+   `--transient` takes its grace only as `--transient=30s` (Q44); `--item <k> "<label>"` per §4.1's rule; an `--item`
+   starting with `@~` → `legacy-form`; positional text, `--plan`, `--to` → `legacy-form` (exit 64) before anything else;
+   `--resolve` rides a new logger message `{type:"resolve"}` → `{type:"resolved"}`; `--wait-answer` takes `--key` / `--id` /
+   `--path` (+ `--agent`); a `--stream` result line keeps `line` = the INPUT line number (the stream protocol is unchanged)
+   and carries the 2.0 result's own `line` flag as `line_set` (the two names collided); `--guide` against a gateway that
+   does not speak 2.0 prints the built-in 2.0 text with the note "This host's gateway runs 1.75.1, not 2.0 …".
+   GUIDES (`lib/log-snippet.js`, §4.3): `{log_snippet}` = the 2.0 command (`--agent <your-key> --label "<your name>" --under
+   <item-key>`) + one line; `agentGuide` = §4.3's ten rule lines verbatim plus four (start an item with `--key <k> --state
+   running --text "@…"`, unplanned work as an item first, quote the text for PowerShell, the exit codes) — every line ≤ 110
+   characters (Q73); `sessionGuide` (its plan by key, briefing an agent with `--agent <key> --label "…" --under <item key>
+   --guide agent`, finish with `"@<summary>"`); `{log_tool_hint}` in tool form (`key` / `label`, `plan:[{key, label}]`,
+   `text:"@…"`); the gateway note is now one line (unreachable, or "not 2.0"); realm guides gain an `{agent}` placeholder
+   (Q34: no `min_bridge` gating or fallback added — rewriting the realm's guides in `config.json` stays Robin's runbook
+   step). `config.example.json`'s realm briefing (code + cowork "activity" reminders) speaks 2.0. README: a "2.0 forms"
+   section and the script's entry (the full rewrite is step 12).
+   NOT REWIRED: #81's dashboard test reporter (`tests/reporters/aimb-dashboard.mjs`) still sends 1.7x stream lines — it is
+   silent unless `AIMB_TEST_LOG_SESSION` is set, and the live bridges stay 1.7x until the cutover; switching it to §3.8's
+   test-run pattern (2d's mapping) belongs to the cutover (step 12). GAPS FOUND (not in any step so far; Q72): on the 2.0
+   board a LOCAL session whose sub-peer left is not marked gone (1.7x's `syncActivityGone` / `markSessionGone`), the doorbell
+   🔔 is not set (`syncActivityBells`), the 90-day auto-abandon of a gone session's plans and the memory budget's entry
+   dropping are not run.
+   Tests: `tests/unit/test_activity9_unit.mjs` (new: `splitBatch2` + the store's batch, the legacy forms, `findTarget2` /
+   find / resolve / outcome, `guideAgent`, the guides' texts and line lengths, the tool schemas);
+   `tests/activity/test_log_script_live.mjs` REWRITTEN for 2.0 (96 checks: one-shot, key + label, label-required, "(2)",
+   exists, the text rule, --no-log, data, --path / --ctx / an alias, items / --done / positions, --move + --rename,
+   duplicate-label, §3.8's test run with typed field flags, --move-to and vanishing buckets, a bare --move-to → suggest,
+   --resolve, questions + waits — timeout 10, answered 0 from a dashboard, withdrawn 12, expired 11 by the timer, not-a-
+   question —, --guide agent created once / printed only / label-required, --guide session, every removed form on the
+   command line AND at the gateway, wait_answer by node_id, gateway-unsupported against a fake 1.7x gateway, --batch,
+   --stream incl. legacy lines, usage, mismatch, prepare-shutdown's flush of v6 cp lines, a stream reconnect, the
+   `resolve` tool forwarded by a follower). Every 1.7x live test was PORTED to 2.0 — each file's header says what it
+   covers now and what step 9 retired: `test_log_live` (v6 history seeded through a 2.0 gateway on a shifted clock),
+   `test_activity_ask_live` + `test_activity_revise_live` (the waits: by key / id / path / node_id, a dropped link
+   re-dialled, expiry 11, gone 13), `test_activity_actions_live` + `test_activity_notices_live` (actions by id),
+   `test_activity_plan82_live` + `test_activity_msg_live`, `test_activity_6c_live` + `test_realm_guides_live` (the 2.0 texts,
+   `--guide agent` as the first report through a realm guide and the tool, run boundaries / `pruned` written by 2.0
+   gateways on a shifted clock), `test_activity_detail_live` + `test_activity_dashboard_live` (reads, paging, the fetch
+   queue, host down), `test_activity_gossip_live` (rate, truncation, forged slices, a v5 peer's slices skipped, link
+   restart) + `test_activity_carry_live` (v5 history from the frozen 1.7x library, converted by the migration library).
+   RETIRED (behaviour gone, each listed in its file): the `@` / `@~` / positional / `--plan` / `--to` forms as working
+   forms (now `legacy-form` checks); path-addressed actions; the 1.7x feature flags (`activity_plan` / `_msg` / `_ask` /
+   `_revise`, `owner-unsupported` for an older owner, `AI_BRIDGE_TEST_NO_ACTIVITY_*`) and every `AIMB_TEST_OLD_BRIDGE`
+   mixed-version check (2.0 never meets 1.7x); v5 slices, the ≤ 1.59 legacy hub; seeded v5 day files (a 2.0 gateway
+   refuses them — re-seeded as v6 where the behaviour lives on); the dashboard's board pushes (`activity_sub`, deltas,
+   units — step 10); the board's `agent` / `path` / `active_only` filters, `log.partial`, the entry's `via`, the rows'
+   `plan_end_at` / `plan_end_how`, the HOME host / `multi_host` grouping (2.0 lists one row per host; grouping returns with
+   the dashboard); and the Q72 gaps (gone on deregister, the bell, auto-abandon). Small fixes the ports found: the
+   owner's answer / withdraw results carry `released` again (no false `not-delivered` for a script-only session whose
+   waiting script took the answer); a report that changes a question (the asker's withdrawal) returns `question` (§4.2);
+   an entry read from a day file no longer shows the line's `line_id` / `line_details` / `line_data` (#90); a call with
+   `stale_after` and `plan` keeps its `stale_after` (each new item's activity used to clear it; the item entries record
+   it, so the replay agrees); `config.example.json`'s code reminder fits the 365-character reminder cap. Also changed:
+   `test_lib_unit` (the guide note / source line), `test_activity2_files_live` (the staging check → "without the switch
+   the gateway refuses the same v5 history"), `test_activity2_gossip_live` and `test_view_state_live` (their 1.7x host =
+   the `v5` stand-in). Left for later: Q72's gaps (step 10 recommended); the reporter (cutover); the dashboard (10); the
+   1.7x code (11); 2.0.0, the README rewrite and the realm guides in `config.json` (12). Questions Q72 – Q73 (§9).
 10. **Dashboard** (§5.4, §5.6). Units / rows / actions by id, Rename…, Merge into…, the clash dialog (merge them / a
     pre-filled "Notes (2)", Q32), the `at` tooltip, the copy command, "show removed", the view state (badges, "new since
     you last looked", Reset view, live vs load-time application, the one-time `localStorage` import), the board head's
@@ -1661,7 +1754,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built), Q69 that of step 6 (accepted as built) and Q70 that of step 7 (changed: built in step 8) — step 8's Q71 is under "Open questions"; GROUPS, ROLLUP and TYPES are decisions
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built), Q69 that of step 6 (accepted as built), Q70 that of step 7 (changed: built in step 8) and Q71 that of step 8 (accepted as built) — step 9's Q72 – Q73 are under "Open questions"; GROUPS, ROLLUP and TYPES are decisions
 Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
@@ -1738,6 +1831,7 @@ answer overrides an earlier one (noted in the earlier row).
 | 68 | (build step 5) What a failed migration run leaves | **Accepted as built (Robin):** the v5 files are restored from the backup and the backup removed — the directory exactly as before, exit 3 (only a failed restore keeps the backup, named); §7.2 had the backup kept and the directory half-converted until the next run (§7.2, §8 step 5). |
 | 69 | (build step 6) What the Windows tray does when the 2.0 gateway it launched refuses to start (exit 78, §7.5) | **Accepted as built (Robin):** it shows the message once in a balloon, keeps it in a "Bridge refused to start - details..." menu item, and stops relaunching the gateway (until now it relaunched every 3 s) until Restart Bridges... is chosen (§8 step 6). |
 | 70 | (build step 7) A host left on 1.7x by mistake, as a 2.0 gateway sees it | **Changed (Robin): "As a serious issue. Show in RED."** The 2.0 board head lists each linked host whose activity format check failed in `unshared_hosts` (`host`, `bridge_version` when known, `since`, `seen_by`), replicated to every 2.0 host in the v6 slices; an entry goes when that link drops or the host comes back on 2.0. The dashboard shows each as a red warning at the top of the board naming the host and why ("still on 1.7x: not on this board") (§5.4, §6.2; built in step 8, the page in step 10). |
+| 71 | (build step 8) A transient bucket's view choices when it vanishes and comes back | **Accepted as built (Robin):** one rule for every removal — a transient context that empties is removed, so every user's records of it (closed / open, hidden, last seen) are tombstoned on the owner and every receiver; when it comes back (the same id, a new run) it shows the defaults. A user who wants a bucket's choices to stick pins it, which also keeps it on the board (§3.8, §5.6). |
 | TIME | (Robin, 2026-10-03) Time in the logs | **Accepted into 2.0 (built in step 3):** a node times each attempt from running to done / failed / skipped / abandoned (`took`, on the node and the ending entry); a reopen / restart is a new attempt (latest `took` + `took_total` / `attempts`); no start → no took; a test-result's duration is its took; plans, test runs and agents get their own start-to-end time; it survives checkpoints and the replay and shows in `displayOf2` ("took 4m 12s") (§2.2, §5.7). |
 | GROUPS | (Robin, 2026-10-03, new) Lists that are not plans | **Accepted into 2.0 (step 2b):** a context can be a GROUP — a list, not a plan: no bar, no plan-end, nothing added to its parent's rollup; where the bar would be, an optional COUNT ("4 items" / "3 open · 1 done"; abandoned and hidden items not counted). Set at creation (`--group` / `group:true`) or toggled from the dashboard (Show as group / Show as plan); its items keep their states. Candidates: Potential changes, Planned changes, Deployed releases, Questions; Next release stays a plan (§1.3, §2.1, §5.7). *The flag was then folded into TYPES: a group is `--context-type=group`.* |
 | TYPES | (Robin, 2026-10-03, "typed nodes and entries") | **Accepted into 2.0:** every node has a `type` from a small built-in REGISTRY held as data — per type its allowed fields, display (glyph, what shows in place of a bar), rollup behaviour, allowed children and menu actions (the slot the context-aware menu, #92, folds into). Types: `context` (the default, plan-capable), `plan`, `group`, `agent`, `question`, and `test-run` (reserved; built in step 2d). The flag is `--context-type=<type>` (tool `context_type`; kebab-case flag, values case-insensitive); it REPLACES `--group` / `group:true`; a question is a node of type `question`. ENTRIES are typed too: `--message-type=<type>` (tool `message_type`; default `note`), each type declaring typed fields that are validated so the bridge can count them (later: `--message-type=test-result --result pass --checks 22 --duration 4.1s`); `--data` stays free-form. Answers are `answer` entries; the node state still drives plans and progress. 2b builds the registries, the mechanism and the types questions need (`note`, `question`, `answer`, `withdrawal`, `expiry`, + `event` for structural entries); a new step 2d builds `test-run` + `test-result`; #81's test reporter is the first user of `test-run`. QUESTIONS read naturally: state the question, its options listed below it as the answers; the text never restates the options; choices stay structured (`--choice`) — in §5.8, the Answer dialog (§5.4) and the agent guide (§4.3) (§1.7, §2, §4, §5.7, §5.8, §8). |
@@ -1808,16 +1902,23 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q70, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). Open — raised by build step 8 (posted on
-the board under Questions / "Step 8 (Q71)"):
-- **Q71** (build step 8) A transient bucket's view choices when it vanishes and comes back. *As built (§5.6's "pruned
-  when the node is gone"):* a transient context that empties is REMOVED (§3.8), so the owner and every receiver tombstone
-  every user's records of it — closed / open, hidden, last seen; a pinned one never vanishes (the pin keeps it). When it
-  comes back (the same id, a new run) it shows the DEFAULTS: in a sequential test run "In progress" vanishes between tests,
-  so a user who collapsed it sees it open again at the next test. *The alternative:* a TRANSIENT vanish does not prune —
-  the choices wait for the bucket to come back, and the 30-day GC drops them if it never does (only a dismissal, an expiry
-  and a merge prune). Recommendation: accept as built (one rule for every removal; a user who wants a bucket's choices to
-  stick pins it, which also keeps it on the board).
+Q40 – Q71, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). Open — raised by build step 9 (posted on
+the board under Questions / "Step 9 (Q72–Q73)"):
+- **Q72** (build step 9) A LOCAL session's lifecycle on the 2.0 board. Porting the 1.7x live tests found four 1.7x
+  behaviours that no step of §8 rebuilds on the 2.0 board: (1) a session whose sub-peer leaves this host's roster is not
+  marked GONE (its agents just go stale after the stale window); (2) the doorbell 🔔 of a watched session is not set on the
+  board; (3) the 90-day auto-abandon of a gone session's open plans (6c) does not run; (4) the memory budget's dropping of
+  old log entries does not run (the per-node log cap and the node limits still hold). The model already carries `gone_at`
+  and the gossip v6 session header `gone_at` / `bell`; what is missing is the bridge's wiring (1.7x `syncActivityGone`,
+  `syncActivityBells`, `autoAbandon`, `enforceBudget`) and a local `gone` in the 2.0 rows (and in expiry, so a gone
+  session leaves after `finished_visible_hours`). *Recommendation:* build them in step 10, with the dashboard that shows
+  them (gone pills, the bell). *Alternative:* build them now, before the dashboard.
+- **Q73** (build step 9) The agent guide's lines beyond §4.3's list. *As built:* `agentGuide` prints §4.3's ten rule lines
+  verbatim plus four: "Start an item with --key <k> --state running --text "@<what you are doing>"; keep its line
+  current", "Work that is not on your checklist: add it as an item FIRST. Back on a ticked item: --state running"
+  (both carried over from the 1.7x guide's "keep it live" rules), "Always quote the text ("@…"): in PowerShell an unquoted
+  @word is a splat" (§4.0's PowerShell note), and the 1.7x exit-code line. *Alternative:* §4.3's ten lines only.
+  Recommendation: accept as built.
 
 ---
 

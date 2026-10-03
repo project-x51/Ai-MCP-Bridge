@@ -1,4 +1,4 @@
-// #88 (v2.0) build step 6 — BRIDGE FILES, live: a 2.0 gateway (the pre-cutover switch AI_BRIDGE_ACTIVITY_V2=1) on a temp
+// #88 (v2.0) build step 6 — BRIDGE FILES, live: a 2.0 gateway (every gateway since step 9 removed the switch) on a temp
 // persistence dir, a temp AI_BRIDGE_CONFIG (never src/config.json), its own TEMP dir (the tray's refusal file) and this
 // file's port block (never 12317 / 12318). The history is 1.7x history written by the FROZEN 1.7x library
 // (tests/fixtures/activity-v175.js) over three days, then converted by the migration library (lib/activity2-migrate.js,
@@ -6,8 +6,8 @@
 // gateway a few seconds before a local midnight, so the day ROLLOVER (AI_BRIDGE_ACTIVITY_ROLLOVER_CHECK_MS = 300) happens.
 // Covers (docs/spec-88.md §2.4, §5.1, §5.2, §7.5, §8 step 6, §10):
 //   (0) the START CHECK — on unconverted (v5) history the 2.0 gateway exits 78 with the command in its stderr line and in
-//       the tray's file, changing no byte; a leftover migration backup → 78 "did not finish"; WITHOUT the switch the same
-//       history starts the 1.7x board as before (the staging: 1.7x stays the default until step 9);
+//       the tray's file, changing no byte; a leftover migration backup → 78 "did not finish"; (step 9) WITHOUT the
+//       pre-cutover switch the gateway is 2.0 all the same: it refuses the same history (the switch is gone);
 //   (1) after the migration the 2.0 gateway STARTS on the converted history (its board, format 6, the tray's old refusal
 //       file removed) and WRITES v6 records to today's day file (node records + entries by id) — the open day's index is
 //       kept in memory (the file the migration wrote for it goes stale until the rollover rewrites it);
@@ -122,13 +122,11 @@ try {
   const r1 = await runGateway('V2Refuse2')
   check('start check: a leftover migration backup → exit 78 "did not finish — run node src/tools/aimb-migrate-v2.mjs again"', r1.code === 78 && r1.err.includes('the migration of persistence/activity/v2host-a did not finish — run node src/tools/aimb-migrate-v2.mjs again'), J([r1.code, r1.err.slice(-300)]))
   fs.rmSync(path.join(persist, G.BACKUP_ROOT), { recursive: true, force: true })
-  // the staging: WITHOUT the switch, the same unconverted history starts the 1.7x board, as before (until step 9)
-  const L = await spawnMcp('V17', { v2: false }); all.push(L)
-  const lb = await until(async () => (await call(L, 'activity')).sessions || [], s => s.some(x => x.session === 'Alpha'), 8000)
-  const l17 = lb.find(s => s.session === 'Alpha')
-  check('staging: without AI_BRIDGE_ACTIVITY_V2 the gateway serves the 1.7x board from the same v5 files (1.7x paths, no format 6)', !!l17 && (l17.nodes || []).some(n => n.path === '@"Next release"/@WIP/spec-88'), J(lb.map(s => [s.session, (s.nodes || []).map(n => n.path)])))
-  await stop(L)
-  // the 1.7x gateway may have added records (its startup cf) — convert what is there now
+  // step 9 removed the pre-cutover switch: WITHOUT AI_BRIDGE_ACTIVITY_V2 the gateway is 2.0 all the same — it refuses too
+  const before1 = snap(persist)
+  const r2 = await runGateway('NoSwitch', { v2: false })
+  check('step 9: the switch is gone — a gateway started WITHOUT AI_BRIDGE_ACTIVITY_V2 refuses the same v5 history (exit 78), no byte changed', r2.code === 78 && r2.err.includes(`REFUSED TO START (exit 78): ${msg0}`) && J(snap(persist)) === J(before1), J([r2.code, r2.err.slice(-300)]))
+  // convert the host's history (as src/tools/aimb-migrate-v2.mjs does)
   const rep = await G.migrate({ dir: persist, host: HOST, config: A.resolveConfig({ log_retention_days: 30 }, {}), probe: async () => ({ up: false }), now: () => MID - 30000 })
   check('harness: the migration library converted the host\'s history (v6 days + index files + the marker, no backup left)', rep.code === 0 && fs.existsSync(path.join(hostDir, 'format.json')) && [Dm2, Dm1, D].every(d => fs.existsSync(path.join(hostDir, `${d}.idx.json`))) && !fs.existsSync(bk), J([rep.code, rep.status, rep.message]))
 

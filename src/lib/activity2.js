@@ -1268,22 +1268,92 @@ export function resolveCall(state, ident, input) {
   if (!sess) return bad('unknown-session', `no activity from a session "${String(ident && ident.session).slice(0, 80)}" on this host`)
   const t = newTx(state, sess, 0)
   try {
-    let scope = rootOf(sess)
-    if (q.agent) { scope = creatorByChain(t, q.agent); if (!scope) return bad('unknown-agent', `--agent ${q.agent.join('/')} is not on the board`) }
-    let node = scope
-    if (q.key != null) {
-      const id = sess.scope.get(scopeKey(scope.id, q.key)), n = id && sess.nodes.get(id)
-      if (!n) return bad('unknown-node', `no node has the key ${q.key} in your scope${id ? ' (it was removed)' : ''}`)
-      node = n
-    } else if (q.id != null) { const r = byId(t, q.id, 'id'); if (r.ok === false) return r; node = r.node }
-    else if (q.segs) { const w = walkPath(t, scope, q.segs, false); if (w.ok === false) return w; node = w.node }
-    node = redirect(t, node)
+    const f = targetIn(t, q)
+    if (f.ok === false) return f
+    const node = f.node
     const b = relBase(sess, node, sp.abs, sp.up)
     if (b.ok === false) return b
     const w = walkRead(sess, b.base, sp.segs)
     return { ok: true, path: absPath(sess, b.base, w.labels), id: w.state === 'new' ? null : w.node.id, state: w.state, node: w.state === 'live' ? nodeView(sess, w.node) : null,
       create: w.create, from: nodeView(sess, node), warnings: [...t.warnings] }
   } finally { rollback(t) }
+}
+/** The target a parsed call names (§3: key → id → path → the agent → the root), WITHOUT creating anything. → { node } | a refusal */
+function targetIn(t, q) {
+  const { sess } = t
+  let scope = rootOf(sess)
+  if (q.agent) { scope = creatorByChain(t, q.agent); if (!scope) return bad('unknown-agent', `--agent ${q.agent.join('/')} is not on the board`) }
+  let node = scope
+  if (q.key != null) {
+    const id = sess.scope.get(scopeKey(scope.id, q.key)), n = id && sess.nodes.get(id)
+    if (!n) return bad('unknown-node', `no node has the key ${q.key} in your scope${id ? ' (it was removed)' : ''}`)
+    node = n
+  } else if (q.id != null) { const r = byId(t, q.id, 'id'); if (r.ok === false) return r; node = r.node }
+  else if (q.segs) { const w = walkPath(t, scope, q.segs, false); if (w.ok === false) return w; node = w.node }
+  return { node: redirect(t, node) }
+}
+/**
+ * Step 9: the node a call's ADDRESS names now — `agent`, `key` | `id` | `path` (§3) — READ-ONLY: nothing is created,
+ * resurrected or refreshed (the script's --wait-answer, and `--guide agent`'s "is the agent on the board yet?").
+ * → { ok:true, node: nodeView + { path }, id } | a refusal (unknown-session, unknown-agent, unknown-node, bad-* …)
+ * @param {any} state @param {{ session: string, project?: string, user?: string, realm?: string }} ident
+ * @param {{ agent?: string, key?: string, id?: string, path?: string }} input
+ */
+export function findTarget2(state, ident, input) {
+  if (!state || !(state.sessions instanceof Map)) return bad('bad-state-object', 'pass a createModel() state')
+  const a = input && typeof input === 'object' ? input : {}
+  const pc = parseCall({ agent: a.agent, key: a.key, id: a.id, path: a.path })
+  if (!pc.ok) return pc
+  const sess = getSession2(state, ident)
+  if (!sess) return bad('unknown-session', `no activity from a session "${String(ident && ident.session).slice(0, 80)}" on this host`)
+  const t = newTx(state, sess, 0)
+  try {
+    const f = targetIn(t, pc.q)
+    if (f.ok === false) return f
+    return { ok: true, id: f.node.id, node: { ...nodeView(sess, f.node), path: pathOf(sess, f.node) } }
+  } finally { rollback(t) }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// step 9: the `log` tool's fields and its BATCH (§4.2)
+
+/** The 2.0 `log` tool's fields (parseCall) — what the bridge passes through from a tool call, a logger link or a batch item. */
+export const LOG2_FIELDS = Object.freeze(['agent', 'key', 'id', 'path', 'label', 'rename', 'under', 'under_id', 'move', 'move_id', 'merge', 'merge_id', 'move_to', 'unmerge', 'keep', 'transient',
+  'before', 'before_id', 'after', 'after_id', 'position', 'plan', 'context_type', 'text', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'ask', 'choices', 'free', 'expires',
+  'message_type', 'fields'])
+/** 1.7x fields that are passed through only so parseCall can refuse them `legacy-form`, naming the 2.0 form (§4.5). */
+export const LEGACY2_FIELDS = Object.freeze(['to', 'note', 'context'])
+/** What may stand BESIDE a batch's items: defaults for every item (an item's own value wins). */
+export const BATCH2_DEFAULTS = Object.freeze(['agent', 'log'])
+/**
+ * A BATCH (§4.2: "Batch items take the same; `agent` is a batch default"): { items:[{ …the log fields, ref? }, …], agent?,
+ * log? } → { ok, items:[{ ref?, input } | { ref?, error }] }. The bounds (≤ 64 items, ≤ 64 KB of JSON) refuse the whole
+ * call; a bad item is answered alone (each item is its own all-or-nothing call, applied in order). Beside items only
+ * `agent` and `log` (defaults; an item's own wins); every item is addressed like a call (`key` / `id` / `path` from the
+ * session root or its `agent`) — 1.7x's paths RELATIVE to the call's path are gone with `@`.
+ */
+export function splitBatch2(input) {
+  if (!input || typeof input !== 'object' || !Array.isArray(input.items)) return bad('bad-batch', 'a batch is { items:[{ key? | path?, text, … }, …], agent?, log? }')
+  const items = input.items
+  if (!items.length) return bad('bad-batch', 'items is empty')
+  if (items.length > ACTIVITY_LIMITS.batchItems) return bad('too-many-items', `a batch holds at most ${ACTIVITY_LIMITS.batchItems} items (got ${items.length}) — split it`)
+  let bytes
+  try { bytes = Buffer.byteLength(JSON.stringify(items), 'utf8') } catch (e) { return bad('bad-batch', `items are not JSON-serialisable (${e && e.message})`) }
+  if (bytes > ACTIVITY_LIMITS.batchBytes) return bad('batch-too-large', `the batch is ${bytes} bytes of JSON; the limit is ${ACTIVITY_LIMITS.batchBytes} — split it or trim details/data`)
+  const extra = Object.keys(input).filter(k => k !== 'items' && input[k] !== undefined && !BATCH2_DEFAULTS.includes(k))
+  if (extra.length) return bad('bad-batch', `beside items only ${BATCH2_DEFAULTS.join(' / ')} may be given (defaults for every item); put ${extra.join(', ')} in each item`)
+  const out = []
+  for (const it of items) {
+    if (!it || typeof it !== 'object' || Array.isArray(it)) { out.push({ error: bad('bad-item', 'each item must be an object { key? | path?, text, … }') }); continue }
+    const { ref, ...fields } = it
+    const r = ref !== undefined ? { ref } : {}
+    const unknown = Object.keys(fields).filter(k => !LOG2_FIELDS.includes(k) && !LEGACY2_FIELDS.includes(k))
+    if (unknown.length) { out.push({ ...r, error: bad(unknown.includes('items') ? 'bad-item' : 'bad-field', unknown.includes('items') ? 'a batch item can\'t hold a batch' : `unknown field(s) ${unknown.join(', ')}: an item carries the log fields (${LOG2_FIELDS.join(', ')}) + ref`) }); continue }
+    const inp = { ...fields }
+    for (const k of BATCH2_DEFAULTS) if (inp[k] === undefined && input[k] !== undefined) inp[k] = input[k]
+    out.push({ ...r, input: inp })
+  }
+  return { ok: true, items: out }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1466,6 +1536,7 @@ function parseReport(input, o, warnings) {
   const given = k => input[k] !== undefined && input[k] !== null
   if (given('to')) return bad('legacy-form', '--move … --to was removed in 2.0: use --key <node> --move <parent> (or --path … --move …)')
   if (given('note')) return bad('legacy-form', 'note was removed in 2.0: plain text only logs — use text "…" (a leading @ also sets the line)')
+  if (given('context')) return bad('legacy-form', 'context was removed in 2.0: name the node with key (your own node, made once with label) or path "<label>" (below agent) — a leading @ in text sets its line')
   let log = true
   if (given('log')) { log = boolOf(input.log); if (log === null) return bad('bad-log', 'log must be true (append to the log; the default) or false (update the board only)') }
   const common = { stale_after_ms: null, details: null, data: null }
@@ -1626,7 +1697,7 @@ function parsePlan2(v, warnings) {
  * sort before an item already there (an explicit position: placeNew, 2c).
  * @returns {any} { items:[{ key, id, label, path, created, adopted?, plan_item, state, warning? }] } or a refusal
  */
-function applyPlan2(t, target, items, scope) {
+function applyPlan2(t, target, items, scope, staleMs = null) {   // staleMs: the call's stale_after (§4.0) — an item's activity keeps it (and records it, so the replay agrees)
   const { sess } = t
   if (isQuestion2(target)) return bad('bad-plan', 'a question holds no plan')
   const out = []
@@ -1641,8 +1712,8 @@ function applyPlan2(t, target, items, scope) {
     const id = newEntryId(t.state, t.now)
     fset(t, n, 'current', { id, ts: t.now, text: n.label, state: 'todo', details: null, data: null })
     fset(t, n, 'implicit', false)
-    if (!t.by) touch(t, n, null, null)
-    writeEntry(t, n, { id, current: true, text: cut(n.label), state: 'todo', extra: { line: true } })
+    if (!t.by) touch(t, n, staleMs, null)
+    writeEntry(t, n, { id, current: true, text: cut(n.label), state: 'todo', extra: { line: true, ...(!t.by && staleMs ? { stale_after_ms: staleMs } : {}) } })
   }
   const classify = c => (c.plan ? 'keep' : c.kind === 'context' && !c.current && countsAs(c) === 'bar' ? 'adopt' : 'other')   // a group / question is never adopted
   for (let ix = 0; ix < items.length; ix++) {
@@ -2360,9 +2431,9 @@ function run(t, q) {
     if (r.ok === false) return r
     Object.assign(out, { id: r.entry ? r.entry.id : null, logged: !!r.entry, current: r.changes, line: r.line })
     if (r.cascade) out.cascade = r.cascade
-    if (asks) out.question = questionView(rnode.current.question)
+    if (asks || (r.changes && rnode.current && rnode.current.question)) out.question = questionView(rnode.current.question)   // + the asker's withdrawal: the question as it is now (#85)
   }
-  if (q.plan) { const p = applyPlan2(t, node, q.plan, scopeNode); if (p.ok === false) return p; out.plan = p.items }
+  if (q.plan) { const p = applyPlan2(t, node, q.plan, scopeNode, q.report ? q.report.stale_after_ms : null); if (p.ok === false) return p; out.plan = p.items }
   const hasMove = q.move != null || q.move_id != null
   // 2c: a POSITION (§4.1) — with a plan it places the items this call CREATED (a re-plan never moves an item); else it places
   // a NEW target among its siblings, or REORDERS an existing one (a no-op when it is already there). On an existing target

@@ -17,7 +17,7 @@
 // session?: { text, min_bridge? } }: the realm's own text for `aimb-log --guide agent|session` (and the log tool's guide),
 // PULLED on request from a gateway, never pushed (no register_self, no connect reminder carries it). Each text ≤ 4 KB (UTF-8
 // bytes; separate from the 365-char reminder cap), a string or an array of lines (joined with "\n"), no control characters
-// but newline / tab; placeholders {cmd} {path} {gateway} {script} are filled when served (lib/log-snippet.js guideText).
+// but newline / tab; placeholders {cmd} {path} {agent} {gateway} {script} are filled when served (lib/log-snippet.js guideText).
 // min_bridge (optional, "1.75" or "1.75.0") = the guide is served only to a requester (and by a gateway) on that version or
 // newer; others get the built-in text. An invalid guide is DROPPED (never cut: a cut guide loses its ending), the rest of the
 // record stands. Guides ride the same record, so they replicate (and are replaced, and cleared) exactly as the reminders do.

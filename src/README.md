@@ -64,6 +64,11 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
     tree) and `--batch <file|->`; v1.63.0: `--plan "A" "B" …` and `--done`; v1.64.0: `--token-file <path>` (#75); v1.69.0:
     `--before` / `--after` / `--first` / `--last` and `--move` / `--to` (#82); v1.71.0: `--ask` / `--choice` / `--free` /
     `--expires` / `--wait` and `--wait-answer` (#85: a question, and waiting for its answer). See "Log / activity" below.
+    **#88 (2.0, build step 9): it speaks only the 2.0 forms** — `--agent <chain>`, `--key <k>` (+ `--label`, `--under`),
+    `--id`, `--path "A/B"` (labels, no `@`), `--text` (a leading `@` sets the line), `--item <k> "<label>"`, `--move-to`,
+    `--resolve`, `--context-type=`, `--message-type=` + its field flags, `--transient` / `--keep`, `--guide agent` as the
+    agent's first report — and refuses every 1.7x form `legacy-form` (exit 64); it validates with `lib/activity2.js` and
+    talks only to a 2.0 gateway. See "2.0 forms" below.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -563,6 +568,27 @@ the **unified node tree + batch logging** (step 6a, v1.62.0, "The node tree" bel
 v1.63.0, "Todos and plans" below), and (step 6c, v1.64.0, "Step 6c" below) the paste-ready agent snippet + the connect
 reminders, the abandoned state and the plan-end rule, gossiped entry counts, run-boundary history, the finished-plan
 window, home-host tags and the Plans filter.
+
+### 2.0 forms (#88, build step 9) — read this first
+From #88 build step 9 the gateway runs ONLY the 2.0 board (the pre-cutover switch `AI_BRIDGE_ACTIVITY_V2` is gone; a gateway
+refuses to start on unconverted 1.7x history — run `tools/aimb-migrate-v2.mjs`, docs/spec-88.md §7). The sections below
+describe the 1.7x forms; they stay until the 2.0.0 release rewrites this README (step 12). The authoritative 2.0 rules are
+docs/spec-88.md §3 – §4; in short:
+- **A node is named by its KEY** (`--key docs` / `key:"docs"`): made once with its LABEL (`--label "Write the docs"`,
+  required — `label-required`; a sibling's label → `"… (2)"`, reported), placed with `--under <ref>` or a position; later
+  calls just name the key. `--agent spec-88` reports as that agent (its keys live in its scope); `--id <id>` names a node by
+  its stable id; `--path "Next release/Docs"` is the shorthand (labels, no `@`).
+- **Text:** plain text only LOGS; a LEADING `@` also sets the node's line (`--text "@Writing the docs"`); `@@` = a literal `@`.
+- **Plans:** `--item <k> "<label>"` / `--item "<label>"` (tool: `plan:[{key, label}]`); tick with `--key <k> --done`.
+- **Structure:** `--move <ref>`, `--rename`, `--merge` / `--unmerge`, `--move-to "../X" | "/A/B"` (report, then move; missing
+  destinations made transient), `--transient[=30s]` / `--keep`, `--resolve` (read-only; the `resolve` tool).
+- **Types:** `--context-type=plan|group|test-run`; `--message-type=test-result --result pass --checks 22 --failed 0
+  --duration 4.1s` (the tool's `message_type` + `fields`).
+- **Batches** (`items`, `--batch`, a `--stream` array line): beside the items only `agent` / `log` (defaults); each item its
+  own all-or-nothing call. **Waits:** `--ask … --wait 30m`, `--wait-answer --key ?1` (the logger link's `wait_answer` by
+  `node_id`). **`--guide agent`** with `--agent` + `--label` + `--under` puts the agent on the board (its first report).
+- **Removed (refused `legacy-form`, naming the 2.0 form):** positional text, `--plan`, `--move … --to`, `@` in a path, `@~`
+  (path or text), and the tool's `to` / `note` / `context`.
 
 ### The node tree (v1.62.0, step 6a)
 A session holds ONE TREE of **nodes**. The session itself is the root. Every other node is one of two kinds:
@@ -1118,6 +1144,9 @@ by each host from its own script, so it can use them:
   a path under the plan item it serves ("<item>/<agent>") and a checklist; it ticks items and ends with "@~root
   <summary>", state:"done". Keep your plan true: add unplanned work as an item first; reopen an item (state:"running")
   when work resumes."
+- **2.0 (#88 build step 9):** both reminders now brief agents with `--agent <its key> --label "<its name>" --under <its
+  plan item's key>` (the tool form: `agent` / `label` / `under`), end with `state:"done", text:"@<summary>"`, and keep
+  within the 365-character cap — see `config.example.json`; the realm's copy in `config.json` is rewritten at the cutover.
 
 ### The plan workflow — order, insert anywhere, move, abandon anything (v1.69.0, #82)
 **Order.** Siblings show **plan items first** (in their plan order), **then the other contexts, then agents**; a state

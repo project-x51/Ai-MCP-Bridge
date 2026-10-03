@@ -3,10 +3,10 @@
 // §2.4, §5.1 – §5.3, §7.5, §10. bridge.mjs keeps the timers, the tools and the wire; this module is everything between a
 // call and the bytes on disk, so the unit tests drive it on temp dirs without a bridge.
 //
-// THE STAGING (spec §8 step 6 "as built"): the bridge runs this store only with the pre-cutover switch
-// AI_BRIDGE_ACTIVITY_V2=1 (tests, and a host that has been converted); without it the 1.7x board (lib/activity.js) serves
-// as before, until step 9 switches the bridge for good. Gossip v6 is step 7, the per-user view state step 8, the 2.0 tool /
-// script forms and guides step 9, the dashboard step 10.
+// THE STAGING (spec §8 step 6 "as built"): steps 6 – 8 ran this store only behind the pre-cutover switch
+// AI_BRIDGE_ACTIVITY_V2=1; step 9 removed the switch — every gateway holds this store (the 1.7x board in lib/activity.js
+// is no longer reached; step 11 deletes it). Step 9 added the batch, the read-only resolve / find, the waiters' question
+// outcome and `--guide agent`'s first report (guideAgent). The dashboard is step 10.
 //
 // WHAT IT DOES
 // - start(now): §7.5's START CHECK (lib/activity2-migrate.js startCheck2): v5 history or an unfinished migration → refused
@@ -40,10 +40,8 @@ const str = v => (typeof v === 'string' && v.trim() ? v.trim() : null)
 export const fileCursor2 = (day, offset) => `f2.${day}.${Math.max(0, Math.floor(Number(offset) || 0))}`
 /** @returns {{ day: string, offset: number } | null} */
 export function parseFileCursor2(c) { const m = typeof c === 'string' && c.match(/^f2\.(\d{4}-\d{2}-\d{2})\.(\d{1,15})$/); return m ? { day: m[1], offset: Number(m[2]) } : null }
-/** The 2.0 `log` tool's fields (lib/activity2.js parseCall) — what the bridge passes through from a tool call / a logger link. */
-export const LOG2_FIELDS = Object.freeze(['agent', 'key', 'id', 'path', 'label', 'rename', 'under', 'under_id', 'move', 'move_id', 'merge', 'merge_id', 'move_to', 'unmerge', 'keep', 'transient',
-  'before', 'before_id', 'after', 'after_id', 'position', 'plan', 'context_type', 'text', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'ask', 'choices', 'free', 'expires',
-  'message_type', 'fields'])
+/** The 2.0 `log` tool's fields (lib/activity2.js parseCall) — re-exported (step 9 moved them into lib/activity2.js). */
+export const LOG2_FIELDS = A2.LOG2_FIELDS
 const seqOf = id => { const m = typeof id === 'string' && id.match(/-([0-9a-z]+)$/); const n = m ? parseInt(m[1], 36) : 0; return Number.isFinite(n) ? n : 0 }
 const ordCmp = (a, b) => a.ts - b.ts || seqOf(a.id) - seqOf(b.id) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
@@ -180,6 +178,47 @@ export function createStore2(o) {
       const { records: _r, entries: _e, writes: _w, ...rest } = r
       return { ...rest, ...(p === false ? { persisted: false } : {}), ...(left.length ? { left } : {}) }
     },
+    /**
+     * Step 9: a BATCH (§4.2; lib/activity2.js splitBatch2) — its bounds refuse the whole call; then each item is applied
+     * IN ORDER as its own all-or-nothing call (one bad item never stops the rest). → { ok, results:[one per item, its ref
+     * echoed], applied, failed, left? } (left = every node that left the board in any item, for the view-state pruning)
+     */
+    batch(ident, input, now, opts = {}) {
+      const sp = A2.splitBatch2(input)
+      if (!sp.ok) return sp
+      const results = [], left = []
+      for (const it of sp.items) {
+        let r = it.error || store.apply(ident, it.input, now, opts)
+        if (r.ok && r.left) { left.push(...r.left); const { left: _l, ...rest } = r; r = rest }
+        results.push(it.ref !== undefined ? { ref: it.ref, ...r } : r)
+      }
+      const failed = results.filter(r => !r.ok).length
+      return { ok: true, results, applied: results.length - failed, failed, ...(left.length ? { left: [...new Set(left)] } : {}) }
+    },
+    /** Step 9: the read-only `resolve` tool / `aimb-log --resolve` (Q46, lib/activity2.js resolveCall). */
+    resolve(ident, input) { return A2.resolveCall(state, ident, input) },
+    /** Step 9: the node a call's address (agent, key | id | path) names now — read-only (lib/activity2.js findTarget2). */
+    find(ident, input) { return A2.findTarget2(state, ident, input) },
+    /** Step 9: a question's outcome for a waiting script (lib/activity2.js questionOutcome2). */
+    outcome(ident, id) { return A2.questionOutcome2(state, ident, id) },
+    /**
+     * Step 9 (§4.4, Q17): `--guide agent` with `--agent` is the agent's FIRST REPORT — when the agent is not on the board
+     * yet it is created (label = `label`, required; under `under`, else its creator; a sibling clash → "<label> (2)") with
+     * state running and the line "reading the guide"; when it is already there NOTHING is written (a re-read never
+     * clobbers a running line). → { ok:true, created:true, …the call's result } | { ok:true, created:false, node } | a
+     * refusal (label-required, unknown-node for under, unknown-agent for a missing earlier step …)
+     */
+    guideAgent(ident, a, now, opts = {}) {
+      const f = A2.findTarget2(state, ident, { agent: a.agent })
+      if (f.ok) return { ok: true, created: false, node: f.node }
+      if (f.code !== 'unknown-agent' && f.code !== 'unknown-session') return f
+      const input = { agent: a.agent, text: '@reading the guide', state: 'running' }
+      if (a.label !== undefined) input.label = a.label
+      if (a.under !== undefined) input.under = a.under
+      if (a.under_id !== undefined) input.under_id = a.under_id
+      const r = store.apply(ident, input, now, opts)
+      return r.ok ? { ...r, created: true } : r
+    },
     /** One dashboard action on ids (lib/activity2.js applyAction2), its writes appended in order (step 10 wires the
      * dashboard to it; the tests use it for dismissals). → the result without its records */
     action(q, now, opts = {}) {
@@ -276,7 +315,7 @@ export function createStore2(o) {
         if (t) for (const d of new Set([localDay(t), localDay(t - DAY), localDay(t + DAY)])) {
           for (const l of fsx.readDay(host, d)) {
             if (!l.rec || l.rec.id !== id || A2.recordKind2(l.rec) !== 'entry') continue
-            const { v: _v, ...e } = l.rec
+            const { v: _v, line_id: _li, line_details: _ld, line_data: _lx, ...e } = l.rec   // #90: a question's status entry also carries the LINE's kept id / details / data (for the replay) — not this entry's
             return { ok: true, source: 'file', entry: { ...e, node_id: e.n, rendered: renderText(e.text, e.progress, e.eta_at, now) } }
           }
         }
@@ -400,7 +439,8 @@ export function createStore2(o) {
  * line carries has_details / has_data flags, never the details / data). */
 export function nodeRow2(sess, n, depth, now, memo, staleMin) {
   const l = n.current
-  return { ...A2.nodeView(sess, n), parent: n.parent, depth, rank: n.rank || null, created_at: n.created_at, run_at: n.run_at, runs: n.runs, last_activity: n.last_activity,
+  // step 9: + parent_id, the §4.2 name (`parent` stays: the same id, as steps 6 – 8 served it)
+  return { ...A2.nodeView(sess, n), parent: n.parent, parent_id: n.parent, depth, rank: n.rank || null, created_at: n.created_at, run_at: n.run_at, runs: n.runs, last_activity: n.last_activity,
     ...(es => ({ state: es.state, ...(es.stale ? { stale: true, was: es.was } : {}), stale_at: es.stale_at }))(A2.effectiveState2(sess, n, now, staleMin)), current: l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: l.data != null || !!l.has_data, ...(l.by ? { by: l.by } : {}), ...(l.question ? { question: l.question } : {}) } : null,
     progress: n.progress || null, eta_at: n.eta_at || null, finished_at: n.finished_at || null, implicit: !!n.implicit, log_n: n.log.length + n.log_dropped, ...(n.log_floor ? { log_floor: n.log_floor } : {}),
     display: A2.displayOf2(sess, n, { now, memo }) }

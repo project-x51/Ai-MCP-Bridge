@@ -1,11 +1,11 @@
-// #88 (v2.0) build step 7 — GOSSIP v6, live: three 2.0 gateways (the pre-cutover switch AI_BRIDGE_ACTIVITY_V2=1) and one
-// 1.7x gateway (the same bridge WITHOUT the switch = a live 1.7x bridge), each on its own loopback address, host name
+// #88 (v2.0) build step 7 — GOSSIP v6, live: three 2.0 gateways and one STAND-IN for a
+// 1.7x gateway (since step 9 removed the switch: AI_BRIDGE_TEST_GOSSIP=v5 announces activity_gossip:5, as a 1.7x hub), each on its own loopback address, host name
 // (AI_BRIDGE_TEST_HOSTNAME), temp persistence dir and this file's port block (never 12317 / 12318); a temp AI_BRIDGE_CONFIG
 // (never src/config.json). Every gateway has the others as seeds (activity gossip is one-hop: each host sends its OWN board):
 //   A  127.0.0.1  "V2GOS-A"  2.0; a dashboard attaches here (its actions on B's nodes go to B by id)
 //   B  127.0.0.2  "V2GOS-B"  2.0; serves 3 entries per remote log page; restarted mid-test (catch-up)
 //   C  127.0.0.3  "V2GOS-C"  2.0; a third board
-//   L  127.0.0.4  "V2GOS-L"  1.7x (no switch): announces activity_gossip:5
+//   L  127.0.0.4  "V2GOS-L"  the 1.7x stand-in (AI_BRIDGE_TEST_GOSSIP=v5): announces activity_gossip:5
 // Covers (docs/spec-88.md §6, §8 step 7): the handshake (2.0 announces 6 and shares only with 6); boards REPLICATE both
 // ways and to a third host, node IDS STABLE across hosts (the same id, path, kind, type, bar and plan on every board); a
 // rename / a move on one host travels as ONE changed unit, a merge as the merged node's removal (+ its new parent);
@@ -44,8 +44,7 @@ function spawn(k, extra = {}) {
   const env = { ...process.env, AI_BRIDGE_CONFIG: cfgFile, AI_BRIDGE_NAME: `Hub${k}`, AI_BRIDGE_PORT: P[k], AI_BRIDGE_WS_PORT: String(Number(P[k]) + 1), AI_BRIDGE_TOKEN: TOKEN,
     AI_BRIDGE_BIND: ADDR[k], AI_BRIDGE_ADVERTISE_HOST: ADDR[k], AI_BRIDGE_USER: 'robin', AI_BRIDGE_TEST_HOSTNAME: H[k], AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: dirs[k],
     AI_BRIDGE_DISCOVERY: 'seeds', AI_BRIDGE_SEEDS: Object.keys(H).filter(x => x !== k).map(x => `${ADDR[x]}:${P[x]}`).join(','), AI_BRIDGE_DISCOVERY_MS: '300',
-    AI_BRIDGE_TEST_GOSSIP: '', AI_BRIDGE_TEST_ACTIVITY_TAP: '1', TEMP: TMP, TMP, ...(k === 'L' ? {} : { AI_BRIDGE_ACTIVITY_V2: '1' }), ...extra }
-  if (k === 'L') delete env.AI_BRIDGE_ACTIVITY_V2
+    AI_BRIDGE_TEST_GOSSIP: k === 'L' ? 'v5' : '', AI_BRIDGE_TEST_ACTIVITY_TAP: '1', TEMP: TMP, TMP, ...extra }   // step 9: no switch any more; L stands in for a 1.7x hub (AI_BRIDGE_TEST_GOSSIP=v5: it announces activity_gossip:5)
   delete env.AI_BRIDGE_TRAY
   const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR, env, stderr: 'pipe' })
   const c = new Client({ name: `t-${k}`, version: '0' }, { capabilities: {} })
@@ -244,10 +243,10 @@ try {
 
   // ---- 6. a 1.7x PEER (L): nothing shared either way (§6.2), the message mesh still federated
   await call(L, 'register_self', { name: 'Old', secret: 'ol', project: 'AIMB' })
-  const lo = await call(L, 'log', { as: 'Old', secret: 'ol', agent: 'old-agent', text: '@~root on the 1.7x host' })
+  const lo = await call(L, 'log', { as: 'Old', secret: 'ol', agent: 'old-agent', label: 'Old agent', text: '@on the 1.7x host' })
   await sleep(2500)
   const bA6 = await board(A), bL6 = (await call(L, 'activity')).sessions || [], tA6 = await tap(A)
-  check('1.7x peer: L\'s board works (its 1.7x log) but its sessions never reach a 2.0 board', lo.ok && !!bL6.find(s => s.session === 'Old') && !bA6.some(s => s.host === H.L || s.session === 'Old'), J([lo.code, bA6.map(s => [s.session, s.host])]))
+  check('1.7x peer: L\'s board works (its own 2.0 board) but its sessions never reach a 2.0 board', lo.ok && !!bL6.find(s => s.session === 'Old') && !bA6.some(s => s.host === H.L || s.session === 'Old'), J([lo.code, bA6.map(s => [s.session, s.host])]))
   check('1.7x peer: no 2.0 session reaches L\'s 1.7x board either', !bL6.some(s => ['Orch', 'Lead'].includes(s.session)), J(bL6.map(s => [s.session, s.host])))
   check('1.7x peer: A never sends L an activity frame, takes none from it, and tapped the format mismatch once (activity_gossip:5)', !tA6.sent.some(x => x.peer === H.L) && !tA6.recv.some(x => x.peer === H.L && x.kind !== 'format-mismatch')
     && tA6.recv.filter(x => x.peer === H.L && x.kind === 'format-mismatch').length >= 1 && tA6.recv.find(x => x.peer === H.L && x.kind === 'format-mismatch').v === 5, J(tA6.recv.filter(x => x.peer === H.L)))

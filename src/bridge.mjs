@@ -893,7 +893,7 @@ const ACT_CLOCK_OFFSET_MS = Number(process.env.AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFF
 const actNow = () => Date.now() + ACT_CLOCK_OFFSET_MS
 const LOG_FIELDS = [...Act.MESSAGE_FIELDS, 'items']   // v1.62.0 (#70 step 6a): + path (the node tree) + items (a batch); v1.63.0 (6b): + plan (in MESSAGE_FIELDS)
 const ACT_TAP = process.env.AI_BRIDGE_TEST_ACTIVITY_TAP === '1'   // test-only (#70 step 4): `activity {tap:true}` returns the recent gossip frames sent/received
-const BOARD_FIELDS = ['project', 'session', 'agent', 'path', 'host', 'active_only', 'log', 'entry', ...(ACT_TAP ? ['tap'] : [])]   // v1.60.0: + host (the mesh board); v1.62.0: + path (a node and its subtree)
+const BOARD_FIELDS = ['project', 'session', 'user', 'host', 'log', 'entry', ...(ACT_TAP ? ['tap'] : [])]   // #88 step 9: the 2.0 read's fields (lib/activity2-store.js board / logPage / entry)   // v1.60.0: + host (the mesh board); v1.62.0: + path (a node and its subtree)
 function activityConfig(cfg) { const w = []; const c = Act.resolveConfig(cfg && cfg.activity, process.env, w); for (const x of w) log(`activity config: ${x}`); return c }
 let ACT_CFG = activityConfig(CFG)
 let activity = null        // the host's activity state — on the GATEWAY only (a follower forwards)
@@ -905,18 +905,16 @@ let actCfDay = null, actCfLast = null   // v1.63.0 (#70 6b): the local day whose
 const actCheckpointMs = () => Number(process.env.AI_BRIDGE_ACTIVITY_CHECKPOINT_MS) || ACT_CFG.progress_checkpoint_sec * 1000   // env: tests use a short interval
 const tzOff = t => -new Date(t).getTimezoneOffset()
 const actDisabled = () => ({ ok: false, code: 'activity-disabled', what: 'the activity board is disabled on this host (config activity.enabled / AI_BRIDGE_ACTIVITY_ENABLED)' })
-// #88 build step 6 (2.0) — the PRE-CUTOVER SWITCH. AI_BRIDGE_ACTIVITY_V2=1: this host's GATEWAY holds the 2.0 board
-// (lib/activity2-store.js: the id-keyed model + the v6 day files, their per-day index files and the ghost table) INSTEAD of
-// the 1.7x one — `activity` stays null and `act2` holds the store. It refuses to start on unconverted history (exit 78, the
-// §7.5 start check). Unset (the default until step 9 removes the switch), the 1.7x board serves exactly as before. With the
-// switch on, the parts later steps build answer `not-in-2.0-yet`: the per-user view state (8), the 2.0 script / batches /
-// --wait-answer / guides (9), the dashboard's board pushes (10). Step 7 built GOSSIP v6 here (lib/activity2-gossip.js):
-// the gateway announces `activity_gossip:6` and shares its board with the peer hubs that announce 6 too (a 1.7x hub
-// announces 5: the equality check fails both ways and nothing is shared, §6.2), other hosts' boards and log pages are read
-// through their owners, and dashboard actions go to the node's owner by id (§6.3).
-const ACT_V2 = process.env.AI_BRIDGE_ACTIVITY_V2 === '1'
-let act2 = /** @type {any} */ (null)   // the 2.0 store — on the GATEWAY only, with the switch on
-const actRemote2 = G2.createRemote2({ origin: HOSTNAME })   // #88 step 7: the other 2.0 hosts' boards (gossip v6), on the gateway with the switch on
+// #88 (2.0): THE BOARD IS 2.0. Steps 6 – 8 built it behind a pre-cutover switch (AI_BRIDGE_ACTIVITY_V2=1); build step 9
+// REMOVED the switch: every GATEWAY holds the 2.0 store (lib/activity2-store.js: the id-keyed model + the v6 day files,
+// their per-day index files and the ghost table) — `act2` — and refuses to start on unconverted history (exit 78, the §7.5
+// start check). The 1.7x board (`activity`, lib/activity.js) is no longer created; its code below is unreached until step
+// 11 deletes it. Gossip v6 (step 7): the gateway announces `activity_gossip:6` and shares its board with the peer hubs
+// that announce 6 too (a 1.7x hub announces 5: the equality check fails both ways and nothing is shared, §6.2), other
+// hosts' boards and log pages are read through their owners, and dashboard actions go to the node's owner by id (§6.3).
+// The dashboard's board pushes answer `not-in-2.0-yet` until step 10.
+let act2 = /** @type {any} */ (null)   // the 2.0 store — on the GATEWAY only
+const actRemote2 = G2.createRemote2({ origin: HOSTNAME })   // #88 step 7: the other 2.0 hosts' boards (gossip v6), on the gateway
 const actNotYet2 = (step, what) => ({ ok: false, code: 'not-in-2.0-yet', what: `${what} is not wired to the 2.0 activity board yet (#88 build step ${step})` })
 profile.config.watch(c => {   // live-reload: the knobs apply to the next call / sweep (enabled, stale window, caps, cadence)
   const n = activityConfig(c)
@@ -931,7 +929,7 @@ function indexEntry(id, day, offset, length) {
 // gateway promotion (becomeGateway): create the host's state and replay its files in the background (startup is never
 // blocked on it); `log` calls wait for it, reads see the phase-1 board as soon as it's published
 function startActivity() {
-  if (ACT_V2) return startActivity2()
+  return startActivity2()   // #88 step 9: always the 2.0 board (the 1.7x start below is unreached; step 11 deletes it)
   if (activity) return
   activity = Act.createActivity({ config: ACT_CFG, origin: HOSTNAME, idPrefix: `act_${crypto.randomBytes(2).toString('hex')}_` })
   activity.config = ACT_CFG
@@ -960,7 +958,7 @@ function startActivity2() {
   act2 = store
   log(`activity (2.0): ${fsx ? `replayed ${st.fed} record(s) → ${st.sessions} session(s), ${st.nodes} node(s), ${st.ghosts} ghost(s) (${st.ghosts_rebuilt || 0} from the index files) in ${st.ms}ms` : 'memory-only board (no persistence)'}`)
   act2.rollover(actNow(), 'startup')
-  act2.expire(actNow())
+  actExpire2(false)   // step 9: an expired question's asker is told, as at every pass
   scheduleActivityCheckpoints()
   startView2()
 }
@@ -995,11 +993,11 @@ const VIEW_SAVE_MS = Number(process.env.AI_BRIDGE_VIEW_SAVE_MS) || 10000
 const VIEW_GC_MS = Number(process.env.AI_BRIDGE_VIEW_GC_MS) || 600000
 const VIEW_FULL_SETTLE_MS = 5000   // a link's adoption exchange is in flight this long: no anti-entropy resend meanwhile
 const viewSet = createViewSet({ realm: REALM, origin: HOSTNAME, ttlMs: VIEW_TTL, log: l => log(l) })
-const viewOn = () => ACT_V2 && role === 'gateway' && !!act2
+const viewOn = () => role === 'gateway' && !!act2
 let viewPending = /** @type {{ rec: any, from: string|null }[]} */ ([]), viewTimer = /** @type {any} */ (null), viewSaveTimer = /** @type {any} */ (null), viewLastSave = 0, viewDirty = false
 const viewWire = r => ({ k: r.k, v: r.v, ts: r.ts, origin: r.origin })   // what a page gets (no realm / user / generation)
 function startView2() {
-  if (!ACT_V2 || !act2) return
+  if (!act2) return
   let rh = { files: 0, merged: 0, bad: 0 }
   if (PERSIST && persistence.activity2 && persistence.activity2.readViews) {
     try { rh = viewSet.rehydrate(persistence.activity2.readViews(), Date.now()) } catch (e) { log(`view: reading views/ failed: ${(e && e.message) || e}`) }
@@ -1046,7 +1044,7 @@ function viewSaveSoon() {
   viewSaveTimer.unref()
 }
 function viewSaveNow() {
-  if (!viewDirty || !ACT_V2 || !PERSIST || !persistence.activity2 || !persistence.activity2.writeView) return
+  if (!viewDirty || !PERSIST || !persistence.activity2 || !persistence.activity2.writeView) return
   viewDirty = false; viewLastSave = Date.now()
   try { persistence.activity2.writeView(HOSTNAME, viewSet.toFile(HOSTNAME, Date.now())) } catch (e) { viewDirty = true; log(`view: writing views/ failed: ${(e && e.message) || e}`) }
 }
@@ -1089,7 +1087,7 @@ function viewFlush() {
 }
 /** A VIEW frame from an adopted v6 peer-hub link (the switch on, gateway only). */
 function onViewFrame(sock, f) {
-  if (!ACT_V2 || actLegacy()) return
+  if (actLegacy()) return
   const [gw, p] = peerEntryOf(sock)
   if (!gw || !p || !p.act || !p.act.cap) { tapRec('recv', { kind: 'view-refused', why: 'not an adopted v6 link' }); return }
   if (!viewOn() || !Array.isArray(f.recs)) return
@@ -1250,19 +1248,30 @@ function actRollover(why) {
   carryForwardActivity(why).catch(e => log(`activity: carry-forward failed: ${(e && e.message) || e}`))
 }
 setInterval(() => actRollover('day rollover'), ACT_ROLLOVER_CHECK_MS).unref()
+/** #88: the 2.0 owner's expiry pass (question expiry, the transient grace sweep, expiry — each written), every ACT_GC_MS
+ * and (step 9) at the next open question's expires_at (actScheduleExpiry): an expired question's asker hears it at once
+ * (activity_answer, status expired) and its waiting scripts are released (actChanged → actSettleWaiters). remote = also
+ * expire the 2.0 hosts down past the window (the gc tick). */
+function actExpire2(remote) {
+  if (!act2 || role !== 'gateway') return
+  let changed = false, expired = []
+  try { const x = act2.expire(actNow()); changed = x.changed; expired = x.expired || []; if (x.left) viewPrune(x.left) } catch (e) { log(`activity: expiry failed: ${(e && e.message) || e}`) }   // step 8: + the view records of what expired
+  if (remote) for (const o of G2.expireRemote2(actRemote2, actNow(), ACT_CFG.finished_visible_hours * 3600000)) { actOwner.delete(o); log(`activity: ${o} has been down for ${ACT_CFG.finished_visible_hours} h — its board leaves this one`) }   // #88 step 7
+  if (expired.length) {
+    const now = actNow()
+    log(`activity: ${expired.length} question(s) expired unanswered: ${expired.map(e => `${e.ident.session}/${e.path}`).join(', ').slice(0, 300)}`)
+    for (const e of expired) notifyActivitySession(e.ident, A2.answerNotice2(e, { host: HOSTNAME, ts: now, state: act2.state }), { now: true }).catch(() => { })   // step 9 (#85): the asker hears it at once
+  }
+  if (changed) actChanged()   // #88 step 7: the removals reach the peer hubs as a delta
+  else actScheduleExpiry()
+}
 function actBudget() {
   const r = Act.enforceBudget(activity, ACT_CFG.memory_budget_mb * 1048576)
   if (r.evicted.length || r.entries_dropped) log(`activity: over the ${ACT_CFG.memory_budget_mb} MB budget — evicted ${r.evicted.length} finished agent(s), dropped ${r.entries_dropped} log entries`)
   return r.evicted.length
 }
 setInterval(() => {   // expiry (finished/gone agents past finished_visible_hours leave the board) + the memory budget
-  if (act2 && role === 'gateway') {   // #88 step 6: the 2.0 pass writes its removals
-    let changed = false
-    try { const x = act2.expire(actNow()); changed = x.changed; if (x.left) viewPrune(x.left) } catch (e) { log(`activity: expiry failed: ${(e && e.message) || e}`) }   // step 8: + the view records of what expired
-    for (const o of G2.expireRemote2(actRemote2, actNow(), ACT_CFG.finished_visible_hours * 3600000)) { actOwner.delete(o); log(`activity: ${o} has been down for ${ACT_CFG.finished_visible_hours} h — its board leaves this one`) }   // #88 step 7
-    if (changed) actChanged()   // #88 step 7: the removals reach the peer hubs as a delta
-    return
-  }
+  if (act2 && role === 'gateway') { actExpire2(true); return }   // #88 step 6: the 2.0 pass writes its removals
   if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
   const now = actNow()
   // v1.64.0 (#70 6c): AUTO-ABANDON — the open plans of a session gone (not on this host's roster, no message) for
@@ -1273,8 +1282,6 @@ setInterval(() => {   // expiry (finished/gone agents past finished_visible_hour
     log(`activity: abandoned ${ab.abandoned.length} plan node(s)/item(s) of session(s) gone ${ACT_CFG.abandoned_plan_days}+ days: ${[...new Set(ab.abandoned.map(a => a.session))].join(', ')}`)
     if (PERSIST) (async () => { for (const rec of ab.records) await persistActivity(rec) })().catch(e => log(`activity: auto-abandon append failed: ${(e && e.message) || e}`))
   }
-  const qa = Act.nextQuestionExpiry(activity)
-  if (qa != null && qa <= now) actExpireQuestions().catch(e => log(`activity: question expiry failed: ${(e && e.message) || e}`))   // v1.71.0 (#85): a safety net for the expiry timer
   let changed = Act.expire(activity, now).length > 0 || ab.records.length > 0
   for (const k of [...actPresent]) if (!activity.local.has(k)) actPresent.delete(k)
   for (const o of Act.expireRemote(activity, now)) { actOwner.delete(o); changed = true }   // #70 step 4: a host down past the window leaves the board
@@ -1299,7 +1306,7 @@ function syncActivityGone() {
 // ---- the gateway's handlers (a follower reaches them through activityCall → ACTIVITY frame)
 async function activityLog(ident, input, opts = {}) {   // opts.script: an aimb-log.mjs report (#70 step 3) — never tracked for gone
   if (!ACT_CFG.enabled) return actDisabled()
-  if (ACT_V2) return activityLog2(ident, input)
+  return activityLog2(ident, input, opts)   // #88 step 9: always the 2.0 board
   if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   const batch = !!input && typeof input === 'object' && input.items !== undefined
   const split = batch ? Act.splitBatch(input) : null   // v1.62.0 (#70 step 6a): a BATCH — its bounds refuse the whole call (before any wait)
@@ -1326,19 +1333,27 @@ async function activityLog(ident, input, opts = {}) {   // opts.script: an aimb-
   }
   return res
 }
-// #88 step 6: a `log` call on the 2.0 board (the switch on) — the 2.0 tool's fields (lib/activity2.js parseCall), its
-// records written through the store's writer in order. A batch (`items`) waits for step 9's 2.0 tool.
-async function activityLog2(ident, input) {
+// #88 step 6: a `log` call on the 2.0 board — the 2.0 tool's fields (lib/activity2.js parseCall), its records written
+// through the store's writer in order. Step 9: a BATCH (`items`, §4.2: lib/activity2.js splitBatch2 — ≤ 64 items, ≤ 64 KB;
+// beside them only `agent` / `log` as defaults) applies each item in order as its own all-or-nothing call (a bad item fails
+// alone) → { ok, results, applied, failed }, with ONE coalesced gossip / dashboard change.
+async function activityLog2(ident, input, opts = {}) {
   if (!act2) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, code: 'bad-input', what: 'log needs an input object' }
-  if (input.items !== undefined) return actNotYet2(9, 'a batch (items)')
-  const now = actNow()
-  const r = act2.apply({ realm: ident.realm || REALM, project: ident.project, user: ident.user, session: ident.session }, input, now, { tzOffsetMin: tzOff(now) })
+  const now = actNow(), id = { realm: ident.realm || REALM, project: ident.project, user: ident.user, session: ident.session }
+  const batch = input.items !== undefined
+  const r = batch ? act2.batch(id, input, now, { tzOffsetMin: tzOff(now) }) : act2.apply(id, input, now, { tzOffsetMin: tzOff(now) })
   if (!r.ok) return r
-  actChanged()
+  if (batch ? r.applied : true) actChanged()
   const { left, ...res } = r
   if (left) viewPrune(left)   // #88 step 8: nodes that left the board (a transient vanish, a merge) → their view records tombstoned
-  return { ...res, session: ident.session }
+  return batch ? res : { ...res, session: ident.session }
+}
+/** #88 step 9: the read-only `resolve` (the tool, the script's --resolve; Q46) — what a path resolves to now, changing nothing. */
+function activityResolve2(ident, input) {
+  if (!ACT_CFG.enabled) return actDisabled()
+  if (!act2) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  return act2.resolve({ realm: ident.realm || REALM, project: ident.project, user: ident.user, session: ident.session }, input)
 }
 /** #88 step 6: the `activity` read on the 2.0 board — the sessions, a node's log page (via the index files; `removed` = "show
  * removed"), or one entry. Step 7 (gossip v6): the board holds the other 2.0 hosts' sessions too (each row tagged with its
@@ -1417,7 +1432,7 @@ const actShow = o => (o && typeof o === 'object' && o.project != null ? { ...o, 
 // read must answer inside its own timeout, so it gets `busy` rather than a long queue)
 async function activityRead(q, ctx = {}) {
   if (!ACT_CFG.enabled) return actDisabled()
-  if (ACT_V2) return act2 ? activityRead2(q && typeof q === 'object' ? q : {}, ctx) : { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  return act2 ? activityRead2(q && typeof q === 'object' ? q : {}, ctx) : { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   q = q && typeof q === 'object' ? q : {}
   const now = actNow()
@@ -1479,7 +1494,7 @@ function actActionQuery(m) {
 }
 async function activityAction(m, ctx = {}) {   // on the gateway a dashboard is attached to
   if (!ACT_CFG.enabled) return actDisabled()
-  if (ACT_V2) return activityAction2(m, ctx)
+  return activityAction2(m, ctx)   // #88 step 9: always the 2.0 board
   if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   const q = actActionQuery(m)
   if (!q.action || !Act.ACTIVITY_ACTIONS.includes(q.action)) return { ok: false, code: 'bad-action', what: `action must be one of ${Act.ACTIVITY_ACTIONS.join('|')}` }
@@ -1564,6 +1579,7 @@ async function actApplyAction2(q, by) {
   const now = actNow()
   const r = act2.action({ ...q, realm: REALM }, now, { by })
   if (!r.ok) return { ...r, host: HOSTNAME }
+  const isAns = ['answer', 'change_answer', 'withdraw'].includes(r.action), released = actSettleWaiters()   // #85 on 2.0: the scripts waiting on this question hear it now (before actChanged settles them unseen)
   actChanged()
   if (r.left) { viewPrune(r.left); delete r.left }   // #88 step 8: a dismissal / merge → the view records of what left the board
   log(`activity: ${r.action} on ${q.session}/${r.path || '(root)'} (${projName(q.project || 'unclassified')}) ${Act.byText(by)}${r.dismissed ? ` — ${r.dismissed.nodes || ''} node(s) off the board` : ''}`)
@@ -1578,8 +1594,9 @@ async function actApplyAction2(q, by) {
     } else notifyActivitySession(r.ident, nt)
   }
   const { ident: _i, by: _b, ...rest } = r
-  const warns = [...(r.warnings || []), ...(delivery === 'none' ? ['not-delivered'] : [])]
-  return { ...rest, ok: true, host: HOSTNAME, ...(warns.length ? { warnings: warns } : {}), ...(delivery ? { delivered: delivery !== 'none', delivery } : {}) }
+  const lost = delivery === 'none' && !(isAns && released)   // #85: an answer a waiting script took is not lost
+  const warns = [...(r.warnings || []), ...(lost ? ['not-delivered'] : [])]
+  return { ...rest, ok: true, host: HOSTNAME, ...(warns.length ? { warnings: warns } : {}), ...(delivery ? { delivered: delivery !== 'none', delivery } : {}), ...(isAns ? { released } : {}) }   // #85: how many waiting scripts it released
 }
 // #80 (v1.68.0): NOTICES TO THE OWNING SESSION — the one internal hook for "the board changed under you" messages.
 //   notifyActivitySession(ident, { verb, subject, body }, { now? }) → Promise<result | { queued:true, in_ms }>
@@ -1597,7 +1614,7 @@ async function actApplyAction2(q, by) {
 // for the session's durable registration in this host's store (drained on its next register_self, §19); none at all (a
 // script-only session) → nothing but the log entry the action already wrote. A live sub-peer's doorbell wakes as for any
 // mail (deliverSub → counts). #83 (activity_text_edited), #84 (activity_message) and #85 (activity_answer) send through it.
-const ACT_COMBINE = ACT_V2 ? A2.combineActionNotices2 : Act.combineActionNotices   // #88 step 7: the 2.0 board's actions are combined by the 2.0 rule (paths without "@")
+const ACT_COMBINE = A2.combineActionNotices2   // #88 step 7: the 2.0 board's actions are combined by the 2.0 rule (paths without "@")
 const ACT_NOTICE_COMBINE = { [Act.NOTICE_VERB]: ACT_COMBINE, [Act.EDIT_NOTICE_VERB]: ACT_COMBINE }   // v1.70.0 (#83): several edits in a window become one ('robin edited 3 lines in @X')
 const ACT_NOTICE_MAX = 64, ACT_NOTICE_MAX_WINDOWS = 5
 const actNoticeQ = new Map()   // session key → { ident, notices:[{ verb, subject, body }], first, timer }
@@ -1738,17 +1755,20 @@ function activityForward(op, payload) {
   })
 }
 const verLt = (a, b) => { const x = String(a || '0').split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); return false }
-async function activityCall(op, payload) {   // op 'log' { ident, input } | 'read' { query }
+async function activityCall(op, payload) {   // op 'log' { ident, input } | 'read' { query } | (#88 step 9) 'resolve' / 'guide' { ident, input }
   const t0 = Date.now()
   for (;;) {
-    if (role === 'gateway') return op === 'log' ? activityLog(payload.ident, payload.input) : activityRead(payload.query, { maxWaitMs: ACT_TOOL_WAIT_MS })
+    if (role === 'gateway') {
+      if (op === 'log') return activityLog(payload.ident, payload.input)
+      if (op === 'resolve') return activityResolve2(payload.ident, payload.input)
+      if (op === 'guide') return guideRegister(payload.ident, payload.input)
+      return activityRead(payload.query, { maxWaitMs: ACT_TOOL_WAIT_MS })
+    }
     if (role === 'follower' && gwSock && !gwSock.destroyed && gwRegistered) {
       const gv = roster.get(gatewayId)?.bridge_version   // a ≤1.57 gateway ignores ACTIVITY frames: say so now, not after a timeout
       if (gv && verLt(gv, '1.58.0')) return { ok: false, code: 'gateway-unsupported', what: `this host's gateway runs bridge ${gv}; the activity board needs 1.58.0+ on the gateway (restart it on the new version)` }
-      // v1.69.0 (#82): a ≤1.68 gateway would silently IGNORE move / to / before / after / position (an item appended, a move not made)
-      if (gv && op === 'log' && verLt(gv, '1.69.0') && Act.usesPlan82(payload.input)) return { ok: false, code: 'gateway-unsupported', what: `this host's gateway runs bridge ${gv}; move / to / before / after / position need 1.69.0+ on the gateway (restart it on the new version)` }
-      // v1.71.0 (#85): a ≤1.70 gateway would drop ask / choices / free / expires (and refuse state withdrawn) — say so now
-      if (gv && op === 'log' && verLt(gv, '1.71.0') && Act.usesAsk(payload.input)) return { ok: false, code: 'gateway-unsupported', what: `this host's gateway runs bridge ${gv}; questions (ask / choices / free / expires, state withdrawn) need 1.71.0+ on the gateway (restart it on the new version)` }
+      // #88 step 9: a 2.0 follower forwards the 2.0 forms; a 1.7x gateway on the same host is not a supported state (every
+      // bridge of a host stops for the cutover, §7.1) — its own parser refuses what it can't read
       return activityForward(op, payload)
     }
     if (Date.now() - t0 >= ACT_FWD_MS) return { ok: false, code: 'no-gateway', what: 'no gateway on this host right now (re-election in progress?) — retry in a moment' }
@@ -1783,107 +1803,126 @@ function loggerUserConflict(ident) {   // a live sub-peer — or bare session �
   }
   return null
 }
-// v1.71.0 (#85): WAITING FOR AN ANSWER — tools/aimb-log.mjs --ask … --wait 30m / --wait-answer --path <q> sends, on its logger
-// link, {type:"wait_answer", ref, path, timeout_ms} → ONE {type:"answer", ref, result} when the question (a node of the LOGGER's
-// own session) is answered / expired / withdrawn / leaves the board ("gone"), or when timeout_ms (≤ 24 h) runs out ("timeout" —
-// it stays open). A long poll on the existing connection: no board polling. result = { ok:true, outcome, status, path, question,
-// choices, free, answer?, by?, at?, asked_at, expires_at?, entry_id, waited_ms } (lib/activity.js questionOutcome) | { ok:false,
-// code } (bad-path, unknown-node, not-a-question, busy). Released by actSettleWaiters on every local board change (actChanged:
-// an answer, a withdrawal, an expiry, a dismissal, an eviction …); a closed link drops its waiters (the script reconnects and
-// waits again). At most 16 per link and 1024 per gateway.
+// v1.71.0 (#85) → #88 step 9 (2.0): WAITING FOR AN ANSWER — tools/aimb-log.mjs --ask … --wait 30m / --wait-answer [--key K |
+// --id I | --path P] sends, on its logger link, {type:"wait_answer", ref, node_id | (agent?, key | id | path), timeout_ms}
+// (§4.2: `node_id` — the id its ask returned as node.id; the address form is resolved READ-ONLY on the logger's own session,
+// a 2.0 path, no `@`: a 1.7x path is refused legacy-form) → ONE {type:"answer", ref, result} when the question is answered /
+// expired / withdrawn / leaves the board ("gone"), or when timeout_ms (≤ 24 h) runs out ("timeout" — it stays open). A long
+// poll on the existing connection: no board polling. result = { ok:true, outcome, status, id, key, path, question, choices,
+// free, answer?, by?, at?, revised?, previous?, asked_at, expires_at?, entry_id, waited_ms } (lib/activity2.js
+// questionOutcome2) | { ok:false, code } (bad-input, unknown-node, not-a-question, busy, legacy-form …). Released by
+// actSettleWaiters on every local board change (actChanged: an answer, a withdrawal, an expiry, a dismissal, an eviction …);
+// a closed link drops its waiters (the script reconnects and waits again). At most 16 per link and 1024 per gateway.
 const ACT_WAIT_MAX_MS = 24 * 3600000, ACT_WAIT_PER_WS = 16, ACT_WAIT_MAX = 1024
-const actWaiters = new Set()   // { ws, ref, sess, node, t0, timer }
+const actWaiters = new Set()   // { ws, ref, ident, id, t0, timer }
 function actWaitReply(w, result) { actWaiters.delete(w); if (w.timer) clearTimeout(w.timer); try { w.ws.send(JSON.stringify({ type: 'answer', ref: w.ref, result })) } catch { } }
 function actSettleWaiters() {   // → how many were released
-  if (!activity || !actWaiters.size) return 0
+  if (!act2 || !actWaiters.size) return 0
   let n = 0
-  for (const w of [...actWaiters]) { const o = Act.questionOutcome(activity, w.sess, w.node); if (o.outcome !== 'open') { actWaitReply(w, { ok: true, ...o, waited_ms: Date.now() - w.t0 }); n++ } }
+  for (const w of [...actWaiters]) { const o = act2.outcome(w.ident, w.id); if (o.outcome !== 'open') { actWaitReply(w, { ok: true, ...o, waited_ms: Date.now() - w.t0 }); n++ } }
   return n
 }
 function actDropWaiters(ws) { for (const w of [...actWaiters]) if (w.ws === ws) { actWaiters.delete(w); if (w.timer) clearTimeout(w.timer) } }
 async function loggerWait(ws, m) {
   const ref = m && m.ref != null ? m.ref : null
   const send = result => { try { ws.send(JSON.stringify({ type: 'answer', ref, result })) } catch { } }
-  if (ACT_V2) return send(actNotYet2(9, 'waiting for an answer (--wait / --wait-answer)'))
-  if (role !== 'gateway' || !activity) return send({ ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })
+  if (role !== 'gateway' || !act2) return send({ ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })
   if (!ACT_CFG.enabled) return send(actDisabled())
-  if (actReplay && actReplay.phase !== 'done') {
-    const ready = await Promise.race([actReplay.promise.then(() => true), new Promise(res => { setTimeout(() => res(false), ACT_LOAD_WAIT_MS).unref() })])
-    if (!ready) return send({ ok: false, code: 'activity-loading', what: 'the activity board is still loading this host\'s log after a restart — retry in a moment' })
+  const ident = { realm: ws.ident.realm || REALM, project: ws.ident.project, user: ws.ident.user, session: ws.ident.session }
+  let id = null
+  if (m.node_id != null) {
+    if (typeof m.node_id !== 'string' || !/^[a-z2-7]{16}$/.test(m.node_id)) return send({ ok: false, code: 'bad-input', what: 'node_id must be a node id (16 chars of a-z 2-7: the node.id its ask returned)' })
+    id = m.node_id
+  } else {
+    const addr = {}
+    for (const k of ['agent', 'key', 'id', 'path']) if (m[k] !== undefined && m[k] !== null) addr[k] = m[k]
+    if (!addr.key && !addr.id && !addr.path) return send({ ok: false, code: 'bad-input', what: 'wait_answer needs node_id (the node.id its ask returned) or the question\'s key / id / path (+ agent)' })
+    const f = act2.find(ident, addr)
+    if (!f.ok) return send(f)
+    id = f.id
   }
-  const pp = Act.parsePath(typeof m.path === 'string' ? m.path : '')
-  if (!pp.ok || pp.current || !pp.key) return send({ ok: false, code: 'bad-path', what: 'wait_answer needs path: the question\'s node (the path its ask returned)' })
-  const sess = Act.getSession(activity, ws.ident), node = sess ? sess.nodes.get(pp.key) : null
-  if (!node) return send({ ok: false, code: 'unknown-node', what: `session "${ws.ident.session}" has no node "${pp.path}" on this host` })
-  if (!Act.isQuestion(node)) return send({ ok: false, code: 'not-a-question', what: `"${node.path}" is not a question` })
-  const o = Act.questionOutcome(activity, sess, node)
+  const o = act2.outcome(ident, id)
+  if (o.outcome === 'gone') {
+    const f = act2.find(ident, { id })
+    if (f.ok) return send({ ok: false, code: 'not-a-question', what: `"${f.node.path}" is not a question` })
+  }
   if (o.outcome !== 'open') return send({ ok: true, ...o, waited_ms: 0 })
   const ms = Math.max(0, Math.min(ACT_WAIT_MAX_MS, Math.floor(Number(m.timeout_ms) || 0)))
   if (!ms) return send({ ok: true, ...o, outcome: 'timeout', waited_ms: 0 })
   let mine = 0; for (const w of actWaiters) if (w.ws === ws) mine++
   if (mine >= ACT_WAIT_PER_WS || actWaiters.size >= ACT_WAIT_MAX) return send({ ok: false, code: 'busy', what: `too many waits (${mine >= ACT_WAIT_PER_WS ? ACT_WAIT_PER_WS + ' on this link' : ACT_WAIT_MAX + ' on this gateway'})` })
-  const w = { ws, ref, sess, node, t0: Date.now(), timer: /** @type {any} */ (null) }
-  w.timer = setTimeout(() => { if (!actWaiters.has(w)) return; const x = Act.questionOutcome(activity, w.sess, w.node); actWaitReply(w, { ok: true, ...x, outcome: x.outcome === 'open' ? 'timeout' : x.outcome, waited_ms: Date.now() - w.t0 }) }, ms)
+  const w = { ws, ref, ident, id, t0: Date.now(), timer: /** @type {any} */ (null) }
+  w.timer = setTimeout(() => { if (!actWaiters.has(w)) return; const x = act2 ? act2.outcome(w.ident, w.id) : { outcome: 'gone', id: w.id }; actWaitReply(w, { ok: true, ...x, outcome: x.outcome === 'open' ? 'timeout' : x.outcome, waited_ms: Date.now() - w.t0 }) }, ms)
   w.timer.unref()
   actWaiters.add(w)
 }
-// v1.71.0 (#85): QUESTION EXPIRY — one timer for the next open question's expires_at (re-armed on every board change); when it
-// fires the bridge closes every due question as expired (lib/activity.js expireQuestions: a SYSTEM line, logged + persisted),
-// releases its waiting scripts and tells each session at once (activity_answer, status expired). A gateway that was down past an
-// expiry closes it as soon as its replay is done.
-let actQTimer = /** @type {any} */ (null), actQAt = /** @type {number|null} */ (null), actQBusy = false
+// v1.71.0 (#85) → #88 step 9: QUESTION EXPIRY — one timer for the next open question's expires_at (re-armed on every board
+// change); when it fires the owner's 2.0 expiry pass runs (actExpire2: the question closes as expired — a SYSTEM line, an
+// `expiry` entry, written —, its waiting scripts are released and its asker is told at once: activity_answer, status
+// expired). The gc pass (every ACT_GC_MS) is the safety net; a gateway that was down past an expiry closes it at its start.
+let actQTimer = /** @type {any} */ (null), actQAt = /** @type {number|null} */ (null)
 function actScheduleExpiry() {
-  if (!activity || role !== 'gateway') return
-  const at = Act.nextQuestionExpiry(activity)
-  if (at === actQAt && (actQTimer || actQBusy)) return
+  if (!act2 || role !== 'gateway') return
+  const at = A2.nextQuestionExpiry2(act2.state)
+  if (at === actQAt && actQTimer) return
   if (actQTimer) clearTimeout(actQTimer)
   actQTimer = null; actQAt = at
   if (at == null) return
-  actQTimer = setTimeout(() => { actQTimer = null; actQAt = null; actExpireQuestions().catch(e => log(`activity: question expiry failed: ${(e && e.message) || e}`)) }, Math.min(2 ** 31 - 1, Math.max(50, at - actNow() + 5)))
+  actQTimer = setTimeout(() => { actQTimer = null; actQAt = null; actExpire2(false) }, Math.min(2 ** 31 - 1, Math.max(50, at - actNow() + 5)))
   actQTimer.unref()
-}
-async function actExpireQuestions() {
-  if (!activity || role !== 'gateway' || actQBusy) return
-  if (actReplay && actReplay.phase !== 'done') await actReplay.promise.catch(() => { })
-  actQBusy = true
-  try {
-    const now = actNow(), ex = Act.expireQuestions(activity, now)
-    if (!ex.records.length) return
-    if (PERSIST) for (const rec of ex.records) await persistActivity(rec)
-    log(`activity: ${ex.expired.length} question(s) expired unanswered: ${ex.expired.map(e => `${e.ident.session}/${e.path}`).join(', ').slice(0, 300)}`)
-    for (const e of ex.expired) notifyActivitySession(e.ident, Act.answerNotice(e, { host: HOSTNAME, ts: now }), { now: true }).catch(() => { })   // #85: the asker hears it at once
-  } finally { actQBusy = false; actChanged() }
 }
 // v1.74.0 (#89 part 2): GUIDES, PULLED on request — never pushed (no register_self or connect reminder carries one). The
 // realm may publish its own agent / session guide in behaviors.realm.guides (lib/realm-defaults.js: ≤ 4 KB each, an optional
 // min_bridge; replicated with the realm record). A request is served from the record this process holds:
-//   - a logger link (tools/aimb-log.mjs --guide): {type:"guide", ref, kind, cmd?, path?, script?} → {type:"guide", ref, ok,
-//     kind, text, source:"realm"|"builtin", updated_at, origin?, reason?, min_bridge?, gateway}. text = the realm's guide, its
-//     placeholders filled from the request ({cmd} {path} {script}) and this gateway ({gateway}), + the gateway-capability note;
-//     null with source "builtin" when there is none for that kind (reason "none") or the requester / this gateway is older than
-//     its min_bridge (reason "min_bridge") — the script then prints its OWN built-in text (it matches the script's flags).
-//     A ≤1.73 gateway answers {type:"logged", result:{code:"bad-op"}}: the script falls back the same way.
+//   - a logger link (tools/aimb-log.mjs --guide): {type:"guide", ref, kind, cmd?, path?, agent?, label?, under?, script?} →
+//     {type:"guide", ref, ok, kind, text, source:"realm"|"builtin", updated_at, origin?, reason?, min_bridge?, gateway,
+//     board?}. text = the realm's guide, its placeholders filled from the request ({cmd} {path} {agent} {script}) and this
+//     gateway ({gateway}); null with source "builtin" when there is none for that kind (reason "none") or the requester /
+//     this gateway is older than its min_bridge (reason "min_bridge") — the script then prints its OWN built-in text.
 //   - the log tool's guide:"agent"|"session" (Cowork, no shell): the realm's guide, else this bridge's built-in text — always text.
 // min_bridge is checked against the LOWER of the requester's version and the serving gateway's.
+// #88 step 9 (2.0, §4.4, Q17): `--guide agent` WITH an agent (`agent` + `label` + `under`) is the agent's FIRST REPORT:
+// when the agent is not on the board yet the gateway creates it (state running, the line "reading the guide") and answers
+// `board` = the call's result (+ created:true); when it is already there nothing is written (`board` = { ok, created:false,
+// node }); a refused create (label-required, unknown-node …) is `board` = the refusal — the guide is served either way.
 const GUIDE_FIELD_MAX = 2048   // a request's cmd / path / script
 const lowerVer = (a, b) => (!a || !b) ? null : (verLt(a, b) ? a : b)
-/** @param {{ kind: string, cmd?: any, path?: any, script?: any, requester?: string|null, gateway: string, builtin: boolean }} q */
+/** @param {{ kind: string, cmd?: any, path?: any, agent?: any, script?: any, requester?: string|null, gateway: string, builtin: boolean }} q @returns {any} */
 function serveGuide(q) {
   const kind = String(q.kind || '').toLowerCase()
   if (!GUIDE_KINDS.includes(kind)) return { ok: false, code: 'bad-guide', what: `guide takes one of: ${GUIDE_KINDS.join(' / ')}` }
   const s = v => (typeof v === 'string' && v.length <= GUIDE_FIELD_MAX && !/[\u0000-\u001f\u007f]/.test(v) ? v : null)
-  const cmd = s(q.cmd), p = s(q.path), script = s(q.script)
+  const cmd = s(q.cmd), p = s(q.path), agent = s(q.agent), script = s(q.script)
   const r = realmDefaults.guide(kind, lowerVer(q.requester || null, q.gateway))
   const base = { ok: true, kind, gateway: q.gateway }
-  if (r.guide) return { ...base, text: guideText({ kind: /** @type {any} */ (kind), template: r.guide.text, cmd: cmd || '<command>', path: p, gateway: q.gateway, script }), source: 'realm', updated_at: r.updated_at, origin: r.origin || null, ...(r.guide.min_bridge ? { min_bridge: r.guide.min_bridge } : {}) }
-  return { ...base, text: q.builtin ? guideText({ kind: /** @type {any} */ (kind), cmd: cmd || '<command>', path: p, gateway: q.gateway, script }) : null, source: 'builtin', updated_at: null, reason: r.reason, ...(r.min_bridge ? { min_bridge: r.min_bridge } : {}) }
+  if (r.guide) return { ...base, text: guideText({ kind: /** @type {any} */ (kind), template: r.guide.text, cmd: cmd || '<command>', path: p, agent, gateway: q.gateway, script }), source: 'realm', updated_at: r.updated_at, origin: r.origin || null, ...(r.guide.min_bridge ? { min_bridge: r.guide.min_bridge } : {}) }
+  return { ...base, text: q.builtin ? guideText({ kind: /** @type {any} */ (kind), cmd: cmd || '<command>', path: p, agent, gateway: q.gateway, script }) : null, source: 'builtin', updated_at: null, reason: r.reason, ...(r.min_bridge ? { min_bridge: r.min_bridge } : {}) }
+}
+/** #88 step 9 (§4.4): `--guide agent`'s first report — the agent created when it is not on the board yet, else nothing written. */
+function guideRegister(ident, a) {
+  if (!act2) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  const now = actNow(), id = { realm: ident.realm || REALM, project: ident.project, user: ident.user, session: ident.session }
+  const g = { agent: a.agent }
+  for (const k of ['label', 'under', 'under_id']) if (a[k] !== undefined && a[k] !== null) g[k] = a[k]
+  const r = act2.guideAgent(id, g, now, { tzOffsetMin: tzOff(now) })
+  if (!r.ok) return r
+  if (r.created) actChanged()
+  const { left, ...res } = r
+  if (left) viewPrune(left)
+  return res
 }
 function loggerGuide(ws, m) {
   const ref = m && m.ref != null ? m.ref : null
   let result
   if (role !== 'gateway') result = { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
   else if (!ACT_CFG.enabled) result = actDisabled()
-  else result = serveGuide({ kind: m.kind, cmd: m.cmd, path: m.path, script: m.script, requester: typeof m.script === 'string' ? m.script : null, gateway: BRIDGE_VERSION, builtin: false })
+  else {
+    result = serveGuide({ kind: m.kind, cmd: m.cmd, path: m.path, agent: m.agent, script: m.script, requester: typeof m.script === 'string' ? m.script : null, gateway: BRIDGE_VERSION, builtin: false })
+    if (result.ok && result.kind === 'agent' && typeof m.agent === 'string' && m.agent.trim()) {   // #88 step 9: the agent's first report
+      result.board = loggerUserConflict(ws.ident) ? { ok: false, code: 'session-user-mismatch', what: `session "${ws.ident.session}" (${projName(ws.ident.project)}) is live on the mesh under another user — a script may not report for it` }
+        : guideRegister(ws.ident, m)
+    }
+  }
   try { ws.send(JSON.stringify({ type: 'guide', ref, ...result })) } catch { }
 }
 async function loggerLog(ident, input) {
@@ -1892,8 +1931,16 @@ async function loggerLog(ident, input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, code: 'bad-input', what: 'log needs an input object' }
   if (loggerUserConflict(ident)) return { ok: false, code: 'session-user-mismatch', what: `session "${ident.session}" (${projName(ident.project)}) is live on the mesh under another user — a script may not report for it` }
   const clean = {}
-  for (const k of ACT_V2 ? [...LOG2_FIELDS, 'items'] : LOG_FIELDS) if (input[k] !== undefined) clean[k] = input[k]   // v1.62.0: + items (a batch: each item's fields are checked by splitBatch); #88 step 6: the 2.0 fields with the switch on
+  for (const k of [...LOG2_FIELDS, ...A2.LEGACY2_FIELDS, 'items']) if (input[k] !== undefined) clean[k] = input[k]   // #88 step 9: the 2.0 fields (+ the 1.7x ones, refused legacy-form by the parser; + items: a batch)
   return activityLog({ ...ident, host: HOSTNAME }, clean, { script: true })
+}
+/** #88 step 9: `aimb-log --resolve` on the logger link — {type:"resolve", ref, input:{ resolve, agent?, key? | id? | path? }} → {type:"resolved", ref, result}. */
+function loggerResolve(ws, m) {
+  const ref = m && m.ref != null ? m.ref : null
+  let result
+  if (role !== 'gateway') result = { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  else result = activityResolve2(ws.ident, m && m.input && typeof m.input === 'object' ? m.input : {})
+  try { ws.send(JSON.stringify({ type: 'resolved', ref, result })) } catch { }
 }
 
 // ---- #70 step 4 (v1.60.0): MESH-WIDE GOSSIP of the board + ON-DEMAND remote history, over the existing peer-hub links.
@@ -1941,10 +1988,10 @@ function actUnitsNow() { if (!actUnits || actUnitsVer !== actVer) { actUnits = a
 // #88 step 7: with the switch on the format is 6 and the peer must announce 6 (§6.2's equality check, both ways): a 1.7x
 // hub announces 5, so nothing is shared with it in either direction (one log line says so). The 1.7x feature flags
 // (activity_plan / _msg / _ask / _revise) are neither sent nor read by 2.0: activity_gossip:6 implies all of them.
-const actFormat = () => (ACT_V2 ? G2.GOSSIP2_FORMAT : Act.ACTIVITY_FORMAT)
+const actFormat = () => (process.env.AI_BRIDGE_TEST_GOSSIP === 'v5' ? 5 : G2.GOSSIP2_FORMAT)   // #88 step 9: always v6 (=v5: a test's stand-in for a 1.7x hub)
 function actLinkInit(p, gw, hello) {
   if (!p) return
-  const v2 = ACT_V2
+  const v2 = true   // #88 step 9: always 2.0 (the 1.7x flags below are dead until step 11)
   p.act = { gw, host: hostOfGw(gw), cap: !actLegacy() && !!(hello && hello.activity_gossip === actFormat()), plan: !v2 && !!(hello && Number(hello.activity_plan) >= 1), msg: !v2 && !!(hello && Number(hello.activity_msg) >= 1), ask: !v2 && !!(hello && Number(hello.activity_ask) >= 1), revise: !v2 && !!(hello && Number(hello.activity_revise) >= 1), seq: 0, pub: v2 ? G2.createPub2() : Act.createPub(), needFull: true, last: 0, timer: null, beat: false,   // v1.69.0 (#82): plan = it applies move / reorder
     bucket: ACT_FETCH_RATE, bucketAt: Date.now(), resyncAt: 0 }
   if (v2 && !p.act.cap && !actLegacy()) {   // #88 step 7: a 1.7x (or older) hub — not a supported state (§6.2): say so once per link, share nothing
@@ -2050,7 +2097,7 @@ function onActivityFrame(sock, f) {
     log(`activity: dropped a ${f.t} from ${gw} claiming origin "${String(f.origin).slice(0, 80)}"`)
     tapRec('recv', { peer: host, kind: 'forged', t: f.t }); refuse('unauthorized', 'a frame may speak only for its own link host'); return
   }
-  if (ACT_V2) return onActivityFrame2(sock, gw, p, host, f, refuse)   // #88 step 7: gossip v6
+  return onActivityFrame2(sock, gw, p, host, f, refuse)   // #88 step 7: gossip v6 (step 9: always)
   if (f.t === 'ACTIVITY_SLICE') {
     if (!activity || lc(host) === lc(HOSTNAME)) return   // never let a peer write our own host's entities
     if (!f.full && actOwner.get(host) !== gw) { actAskResync(p, host); return }   // a delta from a link that never sent us a full slice
@@ -2177,7 +2224,7 @@ const actWaitMs = (o, pos) => Math.max(0, o.hold - Date.now(), Math.ceil(((pos -
 function activityRemote(host, op, q, ctx = {}) {
   const gw = actOwner.get(host), p = gw ? peerGw.get(gw) : null
   if (!p || !p.sock || p.sock.destroyed) return Promise.resolve({ ok: false, code: 'owner-unreachable', host, what: `host ${host} is down or unreachable right now — its history can't be fetched (its last-known lines show as gone)` })
-  if (!p.act || !p.act.cap) return Promise.resolve({ ok: false, code: 'owner-unsupported', host, what: ACT_V2 ? `host ${host} does not speak activity format v${G2.GOSSIP2_FORMAT} (a 2.0 bridge shares activity only with 2.0 bridges)` : `host ${host} runs a bridge without this activity format (format v${Act.ACTIVITY_FORMAT}: 1.65.0+)` })
+  if (!p.act || !p.act.cap) return Promise.resolve({ ok: false, code: 'owner-unsupported', host, what: `host ${host} does not speak activity format v${G2.GOSSIP2_FORMAT} (a 2.0 bridge shares activity only with 2.0 bridges)` })
   const o = actOut(p.act), ws = ctx && ctx.ws, wait = actWaitMs(o, o.q.length + 1)
   const busy = (why, after) => Promise.resolve({ ok: false, code: 'busy', host, retry_after_ms: Math.max(100, after), what: `too many history fetches are waiting (${why}) — retry in a moment` })
   if (ws && (ws.actFetches || 0) >= ACT_QUEUE_DASH) return busy(`${ACT_QUEUE_DASH} for this dashboard`, actWaitMs(o, o.q.length))
@@ -2961,9 +3008,10 @@ const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = co
 // gateway forwards it only to an owner that declared it (else owner-unsupported). AI_BRIDGE_TEST_NO_ACTIVITY_REVISE=1 (tests only).
 // #88 step 7 (2.0, the switch on): `activity_gossip:6` ALONE (§6.2) — v6 slices, id-addressed ACTIVITY_REQ / ACTIVITY_ACT,
 // the rename / merge actions and the clash answer; the 1.7x flags above are no longer sent (or read: actLinkInit).
-const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap(), ...(TEST_GOSSIP === 'legacy' ? {} : ACT_V2 ? { activity_gossip: G2.GOSSIP2_FORMAT } : { activity_gossip: Act.ACTIVITY_FORMAT, activity_plan: 1,
-  ...(process.env.AI_BRIDGE_TEST_NO_ACTIVITY_MSG === '1' ? {} : { activity_msg: 1 }), ...(process.env.AI_BRIDGE_TEST_NO_ACTIVITY_ASK === '1' ? {} : { activity_ask: 1 }),
-  ...(process.env.AI_BRIDGE_TEST_NO_ACTIVITY_REVISE === '1' ? {} : { activity_revise: 1 }) }) })
+// #88 step 9: the switch is gone — `activity_gossip:6` alone, always. TEST-ONLY: AI_BRIDGE_TEST_GOSSIP=v5 makes this hub
+// announce activity_gossip:5 as a 1.7x hub does (and expect 5 back: actFormat), so a test can stand up "a host left on
+// 1.7x" (Q70) without a 1.7x build; =legacy announces nothing (a ≤1.59 hub).
+const peerHello = () => ({ t: 'PEER_HELLO', session: SESSION, name: NAME, host: ADVERTISE, port: PORT, realm: REALM, ...refreshCap(), ...(TEST_GOSSIP === 'legacy' ? {} : { activity_gossip: actFormat() }) })
 // #66c: `retained` (the replicated retained-value set) is NOT in gossipFrame — it can be MBs and the roster is re-gossiped
 // on every unread-count change — so it rides a PEER_ROSTER only when that link hasn't had the set's current version yet
 // (a fresh link has none → it gets the whole set). LWW makes a repeat harmless; a ≤1.47 receiver ignores the field.
@@ -3238,11 +3286,14 @@ function onControlConn(sock) {
         const reply = result => { try { sendFrame(sock, { t: 'ACTIVITY_R', rid: f.rid, result }) } catch { } }
         if (!who || !f.session || followers.get(f.session) !== sock) { reply({ ok: false, code: 'unauthorized', what: 'activity frames are accepted only from a registered follower' }); return }
         tapRec('recv', { peer: 'follower', kind: 'fwd', op: f.op, items: f.input && Array.isArray(f.input.items) ? f.input.items.length : null })   // test-only: v1.62.0 — a batch arrives as ONE frame
-        if (f.op === 'log') {
+        if (f.op === 'log' || f.op === 'resolve' || f.op === 'guide') {   // #88 step 9: + resolve (Q46) and guide (the agent's first report, §4.4)
           const id = f.ident || {}, fr = roster.get(f.session)
           const known = !!fr && (fr.subpeers || []).some(sp => ciEq(sp.name, id.session) && projKey(sp.project) === projKey(id.project) && lc(sp.user) === lc(id.user) && (sp.realm || REALM) === (id.realm || REALM))
           if (!known) { reply({ ok: false, code: 'unknown-subpeer', what: 'that session is not registered on the forwarding bridge' }); return }
-          activityLog({ realm: id.realm || REALM, project: id.project, user: id.user, session: id.session, host: HOSTNAME }, f.input || {}).then(reply, e => reply({ ok: false, code: 'gateway-error', what: String((e && e.message) || e) }))
+          const ident = { realm: id.realm || REALM, project: id.project, user: id.user, session: id.session, host: HOSTNAME }
+          if (f.op === 'resolve') reply(activityResolve2(ident, f.input || {}))
+          else if (f.op === 'guide') reply(ACT_CFG.enabled ? guideRegister(ident, f.input || {}) : actDisabled())
+          else activityLog(ident, f.input || {}).then(reply, e => reply({ ok: false, code: 'gateway-error', what: String((e && e.message) || e) }))
         } else if (f.op === 'read') activityRead(f.query || {}, { maxWaitMs: Math.max(0, ACT_FWD_MS - ACT_REMOTE_MS - 300) }).then(reply, e => reply({ ok: false, code: 'gateway-error', what: String((e && e.message) || e) }))   // v1.61.0: a queued remote fetch must answer inside the follower's timeout
         else reply({ ok: false, code: 'bad-op', what: `unknown activity op ${f.op}` })
       } else if (f.t === 'TRACE') {
@@ -3376,6 +3427,7 @@ function onWsConnection(ws) {
             if (li.err) { try { ws.send(JSON.stringify({ type: 'error', ...li.err })) } catch {} ; ws.close(); return }
             ws.kind = 'logger'; ws.ident = li.ident; ws.instance = crypto.randomBytes(4).toString('hex')
             try { ws.send(JSON.stringify({ type: 'welcome', logger: true, instance: ws.instance, gateway: SESSION, bridge_version: BRIDGE_VERSION, realm: REALM, host: HOSTNAME,
+              activity_format: G2.GOSSIP2_FORMAT,   // #88 step 9: this gateway speaks the 2.0 forms (the 2.0 script checks it: it stands for bridge_version ≥ 2.0.0 until step 12's bump)
               ident: { project: projName(li.ident.project), user: li.ident.user, session: li.ident.session } })) } catch {}
             return
           }
@@ -3408,16 +3460,18 @@ function onWsConnection(ws) {
           try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result })) } catch {}
         } else if (m.type === 'wait_answer' && ws.kind === 'logger') {   // v1.71.0 (#85): wait for the answer to one of this session's questions (a long poll)
           loggerWait(ws, m).catch(e => { try { ws.send(JSON.stringify({ type: 'answer', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'gateway-error', what: String((e && e.message) || e) } })) } catch { } })
-        } else if (m.type === 'guide' && ws.kind === 'logger') {   // v1.74.0 (#89 part 2): the realm's guide, pulled (aimb-log --guide)
+        } else if (m.type === 'guide' && ws.kind === 'logger') {   // v1.74.0 (#89 part 2): the realm's guide, pulled (aimb-log --guide); #88 step 9: + the agent's first report
           loggerGuide(ws, m)
+        } else if (m.type === 'resolve' && ws.kind === 'logger') {   // #88 step 9: aimb-log --resolve (read-only, Q46)
+          loggerResolve(ws, m)
         } else if (ws.kind === 'logger') {
           if (m.type === 'activity_action') { try { ws.send(JSON.stringify({ type: 'activity_action', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'unauthorized', what: 'activity actions are for dashboards only (a logger only reports)' } })) } catch {} ; return }   // v1.65.0 (#70 6d)
-          try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'bad-op', what: `a logger sends only {type:"log"}, {type:"wait_answer"} or {type:"guide"} (got ${JSON.stringify(String(m.type)).slice(0, 40)})` } })) } catch {}
+          try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'bad-op', what: `a logger sends only {type:"log"}, {type:"wait_answer"}, {type:"guide"} or {type:"resolve"} (got ${JSON.stringify(String(m.type)).slice(0, 40)})` } })) } catch {}
         } else if ((m.type === 'activity' || m.type === 'activity_sub' || m.type === 'activity_unsub') && ws.kind !== 'dashboard') {   // #70 step 5: dashboards only — never a page leaf
           const deny = { ok: false, code: 'dashboard-only', what: 'the activity board is for dashboards and registered sessions (the activity tool), not page leaves' }
           try { ws.send(JSON.stringify(m.type === 'activity' ? { type: 'activity', ref: m.ref != null ? m.ref : null, result: deny } : { type: 'activity_board', ...deny })) } catch {}
         } else if (m.type === 'activity_sub') {   // #70 step 5: the Activity view opened (or a resync after a seq gap) → a full board, then deltas
-          if (ACT_V2) { try { ws.send(JSON.stringify({ type: 'activity_board', ...actNotYet2(10, 'the dashboard\'s board') })) } catch {} ; return }   // #88 step 6
+          { try { ws.send(JSON.stringify({ type: 'activity_board', ...actNotYet2(10, 'the dashboard\'s board') })) } catch {} ; return }   // #88 step 6
           if (role !== 'gateway' || !activity) { try { ws.send(JSON.stringify({ type: 'activity_board', ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })) } catch {} ; return }
           if (!ACT_CFG.enabled) { try { ws.send(JSON.stringify({ type: 'activity_board', ...actDisabled() })) } catch {} ; return }
           actDashSubscribe(ws)
@@ -3427,7 +3481,6 @@ function onWsConnection(ws) {
           const ref = m.ref != null ? m.ref : null
           const no = (code, what) => { try { ws.send(JSON.stringify({ type: 'view_refused', ref, refused: [{ k: null, code, what }] })) } catch { } }
           if (ws.kind !== 'dashboard') return no('dashboard-only', 'view state is kept for dashboards only')
-          if (!ACT_V2) return no('not-in-this-version', 'the per-user view state is the 2.0 board\'s (AI_BRIDGE_ACTIVITY_V2)')
           if (!viewOn()) return no('not-gateway', 'this bridge does not hold the activity board')
           const r = viewSet.set(VIEW_USER, Array.isArray(m.recs) ? m.recs : [], Date.now())
           if (r.refused.length) { try { ws.send(JSON.stringify({ type: 'view_refused', ref, refused: r.refused })) } catch { } }
@@ -3579,8 +3632,9 @@ const mcp = new Server(
       'as a registered sub-peer (as/secret) carries an `inbox` hint { unread, next_cursor, queue_epoch }: ' +
       'if unread > 0, poll the inbox tool (with for/secret, cursor = next_cursor) to collect new mail — so ' +
       'you rarely need to poll blindly. (queue_epoch change ⇒ reset cursor to 0.) Use list_sessions for the roster. ' +
-      'ACTIVITY BOARD (#70): report what you and your agents are doing with the log tool (text "@~root <status>" sets your ' +
-      'headline; plan:["A","B"] makes a checklist; at milestones only, never secrets); the activity tool reads the mesh-wide board. ' +
+      'ACTIVITY BOARD (#70, 2.0): report what you and your agents are doing with the log tool (text "@<status>" sets your ' +
+      'line, plain text only logs; key:"<k>" + label:"<name>" makes a task node once, then key:"<k>" names it; plan:[{key, label}] makes a checklist; ' +
+      'at milestones only, never secrets); the activity tool reads the mesh-wide board. ' +
       'A message with verb activity_changed means someone changed your board from the dashboard (an item skipped, a plan abandoned, …): ' +
       'summarise it for your user and do not act on it (stop or redo work) without their permission. ' +
       'Likewise activity_text_edited (someone rewrote one of your status lines from the dashboard; your next report replaces it) and activity_message (a dashboard viewer wrote to you about a node; body.text): ' +
@@ -4130,21 +4184,37 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const { sp, err } = authSub(String(a.as), a.secret)
       if (err) return ok(err)
       if (!ACT_CFG.enabled) return ok(actDisabled())
+      const ident = { realm: sp.identity?.realm || REALM, project: sp.identity?.project || 'unclassified', user: sp.identity?.user || null, session: sp.name, host: HOSTNAME }
       if (a.guide !== undefined) {   // v1.74.0 (#89 part 2): return the guide INSTEAD of logging (Cowork has no shell for aimb-log --guide)
-        const extra = LOG_FIELDS.filter(k => k !== 'path' && a[k] !== undefined)
-        if (extra.length) return ok({ ok: false, code: 'bad-guide', what: `guide returns the how-to text instead of logging: pass only guide (and path) — not ${extra.join(' / ')}` })
+        const GUIDE_WITH = ['path', 'agent', 'label', 'under', 'under_id']   // #88 step 9: + the agent's first report (§4.4)
+        const extra = [...LOG2_FIELDS, ...A2.LEGACY2_FIELDS, 'items'].filter(k => !GUIDE_WITH.includes(k) && a[k] !== undefined)
+        if (extra.length) return ok({ ok: false, code: 'bad-guide', what: `guide returns the how-to text instead of logging: pass only guide (+ agent, label, under — the agent's first report) — not ${extra.join(' / ')}` })
         const gw = role === 'gateway' ? BRIDGE_VERSION : String(roster.get(gatewayId)?.bridge_version || BRIDGE_VERSION)
         const project = projName(sp.identity?.project || 'unclassified')
-        return ok(serveGuide({ kind: String(a.guide), cmd: logCmd({ node: NODE_PATH, script: LOGGER_PATH, session: sp.name, project, tokenFile: TOKEN_FILE_PATH }), path: typeof a.path === 'string' ? a.path : null,
-          script: BRIDGE_VERSION, requester: BRIDGE_VERSION, gateway: gw, builtin: true }))
+        const g = serveGuide({ kind: String(a.guide), cmd: logCmd({ node: NODE_PATH, script: LOGGER_PATH, session: sp.name, project, tokenFile: TOKEN_FILE_PATH }), path: typeof a.path === 'string' ? a.path : null,
+          agent: typeof a.agent === 'string' ? a.agent : null, script: BRIDGE_VERSION, requester: BRIDGE_VERSION, gateway: gw, builtin: true })
+        if (g.ok && g.kind === 'agent' && typeof a.agent === 'string' && a.agent.trim()) {   // #88 step 9: guide + agent = the agent's first report
+          const reg = {}
+          for (const k of ['agent', 'label', 'under', 'under_id']) if (a[k] !== undefined) reg[k] = a[k]
+          g.board = await activityCall('guide', { ident, input: reg })
+        }
+        return ok(g)
       }
       const input = {}
-      for (const k of ACT_V2 ? [...LOG2_FIELDS, 'items'] : LOG_FIELDS) if (a[k] !== undefined) input[k] = a[k]   // #88 step 6: the 2.0 tool's fields with the switch on
-      const pre = ACT_V2 ? (input.items !== undefined ? { ok: true } : A2.parseCall(input, { now: actNow(), tzOffsetMin: tzOff(actNow()) }))
-        : input.items !== undefined ? Act.splitBatch(input) : Act.parseMessage(input, { now: Date.now(), tzOffsetMin: tzOff(Date.now()) })   // validate here: a bad call costs no round trip (v1.62.0: a batch's bounds; its items are answered one by one)
+      for (const k of [...LOG2_FIELDS, ...A2.LEGACY2_FIELDS, 'items']) if (a[k] !== undefined) input[k] = a[k]   // #88 step 9: the 2.0 tool's fields (+ the 1.7x ones: refused legacy-form, naming the 2.0 form)
+      const pre = input.items !== undefined ? A2.splitBatch2(input) : A2.parseCall(input, { now: actNow(), tzOffsetMin: tzOff(actNow()) })   // validate here: a bad call costs no round trip (a batch: its bounds; its items are answered one by one)
       if (!pre.ok) return ok(pre)
-      const ident = { realm: sp.identity?.realm || REALM, project: sp.identity?.project || 'unclassified', user: sp.identity?.user || null, session: sp.name, host: HOSTNAME }
       return ok(await activityCall('log', { ident, input }))
+    }
+    case 'resolve': {   // #88 step 9 (Q46): what a path resolves to NOW (read-only) — the tool form of aimb-log --resolve
+      if (!a.as) return ok({ ok: false, code: 'as-required', what: 'resolve works on your own session\'s board: pass as + secret (register_self first)' })
+      const { sp, err } = authSub(String(a.as), a.secret)
+      if (err) return ok(err)
+      if (!ACT_CFG.enabled) return ok(actDisabled())
+      const input = {}
+      for (const k of ['resolve', 'agent', 'key', 'id', 'path']) if (a[k] !== undefined) input[k] = a[k]
+      const ident = { realm: sp.identity?.realm || REALM, project: sp.identity?.project || 'unclassified', user: sp.identity?.user || null, session: sp.name, host: HOSTNAME }
+      return ok(await activityCall('resolve', { ident, input }))
     }
     case 'activity': {   // #70: read this host's activity board (+ one agent's log, or one entry in full)
       const query = {}

@@ -1,12 +1,12 @@
 // #88 (v2.0) build step 8 — PER-USER VIEW STATE, live (docs/spec-88.md §5.6, §8 step 8; Q13 / Q28 / Q29 / Q30 / Q70): four
-// 2.0 gateways (the pre-cutover switch AI_BRIDGE_ACTIVITY_V2=1) and one 1.7x gateway (the same bridge WITHOUT the switch),
+// 2.0 gateways and one STAND-IN for a 1.7x gateway (since step 9 removed the switch: AI_BRIDGE_TEST_GOSSIP=v5 announces 5),
 // each on its own loopback address, host name (AI_BRIDGE_TEST_HOSTNAME), temp persistence dir and this file's port block
 // (never 12317 / 12318); a temp AI_BRIDGE_CONFIG (never src/config.json). Links (seeds): everything through A —
 //   A  127.0.0.1  "VIEW8-A"  2.0, view user = this machine's login (AIMB_TEST_VIEW_USER = it): the board's owner
 //   B  127.0.0.2  "VIEW8-B"  2.0, NO test hook and AI_BRIDGE_USER=builder → still this machine's login (Q29)
 //   C  127.0.0.3  "VIEW8-C"  2.0, the same user; linked to A only ("a third via the first"); restarted alone at the end
 //   D  127.0.0.4  "VIEW8-D"  2.0, user "alice" (AIMB_TEST_VIEW_USER); drops VIEW deltas (anti-entropy repairs it)
-//   L  127.0.0.5  "VIEW8-L"  1.7x (no switch): Q70's unshared host
+//   L  127.0.0.5  "VIEW8-L"  the 1.7x stand-in (AI_BRIDGE_TEST_GOSSIP=v5): Q70's unshared host
 // Covers: whose view (Q29: the serving gateway's OS login, never AI_BRIDGE_USER; the welcome's view.user, the head's
 // view_user); a pin on A pushed live to A's second window and to B and C (via A), never to alice's dashboard on D — her
 // own choices stay hers (two users kept apart); refused records; the choices are keyed by NODE ID, so they survive a
@@ -48,8 +48,7 @@ function spawn(k, extra = {}) {
   const env = { ...process.env, AI_BRIDGE_CONFIG: cfgFile, AI_BRIDGE_NAME: `Hub${k}`, AI_BRIDGE_PORT: P[k], AI_BRIDGE_WS_PORT: String(Number(P[k]) + 1), AI_BRIDGE_TOKEN: TOKEN,
     AI_BRIDGE_BIND: ADDR[k], AI_BRIDGE_ADVERTISE_HOST: ADDR[k], AI_BRIDGE_USER: 'robin', AI_BRIDGE_TEST_HOSTNAME: H[k], AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: dirs[k],
     AI_BRIDGE_DISCOVERY: 'seeds', AI_BRIDGE_SEEDS: SEEDS[k].map(x => `${ADDR[x]}:${P[x]}`).join(','), AI_BRIDGE_DISCOVERY_MS: '300',
-    AI_BRIDGE_TEST_GOSSIP: '', AI_BRIDGE_TEST_ACTIVITY_TAP: '1', AI_BRIDGE_VIEW_SAVE_MS: '400', TEMP: TMP, TMP, AI_BRIDGE_ACTIVITY_V2: '1', ...extra }
-  if (k === 'L') delete env.AI_BRIDGE_ACTIVITY_V2
+    AI_BRIDGE_TEST_GOSSIP: k === 'L' ? 'v5' : '', AI_BRIDGE_TEST_ACTIVITY_TAP: '1', AI_BRIDGE_VIEW_SAVE_MS: '400', TEMP: TMP, TMP, ...extra }   // step 9: no switch any more; L stands in for a 1.7x hub (AI_BRIDGE_TEST_GOSSIP=v5)
   if (!('AIMB_TEST_VIEW_USER' in extra)) delete env.AIMB_TEST_VIEW_USER
   delete env.AI_BRIDGE_TRAY
   const transport = new StdioClientTransport({ command: 'node', args: [SRCDIR + 'bridge.mjs'], cwd: SRCDIR, env, stderr: 'pipe' })

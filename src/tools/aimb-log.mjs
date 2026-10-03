@@ -1,94 +1,77 @@
 #!/usr/bin/env node
-// aimb-log (#70 step 3, v1.59.0) — report an agent's / a script's status to this host's activity board WITHOUT registering.
+// aimb-log (#70 step 3, v1.59.0; the 2.0 forms since #88 build step 9) — report an agent's / a script's status to this host's
+// activity board WITHOUT registering.
 //
 // Why: an orchestrating session puts ONE line in each agent's prompt ("report with: node aimb-log.mjs --session X
-// --project P --agent research …"), and the agent (or any long-running script) reports progress with it. The bridge's
-// `log` tool needs a registered sub-peer (as + secret); this script instead attaches to the GATEWAY's WS port as a
-// token-gated `logger` leaf — the same trust as the doorbell (Robin, 2026-10-01: anyone holding the realm token may
-// report as any session) — EXCEPT that the gateway refuses to speak for a session that is LIVE on the mesh roster under
-// another user (code session-user-mismatch). A script-only session is never marked gone; it can go stale.
+// --project P --agent research --label "Research" --under fix-x"), and the agent (or any long-running script) reports
+// progress with it. The bridge's `log` tool needs a registered sub-peer (as + secret); this script instead attaches to the
+// GATEWAY's WS port as a token-gated `logger` leaf — the same trust as the doorbell (Robin, 2026-10-01: anyone holding the
+// realm token may report as any session) — EXCEPT that the gateway refuses to speak for a session that is LIVE on the mesh
+// roster under another user (code session-user-mismatch). A script-only session is never marked gone; it can go stale.
 //
-// v1.62.0 (#70 step 6a): the node tree — --path <p> addresses any node (`spec-70/@Tharsis`, `@#70/@step4/spec-70`; `@` = a
-// context, else an agent; `@"a b"` quotes; `@~` on the last segment sets its current line); --agent / --ctx still work and
-// combine with it (agent + path + ctx, or a leading `@…` text prefix). --batch <file.json|-> sends a JSON ARRAY of items
-// (≤64, ≤64 KB) in ONE call → one line {ok, results:[…]} (exit 0 when every item applied, 4 when the bridge refused the
-// call or any item failed); in --stream a line may be an array (a batch) → one result line {line, ok, results}.
-//
-// v1.63.0 (#70 step 6b): TODOS AND PLANS. --plan "A" "B" "C" creates ☐ plan items under the target node (--path / --agent),
-// in the given order (every following argument up to the next --flag is a name; put text BEFORE --plan, or after `--`);
-// re-sending a plan keeps the existing items as they are and adds new names at the end. --done = --state done; tick an item
-// with --path "@#70/@~B" --done (text optional: an @~ line with a state keeps its text). --state todo|skipped is for plan
-// items only. Batch / stream paths are RELATIVE to --path / --agent (a leading "/" = from the session root): --path @#70
-// with an item {path:"@B/@~x"} reports to @#70/@B/@x.
-//
-// v1.66.0 (#79): --plan "A" "B" "@~root headline" used to make the headline a third item (and fail as a plan name); a --plan
-// name that looks like status text (@~… or "@ctx words") is now refused locally with bad-plan saying
-// "… looks like status text — put text before --plan". --progress also takes a skipped part: "3/6 1 skipped".
-// v1.66.0 (#79, the call signature): --text "<text>" names the text explicitly and --item "A" adds ONE plan item per flag
-// (repeatable, in order), so nothing depends on argument position: --text "the plan" --item "A" --item "B". Positional text
-// and --plan "A" "B" still work (1.65 snippets); --text with positional text is refused. JSON stays for --batch / --stream.
-//
-// v1.69.0 (#82): THE PLAN WORKFLOW. --before "Y" / --after "Y" / --first / --last place things among their siblings (plan items, then
-// contexts, then agents — each kind among its own): with --item they place the NEW items there (several keep their order; default:
-// the end); without, they REORDER the addressed node (--path "@Plan/@~X" --before "Y", no text needed). --move "<node>" --to "<new
-// parent>" re-parents a node with its whole subtree (both relative to --path; a leading "/" = from the session root; --to "/" = the
-// session root), at the end of its kind there unless placed; its history follows it. --state abandoned works on any context and
-// cascades to the open contexts / items under it. A gateway older than 1.69.0 would ignore these flags: refused (gateway-unsupported).
-//
-// v1.71.0 (#85): QUESTIONS. --ask "<question>" [--choice "A" --choice "B" …] [--free] [--expires 2h] posts a question for the
-// dashboard viewer to answer, under --path (the addressed context itself when it is new / line-less / already a question, else a
-// new child @?1, @?2 …; the result's `path` names it). ONE choice per --choice, repeatable, in order (≤ 8, each ≤ 60 characters;
-// like --item, a value that looks like status text or is a flag is refused — no argument's meaning depends on its position, the
-// #79 rule); --free also allows free text beside them (without choices free text is the only answer). It returns at once —
-// unless --wait <dur> (≤ 24h): then it WAITS on the same connection (a long poll on the gateway, no board polling) until the
-// question is answered, expired or withdrawn, or the wait runs out, and prints ONE JSON line { ok, outcome, path, question,
-// choices, answer?{choice?, text?}, by?, at?, waited_ms, asked? } — exit 0 answered, 10 the wait ran out (the question stays
-// open), 11 expired, 12 withdrawn, 13 gone (it left the board); 4 / 64 as always. --wait-answer --path <question> [--wait 30m]
-// waits for an existing question (default 30m). A dropped link is re-dialled (backoff) and the wait resumed until it runs out.
-// Withdraw your question: --path <question> --state withdrawn [--text "<note>"]. A gateway older than 1.71.0: gateway-unsupported.
-//
-// Usage (one report):
-//   node tools/aimb-log.mjs --session <name> --project <P> [--user U] [--agent a/b] [--path p] [--ctx "@~Ctx"] [--state S | --done]
-//        [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."]
-//        [--data '{...}' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …]
-//   (older forms still accepted: positional "<text>", and --plan "A" "B" … — every argument after --plan is a name)
-//   The text is optional when --progress/--eta is given (it defaults to "{progress}" / "{eta}", rendered when read).
-//   --no-log = log:false (update the board only; not appended to the log or the daily file). Flags after `--` are text.
-// Usage (a script reporting often — e.g. every second — over ONE connection):
-//   node tools/aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]
-//   then write newline-delimited JSON objects to stdin, each with the `log` tool's fields minus auth:
-//   {path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?} (+ an optional `ref` echoed
-//   back) — or a JSON ARRAY of such objects (a batch, one result line for the array).
-//   The command line's identity applies to every line; --agent / --path / --ctx / --no-log are DEFAULTS a line may override
-//   (6b: a line's own path / agent is RELATIVE to --agent / --path — a leading "/" makes it absolute — and drops --ctx; one
-//   with only a context keeps --agent / --path).
-// Usage (a batch): node tools/aimb-log.mjs --batch items.json --session <name> --project <P> [--agent a] [--path p] [--ctx c] [--no-log]
-//   (`--batch -` reads the array from stdin).
-//   One JSON result line per input line ({line:n, ref?, ...result}), in input order. Exit 0 at stdin EOF. If the link
-//   drops the script reconnects with backoff; a line in flight when it dropped is reported failed (link-lost — it is
-//   NOT resent, so a logged entry is never duplicated), and a line that waits longer than AIMB_LOG_LINE_WAIT_MS (default
-//   10000) for a link is reported failed (no-bridge). A fatal hello error (bad token, bad ident, an old gateway) exits 4.
-//
-// v1.64.0 (#70 6c / #75 part 2): --token-file <path> — the realm token from a FILE (a bare token or a KEY=VALUE env file, `~`
-// expanded), exactly as the doorbell: an explicit --token-file is AUTHORITATIVE (an unreadable or empty one is exit 64 naming
-// the file — never a silent fallback to another source). The connect reminder's {log_snippet} adds it when the bridge itself
-// read its token from a file.
+// #88 (2.0, docs/spec-88.md §4): THE 2.0 FORMS — and only those (Q19: every 1.7x form is refused `legacy-form`, exit 64,
+// with a message naming the 2.0 form). Every node has a stable id, a KEY its creator chose and a LABEL (its name):
+//   --agent <chain>            the agent you report as ("spec-88", "spec-88/research"): your keys live in its scope. A call
+//                              with no --key / --id / --path targets the agent itself, and creates it when new (with --label).
+//   --key <k>                  YOUR node — created by the first call that names it (a context; --label is REQUIRED then:
+//                              label-required; --under / a position place it). Later calls: just --key <k> (§3.5: location
+//                              and label are set only at creation; a different --under / --label is ignored, warning exists).
+//   --id <id>                  a node by its internal id (the dashboard's copied command; a result's node.id).
+//   --path "A/B"               the shorthand: labels from the session root (or from --agent), no @, a label holding "/"
+//                              in double quotes; it walks the live tree, then the aliases of moved nodes, then creates.
+//   --ctx "<label>"            (kept, §4.5) one more path segment below --agent / --path: --agent a --ctx Notes = the
+//                              context "Notes" under a. A 1.7x "@Ctx" / "@~Ctx" is refused legacy-form.
+//   --under <ref>  --label "<name>"   where / what a NEW target is (a sibling with that label → "<name> (2)", reported).
+//   --text "<text>"            plain text only LOGS; a LEADING @ also SETS the node's line ("@Writing the docs"); @@ = a
+//                              literal @. --state / --done / --progress / --eta / --stale-after change the node whatever
+//                              the text. Finish with --state done --text "@<summary>".
+//   --item <k> "<label>"       a ☐ plan item under the target (repeatable, in order); --item "<label>" (one value: the
+//                              second argument starts with -- or the first isn't a valid key) = label only, key = its slug.
+//   --before <ref> / --after <ref> / --first / --last    place new items / a new target / a --move; alone = reorder.
+//   --move <ref> [--rename "<label>"]   re-parent the target (+ relabel: one checked change); --rename alone relabels.
+//   --merge <ref> / --unmerge  merge the target into another context / undo it (§3.6).
+//   --move-to "../X" | "/A/B"  after the report, move the target there (one all-or-nothing call; only ../X — beside its
+//                              parent — or an absolute path; anything else is refused bad-path with suggest:"/…"); missing
+//                              destinations are created TRANSIENT (they vanish when emptied).
+//   --transient[=30s] / --keep a NEW context vanishes when its last child leaves (after the grace) / make one permanent.
+//   --resolve "<path>"         print what a relative (or absolute) path resolves to NOW from the target's parent (Q46):
+//                              { path:"/…", id, state, create } — changes nothing.
+//   --context-type=<type>      a NEW context's type: context | plan | group | test-run.
+//   --message-type=<type>      the entry's type (default note); a type's typed fields are flags of their own:
+//                              --message-type=test-result --result pass --checks 22 --failed 0 --duration 4.1s.
+//   --ask "<question>" --choice "A" --choice "B" [--free] [--expires 2h] [--wait 30m]   a question (state it only; the
+//                              choices are listed below it as the answers); --wait waits on the same link for the answer.
+//   --wait-answer [--key K | --id I | --path P] [--wait 30m]   wait for an existing question's answer.
+//   --guide agent|session      print the how-to; `--guide agent` WITH --agent (+ --label, --under) is the agent's FIRST
+//                              REPORT: it puts the agent on the board (state running, "reading the guide") when it is
+//                              not there yet — and only prints when it is (a re-read never clobbers a line).
+//   --batch <file.json|->      a JSON ARRAY of items (each the `log` tool's fields + ref) in ONE call → one line
+//                              {ok, results:[…], applied, failed}; --agent / --no-log are defaults for every item.
+//   --stream                   NDJSON on stdin (an object, or an array = a batch, per line) → one result line each, in
+//                              order, over ONE connection; --agent / --no-log are defaults a line may override. Each
+//                              result line is { line: <input line number>, ref?, …the result } — the result's own `line`
+//                              flag (§4.2: the report set the line) is `line_set` there, so the two never collide.
+// REMOVED (refused legacy-form, exit 64): positional text, --plan "A" "B", --move … --to, "@" at a path segment's start,
+// "@~" (in a path, a text or an --item), and the tool's to / note / context fields in a batch or stream line.
+// The 2.0 script talks only to a 2.0 gateway: the gateway's welcome says `activity_format: 6`; anything else → exit 4
+// `gateway-unsupported` before a report is sent (apart from --guide, which prints its built-in text against anything).
 //
 // Identity: --session and --project are required; --user defaults to AI_BRIDGE_USER, else the OS login user
 // (os.userInfo().username); the realm is AI_BRIDGE_REALM, else config.json `realm`, else "default" (as the bridge).
-// Token / port: --token-file (#75), else AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE, as the bridge #46) else config.json's `token`; --ws-port /
-// --url / AI_BRIDGE_WS_PORT else config.json's `wsPort` (12318). config.json is found relative to THIS SCRIPT (../config.json),
-// or AI_BRIDGE_CONFIG names it (tests). `--token` is REFUSED (exit 64): argv is world-readable in the process list and
-// the realm token is also the body-encryption key — use the env var or the config file. The token is never printed.
+// Token / port: --token-file (#75), else AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE, as the bridge #46) else config.json's
+// `token`; --ws-port / --url / AI_BRIDGE_WS_PORT else config.json's `wsPort` (12318). config.json is found relative to THIS
+// SCRIPT (../config.json), or AI_BRIDGE_CONFIG names it (tests). `--token` is REFUSED (exit 64): argv is world-readable in
+// the process list and the realm token is also the body-encryption key. The token is never printed.
 //
-// Exit codes (doorbell conventions): 0 ok (stream: stdin EOF) · 4 the bridge said no / transport error (no bridge, link
-// lost, timeout, a pre-1.59 gateway) · 64 bad usage (a missing flag, bad JSON, a report the bridge would reject).
-// #85 --wait / --wait-answer: 0 answered · 10 the wait ran out (still open) · 11 expired · 12 withdrawn · 13 gone.
+// Exit codes: 0 ok (stream: stdin EOF) · 4 the bridge said no / transport error (no bridge, link lost, timeout, a gateway
+// that does not speak 2.0) · 64 bad usage (a missing flag, bad JSON, a 1.7x form, a report the bridge would reject).
+// --wait / --wait-answer: 0 answered · 10 the wait ran out (still open) · 11 expired · 12 withdrawn · 13 gone.
 // stdout is ONE JSON line (the bridge's `log` result, or {ok:false, code, what}); usage text goes to stderr.
 // Protocol: hello {type:"hello", kind:"logger", token, ident:{session, project, user, realm}} → {type:"welcome", logger:true,
-// bridge_version, ident} | {type:"error", code, what}; then {type:"log", ref, input} → {type:"logged", ref, result}; #85:
-// {type:"wait_answer", ref, path, timeout_ms} → {type:"answer", ref, result} (one, when the question closes or the time runs out);
-// v1.74.0 (#89 part 2, --guide): {type:"guide", ref, kind, cmd, path, script} → {type:"guide", ref, ok, kind, text|null, source, updated_at, …}.
+// bridge_version, activity_format, ident} | {type:"error", code, what}; then {type:"log", ref, input} → {type:"logged", ref,
+// result}; {type:"wait_answer", ref, node_id | (agent?, key | id | path), timeout_ms} → {type:"answer", ref, result};
+// {type:"resolve", ref, input} → {type:"resolved", ref, result}; {type:"guide", ref, kind, cmd, path, agent, label, under,
+// script} → {type:"guide", ref, ok, kind, text|null, source, updated_at, board?, …}.
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -96,17 +79,35 @@ import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
-import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS, usesPlan82, usesAsk, parseDuration } from '../lib/activity.js'
+import { parseDuration, validKey, formatPath2 } from '../lib/activity.js'
+import { parseCall, splitBatch2, LOG2_FIELDS, LEGACY2_FIELDS, MESSAGE_TYPES } from '../lib/activity2.js'
 import { logCmd, guideText, guideSourceLine, GUIDE_KINDS } from '../lib/log-snippet.js'   // v1.73.0 (#89): --guide; v1.74.0: + the realm's guide
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …] [--before "Y" | --after "Y" | --first | --last]\n       aimb-log.mjs --session <name> --project <P> [--path p] --ask "<question>" [--choice "A" --choice "B" …] [--free] [--expires 2h] [--details "..."] [--wait 30m]   (a question; --wait = wait for the answer: exit 0 answered, 10 still open, 11 expired, 12 withdrawn, 13 gone)\n       aimb-log.mjs --session <name> --project <P> --wait-answer --path <question> [--wait 30m]   (wait for an existing question\'s answer)\n       aimb-log.mjs --session <name> --project <P> [--path base] --move "<node>" --to "<new parent>" [--before "Y" | --after "Y" | --first | --last]   (re-parent a node + its subtree; "/" = the session root)\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
-const LOG_FIELDS = MESSAGE_FIELDS   // v1.62.0: + path
-const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch', 'ws-port', 'url', 'token-file', 'text',
-  'move', 'to', 'before', 'after', 'ask', 'expires', 'wait', 'guide'])   // v1.64.0: + token-file (#75); v1.66.0: + text (#79); v1.69.0: + move / to / before / after (#82); v1.71.0: + ask / expires / wait (#85)
-const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done', 'first', 'last', 'free', 'wait-answer'])   // v1.63.0: + done (= --state done); v1.69.0: + first / last (#82); v1.71.0: + free / wait-answer (#85)
-const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'stream', 'ws-port', 'url', 'token-file'])
-const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'path', 'ctx', 'no-log', 'batch', 'ws-port', 'url', 'token-file'])
+const ACTIVITY_FORMAT = 6   // what a 2.0 gateway's welcome says (activity_format)
+const USAGE = [
+  'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent <chain>] [--key <k> | --id <id> | --path "A/B"] [--ctx "<label>"]',
+  '         [--under <ref>] [--label "<name>"] [--text "<text>"  (a leading @ sets the line)] [--state S | --done] [--progress 3/6] [--eta 1h25m] [--stale-after 60m]',
+  '         [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] [--item <k> "<label>" | --item "<label>" …] [--before <ref> | --after <ref> | --first | --last]',
+  '         [--move <ref>] [--rename "<label>"] [--merge <ref> | --unmerge] [--move-to "../X" | "/A/B"] [--transient[=30s] | --keep]',
+  '         [--context-type=context|plan|group|test-run] [--message-type=test-result --result pass|fail|skip --checks N --failed N --duration 4.1s]',
+  '       aimb-log.mjs … --ask "<question>" [--choice "A" --choice "B" …] [--free] [--expires 2h] [--details "..."] [--wait 30m]   (exit 0 answered, 10 still open, 11 expired, 12 withdrawn, 13 gone)',
+  '       aimb-log.mjs … --wait-answer [--agent a] [--key K | --id I | --path P] [--wait 30m]   (wait for an existing question\'s answer)',
+  '       aimb-log.mjs … --resolve "<path>" [--agent a] [--key K | --id I | --path P]   (what a path resolves to now; changes nothing)',
+  '       aimb-log.mjs … --guide agent|session [--agent <key> --label "<name>" --under <item key>]   (print the rules; with --agent: your first report)',
+  '       aimb-log.mjs --stream | --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--no-log]   (the log tool\'s fields per line / item)',
+].join('\n')
+// the typed fields of the settable message types, as flags (§1.7: "the flag is the field's name") → the types that declare it
+const FIELD_FLAGS = new Map()
+for (const [t, T] of Object.entries(MESSAGE_TYPES)) if (T.settable) for (const f of Object.keys(T.fields || {})) FIELD_FLAGS.set(f, [...(FIELD_FLAGS.get(f) || []), t])
+const VALUE_FLAGS = new Set(['session', 'project', 'user', 'agent', 'key', 'id', 'path', 'ctx', 'under', 'label', 'state', 'progress', 'eta', 'stale-after', 'details', 'data', 'data-file', 'batch',
+  'ws-port', 'url', 'token-file', 'text', 'move', 'rename', 'merge', 'move-to', 'resolve', 'before', 'after', 'ask', 'expires', 'wait', 'guide', 'context-type', 'message-type', ...FIELD_FLAGS.keys()])
+const BOOL_FLAGS = new Set(['no-log', 'stream', 'help', 'done', 'first', 'last', 'free', 'wait-answer', 'unmerge', 'keep'])
+const OPT_FLAGS = new Set(['transient'])   // a boolean, or =<value> (Q44: the = form only, so nothing is positional)
+const STREAM_FLAGS = new Set(['session', 'project', 'user', 'agent', 'no-log', 'stream', 'ws-port', 'url', 'token-file'])
+const BATCH_FLAGS = new Set(['session', 'project', 'user', 'agent', 'no-log', 'batch', 'ws-port', 'url', 'token-file'])
+const ADDR_FLAGS = ['session', 'project', 'user', 'agent', 'key', 'id', 'path', 'ctx', 'ws-port', 'url', 'token-file']
+const LINE_FIELDS = [...LOG2_FIELDS, ...LEGACY2_FIELDS]   // a stream line / batch item (the 1.7x ones only so the parser can name the 2.0 form)
 const num = (v, d) => (Number(v) > 0 ? Number(v) : d)
 const TIMEOUT_MS = num(process.env.AIMB_LOG_TIMEOUT_MS, 8000)          // one-shot: connect + hello + reply; stream: hello + each reply
 const LINE_WAIT_MS = num(process.env.AIMB_LOG_LINE_WAIT_MS, 10000)     // stream: how long a line may wait for a (re)connected link
@@ -121,13 +122,11 @@ function finish(code, obj) {   // print ONE JSON line (if any), then exit once s
   process.stdout.write(out, () => process.exit(code))
 }
 function usage(code, what, extra) { console.error(USAGE); finish(64, { ok: false, code, what, ...(extra || {}) }) }
+const legacy = what => usage('legacy-form', what)
+const short = (v, n = 60) => { const s = String(v); return s.length > n ? s.slice(0, n - 3) + '…' : s }
 
 // ---- argv
-// #79 (v1.66.0): a --plan name that looks like STATUS TEXT — "@~…" (a current line), "@ctx words" (a context message), or a
-// — is refused with bad-plan saying so ("@Spec" alone stays a valid name: one leading @ is dropped)
-const looksLikeText = n => { const s = String(n).trim(); return s.startsWith('@~') || (s.startsWith('@') && /\s/.test(s)) }
-const isFlag = s => { const m = /^--([A-Za-z-]+)(=|$)/.exec(s); return !!m && (VALUE_FLAGS.has(m[1].toLowerCase()) || BOOL_FLAGS.has(m[1].toLowerCase()) || ['plan', 'item', 'token', 'choice'].includes(m[1].toLowerCase())) }
-const flags = {}, words = []
+const flags = /** @type {any} */ ({}), words = []
 {
   const argv = process.argv.slice(2)
   let err = null
@@ -137,31 +136,31 @@ const flags = {}, words = []
     if (!a.startsWith('--') || a.length === 2) { words.push(a); continue }
     const eq = a.indexOf('=')
     const name = (eq > 0 ? a.slice(2, eq) : a.slice(2)).toLowerCase()
-    if (name === 'token') { err = ['token-in-argv', '--token is refused: a token on the command line is visible in the process list. Pass --token-file <path>, set AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE), or let it read the bridge\'s config.json'] ; break }
-    if (name === 'item') {   // v1.66.0 (#79): ONE plan item per --item, repeatable; joins --plan's names in command-line order
-      const v = eq > 0 ? a.slice(eq + 1) : argv[i + 1]
-      if (eq < 0) { if (v === undefined || v.startsWith('--')) { err = ['usage', '--item needs a name: --item "A" --item "B"']; break } i++ }
-      if (looksLikeText(v)) { err = ['bad-plan', `--item "${v.length > 60 ? v.slice(0, 57) + '…' : v}" looks like status text — pass text with --text "<text>"`]; break }
-      flags.plan = (flags.plan || []).concat([v]); continue
+    if (name === 'token') { err = ['token-in-argv', '--token is refused: a token on the command line is visible in the process list. Pass --token-file <path>, set AI_BRIDGE_TOKEN (or AI_BRIDGE_TOKEN_FILE), or let it read the bridge\'s config.json']; break }
+    // §4.5: the removed 1.7x flags, each refused with the 2.0 form
+    if (name === 'plan') { err = ['legacy-form', '--plan was removed in 2.0: use --item "A" --item "B" (or --item <key> "<label>")']; break }
+    if (name === 'to') { err = ['legacy-form', '--move … --to was removed in 2.0: use --key <node> --move <parent> (or --path … --move …)']; break }
+    if (name === 'item') {   // --item <k> "<label>" (two values) | --item "<label>" (one) — §4.1's parse rule (H11)
+      if (eq > 0) { flags.items = (flags.items || []).concat([a.slice(eq + 1)]); continue }
+      const v = argv[i + 1]
+      if (v === undefined || v.startsWith('--')) { err = ['usage', '--item needs a label: --item <key> "<label>" or --item "<label>"']; break }
+      i++
+      const w = argv[i + 1]
+      if (w !== undefined && !w.startsWith('--') && validKey(v).ok) { i++; flags.items = (flags.items || []).concat([{ key: v, label: w }]) }
+      else flags.items = (flags.items || []).concat([v])
+      continue
     }
-    if (name === 'plan') {   // v1.63.0 (#70 6b): every following argument up to the next --flag (or `--`) is a plan name
-      const names = eq > 0 ? [a.slice(eq + 1)] : []
-      if (eq < 0) while (i + 1 < argv.length && !argv[i + 1].startsWith('--')) names.push(argv[++i])
-      if (!names.length) { err = ['usage', '--plan needs at least one name: --plan "A" "B" …']; break }
-      const txt = names.find(looksLikeText)   // #79: --plan swallows every following argument, so trailing status text became an item
-      if (txt) { err = ['bad-plan', `"${txt.length > 60 ? txt.slice(0, 57) + '…' : txt}" looks like status text — put text before --plan: "<text>" --plan "A" "B"`]; break }
-      flags.plan = (flags.plan || []).concat(names); continue
-    }
-    if (name === 'choice') {   // v1.71.0 (#85): ONE choice per --choice, repeatable, in command-line order (as --item: never positional)
+    if (name === 'choice') {   // ONE choice per --choice, repeatable, in command-line order (never positional)
       const v = eq > 0 ? a.slice(eq + 1) : argv[i + 1]
       if (eq < 0) { if (v === undefined || v.startsWith('--')) { err = ['usage', '--choice needs a value: --choice "A" --choice "B"']; break } i++ }
-      if (looksLikeText(v)) { err = ['bad-choices', `--choice "${v.length > 60 ? v.slice(0, 57) + '…' : v}" looks like status text — the question goes in --ask "<question>"`]; break }
       flags.choices = (flags.choices || []).concat([v]); continue
     }
+    if (OPT_FLAGS.has(name)) { flags[name] = eq > 0 ? a.slice(eq + 1) : true; continue }
     if (BOOL_FLAGS.has(name)) { if (eq > 0) err = ['usage', `--${name} takes no value`]; else flags[name] = true; continue }
     if (!VALUE_FLAGS.has(name)) { err = ['usage', `unknown flag --${name}`]; break }
     const v = eq > 0 ? a.slice(eq + 1) : argv[i + 1]
-    // #79: --text is explicit, so its value may itself start with "--" ("--text/--item built"); only a real flag name counts as missing
+    // --text is explicit, so its value may itself start with "--" ("--text/--item built"); only a real flag name counts as missing
+    const isFlag = s => { const m = /^--([A-Za-z-]+)(=|$)/.exec(s); return !!m && (VALUE_FLAGS.has(m[1].toLowerCase()) || BOOL_FLAGS.has(m[1].toLowerCase()) || OPT_FLAGS.has(m[1].toLowerCase()) || ['plan', 'to', 'item', 'token', 'choice'].includes(m[1].toLowerCase())) }
     const missing = v === undefined || (v.startsWith('--') && (name !== 'text' || isFlag(v)))
     if (eq < 0) { if (missing) { err = ['usage', `--${name} needs a value`]; break } i++ }
     flags[name] = v
@@ -169,6 +168,10 @@ const flags = {}, words = []
   if (err) usage(err[0], err[1])
 }
 if (!exiting && flags.help) { console.error(USAGE); finish(0, null) }
+// positional text was removed (§4.5); `--` still ends the flags, but what follows is not text any more
+if (!exiting && words.length) legacy(`positional text was removed in 2.0: use --text "…" (a leading @ sets the line) — got "${short(words.join(' '), 40)}"`)
+// "@~" at the start of an item / a choice (the 1.7x "--plan … "@~root headline"" slip): refused, naming the 2.0 form
+if (!exiting) for (const it of flags.items || []) { const l = typeof it === 'string' ? it : it.label; if (/^\s*@~/.test(l)) { legacy(`@~ was removed in 2.0: an --item is a label ("${short(l.replace(/^\s*@~/, ''))}"); set a line with --text "@…"`); break } }
 
 // ---- config: token, port, realm (never printed)
 function readTokenFile(p) {
@@ -192,27 +195,38 @@ const URL_ = flags.url || `ws://127.0.0.1:${WSPORT}`
 const REALM = process.env.AI_BRIDGE_REALM || CFG.realm || 'default'
 const OS_USER = (() => { try { return os.userInfo().username || '' } catch { return process.env.USERNAME || process.env.USER || '' } })()
 const ident = { session: String(flags.session || '').trim(), project: String(flags.project || '').trim(), user: String(flags.user || process.env.AI_BRIDGE_USER || OS_USER || '').trim(), realm: REALM }
+const nowOpts = () => ({ now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset() })
 
-// ---- the report(s): validate locally with the bridge's own parser (a bad report costs no connection and exits 64)
-const STREAM = !!flags.stream, BATCH = flags.batch != null
-const defaults = {}
-if (flags.agent != null) defaults.agent = flags.agent
-if (flags.path != null) defaults.path = flags.path
-if (flags.ctx != null) defaults.context = flags.ctx
-if (flags['no-log']) defaults.log = false
-let oneShot = null
-let WAIT = /** @type {{ ms: number, path: string|null }|null} */ (null)   // v1.71.0 (#85): wait for an answer (path = an existing question; null = the one --ask posts)
-// a batch (6a): the items + the command line's defaults, checked locally (bounds, JSON) — each item is answered by the bridge
-function batchInput(items) {
-  if (!Array.isArray(items)) return { err: { code: 'bad-batch', what: 'a batch is a JSON array of items' } }
-  const input = { ...defaults, items }
-  const sp = splitBatch(input)
-  return sp.ok ? { input } : { err: { code: sp.code, what: sp.what } }
+/** The command line's ADDRESS (§3): --agent, --key | --id | --path, --ctx (a label below --agent / --path). → { addr } | { err } */
+function addressOf() {
+  const a = /** @type {any} */ ({})
+  if (flags.agent != null) a.agent = flags.agent
+  for (const k of ['key', 'id', 'path']) if (flags[k] != null) a[k] = flags[k]
+  if (flags.ctx != null) {
+    const c = String(flags.ctx).trim()
+    if (c.startsWith('@')) return { err: ['legacy-form', `--ctx takes a label in 2.0 (no @): --ctx "${short(c.replace(/^@~?/, '').replace(/^"(.*)"$/, '$1'))}" — set its line with --text "@…"`] }
+    if (a.key != null || a.id != null) return { err: ['bad-address', '--ctx names a context below --agent / --path — not with --key / --id'] }
+    if (!c) return { err: ['usage', '--ctx needs a label'] }
+    a.path = (a.path != null && String(a.path).trim() ? String(a.path).trim().replace(/\/+$/, '') + '/' : '') + formatPath2([c])
+  }
+  return { addr: a }
 }
-// v1.73.0 (#89): --guide agent|session prints the how-to for THIS script (and this host's gateway) instead of reporting
+
+// ---- what to do: one report (oneShot), a wait, a resolve, a batch, a stream or a guide
+const STREAM = !!flags.stream, BATCH = flags.batch != null
+const defaults = /** @type {any} */ ({})
+if (flags.agent != null) defaults.agent = flags.agent
+if (flags['no-log']) defaults.log = false
+let oneShot = /** @type {any} */ (null), RESOLVE = /** @type {any} */ (null)
+let WAIT = /** @type {{ ms: number, addr: any }|null} */ (null)   // wait for an answer (addr = an existing question's address; null = the one --ask posts)
+const EXIT_OF = { answered: 0, timeout: 10, expired: 11, withdrawn: 12, gone: 13 }   // #85: the wait's outcome → exit code
 if (!exiting && flags.guide != null) {
   if (!GUIDE_KINDS.includes(String(flags.guide).toLowerCase())) usage('usage', `--guide takes one of: ${GUIDE_KINDS.join(' / ')}`)
-  else setImmediate(runGuide)
+  else {
+    const extra = Object.keys(flags).filter(k => !['guide', 'session', 'project', 'user', 'agent', 'label', 'under', 'path', 'ws-port', 'url', 'token-file'].includes(k))
+    if (extra.length) usage('usage', `--guide prints the rules (and, with --agent, puts you on the board) — not --${extra.join(' / --')}`)
+    else setImmediate(runGuide)
+  }
 }
 if (!exiting && flags.guide == null) {
   if (!ident.session) usage('usage', '--session <name> is required')
@@ -223,25 +237,43 @@ if (!exiting && flags.guide == null) {
   else if (STREAM && BATCH) usage('usage', '--stream and --batch are exclusive (a stream line may itself be an array)')
   else if (BATCH) {
     const extra = Object.keys(flags).filter(k => !BATCH_FLAGS.has(k))
-    if (extra.length) usage('usage', `--batch takes the report fields per item, not --${extra.join(' / --')}`)
-    else if (words.length) usage('usage', '--batch reads its items from the file (or stdin); no positional text')
+    if (extra.length) usage('usage', `--batch takes the report fields per item, not --${extra.join(' / --')} (beside the items: --agent / --no-log)`)
   } else if (STREAM) {
     const extra = Object.keys(flags).filter(k => !STREAM_FLAGS.has(k))
-    if (extra.length) usage('usage', `--stream takes the report fields per line, not --${extra.join(' / --')}`)
-    else if (words.length) usage('usage', '--stream reads its reports from stdin; no positional text')
+    if (extra.length) usage('usage', `--stream takes the report fields per line, not --${extra.join(' / --')} (defaults: --agent / --no-log)`)
+  } else if (flags.resolve != null) {
+    const extra = Object.keys(flags).filter(k => k !== 'resolve' && !ADDR_FLAGS.includes(k))
+    const ad = addressOf()
+    if (extra.length) usage('usage', `--resolve changes nothing: it takes --agent / --key / --id / --path (the node it is relative to) — not --${extra.join(' / --')}`)
+    else if (ad.err) usage(ad.err[0], ad.err[1])
+    else {
+      const pc = parseCall(ad.addr)
+      if (!pc.ok) usage(pc.code || 'bad-input', pc.what || 'invalid address')
+      else RESOLVE = { ...ad.addr, resolve: flags.resolve }
+    }
   } else {
-    const input = { ...defaults }
-    if (flags.text != null && words.length) usage('usage', `--text and positional text are exclusive (got --text plus "${words.join(' ').slice(0, 40)}")`)
-    else if (flags.text != null) input.text = flags.text                       // v1.66.0 (#79)
-    else if (words.length) input.text = words.join(' ')
-    for (const [f, k] of [['state', 'state'], ['progress', 'progress'], ['eta', 'eta'], ['stale-after', 'stale_after'], ['details', 'details']]) if (flags[f] != null) input[k] = flags[f]
-    if (flags.plan) input.plan = flags.plan                                   // v1.63.0 (#70 6b)
-    for (const k of ['move', 'to', 'before', 'after']) if (flags[k] != null) input[k] = flags[k]   // v1.69.0 (#82): move / re-parent; place before / after a sibling
-    if (flags.ask != null) input.ask = flags.ask                              // v1.71.0 (#85): a question
+    const ad = addressOf()
+    if (ad.err) usage(ad.err[0], ad.err[1])
+    const input = /** @type {any} */ ({ ...(ad.addr || {}) })
+    if (flags['no-log']) input.log = false
+    for (const [f, k] of [['under', 'under'], ['label', 'label'], ['text', 'text'], ['state', 'state'], ['progress', 'progress'], ['eta', 'eta'], ['stale-after', 'stale_after'], ['details', 'details'],
+      ['move', 'move'], ['rename', 'rename'], ['merge', 'merge'], ['move-to', 'move_to'], ['before', 'before'], ['after', 'after'], ['context-type', 'context_type'], ['message-type', 'message_type'],
+      ['ask', 'ask'], ['expires', 'expires']]) if (flags[f] != null) input[k] = flags[f]
+    if (flags.items) input.plan = flags.items
     if (flags.choices) input.choices = flags.choices
     if (flags.free) input.free = true
-    if (flags.expires != null) input.expires = flags.expires
-    if (flags.first && flags.last) usage('usage', '--first and --last are exclusive')
+    if (flags.unmerge) input.unmerge = true
+    if (flags.keep) input.keep = true
+    if (flags.transient != null) input.transient = flags.transient === true ? true : flags.transient
+    // the typed fields (§1.7): each flag is its field's name, for the --message-type that declares it
+    const typed = [...FIELD_FLAGS.keys()].filter(f => flags[f] != null)
+    if (typed.length) {
+      const mt = flags['message-type'] != null ? String(flags['message-type']).trim().toLowerCase() : null
+      const stray = typed.filter(f => !mt || !FIELD_FLAGS.get(f).includes(mt))
+      if (!exiting && stray.length) usage('bad-fields', `--${stray.join(' / --')} ${stray.length > 1 ? 'are fields' : 'is a field'} of --message-type=${FIELD_FLAGS.get(stray[0]).join('|')}${mt ? ` (not of ${mt})` : ' — give the type too'}`)
+      input.fields = Object.fromEntries(typed.map(f => [f, flags[f]]))
+    }
+    if (exiting) { /* usage printed */ } else if (flags.first && flags.last) usage('usage', '--first and --last are exclusive')
     else if (flags.first || flags.last) input.position = flags.first ? 'first' : 'last'
     if (exiting) { /* usage printed */ } else if (flags.done && flags.state != null) usage('usage', '--done and --state are exclusive (--done = --state done)')
     else if (flags.done) input.state = 'done'
@@ -252,21 +284,21 @@ if (!exiting && flags.guide == null) {
       try { raw = fs.readFileSync(String(flags['data-file']), 'utf8') } catch (e) { usage('bad-data', `--data-file unreadable: ${e.code || e.message}`) }
       if (raw != null) { try { input.data = JSON.parse(raw.replace(/^﻿/, '')) } catch (e) { usage('bad-data', `--data-file is not JSON: ${e.message}`) } }
     }
-    // v1.71.0 (#85): --wait (with --ask) / --wait-answer (an existing question): how long to wait for the answer
+    // #85: --wait (with --ask) / --wait-answer (an existing question): how long to wait for the answer
     if (!exiting && (flags.wait != null || flags['wait-answer'])) {
       const ms = flags.wait != null ? parseDuration(flags.wait) : 30 * 60000
       if (!Number.isFinite(ms) || ms <= 0 || ms > 24 * 3600000) usage('usage', '--wait takes a duration > 0 and ≤ 24h, e.g. 30m or 2h')
       else if (flags['wait-answer']) {
-        const extra = Object.keys(flags).filter(k => !['session', 'project', 'user', 'agent', 'path', 'ws-port', 'url', 'token-file', 'wait', 'wait-answer'].includes(k))
-        if (extra.length || words.length) usage('usage', `--wait-answer waits for an existing question (--path <its path>) — not --${extra.join(' / --') || 'text'}`)
-        else if (flags.path == null && flags.agent == null) usage('usage', '--wait-answer needs --path <the question\'s path> (the path its --ask returned)')
-        else WAIT = { ms, path: [flags.agent, flags.path].filter(x => x != null).map(x => String(x).trim().replace(/^\/+|\/+$/g, '')).filter(Boolean).join('/') }
-      } else if (flags.ask == null) usage('usage', '--wait waits for the answer to a question: use it with --ask "…" (or --wait-answer --path <question>)')
-      else WAIT = { ms, path: null }
+        const extra = Object.keys(flags).filter(k => !ADDR_FLAGS.includes(k) && !['wait', 'wait-answer'].includes(k))
+        if (extra.length) usage('usage', `--wait-answer waits for an existing question (--key / --id / --path, + --agent) — not --${extra.join(' / --')}`)
+        else if (ad.addr && ad.addr.key == null && ad.addr.id == null && ad.addr.path == null) usage('usage', '--wait-answer needs the question: --key <its key> (e.g. ?1), --id <its node.id> or --path <its path>')
+        else { const pc = parseCall(ad.addr || {}); if (!pc.ok) usage(pc.code || 'bad-input', pc.what || 'invalid address'); else WAIT = { ms, addr: ad.addr } }
+      } else if (flags.ask == null) usage('usage', '--wait waits for the answer to a question: use it with --ask "…" (or --wait-answer --key <question>)')
+      else WAIT = { ms, addr: null }
     }
     if (!exiting && !flags['wait-answer']) {   // --wait-answer sends no report
-      const p = parseMessage(input, { now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset() })
-      if (!p.ok) usage(p.code || 'bad-input', p.what || 'invalid report')
+      const p = parseCall(input, nowOpts())   // the gateway's own parser: a bad report costs no connection (exit 64)
+      if (!p.ok) usage(p.code || 'bad-input', p.what || 'invalid report', p.suggest ? { suggest: p.suggest } : undefined)
       else oneShot = input
     }
   }
@@ -274,16 +306,17 @@ if (!exiting && flags.guide == null) {
 
 // ---- the link
 function hello(ws) { ws.send(JSON.stringify({ type: 'hello', kind: 'logger', token: TOKEN, ident })) }
-const unsupported = m => ({ ok: false, code: 'gateway-unsupported', what: `the gateway on ${URL_} runs bridge ${m.bridge_version || '?'}; aimb-log needs 1.59.0+ on this host's gateway (restart it on the new version)` })
-// v1.69.0 (#82): a ≤1.68 gateway drops --move / --to / --before / --after / --first / --last without a word (an item lands at the end, a move
-// never happens) — refuse up front instead
-const verLt = (a, b) => { const x = String(a || '0').split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); return false }
-const plan82Unsupported = m => ({ ok: false, code: 'gateway-unsupported', what: `the gateway on ${URL_} runs bridge ${m.bridge_version || '?'}; --move / --to / --before / --after / --first / --last need 1.69.0+ on this host's gateway (restart it on the new version)` })
-// v1.71.0 (#85): a ≤1.70 gateway drops --ask / --choice / --free / --expires (and refuses --state withdrawn); it can't wait either
-const askUnsupported = m => ({ ok: false, code: 'gateway-unsupported', what: `the gateway on ${URL_} runs bridge ${m.bridge_version || '?'}; questions (--ask / --choice / --free / --expires / --wait / --wait-answer, --state withdrawn) need 1.71.0+ on this host's gateway (restart it on the new version)` })
-const EXIT_OF = { answered: 0, timeout: 10, expired: 11, withdrawn: 12, gone: 13 }   // #85: the wait's outcome → exit code
+const is2 = m => !!m && m.logger === true && Number(m.activity_format) === ACTIVITY_FORMAT
+const unsupported = m => ({ ok: false, code: 'gateway-unsupported', what: !m || !m.logger ? `the bridge on ${URL_} is not a gateway that takes reports (bridge ${(m && m.bridge_version) || '?'})`
+  : `the gateway on ${URL_} runs bridge ${m.bridge_version || '?'}, which does not speak the 2.0 activity forms — this aimb-log needs a 2.0 gateway (upgrade every host together: docs/spec-88.md §7.1)` })
 
 // ---- a batch: read the array (file or stdin), check it locally, then ONE call like a one-shot (exit 0 only when every item applied)
+function batchInput(items) {
+  if (!Array.isArray(items)) return { err: { code: 'bad-batch', what: 'a batch is a JSON array of items' } }
+  const input = { ...defaults, items }
+  const sp = splitBatch2(input)
+  return sp.ok ? { input } : { err: { code: sp.code, what: sp.what } }
+}
 async function readBatch() {
   let raw
   try {
@@ -291,19 +324,21 @@ async function readBatch() {
     else raw = fs.readFileSync(String(flags.batch), 'utf8')
   } catch (e) { return usage('bad-batch', `--batch unreadable: ${e.code || e.message}`) }
   let items
-  try { items = JSON.parse(raw.replace(/^\uFEFF/, '')) } catch (e) { return usage('bad-batch', `--batch is not JSON: ${e.message}`) }
+  try { items = JSON.parse(raw.replace(/^﻿/, '')) } catch (e) { return usage('bad-batch', `--batch is not JSON: ${e.message}`) }
   const b = batchInput(items)
   if (b.err) return usage(b.err.code, b.err.what)
   oneShot = b.input
   sendOne()
 }
 if (!exiting && flags.guide == null && BATCH) readBatch()
+else if (!exiting && RESOLVE) sendResolve()
 else if (!exiting && oneShot) sendOne()
-else if (!exiting && WAIT && WAIT.path) waitAnswer(WAIT.path, Date.now() + WAIT.ms, null)
+else if (!exiting && WAIT && WAIT.addr) waitAnswer(WAIT.addr, Date.now() + WAIT.ms, null)
+
 function sendOne() {
-  // ONE report (or one batch): connect → hello → welcome → log → logged → print → exit
+  // ONE report (or one batch): connect → hello → welcome (a 2.0 gateway?) → log → logged → print → exit
   const ws = new WebSocket(URL_)
-  let welcomed = false, handedOff = false   // #85: handedOff = the link now serves the wait (waitAnswer owns it)
+  let welcomed = false, handedOff = false   // handedOff = the link now serves the wait (waitAnswer owns it)
   const timer = setTimeout(() => { finish(4, { ok: false, code: 'timeout', what: `no answer from ${URL_} within ${TIMEOUT_MS}ms` }); try { ws.terminate() } catch { } }, TIMEOUT_MS)
   const done = (code, obj) => { if (handedOff) return; clearTimeout(timer); try { ws.close() } catch { } finish(code, obj) }
   ws.on('open', () => hello(ws))
@@ -311,15 +346,13 @@ function sendOne() {
     let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
     if (m.type === 'welcome' && !welcomed) {
       welcomed = true
-      if (!m.logger) return done(4, unsupported(m))   // a pre-1.59 gateway took the hello for a page: close at once
-      if (usesPlan82(oneShot) && verLt(m.bridge_version, '1.69.0')) return done(4, plan82Unsupported(m))   // #82: it would silently ignore the fields
-      if ((usesAsk(oneShot) || WAIT) && verLt(m.bridge_version, '1.71.0')) return done(4, askUnsupported(m))   // #85: it would drop the question fields
+      if (!is2(m)) return done(4, unsupported(m))   // §4.1: nothing is sent to a gateway that does not speak 2.0
       ws.send(JSON.stringify({ type: 'log', ref: 1, input: oneShot }))
     } else if (m.type === 'logged') {
       const r = m.result || { ok: false, code: 'bad-reply' }
-      if (WAIT && r.ok && r.path != null && r.question) {   // #85: asked — now wait for the answer, on this same link
+      if (WAIT && r.ok && r.question && r.node && r.node.id) {   // asked — now wait for the answer, on this same link
         clearTimeout(timer); handedOff = true
-        return waitAnswer(r.path, Date.now() + WAIT.ms, { ws, asked: { id: r.id, ts: r.ts, path: r.path } })
+        return waitAnswer({ node_id: r.node.id }, Date.now() + WAIT.ms, { ws, asked: { id: r.id, ts: r.ts, node: r.node } })
       }
       done(r.ok && !(r.failed > 0) ? 0 : 4, r)   // a batch with a failed item → 4
     }
@@ -329,23 +362,40 @@ function sendOne() {
   ws.on('error', e => done(4, { ok: false, code: 'link-error', what: String((e && e.message) || e) }))
 }
 
+/** --resolve (Q46): connect → hello → welcome → {type:"resolve"} → {type:"resolved"} → print → exit (0 resolved, 4 refused). */
+function sendResolve() {
+  const ws = new WebSocket(URL_)
+  let welcomed = false
+  const timer = setTimeout(() => { finish(4, { ok: false, code: 'timeout', what: `no answer from ${URL_} within ${TIMEOUT_MS}ms` }); try { ws.terminate() } catch { } }, TIMEOUT_MS)
+  const done = (code, obj) => { clearTimeout(timer); try { ws.close() } catch { } finish(code, obj) }
+  ws.on('open', () => hello(ws))
+  ws.on('message', raw => {
+    let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
+    if (m.type === 'welcome' && !welcomed) { welcomed = true; if (!is2(m)) return done(4, unsupported(m)); ws.send(JSON.stringify({ type: 'resolve', ref: 1, input: RESOLVE })) }
+    else if (m.type === 'resolved') { const r = m.result || { ok: false, code: 'bad-reply' }; done(r.ok ? 0 : 4, r) }
+    else if (m.type === 'error') done(4, { ok: false, code: m.code || 'error', what: m.what || null })
+  })
+  ws.on('close', () => done(4, { ok: false, code: 'link-closed', what: welcomed ? 'the bridge closed the link before answering' : 'the bridge closed the link (bad token?)' }))
+  ws.on('error', e => done(4, { ok: false, code: 'link-error', what: String((e && e.message) || e) }))
+}
+
 /**
- * #85: WAIT for the answer to the question at `path` until `deadline` — {type:"wait_answer", ref, path, timeout_ms} on a logger
- * link (the one --ask just used, else a new one), then ONE {type:"answer"} → print + exit (EXIT_OF). A dropped link is re-dialled
- * with backoff and the wait sent again for the time left; at the deadline with no link → outcome "timeout" (exit 10).
- * @param {string} path @param {number} deadline @param {{ ws?: any, asked?: any }|null} o
+ * #85 → 2.0: WAIT for the answer to a question until `deadline` — {type:"wait_answer", ref, node_id | (agent?, key | id |
+ * path), timeout_ms} on a logger link (the one --ask just used, else a new one), then ONE {type:"answer"} → print + exit
+ * (EXIT_OF). A dropped link is re-dialled with backoff and the wait sent again for the time left; at the deadline with no
+ * link → outcome "timeout" (exit 10). Once the gateway named the question's id, a re-dial waits by node_id.
+ * @param {any} addr @param {number} deadline @param {{ ws?: any, asked?: any }|null} o
  */
-function waitAnswer(path, deadline, o) {
+function waitAnswer(addr, deadline, o) {
   let ws = o && o.ws, backoff = 200, n = 0, cur = null, retry = null, lastErr = null
   const t0 = Date.now(), asked = o && o.asked ? o.asked : null
   const out = (code, r) => { if (retry) clearTimeout(retry); clearTimeout(stop); try { cur && cur.close() } catch { } finish(code, { ...r, ...(asked ? { asked } : {}) }) }
-  const stop = setTimeout(() => out(EXIT_OF.timeout, { ok: true, outcome: 'timeout', path, waited_ms: Date.now() - t0, ...(lastErr ? { note: `no link to the bridge at the end (${lastErr})` } : {}) }), Math.max(0, deadline - Date.now()) + 3000)   // the bridge answers "timeout" itself; this covers a bridge that can't
-  const ask = sock => { const left = deadline - Date.now(); sock.send(JSON.stringify({ type: 'wait_answer', ref: `w${++n}`, path, timeout_ms: Math.max(1, left) })) }
+  const stop = setTimeout(() => out(EXIT_OF.timeout, { ok: true, outcome: 'timeout', ...addr, waited_ms: Date.now() - t0, ...(lastErr ? { note: `no link to the bridge at the end (${lastErr})` } : {}) }), Math.max(0, deadline - Date.now()) + 3000)   // the bridge answers "timeout" itself; this covers a bridge that can't
+  const ask = sock => { const left = deadline - Date.now(); sock.send(JSON.stringify({ type: 'wait_answer', ref: `w${++n}`, ...addr, timeout_ms: Math.max(1, left) })) }
   const onMsg = (sock, raw) => {
     let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
     if (m.type === 'welcome') {
-      if (!m.logger) return out(4, unsupported(m))
-      if (verLt(m.bridge_version, '1.71.0')) return out(4, askUnsupported(m))
+      if (!is2(m)) return out(4, unsupported(m))
       backoff = 200; ask(sock)
     } else if (m.type === 'answer') {
       const r = m.result || { ok: false, code: 'bad-reply' }
@@ -356,7 +406,7 @@ function waitAnswer(path, deadline, o) {
   const redial = () => {
     retry = null
     if (exiting) return
-    if (Date.now() >= deadline) return out(EXIT_OF.timeout, { ok: true, outcome: 'timeout', path, waited_ms: Date.now() - t0, note: `no link to the bridge at the end${lastErr ? ` (${lastErr})` : ''}` })
+    if (Date.now() >= deadline) return out(EXIT_OF.timeout, { ok: true, outcome: 'timeout', ...addr, waited_ms: Date.now() - t0, note: `no link to the bridge at the end${lastErr ? ` (${lastErr})` : ''}` })
     const sock = new WebSocket(URL_)
     cur = sock
     sock.on('open', () => hello(sock))
@@ -378,14 +428,14 @@ if (!exiting && STREAM) {
   // The queue holds every line: a pending report { n, ref, input, deadline } or an already-answered one { n, ref, result }
   // (a bad line) that waits its turn behind the reports before it.
   const queue = []
-  let ws = null, ready = false, inflight = null, backoff = 200, eof = false, nextRef = 0, retry = null, gwVer = null
-  const emit = (item, result) => { process.stdout.write(JSON.stringify({ line: item.n, ...(item.ref !== undefined ? { ref: item.ref } : {}), ...result }) + '\n') }
+  let ws = null, ready = false, inflight = null, backoff = 200, eof = false, nextRef = 0, retry = null
+  // `line` stays the INPUT line number (the stream protocol is unchanged, §4.1); a 2.0 result's own `line` flag (§4.2: the
+  // report set the node's line) is passed on as `line_set`, so the two never collide
+  const emit = (item, result) => { const { line: set, ...r } = result || {}; process.stdout.write(JSON.stringify({ line: item.n, ...(item.ref !== undefined ? { ref: item.ref } : {}), ...r, ...(set !== undefined ? { line_set: set } : {}) }) + '\n') }
   function settle() { if (eof && !queue.length && !inflight && !exiting) { clearInterval(sweep); if (retry) clearTimeout(retry); try { ws && ws.close() } catch { } finish(0, null) } }
   function pump() {   // emit answered heads; send the next report when the link is up and nothing is in flight
     if (inflight || exiting) return
-    const old82 = it => ready && ws && usesPlan82(it.input) && verLt(gwVer, '1.69.0')   // #82: a ≤1.68 gateway would drop the fields silently
-    const old85 = it => ready && ws && usesAsk(it.input) && verLt(gwVer, '1.71.0')      // #85: a ≤1.70 gateway would drop the question fields
-    while (queue.length && (queue[0].result || old82(queue[0]) || old85(queue[0]))) { const it = queue.shift(); emit(it, it.result || (old82(it) ? plan82Unsupported({ bridge_version: gwVer }) : askUnsupported({ bridge_version: gwVer }))) }
+    while (queue.length && queue[0].result) { const it = queue.shift(); emit(it, it.result) }
     if (ready && ws && queue.length) {
       const it = queue.shift()
       it.wire = ++nextRef
@@ -395,7 +445,7 @@ if (!exiting && STREAM) {
     }
     settle()
   }
-  function fatal(r) {   // the bridge will never accept these reports (bad token / ident, an old gateway): report them all, exit 4
+  function fatal(r) {   // the bridge will never accept these reports (bad token / ident, a gateway without 2.0): report them all, exit 4
     if (inflight) { clearTimeout(inflight.timer); emit(inflight, r); inflight = null }
     for (const it of queue.splice(0)) emit(it, it.result || r)
     try { ws && ws.close() } catch { }
@@ -412,8 +462,7 @@ if (!exiting && STREAM) {
       let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
       if (m.type === 'welcome' && !ready) {
         clearTimeout(helloTimer)
-        if (!m.logger) return fatal(unsupported(m))   // a pre-1.59 gateway took the hello for a page
-        gwVer = m.bridge_version || null
+        if (!is2(m)) return fatal(unsupported(m))
         ready = true; backoff = 200; pump()
       } else if (m.type === 'logged') {
         if (!inflight || m.ref !== inflight.wire) return   // a late answer to a line already reported (timeout)
@@ -440,12 +489,12 @@ if (!exiting && STREAM) {
   let n = 0
   const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
   rl.on('line', raw => {
-    const item = { n: ++n }
+    const item = /** @type {any} */ ({ n: ++n })
     const line = raw.trim()
     if (!line) return
     let o
     try { o = JSON.parse(line) } catch (e) { item.result = { ok: false, code: 'bad-json', what: e.message } }
-    if (!item.result && Array.isArray(o)) {   // v1.62.0: a batch line — one call, one result line {line, ok, results}
+    if (!item.result && Array.isArray(o)) {   // a batch line — one call, one result line {line, ok, results}
       const b = batchInput(o)
       if (b.err) item.result = { ok: false, ...b.err }
       else { item.input = b.input; item.deadline = Date.now() + LINE_WAIT_MS }
@@ -455,12 +504,13 @@ if (!exiting && STREAM) {
     if (!item.result) {
       const { ref, ...fields } = o
       item.ref = ref
-      const extra = Object.keys(fields).filter(k => !LOG_FIELDS.includes(k))
-      if (extra.length) item.result = { ok: false, code: 'bad-field', what: `unknown field(s) ${extra.join(', ')}: a line carries ${LOG_FIELDS.join(', ')} (+ ref); the identity comes from the command line` }
+      const extra = Object.keys(fields).filter(k => !LINE_FIELDS.includes(k))
+      if (extra.length) item.result = { ok: false, code: 'bad-field', what: `unknown field(s) ${extra.join(', ')}: a line carries the log tool's fields (${LOG2_FIELDS.join(', ')}) + ref; the identity comes from the command line` }
       else {
-        item.input = withDefaults(defaults, fields)   // v1.62.0: a line with its own path / agent takes none of the address defaults
-        const p = parseMessage(item.input, { now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset() })
-        if (!p.ok) item.result = { ok: false, code: p.code || 'bad-input', what: p.what || null }
+        item.input = { ...fields }
+        for (const k of Object.keys(defaults)) if (item.input[k] === undefined) item.input[k] = defaults[k]   // --agent / --no-log: defaults a line may override
+        const p = parseCall(item.input, nowOpts())
+        if (!p.ok) item.result = { ok: false, code: p.code || 'bad-input', what: p.what || null, ...(p.suggest ? { suggest: p.suggest } : {}) }
         else item.deadline = Date.now() + LINE_WAIT_MS
       }
     }
@@ -471,40 +521,54 @@ if (!exiting && STREAM) {
   connect()
 }
 
-// v1.73.0 (#89): --guide agent|session — print the how-to (plain text, not JSON). The command it shows is the one this
-// script was run as (node + script + --session / --project / --token-file); the gateway is asked its version (only when a
-// token is at hand) so flags it can't serve are named. Never reports anything.
-// v1.74.0 (#89 part 2): the guide is PULLED from the gateway first — {type:"guide", ref, kind, cmd, path, script} on the logger
-// link → the realm's published guide (behaviors.realm.guides, placeholders filled, the capability note appended). The script
-// prints its OWN built-in text when the gateway is older than 1.74 (it answers bad-op; the welcome's version already says so),
-// can't be reached within AIMB_LOG_GUIDE_MS (default 2500), or the realm has none for this kind / for this version
-// (min_bridge). The last line says which source it used.
+// #89 → 2.0: --guide agent|session — print the how-to (plain text, not JSON). The command it shows is the one this script
+// was run as (node + script + --session / --project / --token-file). The guide is PULLED from the gateway first —
+// {type:"guide", ref, kind, cmd, path, agent, label, under, script} on the logger link → the realm's published guide, else
+// the script's OWN built-in text (also when the gateway can't be reached within AIMB_LOG_GUIDE_MS, default 2500, or does
+// not speak 2.0). §4.4: with --agent the same request is the agent's FIRST REPORT — the gateway puts the agent on the board
+// (state running, "reading the guide") when it is not there yet, and writes nothing when it is; the last lines say which
+// (and the label it got). A refused create (label-required, unknown-node for --under …) prints the guide, then the error,
+// and exits 64. The last line says where the guide came from.
 function runGuide() {
   const kind = String(flags.guide).toLowerCase(), fwd = p => String(p).split(path.sep).join('/')
   let ver = null
   try { ver = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'package.json'), 'utf8')).version || null } catch { }
   const cmd = logCmd({ node: fwd(process.execPath), script: fwd(fileURLToPath(import.meta.url)), session: ident.session || '<session>', project: ident.project || '<project>', tokenFile: TOKEN_FILE_ARG })
-  const by = `aimb-log ${ver || '?'}`
-  const out = text => { process.stdout.write(text + '\n', () => process.exit(0)) }
-  const builtin = (gw, why) => out(guideText({ kind: /** @type {any} */ (kind), cmd, path: flags.path || null, gateway: gw, script: ver }) + '\n' + guideSourceLine({ source: 'builtin', kind, by, gateway: gw, ...why }))
-  if (!TOKEN || !ident.session || !ident.project || !ident.user) return builtin(null, { reason: 'unreachable' })
+  const by = `aimb-log ${ver || '?'}`, agent = flags.agent != null ? String(flags.agent).trim() : null
+  const wantBoard = kind === 'agent' && !!agent
+  const out = (text, board) => {
+    const lines = [text]
+    let code = 0
+    if (wantBoard) {
+      if (!board) lines.push(`(Not on the board yet: this host's gateway could not register you — your first report with --label "…" will.)`)
+      else if (!board.ok) { lines.push(`(Not on the board: ${board.code} — ${board.what || ''})`, JSON.stringify(board)); code = board.code === 'session-user-mismatch' ? 4 : 64 }
+      else if (board.created) lines.push(`(You are on the board now as "${board.node && board.node.label}" — ${board.node && board.node.path}; key ${board.node && board.node.key}, id ${board.node && board.node.id}${(board.warnings || []).some(w => w && w.code === 'relabelled') ? ` — a sibling had your label, so you got "${board.node.label}"` : ''}.)`)
+      else lines.push(`(Already on the board as "${board.node && board.node.label}" — ${board.node && board.node.path}: nothing written.)`)
+    }
+    process.stdout.write(lines.join('\n') + '\n', () => process.exit(code))
+  }
+  const builtin = (gw, why, gateway2, board) => out(guideText({ kind: /** @type {any} */ (kind), cmd, path: flags.path || null, agent, gateway: gw, gateway2, script: ver }) + '\n' + guideSourceLine({ source: 'builtin', kind, by, gateway: gw, ...why }), board)
+  if (!TOKEN || !ident.session || !ident.project || !ident.user) return builtin(null, { reason: 'unreachable' }, undefined, null)
   let ws, settled = false, gw = null
   const end = fn => { if (settled) return; settled = true; clearTimeout(t); try { ws.close() } catch { } fn() }
-  const t = setTimeout(() => end(() => builtin(gw, { reason: gw ? 'old-gateway' : 'unreachable' })), num(process.env.AIMB_LOG_GUIDE_MS, 2500))
-  try { ws = new WebSocket(URL_) } catch { return end(() => builtin(null, { reason: 'unreachable' })) }
+  const t = setTimeout(() => end(() => builtin(gw, { reason: gw ? 'old-gateway' : 'unreachable' }, gw ? false : undefined, null)), num(process.env.AIMB_LOG_GUIDE_MS, 2500))
+  try { ws = new WebSocket(URL_) } catch { return end(() => builtin(null, { reason: 'unreachable' }, undefined, null)) }
   ws.on('open', () => hello(ws))
   ws.on('message', raw => {
     let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
     if (m.type === 'welcome') {
-      if (!m.logger) return end(() => builtin(null, { reason: 'unreachable' }))
+      if (!m.logger) return end(() => builtin(null, { reason: 'unreachable' }, undefined, null))
       gw = m.bridge_version || null
-      if (verLt(gw, '1.74.0')) return end(() => builtin(gw, { reason: 'old-gateway' }))   // a ≤1.73 gateway serves no guides
-      ws.send(JSON.stringify({ type: 'guide', ref: 1, kind, cmd, path: flags.path || null, script: ver }))
+      if (!is2(m)) return end(() => builtin(gw, { reason: 'old-gateway' }, false, null))   // a 1.7x gateway: the built-in 2.0 text, + a note that it won't take these forms
+      const g = { type: 'guide', ref: 1, kind, cmd, path: flags.path || null, script: ver }
+      if (wantBoard) { g.agent = agent; for (const k of ['label', 'under']) if (flags[k] != null) g[k] = flags[k] }
+      ws.send(JSON.stringify(g))
     } else if (m.type === 'guide' && m.ref === 1) {
-      if (m.ok && m.source === 'realm' && typeof m.text === 'string') return end(() => out(m.text + '\n' + guideSourceLine({ source: 'realm', kind, updated_at: m.updated_at, origin: m.origin })))
-      end(() => builtin(gw, m.ok ? { reason: m.reason || 'none', min_bridge: m.min_bridge || null } : { reason: 'unreachable' }))
-    } else if (m.type === 'logged' || m.type === 'error') end(() => builtin(gw, { reason: gw ? 'old-gateway' : 'unreachable' }))   // bad-op = no guide request there
+      const board = wantBoard ? (m.board || null) : null
+      if (m.ok && m.source === 'realm' && typeof m.text === 'string') return end(() => out(m.text + '\n' + guideSourceLine({ source: 'realm', kind, updated_at: m.updated_at, origin: m.origin }), board))
+      end(() => builtin(gw, m.ok ? { reason: m.reason || 'none', min_bridge: m.min_bridge || null } : { reason: 'unreachable' }, true, board))
+    } else if (m.type === 'logged' || m.type === 'error') end(() => builtin(gw, { reason: gw ? 'old-gateway' : 'unreachable' }, gw ? false : undefined, null))   // bad-op = no guide request there
   })
-  ws.on('error', () => end(() => builtin(gw, { reason: 'unreachable' })))
-  ws.on('close', () => end(() => builtin(gw, { reason: 'unreachable' })))
+  ws.on('error', () => end(() => builtin(gw, { reason: 'unreachable' }, undefined, null)))
+  ws.on('close', () => end(() => builtin(gw, { reason: 'unreachable' }, undefined, null)))
 }
