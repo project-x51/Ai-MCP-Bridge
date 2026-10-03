@@ -109,10 +109,12 @@ await section(() => {
   check('path: @ inside a label (a@b) is plain', segs('a@b/c @ d') === J(['a@b', 'c @ d']))
   check('path: an empty inner segment is refused', segs('a//b') === 'bad-path' && segs('a/ /b') === 'bad-path')
   check('path: an unterminated quote / text after a closing quote is refused', segs('"abc') === 'bad-path' && segs('"a"b/c') === 'bad-path')
-  check('path: 6 segments ok, 7 refused path-too-deep', segs('a/b/c/d/e/f') !== 'path-too-deep' && segs('a/b/c/d/e/f/g') === 'path-too-deep')
+  const deep = n => Array.from({ length: n }, (_, i) => 's' + i).join('/')
+  check('path: 32 segments ok, 33 refused path-too-deep (Q11b: the 2.0 hard depth)', segs(deep(32)) !== 'path-too-deep' && segs(deep(33)) === 'path-too-deep' && A.DEPTH2.max === 32 && A.DEPTH2.warn === 20)
   check('path: a 61-code-point label is refused bad-label', segs(rep('x', 61)) === 'bad-label' && segs('"' + rep('x', 60) + '"') === J([rep('x', 60)]))
   check('path: key = labelKey of the display path (case-insensitive)', P('Next Release/DOCS').key === P('next release/docs').key && P('Next Release/DOCS').path === 'Next Release/DOCS')
-  const tricky = [['a/b', 'c'], ['"q', 'x'], ['@home'], ['.', 'x'], ['say "hi"'], ['Next release', 'Docs (2)'], ['?3'], ['root']]
+  const tricky = [['a/b', 'c'], ['"q', 'x'], ['@home'], ['.', 'x'], ['..', 'x'], ['say "hi"'], ['Next release', 'Docs (2)'], ['?3'], ['root']]
+  check('path: formatPath2 quotes a ".." label (step 2a: a leading .. navigates in --move-to)', A.formatPath2(['..', 'x']) === '".."/x' && A.formatPath2(['...']) === '...')
   check('path: formatPath2 → parsePath2 round-trips tricky labels (/, leading " or @, ".", quotes)', tricky.every(ls => { const r = P(A.formatPath2(ls)); return r.ok && J(r.segs) === J(ls) }), J(tricky.map(A.formatPath2)))
   check('path: formatPath2 quotes only where needed', A.formatPath2(['Next release', 'a/b', '@x', 'say "hi"']) === 'Next release/"a/b"/"@x"/say "hi"')
   check('path: non-string refused', P(null).code === 'bad-path' && P(5).code === 'bad-path')

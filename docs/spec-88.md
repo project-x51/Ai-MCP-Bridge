@@ -1,8 +1,9 @@
 # #88 spec (final pass) — stable node identity, v2.0
 
 Status: FINAL, 2026-10-03. Robin has answered Q01 – Q41 and confirmed two follow-ups (no v5 network projection; how
-duplicate labels behave). He then added `--move-to` and transient contexts (Q43, §3.8). All his decisions are in §9
-"Decisions". Two small questions on §3.8 are open (Q44, Q45). The build (§8) has started at step 1. The agreed design is in
+duplicate labels behave). He then added `--move-to` and transient contexts (Q43, §3.8), answered its two follow-ups (Q44 grace period,
+Q45 no bare names in `--move-to`) and revised the depth limit for 2.0 (Q11b: hard 32, warning past 20). All his decisions
+are in §9 "Decisions". The build (§8) has started (step 1 done; step 2a in progress). The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
 
@@ -74,7 +75,17 @@ is no v5 projection and no support for a 1.7x host, so **every host is upgraded 
 | question | unchanged from #85: a property of the current line (`line.question`), not a kind. |
 | `merged_into` | §3.6. |
 
-Depth stays ≤ 6 below the session (`ACTIVITY_LIMITS.depth`), checked on create and move (Q11).
+**Depth (Q11b — revises Q11 for 2.0; 1.7x keeps its limit of 6).** A node's depth is its number of steps below the session
+root (a child of the root is depth 1). Checked on every create and every move (incl. merge, unmerge and `--move-to`):
+- **Hard limit 32** (`depth_max`): a create or move that would put ANY node deeper than 32 is refused `depth`, nothing
+  written. For a move the whole moved subtree counts (its deepest node lands at new parent depth + 1 + the subtree's height);
+  the error names that deepest node (`{id, key, label}`) and the depth it would reach. The dashboard's Move-to picker greys
+  out such targets.
+- **Soft warning past 20** (`depth_warn`): a create or move that leaves a node at depth 21 – 32 succeeds, with warning
+  `deep-tree` `{depth: N}` (N = the deepest depth it produced) in its result. The dashboard's Move-to dialog shows the same
+  warning before the user confirms.
+- **Display:** a long path is shortened in the MIDDLE (`Next release/…/Write the docs`) wherever it is shown, with the full
+  path on hover. Stored paths are never shortened — except `at` (§2.2), which is capped at about 1 KB.
 
 **Terms, used precisely from here on.** The **label** is the node's name (what the tree shows). The **current line** (or just
 "line") is its status text — the one-line "what it is doing now", with its state, bar and ETA. An **entry** is one line of the
@@ -165,7 +176,8 @@ path BEFORE the change (it seeds the alias table, §3.3, and lets a log say "mov
 - `create`: `n` id, `c` creator id (the session root's id for the session), `key`, `nk` (agent | context), `label`, `p` parent,
   `rank` (null = derived), `plan_item` / `plan_ix` when born a plan item, `run:true` (it BEGINS a run — replaces `new_from`;
   §5.3), and `asked` when the label was auto-renamed (§1.6: `"label":"notes (2)","asked":"notes"`). A create for a key whose
-  node is a GHOST (§5.1) re-uses its id and starts a new run. `transient:true` marks a transient context (§3.8).
+  node is a GHOST (§5.1) re-uses its id and starts a new run. `transient:true` marks a transient context (§3.8), with
+  `grace_ms` when it was created with a grace period (Q44).
 - `move`: new `p` (+ the rank it got there). `label`, `rank`, `item`: the one attribute. `keep`: a transient context becomes
   permanent (§3.8), with no other field.
 - `merge`: A (`n`) into B (`into`); `from` = A's parent then (for an unmerge); `kids` = A's children at that moment, which
@@ -181,7 +193,9 @@ path BEFORE the change (it seeds the alias table, §3.3, and lets a log say "mov
 - Today's entry fields (`apply` → `res.entry`) MINUS `path`, `new_from`, `evicted`, `moved_from`, `plan_item` / `plan_ix`
   (structure moved to node records) PLUS `n` (the node id) and `at`.
 - **`at` = the node's full display path when written** (Q08). The log panel shows it on hover when it differs from the node's
-  path now ("logged as #88/Docs"); it stays greppable. ~60 – 150 bytes per entry.
+  path now ("logged as #88/Docs"); it stays greppable. ~60 – 150 bytes per entry. **Capped at 1 024 UTF-8 bytes** (Q11b: a
+  32-deep path of 60-code-point labels could reach ~8 KB): a longer path keeps its head and tail and is cut in the MIDDLE with
+  `…` (on code-point boundaries), so both the top of the tree and the node's own label survive.
 - `current:true` marks an entry that SET the line (§4.0); `false` = logged only. Kept: `current text state progress eta_at
   stale_after_ms details data by act line_text line_by question plan_end finished_at`, and `dismiss:true` on the parent-log
   dismissal entry (`n` = the PARENT, `of` = the removed id). `rank` leaves entries: a placement writes a `rank` node record
@@ -317,12 +331,16 @@ target.
 - **Order and atomicity.** The report's state, line and log entry are applied first, then the node moves. It is ONE
   all-or-nothing change: the destination is resolved and every check below passes BEFORE anything is written. A refused move
   refuses the whole call, including the report.
-- **The path** is a §3.3 path (labels, quoting per Q37, no `@`) with two additions:
+- **The path** is a §3.3 path (labels, quoting per Q37, no `@`) in one of two forms (Q45):
   - A LEADING `/` makes it absolute from the session root, even with `--agent`.
-  - Otherwise it is RELATIVE to the node's CURRENT parent. Each leading `..` segment goes up one level, so `../X` is a
-    sibling of the parent and a plain `X` is a child of the parent (a sibling of the node). `..` is navigation only as a
-    leading segment. A label that is literally `..` is written quoted (`".."`), and going above the session root →
-    `bad-path`.
+  - A LEADING `..` makes it RELATIVE to the node's CURRENT parent. Each leading `..` segment goes up one level, so `../X` is
+    a sibling of the parent; EXACTLY as many segments must follow as there are `..` (`../X`, `../../R/X`), so a retry lands
+    in the same place (below). `..` is navigation only as a leading segment. A label that is literally `..` is written quoted
+    (`".."`), and going above the session root → `bad-path`.
+  - **Anything else is refused `bad-path`** (Q45): a bare destination (`X`, `X/Y`) would be resolved one level DOWN from the
+    parent and is not retry-safe. The error suggests both forms: `use "../X" (beside the node's parent) or "/…/X" (from the
+    session root)`. So is a path of only `..` segments with nothing after them (`..`, `../..`): there is no destination
+    label. (`../..` alone would be "the grandparent itself"; write it absolutely.)
 - **Resolution, segment by segment, from that base:**
   1. a LIVE child with that label (§3.3 step 1: by label, else an agent by key), whoever created it;
   2. else a GHOST (§5.1) whose last parent is this node and whose label matches (labelKey), the newest if there are several.
@@ -337,14 +355,18 @@ target.
   that key. Each bucket keeps one id for its whole life; a test run does not leave a new ghost behind.
 - **Arrival:** the node goes LAST in the destination (a stored rank after the last child, §1.3). The label rule is that of
   `--move` (§1.6): a destination child that already has the node's label → `duplicate-label` (nothing is written). The other
-  `--move` rules also apply: the same session only (`cross-session`), never under itself, depth ≤ 6 for the node's whole
-  subtree, and the session root cannot move. Agents may move (Q15). `--move-to` with `--move` → `bad-input` (one destination
+  `--move` rules also apply: the same session only (`cross-session`), never under itself, the depth rules for the node's whole
+  subtree (§1.3, Q11b: refused past 32 — the contexts it would create count too — and `deep-tree` past 20), and the session
+  root cannot move. Agents may move (Q15). `--move-to` with `--move` → `bad-input` (one destination
   per call). `--move-to` is not the removed `--to` (§4.5): it is a path, and it travels with a report.
 - **Idempotent on retry.** When the node's current parent already IS the resolved destination, the move part is a no-op: no
   `move` record and no rank change. The report applies again as a normal report (a logged retry logs twice, §3.5). Absolute
   paths, and relative ones with as many leading `..` as segments after them (`../Passed`, `../../Run 2/Passed`), resolve to the
-  same place on a retry. A plain `X` (one level DOWN) does not: a retry after a lost response would move it again, into `X/X`.
-  The guide therefore teaches `../X` and `/…` (whether to refuse the down form is Q45, §9).
+  same place on a retry. A bare `X` (one level DOWN) would not — a retry after a lost response would move it again, into
+  `X/X` — which is why it is refused (Q45). By the same reasoning a relative path whose segment count after the leading `..`
+  differs from its number of `..` is refused `bad-path` too, naming the absolute form: `../A/B` (a retry from the new parent
+  `B` would land in `A/A/B`) and `../../X` (a retry would climb one level higher). Build 2a's reading of Q45; confirmation
+  asked as Q46. The guide teaches `../X` and `/…`.
 - **Records:** the report's entry; any `create` records for created or resurrected contexts (`transient:true`, `c` = the
   caller); the `move` record plus its move entry (§2.2); then any `remove` records for transient contexts that emptied (below).
   All belong to one call, in that order.
@@ -354,11 +376,21 @@ target.
   `--transient` (the tool's `transient:true`). The flag is set only when the call CREATES the node (on an existing node
   `--transient` is ignored with warning `exists`, §3.5), and contexts only (never an agent). Every other context is permanent,
   as today.
+- **Grace period (Q44): an OPTIONAL parameter of `--transient`, default none.** `--transient=30s` (the `=` form only, so
+  there is no positional ambiguity; the duration syntax of `--stale-after`), the tool's `transient: "30s"` (`transient:
+  true` = no grace). With `--move-to`, `--transient=30s` also applies to every destination context the call auto-creates or
+  resurrects (without `--move-to` it applies to the target the call creates). The create record keeps `grace_ms` beside
+  `transient:true`.
 - **Vanishing:** a transient context disappears as soon as its LAST LIVE CHILD LEAVES. That means the child moves out, merges
   away, or is removed (dismissed, evicted, expired). It becomes a GHOST (§5.1, with its history kept): one entry on itself
   ("emptied — removed from the board (transient)"), then a `remove` record with `why:"transient"`. If its parent is
   transient and now empty too, the parent vanishes the same way (bottom-up, in the same call). A transient context that
   never had a child does not vanish, because nothing left it.
+  - **With a grace period** the emptied context is not removed at once: it is marked `empty_since` (in memory and in `cf`,
+    no record) and the owner's expiry pass removes it — with the same entry and `remove` record, and the same bottom-up chain,
+    each parent getting its own grace from that moment — once `grace_ms` has passed with no child. If a child ARRIVES during
+    the grace period the context stays (the mark is cleared); it vanishes again only when that child leaves in turn. The
+    replay re-runs the pass, as for expiry.
 - **Becoming PERMANENT** (for good; a permanent context never auto-disappears, and an unpin does not undo it):
   - a user PINS it (the owner sees a live `pin:<id>` record of any user in the view set it holds, §5.6);
   - it is RENAMED (`--rename`, or the dashboard's Rename…);
@@ -374,7 +406,8 @@ target.
   ghosts under it (visible with "show removed").
 - **A side effect of sequential runs:** in a sequential run, `In progress` empties between two tests. It therefore vanishes and
   comes back once per test, one run each (a `create` + `remove` pair and two entries per test). This is correct by the rules
-  above. Whether a short grace period should hold it is Q44 (§9).
+  above, and it is the default; a reporter that would rather keep the bucket between tests creates it with
+  `--transient=30s` (Q44).
 
 ---
 
@@ -411,8 +444,8 @@ Q19 FINAL).
 | `--move <ref>` | move the TARGET under `<ref>` (+ a position); a label clash → `duplicate-label` (§1.6) |
 | `--rename "<label>"` | the target's new label; a clash → `duplicate-label`; with `--move`, one checked change (§1.6) |
 | `--merge <ref>` / `--unmerge` | §3.6 |
-| `--move-to "<path>"` | after the report is applied, move the target there (relative to its parent: `../X`, `X`; absolute: `/…`), creating missing transient contexts; one all-or-nothing change (§3.8) |
-| `--transient` / `--keep` | a NEW context is transient (it vanishes when its last child leaves) / make a transient context permanent (§3.8) |
+| `--move-to "<path>"` | after the report is applied, move the target there (relative: `../X`, as many segments as `..`; absolute: `/…`; a bare `X` → `bad-path`, Q45), creating missing transient contexts; one all-or-nothing change (§3.8) |
+| `--transient[=<dur>]` / `--keep` | a NEW context is transient (it vanishes when its last child leaves; `=30s` = after a grace period with no child, Q44 — with `--move-to` it applies to the contexts that call creates) / make a transient context permanent (§3.8) |
 | `--text "<text>"` | log an entry; a leading `@` also sets the line (§4.0) |
 | `--guide agent\|session` | print the guide; with `--agent` it is also the agent's first report (§4.4) |
 | `--ctx`, `--state`, `--done`, `--progress`, `--eta`, `--stale-after`, `--details`, `--data`, `--no-log`, `--ask` …, `--stream`, `--batch` | unchanged |
@@ -424,14 +457,15 @@ Q19 FINAL).
 
 ### 4.2 The `log` and `activity` tools
 - `log` takes `agent` (the chain), `key`, `id`, `path`, `under` / `under_id`, `label`, `plan:[ "label" | { key, label } ]`,
-  `before` / `after` / `*_id`, `move` / `move_id`, `move_to`, `transient`, `keep` (§3.8), `rename`, `merge` / `merge_id`,
+  `before` / `after` / `*_id`, `move` / `move_id`, `move_to`, `transient` (`true | "30s"`, Q44), `keep` (§3.8), `rename`, `merge` / `merge_id`,
   `unmerge`, `text` (§4.0), `guide`. Batch
   items take the same; `agent` is a batch default. The tool's `plan` field is the `--item` list, kept (it is the tool's only
   form for items).
 - **Results always name the node:** `{ ok, id:<ENTRY id, as today>, ts, node:{ id, key, scope:"spec-88", label, path, kind,
   created? }, state, current, line:<true when the line was set>, logged, stale_at, … }`; `plan:[{ key, id, label, path,
   created, plan_item, state, warning? }]`; `moved:{ from, to, parent_id }`, `merged:{ into_id, path }`, `warnings` (`exists`,
-  `exists-elsewhere`, `alias`, `merged`, `relabelled` — §1.6: `node.label` / `plan[].label` is the label the node GOT). The
+  `exists-elsewhere`, `alias`, `merged`, `relabelled` — §1.6: `node.label` / `plan[].label` is the label the node GOT;
+  `deep-tree` `{depth}` — §1.3, Q11b). The
   top-level `id` stays the entry id (hole H10) — the node id is `node.id`. A create without a label → `label-required`.
 - `activity` board nodes gain `id`, `parent_id`, `key`, `scope`, `label`; `path` (computed now, no `@`), `parent` (path) and
   `kind` stay; `log:{ id | path …, earlier?, removed? }`; `entry:{ id }` unchanged. The logger WS `wait_answer` takes `node_id`
@@ -535,6 +569,10 @@ an old prompt pasted into a tool call).
 - New menu items: **Rename…** (label ≤ 60), **Merge into…** (picker: contexts of the same session and host, then confirm).
   Unmerge: not on the dashboard in 2.0 (Q06). A move or merge onto a same-label sibling opens the clash dialog — merge them,
   or a different label pre-filled with the suggestion ("Notes (2)") — and sends the answer as one action (§1.6, Q32).
+- Depth (Q11b): the Move to… picker greys out targets where the moved subtree would pass depth 32 (with the reason on
+  hover); a target that would take it past 20 shows the `deep-tree` warning in the dialog before the user confirms. Long
+  paths (row tooltips, the log's `at`, dialogs, notices) are shortened in the middle (`Next release/…/Docs`), the full path on
+  hover.
 - Log entries show `at` on hover when it differs from the node's path now. Copy command = `--agent <scope> --key <key>` (or
   `--id <id>` when the node has no key path).
 - The view state (pins, hidden, open / closed, selection, DETAILS fold, last seen) is per USER on the bridge (§5.6), no longer
@@ -797,8 +835,17 @@ existing checks keep passing while the core is written.
    - arrival last; the `--move` refusals;
    - the `transient` flag (`--transient` / `transient:true` on create), the bottom-up vanish when the last live child leaves
      (an entry + `remove` `why:"transient"`, chained up through emptied transient parents);
+   - the grace period (`--transient=30s` / `transient:"30s"`, Q44: removed by the expiry pass; an arrival keeps it), the
+     bare-name refusal (Q45) and the depth rules (Q11b: `depth` past 32 for the whole subtree, `deep-tree` past 20; `at`
+     capped at ~1 KB);
    - permanence: the `keep` record on `--keep` / `keep:true`, a rename, or a line of its own (the PIN trigger lands with
      step 8's view state).
+
+   **2a as built** (2026-10-03): `src/lib/activity2.js` (beside `lib/activity.js`, used by nothing but its tests yet) —
+   `applyCall` (target resolution + the structural verbs, all-or-nothing through an undo journal), `parseCall`,
+   `parseMoveTo`, `sweepTransients` (the grace pass), `expireAliases`, `pruneGhosts`, `removeById`, `capAt`, `shortPath`;
+   `--move-to` / transient contexts were pulled forward from 2c into 2a. Entries are returned as stubs for 2b; positions,
+   the dashboard clash answer, eviction and node limits stay in 2c. Tests: `tests/unit/test_activity2_unit.mjs`.
 
    After the 2.0 cutover, the #81 dashboard test reporter (`tests/reporters/aimb-dashboard.mjs`) switches to this pattern:
    §3.8's `Tests` / `Pending` / `In progress` / `Passed` / `Failed` example.
@@ -895,7 +942,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build; C1 / C2 are the two follow-ups Robin
+build and Q44 / Q45 / Q11b its follow-ups; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
 
@@ -911,7 +958,8 @@ answer overrides an earlier one (noted in the earlier row).
 | 08 | `at` on every entry | **Accepted** — the full path at the time (§2.2). |
 | 09 | Rollback | **Changed** — none ("1.7 was experimental"): no state files, tail maps or newer-wins (§7). |
 | 10 | Hello: keep `activity_gossip:5`, add `activity_ids:1` | Accepted at first; **superseded by Q39 / C1:** no v5 at all — 2.0 announces `activity_gossip:6` only, no dual handshake, no 2.1 step (§6.2). |
-| 11 | Depth limit 6 | **Accepted** (§1.3). |
+| 11 | Depth limit 6 | **Accepted** (§1.3) — for 1.7x; **revised for 2.0 by Q11b** below. |
+| 11b | (Robin, 2026-10-03) Depth in 2.0 | **Changed:** HARD limit 32 — a create or move that would put any node deeper is refused `depth`; for a move the whole moved subtree counts and the error names the deepest node and the depth it would reach; the dashboard's Move-to picker greys such targets out. SOFT warning past 20 — the call succeeds with warning `deep-tree` (depth N); the Move-to dialog shows it before confirming. Long paths are shortened in the middle ("…") for display, full path on hover; the stored `at` (Q08) is capped at about 1 KB, cut in the middle. 1.7x keeps 6 (§1.3, §2.2, §3.8, §5.4). |
 | 12 | Id = 16 base32 chars | **Accepted** (§1.2). |
 | 13 | Pins / hidden mapped to node ids once | **Accepted, then extended (FINAL):** view state is stored per USER on the bridge and replicated across the realm; the browser's pins / hidden are imported once (§5.6). |
 | 14 | Cross-session / cross-host moves | **Accepted** — later, not 2.0. |
@@ -942,7 +990,9 @@ answer overrides an earlier one (noted in the earlier row).
 | 39 | Starting 1.7x on converted history by mistake | **Changed:** old bridges are NOT supported; 2.0 is a clean, no-legacy cutover — no stray-v5 handling, no way back (§7.5). |
 | 40 | Do agents need a label too? | **Accepted** — yes, one rule for every create: the orchestrator's `{log_snippet}` fills in `--agent <key> --label "<name>" --under <item>`, so it costs the agent nothing; a missing agent is never made as a side effect of a call aimed at another node (`unknown-agent`, §1.5, §4.3). |
 | 41 | Hosts whose OS logins differ | **Accepted for 2.0** — the view state follows the serving gateway's OS login (Q29); the board head shows "view: <login>" so a mismatch is visible. A realm-level login alias map only if it bites; no per-host `view_user` setting now (§5.6). |
-| 43 | (Robin, 2026-10-03, new) Report + move in one call; transient contexts | **Accepted into 2.0:** `--move-to "<path>"` / `move_to` (also per batch / stream item) applies the report, then moves the node, as one all-or-nothing change that is idempotent on retry. The path is relative to the node's current parent (`../X`, `X`) or absolute (`/…`). Missing contexts are created on the way (creator = the caller, label = the segment, key = its slug), and the node arrives LAST. The `--move` checks apply (`duplicate-label`, no cross-session, depth ≤ 6). TRANSIENT contexts (auto-created by `--move-to`, or `--transient` / `transient:true`) vanish into ghosts when their last live child leaves. They become permanent for good on a pin, a rename, their own line, or `--keep` / `keep:true`; every other context is permanent. **Correction (same day):** a move into a path whose transient context has vanished RESURRECTS that ghost (same id, key and creator, still transient) as a NEW RUN, so its log shows the current run and earlier uses sit behind "show earlier runs". It leaves the ghost table, and each bucket keeps one id for its whole life (§3.8, §3.7). |
+| 43 | (Robin, 2026-10-03, new) Report + move in one call; transient contexts | **Accepted into 2.0:** `--move-to "<path>"` / `move_to` (also per batch / stream item) applies the report, then moves the node, as one all-or-nothing change that is idempotent on retry. The path is relative to the node's current parent (`../X`, `X`) or absolute (`/…`). Missing contexts are created on the way (creator = the caller, label = the segment, key = its slug), and the node arrives LAST. The `--move` checks apply (`duplicate-label`, no cross-session, depth — ≤ 6 then, 32 since Q11b). TRANSIENT contexts (auto-created by `--move-to`, or `--transient` / `transient:true`) vanish into ghosts when their last live child leaves. They become permanent for good on a pin, a rename, their own line, or `--keep` / `keep:true`; every other context is permanent. **Correction (same day):** a move into a path whose transient context has vanished RESURRECTS that ghost (same id, key and creator, still transient) as a NEW RUN, so its log shows the current run and earlier uses sit behind "show earlier runs". It leaves the ghost table, and each bucket keeps one id for its whole life (§3.8, §3.7). |
+| 44 | Grace period for emptied transient contexts? | **Changed (Robin):** an OPTIONAL parameter of `--transient`, default none — the context vanishes the moment it empties. `--transient=30s` (the `=` form, no positional ambiguity); the tool's `transient: true \| "30s"`. With `--move-to`, `--transient=30s` also applies to every destination context it auto-creates. Something arriving during the grace period keeps the context (§3.8). |
+| 45 | `--move-to "X"` (one level down) is not retry-safe | **Changed (Robin):** no bare names — a bare destination is refused `bad-path`; only `../X` (from the node's current parent) and `/X` (absolute). The error suggests both forms (§3.8). Build 2a also refuses relative paths whose segment count differs from their `..` count (`../A/B`, `../../X`) for the same retry reason — to be confirmed (Q46). |
 | C1 | (confirmation) Drop the v5 network projection? | **Yes** — 2.0 speaks only 2.0; no `activity_gossip:5` / `activity_ids:1` dual handshake, no 2.1 cleanup step; every host is upgraded together with the stop-all runbook (§6, §7.1). |
 | C2 | (confirmation) Duplicate labels, all cases | **Yes** — auto-rename on CREATE; refuse a deliberate rename / move through the tool or script (`duplicate-label`); the dashboard's clash dialog offers merge or a suggested label — "see how it plays out" (§1.6). |
 
@@ -961,7 +1011,7 @@ answer overrides an earlier one (noted in the earlier row).
   as earlier runs (§7.3).
 - **H8** "a per-host index (id → day files)": today's `actIndex` is entry-id → offset, in memory, capped → persisted per-day
   index files (§2.4).
-- **H9** free-text labels can't always be v5 path segments → moot since Q39 / C1 (no v5 projection); depth stays ≤ 6.
+- **H9** free-text labels can't always be v5 path segments → moot since Q39 / C1 (no v5 projection); depth: Q11b (32).
 - **H10** the tool result's `id` is already the ENTRY id → the node id goes in `node.id` (§4.2).
 - **H11** `--item <key> "<label>"` vs the one-value `--item "A"` → the parse rule in §4.1.
 - **H12** (revised) the persistence folder is Dropbox-shared (ROBIN-Z790 + LITTLE-001) and the project's rule was "no
@@ -1009,16 +1059,13 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 and Q41 were accepted as recommended (Decisions above), and the build (§8) has started. Q43's write-up (§3.8) raises two
-small questions, posted to the board. The spec follows the recommendation for each until Robin answers.
+Q40 – Q45 and Q11b are decided (Decisions above). Build step 2a raised the questions below, posted to the board; the build
+follows the recommendation for each until Robin answers.
 
-44. **A grace period for emptied transient contexts?** In a sequential run, `In progress` vanishes and comes back once per test
-    (§3.8). *Recommend: accept as is for 2.0.* It is correct, each bucket keeps one id, and the churn is one `create` +
-    `remove` pair per test. Alternative: a transient context vanishes only after ~60 s without a child (the owner's expiry
-    pass would remove it).
-45. **`--move-to "X"` (one level down) is not retry-safe** (§3.8). *Recommend: allow it and teach `../X` and `/…` in the
-    guide.* Alternative: refuse a relative path with fewer leading `..` than segments after them (`bad-path`, naming the
-    absolute form).
+46. **Relative `--move-to` paths other than `../X`** (§3.8). Q45 refuses a bare `X`. `../A/B` and `../../X` are not
+    retry-safe either (a retry resolves from the NEW parent: `A/A/B`, one level higher). *Recommend: refuse any relative
+    path whose segment count differs from its `..` count* (`bad-path`, naming the absolute form); `../X` and `../../R/X`
+    stay allowed. Alternative: allow them (only the bare form is refused).
 
 ---
 

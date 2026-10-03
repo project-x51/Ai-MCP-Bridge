@@ -171,6 +171,8 @@
 // functions written BESIDE the 1.7x model, used by nothing yet: mintId / legacyId (stable node ids), validKey / slugKey /
 // uniqueKey (keys), normLabel / labelKey (labels), parseRef / parsePath2 / formatPath2 (references and `@`-free paths) and
 // parseText (the leading-`@` rule). The bridge still runs the 1.7x path model below until step 9 switches it.
+// Build step 2a (the id-keyed model's structure + resolution) lives in lib/activity2.js, built on these primitives; DEPTH2
+// (Q11b: hard 32, warning past 20) is the 2.0 depth, ACTIVITY_LIMITS.depth (6) stays the 1.7x one.
 import { createHash } from 'node:crypto'
 import { lc, projKey } from './keys.js'
 
@@ -838,6 +840,9 @@ const ownerIndex = segs => { for (let i = segs.length - 1; i >= 0; i--) if (segs
 
 /** Key limits (spec §1.1): a key is 1 – 48 code points; a slug made from a label is cut to 40. */
 export const KEY_LIMITS = Object.freeze({ key: 48, slug: 40 })
+/** 2.0 depth (spec §1.3, Q11b — revises Q11; the 1.7x model above keeps ACTIVITY_LIMITS.depth = 6): steps below the session
+ * root. `max` is HARD (a create / move past it is refused `depth`), past `warn` a call succeeds with warning `deep-tree`. */
+export const DEPTH2 = Object.freeze({ max: 32, warn: 20 })
 const KEY_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_.#+-]*$/u        // today's agent-segment charset (SEGMENT) MINUS ':' (hole H1)
 const QKEY_RE = /^\?\d+$/                                     // a bridge-made question key (?1, ?2 …; #85's @?N)
 const B32 = 'abcdefghijklmnopqrstuvwxyz234567'               // RFC 4648 base32, lower-case, no padding
@@ -931,9 +936,9 @@ export function normLabel(raw) {
 export const labelKey = label => lc(String(label == null ? '' : label).normalize('NFC')).normalize('NFC')
 
 // A path segment needs quotes when it holds '/', starts with '"' or '@' (an unquoted '@' start is the 1.7x form), or is '.'
-// (a leading './' is the "this is a path" marker, §3.2). Labels are trimmed, so the "starts / ends with a space" case of Q37
-// never arises. `"` inside is doubled.
-const quoteLabel = l => (/\/|^["@]|^\.$/.test(l) ? `"${l.replace(/"/g, '""')}"` : l)
+// (a leading './' is the "this is a path" marker, §3.2) or '..' (a leading '..' navigates in `--move-to`, §3.8). Labels are
+// trimmed, so the "starts / ends with a space" case of Q37 never arises. `"` inside is doubled.
+const quoteLabel = l => (/\/|^["@]|^\.\.?$/.test(l) ? `"${l.replace(/"/g, '""')}"` : l)
 /** The display path of labels (spec §3.3: labels joined by '/', no `@`; quoted where needed). @param {string[]} labels */
 export const formatPath2 = labels => labels.map(quoteLabel).join('/')
 
@@ -968,7 +973,7 @@ const legacyPath = raw => {
  * Parse a 2.0 PATH (spec §3.3, Q37): segments separated by '/', each a LABEL (normLabel). A segment holding '/' (or one
  * starting with '"', '@' or being '.') is written in double quotes, `""` inside for a literal '"'; an unquoted segment runs
  * to the next '/', quotes inside it literal. Leading / trailing slashes and one leading './' (§3.2's "force a path") are
- * dropped; '' = the scope itself; ≤ 6 segments. An UNQUOTED segment starting with '@' is the 1.7x form: refused
+ * dropped; '' = the scope itself; ≤ DEPTH2.max (32) segments (Q11b). An UNQUOTED segment starting with '@' is the 1.7x form: refused
  * `legacy-form`, the message (and `path`) giving the converted 2.0 path (§4.5).
  * @param {any} raw
  * @returns {ActivityResult} { ok:true, segs:[label…], path, key } (key = labelKey(path)) or { ok:false, code, what, path? }
@@ -1007,7 +1012,7 @@ export function parsePath2(raw) {
     i++   // the '/'
     if (i >= s.length) return bad('bad-path', 'path has an empty segment')
   }
-  if (segs.length > ACTIVITY_LIMITS.depth) return tooDeep(segs.length)
+  if (segs.length > DEPTH2.max) return bad('path-too-deep', `the path has ${segs.length} segments; the limit is ${DEPTH2.max}`)
   const path = formatPath2(segs)
   return { ok: true, segs, path, key: labelKey(path) }
 }

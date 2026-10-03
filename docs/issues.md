@@ -611,10 +611,18 @@ follow-ups (spec §9 "Decisions"); **2.0 is a clean, no-legacy cutover**. In sho
   stop-all runbook; a host left on 1.7x shares no activity until it is upgraded.
 - **Holes:** H1 – H21 in the spec §9. **Q40 / Q41 decided as recommended** (spec §9): agents need a label too (the snippet
   fills it in); the view follows the serving gateway's OS login, the board head shows "view: <login>". Build step 1 (the
-  identity primitives) is in progress.
+  identity primitives) is done; step 2a (the id-keyed structure + resolution, beside the 1.7x model) is in progress.
 - **Q43 `--move-to` + transient contexts** (spec §3.8, step 2c). One call reports, then moves (`--move-to "../Passed"`), and
   missing buckets are created TRANSIENT. They vanish into ghosts when empty, and are resurrected with the same id and a new
-  run. Q44 / Q45 are open.
+  run. **Q44 / Q45 decided (Robin):** a grace period is an OPTIONAL parameter of `--transient` (default none: it vanishes
+  the moment it empties; `--transient=30s`, tool `transient: true | "30s"`; with `--move-to` it also covers the contexts it
+  auto-creates; an arrival during the grace keeps it). A bare `--move-to "X"` is refused `bad-path` — only `../X` and `/X`,
+  the error suggesting both (2a also refuses `../A/B` / `../../X`, not retry-safe either: Q46 asks).
+- **Depth in 2.0 (Q11b, revises Q11; 1.7x stays at 6):** HARD limit 32 — a create or move putting any node deeper is
+  refused `depth` (a move counts the whole subtree; the error names the deepest node and the depth it would reach; the
+  Move-to picker greys such targets). SOFT warning past 20: the call succeeds with `deep-tree` (depth N); the Move-to dialog
+  shows it before confirming. Long paths are shortened in the middle ("…") for display, full path on hover; the stored `at`
+  (Q08) is capped at ~1 KB, cut in the middle.
 
 ## #87 — log panel order: oldest first, auto-scroll to the bottom  ·  **DONE (v1.72.0)**
 Robin, 2026-10-03, asking whether the log panel should run the other way.
