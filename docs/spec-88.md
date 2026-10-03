@@ -18,7 +18,8 @@ the per-user view state (and Q70's `unshared_hosts`) behind the same switch — 
 removed the switch (the gateway runs 2.0 only) and built the 2.0 tool, script and guides — its Q72 (build the four missing
 1.7x behaviours in step 10) and Q73 (accepted as built) were decided overnight as recommended, for Robin to review; step 10
 built the dashboard on the 2.0 board and Q72's behaviours — its Q74 – Q77 are open; step 11 deleted the 1.7x
-machinery — its Q78 was decided overnight as recommended, for Robin to review).
+machinery — its Q78 was decided overnight as recommended, for Robin to review; step 12 prepared the release —
+2.0.0, the cutover runbook `docs/cutover-2.0.md`, the docs — and its Q90 – Q93 are open; the cutover itself is Robin's).
 The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
@@ -1938,7 +1939,7 @@ existing checks keep passing while the core is written.
     migration: `git reset --hard v1.75.1`; nothing is pushed until the post-checks pass), and the follow-ups (#81's reporter
     to the test-run pattern, the old failed review run, phub's `RestartPreventExitStatus=78` — added to
     docs/linux-setup.md's unit). VERSION: `src/package.json` and `package-lock.json` (its own version, stale at 1.21.0)
-    are 2.0.0; `bridge.mjs`'s `BRIDGE_VERSION` is left to the integration with step 11 (a `src/` file); the 2.0 script keeps
+    are 2.0.0, and so is `bridge.mjs`'s `BRIDGE_VERSION` (set at the integration on top of step 11); the 2.0 script keeps
     recognising a 2.0 gateway by the welcome's `activity_format: 6` (§4.1 said `bridge_version ≥ 2.0.0`; Q92). DOCS: the
     root README's 2.0 sections (upgrading, the 2.0 forms, the removed-forms table), architecture.md §12's v6 layout
     (`activity/<host>/` day + index files + marker, `views/`, the transient `activity-v5-backup/`) and the §13 "Built

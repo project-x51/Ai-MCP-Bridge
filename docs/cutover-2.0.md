@@ -29,9 +29,9 @@ checkout.
 ## 0. Before the day (integration, done once on ROBIN)
 
 - [ ] `v2` holds the whole release: build steps 1 – 12 merged and green (`npm test` in `src/`, typecheck included).
-- [ ] **`src/bridge.mjs` `BRIDGE_VERSION = '2.0.0'`** — it must match `src/package.json` (2.0.0). The dashboard,
-      `list_sessions`, the logger welcome and the tray menu show it, and `test_activity_6c_live` /
-      `test_realm_guides_live` compare the two.
+- [ ] `src/bridge.mjs` `BRIDGE_VERSION` and `src/package.json` both say **2.0.0** (set at the step-12 integration). The
+      dashboard, `list_sessions` and the logger welcome show the first, the tray menu the second, and
+      `test_activity_6c_live` / `test_realm_guides_live` compare the two.
 - [ ] `v2` is pushed (`git push origin v2`), so the Mac and phub can fetch it.
 
 ## 1. Pre-checks (5 min)

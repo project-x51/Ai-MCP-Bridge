@@ -29,14 +29,15 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `project-names.js` (#71 the replicated first-seen canonical spelling per project; `note`/`merge`/`display`),
   `traces.js` (the observation-plane ring buffer + dashboard fan-out; `collect`/`history`), and `egress-auth.js`
   (#36 server-side auth token sources — mint/cache/refresh a bearer token for an egress backend). `log-snippet.js` (#70 6c)
-  builds the `{log_snippet}` / `{log_tool_hint}` connect-reminder texts (pure; the bridge fills the paths). `activity.js` is the
-  pure core of the #70 agent activity board (no I/O, no clock — `now` is a parameter; bridge.mjs does the I/O): report
-  parsing (`@ctx`/`@~ctx`, progress/eta/stale_after, the `log` flag, the locked limits), `apply` over a plain state
-  object, text placeholders (`renderText`), checkpoints (`planCheckpoints`), the newest-first replay (`createReplay`),
-  the read views (`boardView`/`logView`/`findEntry`), the derived views (stale/gone, rollup, visibility), the
-  per-origin gossip `snapshot`/`mergeSnapshot` and (v1.60.0) the wire — `planSlice` (per-link deltas, byte cap, newest
-  first) / `applySlice` (epoch + seq) / `markOriginDown` / `locateSessions`, the memory budget and `resolveConfig` (the `activity` block +
-  `AI_BRIDGE_ACTIVITY_*`); unit-tested in `tests/unit/test_activity_unit.mjs`. `win-env.js`
+  builds the `{log_snippet}` / `{log_tool_hint}` connect-reminder texts (pure; the bridge fills the paths). The activity board (#70; 2.0, #88): `activity.js` holds the shared
+  primitives (limits, states, `resolveConfig` — the `activity` block + `AI_BRIDGE_ACTIVITY_*` —, durations / progress /
+  ETA parsing, questions, ranks, and the #88 identity primitives: `mintId`, keys, slugs, `@`-free paths, the leading-`@`
+  text rule); `activity2.js` is the pure 2.0 model (the id-keyed tree, `parseCall` / `applyCall`, plans, questions, the
+  type registries, actions, v6 records + the replay, expiry, the budget); `activity2-files.js` the day / index files
+  and the marker; `activity2-store.js` the gateway's store (model + files); `activity2-gossip.js` gossip v6;
+  `activity2-dash.js` the dashboard's units; `view-state.js` the per-user view set; `activity2-convert.js` +
+  `activity2-migrate.js` (+ the v5 readers in `activity-v5.js`) the one-time 1.7x → 2.0 conversion. All pure or
+  directory-scoped and unit-tested (`tests/unit/test_activity*_unit.mjs`, `test_node_id_unit`, `test_view_state_unit`). `win-env.js`
   rehydrates environment variables that an MCP host stripped at launch (Windows registry) so `${env:…}` secret
   refs resolve. The bridge core (handlers, routing, delivery, gateway) deliberately stays in `bridge.mjs`.
 - `types.d.ts` — shared shapes for JSDoc + `checkJs` (see Type-checking below).
@@ -58,17 +59,13 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
     (or topic) and then exits, so an idle AI session can be woken instead of polling `inbox` every few seconds.
     See "Doorbell" below. Its pure clock maths (next boundary, `HH:MM` label, the #69 6-hour check-in mark) is in
     `tools/aimb-doorbell-clock.mjs`, which must sit beside it.
-  - `tools/aimb-log.mjs` — **the activity reporter (#70 step 3)**: a node CLI that reports an agent's or a script's
-    status to this host's activity board without registering (one report, or `--stream` NDJSON). It imports
-    `lib/activity.js` to validate locally, so it runs from inside the bridge's `src/`. v1.62.0: `--path` (the node
-    tree) and `--batch <file|->`; v1.63.0: `--plan "A" "B" …` and `--done`; v1.64.0: `--token-file <path>` (#75); v1.69.0:
-    `--before` / `--after` / `--first` / `--last` and `--move` / `--to` (#82); v1.71.0: `--ask` / `--choice` / `--free` /
-    `--expires` / `--wait` and `--wait-answer` (#85: a question, and waiting for its answer). See "Log / activity" below.
-    **#88 (2.0, build step 9): it speaks only the 2.0 forms** — `--agent <chain>`, `--key <k>` (+ `--label`, `--under`),
-    `--id`, `--path "A/B"` (labels, no `@`), `--text` (a leading `@` sets the line), `--item <k> "<label>"`, `--move-to`,
-    `--resolve`, `--context-type=`, `--message-type=` + its field flags, `--transient` / `--keep`, `--guide agent` as the
-    agent's first report — and refuses every 1.7x form `legacy-form` (exit 64); it validates with `lib/activity2.js` and
-    talks only to a 2.0 gateway. See "2.0 forms" below.
+  - `tools/aimb-log.mjs` — **the activity reporter** (#70; 2.0 forms since #88): a node CLI that reports an agent's or
+    a script's status to this host's activity board without registering (one report, `--batch`, or `--stream` NDJSON),
+    and asks questions / waits for their answers. It validates with `lib/activity2.js`, so it runs from inside the
+    bridge's `src/`, and talks only to a 2.0 gateway. See "Log / activity" below.
+  - `tools/aimb-migrate-v2.mjs` — **the one-time 1.7x → 2.0 history conversion** (#88): converts this host's
+    `persistence/activity/<host>/` in place, verified, restored on failure. Run it only with every bridge on the host
+    stopped (it refuses while the gateway answers on its port). See `../docs/cutover-2.0.md`.
   - `tools/research_client.js` — example page leaf injected into a browser tab (generic site research;
     wayback engine on web.archive.org).
 - `dashboard.html` — live debug page: **mesh map** (hosts grouped by session-id prefix, gateway ringed,
@@ -140,56 +137,21 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   containment, header filter + server-side inject (#33, 9); and `test_lib_unit.mjs` — the fast pure-`lib/` +
   services units (topics/envelope/refs/consent/reminders/traces, egress incl. server-side auth mint/refresh/
   inject and the secret-resolver, `win-env` reg-parsing, tailscale `hostOf`) (#31/#35/#36, 88); and
-  `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 664 — v1.63.0: todos, plans, the
-  rollup variants, lifetime, eviction, carry-forward across rollovers + a restart; v1.64.0: abandoned, the plan-end rule,
-  auto-abandon, entry counts, the home host + s0, the run boundary / pruned paging; v1.65.0: the agent-finish rule, the
-  plan-end marker, every dashboard action + its codes, dismiss + its replay, the cf entry count); `test_node_id_unit.mjs` —
-  the #88 (v2.0) identity primitives in `lib/activity.js`: node ids, keys, slugs, labels, references, `@`-free paths and the
-  leading-`@` text rule (#88 step 1, 103); `test_activity_gossip_live.mjs`
-  — four loopback "hosts" + a follower: the mesh board, deltas ≤1/s per link, truncation, remote paging / entries /
-  queued fetches, going-down, owner down, forged slices, a legacy hub, dashboards, plans (#70 step 4 / 6b, 51);
-  `test_dashboard_activity.mjs` — the dashboard's Activity view in jsdom: client-side stale, the status glyph + ring,
-  hover times, placeholders, the delta store, the tree, pills / host down / bell, the project cycle, active only, logs
-  (#70 step 5 / 6b — plan items, the plan bar, host tags, per-host headlines; 6c — open by default, the finished-plan
-  window + slider, abandoned, home-host tags, the Plans filter, rollups that follow it, the bar column, counts, the run
-  boundary, the 6d row hooks; 6d — the right-click menu per row and state, copies (never a token), confirmations,
-  feedback, keyboard + long-press, the log panel + selection, pin / hide, open ancestors, unfiltered counts, the 0 – 7 day
-  slider; #86 — the details section, the JSON tree + Copy, the ¶ {} markers, escaping of `<script>` / `<img onerror>`
-  details and data; #87 — oldest first, following, the "N new ↓" chip, load older keeping the place, the toggle with
-  storage that throws; 327); `test_activity_dashboard_live.mjs` — WS dashboards against three loopback hosts: subscribe → full
-  board → deltas ≤1/s, seq-gap resync, page leaves refused, paging into the day files (local + remote), queued fetches
-  + `busy`, gone vs host down, the doorbell flag, the duplicate-hostname warning, plan units + ticks (#70 step 5 / 6b, 43);
-  `test_activity_carry_live.mjs` — the #70 6b carry-forward under the test clock hook: 13 days of seeded files, a real
-  day rollover, a restart a week later rebuilt from the rollover's records alone (11); `test_activity_6c_live.mjs` — #70
-  6c + #75 part 2: the reminders' --token-file (never the token), the exact {log_snippet} / {log_tool_hint}, aimb-log
-  --token-file, the run boundary + pruned history local and remote, gossiped counts, the home host, the board head, and
-  auto-abandon under the clock hook (31); `test_activity_actions_live.mjs` — #70 6d: every dashboard action with its codes
-  and attribution, local and forwarded to the owning host (ACTIVITY_ACT) with the effect gossiped back, the agent-finish
-  rule, abandon_plan leaving an agent running, dismiss (open items refused, gossiped, persisting across a restart), page
-  leaves / loggers / hello-less sockets and forged hub frames refused, the exact entry count across restarts (43);
-  `test_activity_notices_live.mjs` — #80: a dashboard action tells the owning session (`activity_changed`: subject, body,
-  entry id), a burst batched into one message, view-only / refused actions and reads send nothing, the doorbell wakes,
-  both directions across two hosts (the OWNER sends), a recipient on another host matched case-insensitively, an offline
-  session's notice parked and drained, a script-only session gets nothing, prepare-shutdown flushes the queue (26);
-  `test_activity_plan82_live.mjs` — #82: insert before / after / first / last (tool + script), reorder, move with its
-  history (memory + the day files under the old path), abandon an ordinary context with the cascade, dashboard Move up /
-  Move to (local and forwarded to the owner) with the #80 notice, gossip of ranks + moves to a second host, and a restart
-  that replays it all (26); `test_activity_msg_live.mjs` — #83 / #84: Edit text (the line + state, attributed on the line,
-  in the entry and through gossip; the batched `activity_text_edited`; the session's next report takes it back) and Message
-  session (logged with details; `activity_message` at once — subject, body, entry id; live, parked, or "not delivered" for a
-  script-only session), both directions across two hosts, refusals over the wire, an owner without `activity_msg` refused
-  `owner-unsupported` before forwarding, the trust wording (34; + 3 with `AIMB_TEST_OLD_BRIDGE=<an older bridge.mjs>`: a real
-  1.69 owner — boards both ways, its refusal, its dashboard acting on a 1.70 node); `test_activity_ask_live.mjs` — #85:
-  questions (the tool's ask; an answer from the dashboard → `activity_answer` at once, the answer never in the subject; a
-  script's `--ask … --wait` released by the answer; an agent's question to its session; answers forwarded to another host's
-  owner, incl. a script waiting there; expiry; withdraw by the asker and the dashboard; a wait that runs out; a question that
-  goes; script usage; an owner without `activity_ask` refused `owner-unsupported`; the trust wording; `--choice` one per flag, refusing status text / a flag) (37; + 4 with
-  `AIMB_TEST_OLD_BRIDGE`: a real 1.70 host — it shows a question as a blocked context, its refusal, its dashboard's Abandon…
-  withdrawing a 1.71 question, a 1.71 script's `--ask` against it `gateway-unsupported`); `test_activity_detail_live.mjs` —
-  #86: a node's details + data reach a dashboard on demand (by the line's entry id + host) and never through gossip (the
-  board / delta frames and the `activity` tool carry only the flags), local and from another host's owner, an older entry
-  from the owner's day file, a 300-row data value across the hub link, a line that moves on, unknown id / host, an owner
-  that went away refused promptly (14; + 1 with `AIMB_TEST_OLD_BRIDGE`: a real 1.71 owner answers the same way). Tests run in
+  the ACTIVITY BOARD (2.0, #88): `unit/test_activity_unit.mjs` (the shared primitives in `lib/activity.js`),
+  `test_node_id_unit.mjs` (ids, keys, slugs, labels, references, `@`-free paths, the leading-`@` rule),
+  `test_activity2*_unit.mjs` … `test_activity10_unit.mjs` and `test_activity_q72_unit.mjs` (one per #88 build step: the
+  model, plans / questions / types, actions, test runs, v6 records + replay, the conversion — fuzzed against the frozen
+  1.7x library in `tests/fixtures/activity-v175.js` —, the migration script, the store and its files, gossip v6 — a seeded
+  gossip fuzz —, the tool / script / guides, the dashboard units, the session lifecycle), `test_view_state_unit.mjs`; and
+  the live suites in `tests/activity/` — 2.0 gateways on temp dirs: the start check (exit 78) and the files
+  (`test_activity2_files_live`), gossip v6 across hosts and a 1.7x stand-in (`test_activity2_gossip_live`,
+  `test_activity_gossip_live`), the view state (`test_view_state_live`), the script (`test_log_script_live`: every 2.0
+  form and every removed one), the tool (`test_log_live`), questions and waits (`test_activity_ask_live`,
+  `test_activity_revise_live`), dashboard actions and notices by id (`test_activity_actions_live`,
+  `test_activity_notices_live`, `test_activity_msg_live`, `test_activity_plan82_live`), details / paging / pushes
+  (`test_activity_detail_live`, `test_activity_dashboard_live`), the carry-forward and the guides (`test_activity_carry_live`,
+  `test_activity_6c_live`, `test_realm_guides_live`) and the page in jsdom (`test_dashboard_activity`). Each file's header
+  says what it covers and what the 2.0 port retired. Tests run in
   cwd is `process.cwd()`, so any path works incl. Windows. The page fixture is env-overridable
   (`AIMB_TEST_PAGE` — point it at any page following the same widget contract; `AIMB_DASHBOARD`) —
   no hardcoded paths.
@@ -231,7 +193,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
     `AIMB_TEST_LOG_CONFIG` (a config file given ONLY to the aimb-log child as its `AI_BRIDGE_CONFIG` — never set
     `AI_BRIDGE_CONFIG` / `AI_BRIDGE_TOKEN*` in the test run's own env: the live tests' bridges would inherit it).
     `AIMB_TEST_LOG_TICK_MS` / `AIMB_TEST_LOG_DEBUG=<file>` (a transcript of the stream) are for tuning. It is silent and
-    never fails the run (no token, no bridge: it stops reporting). Live state comes from a side channel: the reporter
+    never fails the run (no token, no bridge: it stops reporting). **Not yet on 2.0:** it still sends 1.7x stream lines
+    (`@` paths, `@~`), which a 2.0 gateway refuses `legacy-form` — run the suite without `AIMB_TEST_LOG_SESSION` until it
+    is switched to the 2.0 test-run pattern (`docs/spec-88.md` §3.8, build step 2d). Live state comes from a side channel: the reporter
     creates `AIMB_TEST_STATUS_DIR`, each driver appends start / end lines there (node:test replays a test file's events
     only after the earlier files have reported). Other knobs: `AIMB_TEST_FILE_TIMEOUT_MS` (default 15 min) kills a hung
     script and its bridges.
@@ -276,7 +240,7 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
 • `set_behavior {behavior, operation?, scope, match?, as?, secret?}` • `list_behaviors {as?, secret?}` • `clear_behavior {operation?, scope?, match?, as?, secret?}` (#29/#32/#44 per-operation behaviour reminders)
 • `allow_project {project, mode?, as?, secret?}` • `revoke_project {project, as?, secret?}` • `request_project_access {to, reason?, as?, secret?}`
 • `http_request {backend, method?, path?, query?, headers?, body?, json?, as?, secret?}` (#33/#36 egress — present only when a backend is configured)
-• `log {as, secret, path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?, plan?, items?}` • `activity {project?, session?, path?, agent?, host?, active_only?, log?, entry?}` (#70 the mesh-wide activity board — see "Log / activity")
+• `log {as, secret, agent?, key?, id?, path?, label?, under?, text?, state?, progress?, eta?, stale_after?, details?, data?, log?, plan?, context_type?, message_type?, fields?, move?, rename?, merge?, unmerge?, move_to?, transient?, keep?, before?, after?, position?, ask?, choices?, free?, expires?, guide?, items?}` • `resolve {as, secret, resolve, agent?, key?, id?, path?}` • `activity {project?, session?, user?, host?, log?, entry?}` (the mesh-wide activity board, 2.0 forms — see "Log / activity")
 • `set_wake {…}` (reserved — unsupported).
 
 **Feature detection (#41):** `profile.names` says which facet the operator CONFIGURED; `capabilities` says
@@ -559,1123 +523,239 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82; v1.70.0 #83 / #84; v1.71.0 #85; v1.72.0 #86 / #87; v1.75.0 #90)
-Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
-the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
-`tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
-remote history (step 4, "Mesh-wide" below), the dashboard's **Activity** tree (step 5, "The Activity page" below), and
-the **unified node tree + batch logging** (step 6a, v1.62.0, "The node tree" below) and **todos and plans** (step 6b,
-v1.63.0, "Todos and plans" below), and (step 6c, v1.64.0, "Step 6c" below) the paste-ready agent snippet + the connect
-reminders, the abandoned state and the plan-end rule, gossiped entry counts, run-boundary history, the finished-plan
-window, home-host tags and the Plans filter.
+## Log / activity — what every agent is doing (#70; 2.0: #88)
+Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their work across the
+whole mesh: sessions report with the `log` tool (or, from a shell, `tools/aimb-log.mjs`), anyone reads it with the
+`activity` tool or on the dashboard's **Activity** view. Since **2.0.0** (#88, "stable node identity") every node has a
+stable internal id: a move or rename is one record and nothing is rewritten. The authoritative rules are
+[`../docs/spec-88.md`](../docs/spec-88.md) (§1 identity, §2 records, §3 resolution, §4 API, §5 display, §6 gossip, §7
+migration); upgrading a 1.7x realm is [`../docs/cutover-2.0.md`](../docs/cutover-2.0.md). The 1.7x history of this
+section (#70 steps 2 – 6d, #79 – #90) is in `docs/architecture.md` §13.
 
-### 2.0 forms (#88, build step 9) — read this first
-From #88 build step 9 the gateway runs ONLY the 2.0 board (the pre-cutover switch `AI_BRIDGE_ACTIVITY_V2` is gone; a gateway
-refuses to start on unconverted 1.7x history — run `tools/aimb-migrate-v2.mjs`, docs/spec-88.md §7). The sections below
-describe the 1.7x forms; they stay until the 2.0.0 release rewrites this README (step 12). The authoritative 2.0 rules are
-docs/spec-88.md §3 – §4; in short:
-- **A node is named by its KEY** (`--key docs` / `key:"docs"`): made once with its LABEL (`--label "Write the docs"`,
-  required — `label-required`; a sibling's label → `"… (2)"`, reported), placed with `--under <ref>` or a position; later
-  calls just name the key. `--agent spec-88` reports as that agent (its keys live in its scope); `--id <id>` names a node by
-  its stable id; `--path "Next release/Docs"` is the shorthand (labels, no `@`).
-- **Text:** plain text only LOGS; a LEADING `@` also sets the node's line (`--text "@Writing the docs"`); `@@` = a literal `@`.
-- **Plans:** `--item <k> "<label>"` / `--item "<label>"` (tool: `plan:[{key, label}]`); tick with `--key <k> --done`.
-- **Structure:** `--move <ref>`, `--rename`, `--merge` / `--unmerge`, `--move-to "../X" | "/A/B"` (report, then move; missing
-  destinations made transient), `--transient[=30s]` / `--keep`, `--resolve` (read-only; the `resolve` tool).
-- **Types:** `--context-type=plan|group|test-run`; `--message-type=test-result --result pass --checks 22 --failed 0
-  --duration 4.1s` (the tool's `message_type` + `fields`).
-- **Batches** (`items`, `--batch`, a `--stream` array line): beside the items only `agent` / `log` (defaults); each item its
-  own all-or-nothing call. **Waits:** `--ask … --wait 30m`, `--wait-answer --key ?1` (the logger link's `wait_answer` by
-  `node_id`). **`--guide agent`** with `--agent` + `--label` + `--under` puts the agent on the board (its first report).
-- **Removed (refused `legacy-form`, naming the 2.0 form):** positional text, `--plan`, `--move … --to`, `@` in a path, `@~`
-  (path or text), and the tool's `to` / `note` / `context`.
+### The tree: nodes, keys, labels, types
+A session holds ONE TREE of nodes; the session itself is the root. A node is an **agent** (an actor: it starts with its
+first report, **finishes** when its own line is set done / failed, can go **stale** or **gone**) or a **context** (a
+piece of work with a line, a bar and an ETA; never stale by itself). Either kind may hold either kind.
+- **Id.** Minted once from (owner host, session, creator, key): 16 characters of `a-z2-7`. Results name it as
+  `node.id`; the dashboard's copied command uses `--id`. Ids never collide across hosts (the host is hashed in).
+- **Key.** The name its creator chose (`--key docs`, `key:"docs"`; 1 – 48 of letters, digits and `_ . # + -`; no `:` or
+  `/`; `root` reserved), unique in the creator's SCOPE. An agent's key is its segment of the `--agent` chain
+  (`spec-88/research`). A used key reopens its node: new work gets a new key.
+- **Label.** Its name on the board (≤ 60), REQUIRED when a call creates the node (`label-required`; never the key).
+  Labels are unique among siblings: a clashing CREATE becomes `"Notes (2)"` (warning `relabelled`; the result says which
+  label it got); a deliberate rename / move onto a sibling's label is refused `duplicate-label`.
+- **Path.** Labels from the session root (or from `--agent`) joined by `/`, no `@` — `Next release/WIP/Docs`; a label
+  holding `/` is quoted (`"a/b"`). A path resolves against the live tree, then the aliases of moved / renamed nodes
+  (warning `alias`), then creates the missing tail.
+- **Types** (a built-in registry: fields, glyph, what shows in place of a bar, rollup, menu): `context` (default),
+  `plan` (☰ — its bar is ALWAYS its items, "N of M"), `group` (▤ — a list, not a plan: no bar, a count "3 open · 1 done"),
+  `test-run` (⚑ — one bar of its tests, passed green / failed red), `question`, `agent`, `session`. Entries are typed
+  too: `note` (default), `question`, `answer`, `withdrawal`, `expiry`, `event` (structure: moves, merges, dismissals) and
+  `test-result` (`result` pass | fail | skip, `checks`, `failed`, `duration`; a test-result means done).
+- **State:** `running · blocked · failed · done · idle · todo · skipped · abandoned` (+ `withdrawn` for a question you
+  asked). `todo` / `skipped` are for plan items; `abandoned` cascades to the open work under it. **Time:** each attempt
+  from running to its end is timed (`took`; a reopen starts a new attempt) and shows after the line ("took 4m 12s",
+  "running 3m").
+- **Limits:** text 240 (longer is truncated with a warning), label 60, depth 32 (warning `deep-tree` past 20),
+  128 agents and 4 096 nodes per session (the oldest finished agents / ended plans are evicted past them), details 4 KB,
+  data 16 KB.
 
-### The node tree (v1.62.0, step 6a)
-A session holds ONE TREE of **nodes**. The session itself is the root. Every other node is one of two kinds:
-- an **agent** (an actor) — it starts with its first message, **finishes** when its own current line is set done/failed
-  (a later running/blocked/idle line revives it), can go **stale** or **gone**, and takes `stale_after`;
-- a **context** (a piece of work) — a current line, progress and an ETA. It never goes stale by itself.
+### Reporting — the `log` tool and `tools/aimb-log.mjs`
+Both take the same fields (the script's flags in brackets); the script needs no registration (below).
+- **Address:** `agent` [`--agent <chain>`] — report AS that agent (your keys live in its scope; a call with no key / id /
+  path targets the agent itself and creates it when new); `key` [`--key`] — YOUR node, created by the first call that
+  names it (with `label` [`--label`] and optionally `under` [`--under <ref>`] or a position); `id` [`--id`]; `path`
+  [`--path "A/B"`]; [`--ctx "<label>"`] = one more path segment below `--agent` / `--path`. No address = your own node
+  (the agent, else the session root). A `<ref>` is a key (yours, then your creators'), `chain:key`, a path, or an `*_id`
+  field. Location and label are set ONLY at creation: a different `under` / `label` on an existing node is ignored
+  (warning `exists`) — change them with `move` / `rename`.
+- **Text** (§4.0): plain `text` [`--text "…"`] only LOGS an entry; a LEADING `@` also SETS the node's line
+  (`"@Writing the docs"`); `@@` = a literal `@`. `state`, `progress` ("4812/12000 tiles", "3/6", "61%", "3/6 1
+  skipped"), `eta` ("15m", "19:27"), `stale_after` ("60m", ≤ 24h) change the node whatever the text. `log:false`
+  [`--no-log`] updates the board without logging (frequent progress; checkpointed, below). `details` [`--details`] and
+  `data` [`--data` / `--data-file`] are fetched on demand. Finish with `state:"done", text:"@<summary>"`.
+- **Plans:** `plan:[{ key, label }, "Label", …]` [`--item <k> "<label>"` / `--item "<label>"`, repeatable] creates ☐ plan
+  items under the target, in order (re-sending keeps existing items; a label-only item's key is its slug, matched by
+  label first). Tick: `key:"spec", state:"done"` [`--key spec --done`]. `before` / `after` / `position:"first"|"last"`
+  [`--before` / `--after` / `--first` / `--last`] place new items or a new node; alone on an existing node they REORDER it.
+- **Structure:** `move` [`--move <ref>`] re-parents the target with its subtree; `rename` [`--rename`] (with `move`: one
+  checked change); `merge` / `unmerge` [`--merge <ref>` / `--unmerge`] (contexts and plan items; the merged node's log stays
+  reachable); `move_to` [`--move-to "../X" | "/A/B"`] = report, THEN move there in one all-or-nothing call (only `../X` —
+  beside the parent — or absolute; a bare or deeper relative path is refused `bad-path` with `suggest:"/…"`; missing
+  destinations are created TRANSIENT); `transient` [`--transient` / `--transient=30s`] — a new context that vanishes when
+  its last child leaves (after the grace); `keep` [`--keep`] makes it permanent (so does a pin on the dashboard). The
+  read-only `resolve` tool [`--resolve "<path>"`] prints the absolute path + id a path names now.
+- **Types:** `context_type` [`--context-type=plan|group|test-run|context`] for a NEW context; `message_type` + `fields`
+  [`--message-type=test-result --result pass --checks 22 --failed 0 --duration 4.1s`].
+- **Questions:** `ask` [`--ask "<the question only>"`] + `choices` [`--choice "A"`, one per option, ≤ 8 × 60 chars] +
+  `free` [`--free`] + `expires` [`--expires 2h`, ≤ 7d] posts a question for the dashboard viewer (on a line-less context,
+  else a new `?N` child). The answer arrives as `activity_answer`; the script can WAIT for it on the same connection
+  (`--wait 30m`; `--wait-answer --key|--id|--path` for an existing one). Withdraw: its key with `state:"withdrawn"`. An
+  open question never goes stale. State the question only — its choices are listed below it as the answers (a question
+  that repeats its choices gets warning `choices-in-question`).
+- **Batches:** `items:[…]` [`--batch <file.json|->`, a `--stream` array line] — ≤ 64 items, ≤ 64 KB; beside the items only
+  `agent` and `log` (defaults); each item is its own all-or-nothing call, applied in order →
+  `{ ok, results:[…, ref echoed], applied, failed }`.
+- **Guide:** `guide:"agent"|"session"` [`--guide agent|session`] logs nothing and returns the how-to text; with `agent`
+  (+ `label`, `under`) it is that agent's FIRST REPORT: the agent is put on the board (running, "reading the guide") if it
+  is not there yet.
+- **Result:** `{ ok, id (the ENTRY id), ts, session, node:{ id, key, scope, label, path, kind, type, created? }, state,
+  current, line (true when the line was set), logged, stale_at }` (+ `plan:[…]`, `moved`, `merged`, `question`,
+  `cascade`, `warnings`: `exists`, `exists-elsewhere`, `alias`, `relabelled`, `deep-tree`, `position-unused`,
+  `choices-in-question`).
+- **Removed 1.7x forms** — refused `legacy-form` BEFORE anything is written, with a message naming the 2.0 form (the
+  script on its command line, the gateway in tool calls, batches, streams and waits):
 
-Any node may contain either kind, so agents can be grouped under the task they serve and contexts can nest.
-
-**Paths.** One `/`-separated path; a segment starting with `@` is a context, anything else an agent:
-
-| Path | Means |
+| 1.7x form | 2.0 form |
 |---|---|
-| `spec-70` | an agent |
-| `spec-70/research` | a sub-agent |
-| `spec-70/@Tharsis` | a context of that agent |
-| `spec-70/@Tharsis/@z12` | a nested context |
-| `@#70/spec-70` | agent spec-70 grouped under the session's context #70 |
-| `@#70/@step4/spec-70` | an agent under a nested task context |
+| positional text (`aimb-log … "text"`) | `--text "…"` (a leading `@` sets the line) |
+| `--plan "A" "B"` | `--item "A" --item "B"` (or `--item <key> "<label>"`) |
+| `--move <node> --to <parent>`; the tool's `to` | `--key <node> --move <parent>` |
+| `@` at the start of a path segment (`@"Next release"/@Docs`, `@root`, `@?3`) | `Next release/Docs` (the message shows the converted path) |
+| `@~` in a path or text (`…/@~A`, `"@~root …"`) | `--text "@…"` on the node (`--key A`, or no `--key` for your own node) |
+| the tool's `note` / `context` | plain `text` / `path` (or `--ctx`) |
 
-- `@~` on the **last** segment sets that node's current line: `spec-70/@~Tharsis`. `@root` / `@~root` as the last
-  segment means the node itself: `spec-70/@~root` is the agent's own headline, a bare `@~root` the session's.
-- Quote a context name with spaces: `@"CTX strip 17"` (in the `path` field an unquoted name may contain spaces too;
-  the canonical spelling quotes it). An agent segment is letters/digits/`_` then `. : # + -` (≤48 chars); a context
-  name ≤60 chars without `"`, `/` or control characters; `root` is reserved. Matching is case-insensitive; the first
-  spelling seen is kept.
-- Intermediate nodes a path names are created **implicitly** (`implicit:true`, no line of their own); a node stops being
-  implicit once a message targets it or is owned by it. An implicit agent never goes stale.
-- **The old notation is a special case:** `agent` (agent segments only) + `path` + ONE trailing context — the `context`
-  param (`"@~Ctx"`, markers optional, the text then literal) or else a leading `@…` prefix in the text, which may itself
-  be a relative path (`"@Tharsis/@~z12 seeding"`). Precedence: `context` beats a text prefix; `agent` then `path`
-  concatenate. So `agent:"a/b"` + text `"@~Ctx …"` = `a/b/@~Ctx`, and no address + `"@~root …"` = the session's headline.
+**Status text is plaintext and visible realm-wide: never put secrets in it.**
 
-**Activity and staleness.** A message's **owner** is the nearest agent at or above its target (the session when there is
-none). A message refreshes `last_activity` (and sets `stale_after`) on its target and every node up to its owner — a
-context's message keeps its agent fresh; a sub-agent does not refresh its parent agent. **Staleness belongs to agents**
-(and the session). A context shows the staleness / gone of its **nearest agent ancestor**, and only while it has a live
-current line of its own (a context with no line — a grouping node — shows no state). A context directly under the
-session follows the **session's own** reports (any message whose owner is the session, at any depth that doesn't cross an
-agent) — exactly as the session row always has.
-
-**Rollup** recurses through any depth: a node's bar is its reported progress, else the sum of its children's bars when
-they share a unit, else the mean % of its children that have a bar, else (6b) "N of M done" over its plan items — see
-"Todos and plans" for how plan items and other children combine. **v1.66.0 (#79): progress has three parts — done,
-skipped, total** (see "Three-part progress" below): every rollup carries all three, and a **done** node always counts as
-100% done.
-
-**Logs.** Every node keeps its **own** bounded log (`log_entries_per_agent` per node). A node's **Log** is the merged log
-of its whole **subtree**, newest first (`own:true` for the node's own entries); each entry carries its `path` and `rel`
-(relative to the node). Paging works for any node, local and remote: the merged memory is complete down to the
-subtree's **floor** (the newest entry any of its nodes holds only in the files), then the pages continue into the day
-files.
-
-**Limits** (locked): depth ≤ **6** segments; per session **128 agents** and **4096 nodes** of either kind (the root not
-counted); text 240, context name 60, `details` 4 KB, `data` 16 KB (unchanged). A message that needs room **evicts the
-oldest finished agent with its whole subtree** — v1.63.0: or the oldest ENDED plan (v1.64.0: every item done, or marked complete / abandoned), and never
-a subtree that still holds an OPEN plan item; never an ancestor of its own target; reported in `evicted` — and is refused
-(`too-many-agents` / `too-many-nodes`) only when that can't make room — or when it writes no record (`log:false`).
-
-**Batch.** `log {…, items:[{ path?, agent?, text, context?, state?, progress?, eta?, stale_after?, details?, data?, log?,
-ref? }, …]}` logs several messages in **one call**, applied **in order**: `{ok:true, results:[one per item, its ref
-echoed], applied, failed}` — a bad item fails alone. Bounds: ≤ **64 items** and ≤ **64 KB** of items JSON; over either,
-the whole call is refused (`too-many-items` / `batch-too-large`; `bad-batch` for an empty / non-array batch or another
-message field beside `items`). Beside `items`, `log` is a default for every item and `path` / `agent` are the batch's
-**default address**. **v1.63.0: an item's own `path` / `agent` is RELATIVE to it, like a folder** — `path:"@#70"` +
-item `path:"@B/@~x"` = `@#70/@B/@x`; the default agent stays in front (`agent:"w"` + item `path:"y"` = `w/y`) — and a
-**leading `/`** on the item's first address field makes it absolute from the session root (`"/@other/@~y"`). (6a's rule
-was "an item's own path replaces the default".) The default `context` (a trailing marker) applies only to items naming no
-path / agent; an item with only a `context` keeps the default path / agent and replaces the default context. A follower
-forwards a batch to its gateway in ONE `ACTIVITY` frame; the `logger` WS accepts `{type:"log", ref, input:{items:[…]}}`;
-the script takes `--batch <file.json|->` and, in `--stream`, a line that is a JSON array (both with the same relative
-rule against `--agent` / `--path`). A batch is gossiped and pushed to dashboards as one coalesced update. An item may
-carry a `plan` (v1.63.0).
-
-**Formats (v1.63.0).** Day-file records are **v3** (`{"v":3, …, "path":"spec-70/@Tharsis", …}`; `new_from` marks the first
-persisted record of each node on its chain); v3 only ADDS to v2 (the `todo` / `skipped` states, `plan_item` + `plan_ix`
-on a plan item's records, `created_at` on a cp, the `cf` carry-forward record), so a 1.62 (v2) record is still read;
-1.58–1.61 records (v1: `agent` / `context`) are **skipped**, never misread. Gossip slices are v3 (one unit per node, a
-plan item with `plan_item` / `plan_ix`) and hubs declare `activity_gossip:3` — a 1.62 hub (format 2, which would misread
-a todo) exchanges no activity with a 1.63 hub (its frames are ignored; remote fetches to it answer `owner-unsupported`).
-
-### Todos and plans (v1.63.0, step 6b)
-Opt-in: nothing becomes a todo unless it is created as one, and ordinary contexts are unchanged.
-
-| State | Shown as | Meaning |
-|---|---|---|
-| `todo` | ☐ | planned, not started |
-| `running` / `blocked` | the in-progress mark | being worked on |
-| `done` | ☑ | finished |
-| `skipped` | ~~struck through~~ | dropped from the plan, kept visible so the plan stays honest |
-| `failed` / `idle` | ✗ in a box / the idle mark | as for any context |
-
-- **A todo is a context with a todo status.** A context created by a **plan**, or whose FIRST current line has state
-  `todo`, is remembered as a **plan item** (`plan_item:true` on the board; there is no flag to pass). It stays one after
-  it is ticked: done shows ☑, not ✓, and it keeps the plan lifetime rules below.
-- **Who can be what:** `todo` / `skipped` are context states — an agent or the session gets `bad-agent-state`. `skipped`
-  on an ordinary context, or `todo` on a context that already has a line of its own, is `not-a-plan-item`.
-- **Plans:** `log {path:"@#70", plan:["Spec", "Build", "Test"]}` (script: `--path @#70 --plan "Spec" "Build" "Test"`)
-  creates `@#70/@Spec`, `@#70/@Build`, `@#70/@Test` as ☐ items, in the **given** order (never A→Z); each name is one
-  context segment (≤60 chars, no `/`, a leading `@` is dropped, `root` is reserved; ≤64 names; a repeated name is kept
-  once with a `plan-duplicates` warning; else `bad-plan`). Text is optional with a plan; with text, the target gets its own
-  message first. Each new item is **logged** (a ☐ line whose text is its name, persisted at once) even with `log:false`,
-  and the result lists them: `plan:[{name, path, created?, adopted?, plan_item, state}]`. A plan counts toward the 4096-node
-  budget. A batch item may carry a plan.
-- **Re-planning (the merge rule):** re-sending a plan **never duplicates or resets** an item — an existing item stays
-  exactly as it is (its state, its place); a **new** name is added at the **end**, in the order given; a name **left out**
-  stays where it is. Re-ordering the names moves nothing. An existing context with **no line of its own** (e.g. one a
-  deeper path created) is **adopted** as a ☐ item; one that already has a line is left alone (`plan_item:false`).
-- **Ticking:** `path:"@#70/@~Build", state:"done"` (script: `--path "@#70/@~Build" --done`; `--done` = `--state done`). An
-  `@~` line that carries a state may omit its text: the item keeps its line (its name, or what was last said). An `@~`
-  line with no state on a ☐ item **starts** it (running); `todo` again re-opens an item. Any report naming the path may
-  tick it (the session or any agent).
-- **Never stale:** a plan item never goes stale, in any state, and its own staleness is never shown (nor gone: it shows its
-  own state). An agent working under an item still shows its OWN staleness on its row.
-- **Rollup — "N of M done":** a node with plan items and no reported progress gets an automatic bar, unit `done`,
-  `todos:true`, `n` = all items. **v1.66.0 (#79): M = EVERY item; N = done items; skipped AND abandoned items form the
-  bar's skipped part; todo / in-progress / idle / failed items are what remains** (`{progress}` → "2 of 5 done · 1
-  skipped"; `items:true`, `skipped`, `abandoned` = how many of the skipped were abandoned). (6b–6c left skipped items out
-  of M and drew no bar when every item was skipped.) **Mixed children:** a plan item
-  counts ONLY as a todo of its parent — its own bar (e.g. an agent under it reporting files) shows on its own row, never in
-  the parent's sum. **v1.75.1 (#88): a node that holds plan items gets its bar from those items ONLY** ("N of M done",
-  questions counting as items) — its helper agents and contexts keep their own bars on their own rows, never mixed in.
-  (Until v1.75.0 ordinary children with bars won over the plan, so an open plan whose helper agents had finished showed a
-  full bar.) A node with no plan items rolls up as before: its reported progress, then the SUM of its ordinary children's
-  bars when they share a unit, then their MEAN %. The node's own reported progress still wins over its plan.
-  Up the tree, plan bars sum like any shared unit (two plans → "3 of 9 done").
-- **Lifetime** (v1.64.0 changed when a plan ENDS — see "Step 6c": only all-done, or the plan marked complete / abandoned;
-  what follows is 6b's rule): `finished_visible_hours` now defaults to **168 (7 days)** (per host as before). **Open** items (todo /
-  running / blocked) **never expire** while their session exists — not in a finished agent's subtree (the agent stays),
-  not in a session that went gone. A **plan** (a node with plan items) **ends** when its last item became done / skipped,
-  or when its owner (the plan node itself if it is an agent, else its nearest agent / the session) finishes, and expires
-  `finished_visible_hours` after that: its items go, and the plan node too when it is a plain context with nothing else
-  under it and no live line. **Eviction** under the hard limits (128 agents / 4096 nodes, the memory budget) takes the
-  oldest finished agents and ended plans first and **never** a subtree that holds an open item; when nothing else can go,
-  the call is refused (`too-many-nodes` / `too-many-agents`).
-- **Carry-forward:** at each **local day rollover** (the gateway checks every 30 s) — and once after a restart's replay
-  when today's file has none yet — the gateway appends a `cf` record of every long-lived node to the NEW day's file:
-  every open plan item **and its ancestors**, and every node whose own state (line, bar, ETA, or its reported activity)
-  would otherwise fall out of the replay window before the next rollover. `{"v":3,"kind":"cf","ts":…,"path":"@#70/@Build",
-  …identity, "current":{…line incl. details/data}, "state", "progress", "eta_at", "created_at", "last_activity",
-  "stale_after_ms", "implicit", "plan_item", "plan_ix", "finished_at"? }` — a full snapshot of that node only (it refreshes
-  nobody's activity, so a quiet agent is as stale after a restart as before). The replay reads only its window, so a plan
-  open for weeks comes back with every item's ☐ / ☑ / skipped / in-progress state, its order and its created_at; older
-  history stays in the older day files and pages as before (a `cf` is never a log entry).
-- **Headline** of a session on several hosts: the host that **most recently SET** a headline (its root line's own time),
-  with each host's own line shown when the row is expanded (`selves`); none has one → the most recently active host.
-- **Dashboard:** plan items render ☐ / the in-progress mark / ☑ / struck-through skipped, as a checklist (their line shows
-  once it says more than the item's name), in creation order; a plan node shows a solid green "N of M done" bar (hover,
-  v1.66.0: "2 of 5 done · 1 skipped (40%) — its plan: 5 items"). **Active only** keeps open items visible (even under a
-  finished agent) and hides ended plans. **Host tags** appear only where a node's host differs from its parent's (a
-  top-level node: from the session's headline host — v1.64.0: its HOME host); the session row shows all its hosts and,
-  expanded, each host's own line above its Log.
-
-**Reporting — `log {as, secret, path?, agent?, text?, context?, state?, progress?, eta?, stale_after?, details?, data?, log?, plan?, items?}`.**
-You report as a registered session (`as` + `secret`). Address a node with `path` (above; omit it for the session itself)
-or the old `agent` + `context` / text prefix — agents never register. The identity is **realm + project + user + session
-name + host** (v1.60.0; + the node path): each host only ever writes its own entities, so the same session or node
-reporting from two hosts is two entities, which the board groups under one session (a session that moves machines
-leaves its old host's entries to go stale or gone).
-- Every message belongs to its **target node**: `path:"w/@build", text:"compiling"` (or `agent:"w"` + `"@build
-  compiling"`) appends to the build context's log; `@~` on the last segment (`"w/@~build"`, `"@~build compiling"`)
-  also makes it that node's **current line**; `"@~root …"` sets your own headline; no address = the session itself, log
-  only. `context:"@~build"` does the same as a text prefix (the text is then literal). Quote spaces: `@~"strip 17"`.
-- **State** (`running|blocked|failed|done|idle`, + `todo|skipped` for plan items — v1.63.0) changes only with a current
-  (`@~`) line; done/failed on an **agent's** own line **finishes** it. Stale is computed for agents (quiet longer than `stale_after_min`, or the message's own
-  `stale_after`, ≤24h; a context follows its agent); gone = the session left this host's roster (deregister / TTL / its
-  process exited), cleared when it comes back.
-- **Progress / ETA** (`"4812/12000 tiles"`, `"3/6"`, `"61%"`, v1.66.0 also `"3/6 1 skipped"` / `{done, skipped, total}` / `"15m"`, `"1h25m"`, `"19:27"`) move the node's bar from
-  **any** message, stick until changed (`"none"` clears) and the ETA is dropped while the node is done/failed.
-- **Text is a template**, rendered when read: `{progress}` → "4,812 of 12,000 tiles" ("61%" for a % bar, "3 of 6"
-  without a unit; v1.66.0: "1 of 5 done · 1 skipped" when the bar has a skipped part), `{skipped}` (v1.66.0), `{pct}` → "40%" (floored), `{done}` `{total}` `{unit}`, `{eta}` → "~1h 25m" ("now" once due, "?"
-  with no ETA). `{{` / `}}` are literal braces; an unknown `{word}`, or a bar placeholder with no bar, stays as typed. A
-  current line renders against the context's **live** bar (`"@~Tharsis Seeding {progress}"` keeps moving); a log entry
-  against the progress recorded on it. The files and the gossip keep the raw template.
-- **Default text:** a message with progress/eta and no text gets `"{progress}"` (`"{eta}"` with only an ETA) — logged or not.
-- **`log:false`** updates the board (line, state, bar, activity) **without** appending to the log or the file. An
-  agent's own tool calls cost tokens, so agents log sparingly, at milestones; a **script** may report often with
-  `log:false` (e.g. every second) and occasionally `log:true`. The bridge checkpoints that progress every
-  `progress_checkpoint_sec` so the bar survives a restart.
-- Limits (locked; a change is a version bump): text 240 chars (longer is truncated + `warnings`), context name 60, depth
-  6, 128 agents and 4096 nodes per session (room is made by evicting the oldest *finished* agent with its subtree, or an
-  ended plan — never an open plan item),
-  `details` 4 KB, `data` 16 KB JSON — keep both small. **Status text is plaintext, realm-wide: never put secrets in it.**
-- Returns `{ ok, id, ts, session, path, agent, context, current, state, stale_at, logged }` (`agent` = the owner agent's
-  path, `context` = the target's name when it is a context; + `warnings`, `evicted`; codes like `bad-path`,
-  `path-too-deep`, `context-too-long`, `too-many-agents`, `too-many-nodes`, `bad-plan`, `bad-agent-state`,
-  `not-a-plan-item`, `activity-disabled`, `activity-loading`, `no-gateway`; + `plan:[…]` with a plan). A batch returns
-  `{ ok, results, applied, failed }`.
-
-**Reading — `activity {project?, session?, path?, agent?, host?, active_only?, log?, entry?}`.** The mesh board: sessions,
-each with `self` (its root node) and `nodes` — every node of its tree, FLAT, with `path`, `kind` (agent | context),
-`depth`, `parent` and `host`, its current line (`text` raw, `rendered` filled in), effective state (`stale` / `gone`;
-`was` = the reported one — computed by the READER with its own `stale_after_min`; contexts by their agent), `progress` =
-its bar (reported, or the recursive rollup), ETA, `implicit`, visibility and log counts. Sessions are **grouped** by realm
-+ project + user + name across hosts: every node (and the root) carries its `host`; a group on one host has `host`, one
-on several has `hosts:[…]`, `multi_host:true`, `self` (v1.63.0: the root of the host that most recently SET a headline)
-and `selves` (one per host). `path` (or `agent`) keeps a node and its subtree; `active_only` drops finished / gone agents
-with what is under them (unless it holds an open plan item) and ended plans. A plan item has `plan_item:true` + `plan_ix`. `remote_hosts` lists each remote host held (`sessions`, `seq`, `linked`, `down_at`, `truncated`).
-`log:{session, project?, user?, host?, path?, agent?, context?, own?, limit?, cursor?}` is a node's log — its SUBTREE
-merged (each entry with `path` + `rel`), or `own:true` for its own entries — newest first, paged: `next_cursor` → pass it
-as `cursor` for the older page; a name on several hosts is `ambiguous-session` (with each candidate's host) unless the
-node or `host` settles it. `entry:{id, host?}` is one entry in full with its
-`details`/`data` (memory for a current line, else the day file — via an id → offset index, else a scan of the day the
-id's timestamp names); another host's CURRENT line is found by id alone, its older log entries need `host`. A remote
-read answers with `from_host`. Times are ms epochs.
-
-**One writer per host.** The host's **gateway** owns the board and its files; a follower authenticates its own sub-peer
-and forwards the call up its control link (`ACTIVITY` frame + request id → `ACTIVITY_R`, 5 s timeout; only a registered
-follower's frames are honoured, and only for a sub-peer on its roster). A follower promoted to gateway first **replays**
-the host's files (below); a `log` call waits for that (≤15 s, else `activity-loading`).
-
-**Files:** `<persist dir>/activity/<host>/YYYY-MM-DD.jsonl` (local date), only with persistence on. One JSON line per
-logged entry (with `details`/`data` and the identity), plus two compact kinds for `log:false` activity:
-- a **checkpoint** `{"v":2,"kind":"cp","k":3,"ts":…,"session":…,"path":"w/@tiles","current":{…},"state":…,"progress":…,"eta_at":…}`
-  — written at most once per node per interval when its line / bar / ETA changed; `k` is a small per-file key given
-  to the node the first time it is checkpointed that day;
-- a **repeat line** `{"v":2,"rep":[3,7],"n":245,"since":…,"last":…}` — these keys were alive and *unchanged* for `n`
-  intervals from `since` to `last`. While the set stays exactly the same the bridge rewrites this last line in place;
-  any other write (an entry, a cp) or a different set starts a new one. Contexts with no activity aren't listed.
-
-Ids are `act_<boot nonce>_<ms base36>-<seq>` (the time names the day file). Retention deletes day files older than
-`log_retention_days` (at gateway start and daily). **Replay** reads the files newest-first, backwards in 64 KB chunks:
-phase 1 fills current lines, bars, states and finished status from the newest record carrying them (a cp counts), and
-publishes the board as soon as everything seen is resolved (or after 300 ms); phase 2 fills each agent's history. It
-covers `finished_visible_hours`; a context's `last_activity` also takes the `last` of any repeat line listing it, so it
-isn't stale after a restart; a `cf` carry-forward (v1.63.0, "Todos and plans") restores a long-lived node whose own
-records are older than the window. A garbled final line (a crash mid-write) is skipped. A clean shutdown flushes pending
-checkpoints, and so does the Task Tray before it kills the bridges (`POST /admin/prepare-shutdown`, below).
-
-**Config** — an `activity` block in `config.json` (live-reloaded), each key with an `AI_BRIDGE_ACTIVITY_<KEY>` env override:
-`log_retention_days` 7 · `log_entries_per_agent` 200 (in memory) · `stale_after_min` 15 · `finished_visible_hours` 168 (v1.63.0; was 24; also the replay window) ·
-`memory_budget_mb` 64 (over it, the oldest finished agents, then the oldest log entries, are evicted) ·
-`progress_checkpoint_sec` 60 (10–3600, 0 = off) · v1.64.0: `abandoned_plan_days` 90 (1–3650; a gone session's open plans are
-abandoned by the bridge after this long) · `finished_plan_open_min` 120 (0–10080; how long an ended plan stays expanded on
-dashboards — sent with the board) · v1.68.0: `notice_batch_sec` 3 (0–60, 0 = no batching; dashboard-change notices to one
-session within this long go as one message — #80) · `enabled` true. Test-only env: `AI_BRIDGE_ACTIVITY_CHECKPOINT_MS`,
-`_FWD_MS`, `_LOAD_WAIT_MS`, `_GC_MS`, `_RETENTION_MS`, `_INDEX_MAX`, `_PHASE1_MS`; step 4 (env only, every host should
-agree): `_GOSSIP_MS` (1000), `_SLICE_MAX_BYTES` (262144), `_PAGE_ENTRIES` (50), `_PAGE_BYTES` (32768), `_FETCH_RATE` (4/s),
-`_REMOTE_MS` (4000), `_DOWN_HOLD_MS` (30000); v1.63.0: `_ROLLOVER_CHECK_MS` (30000, the day-rollover check);
-`AI_BRIDGE_TEST_ACTIVITY_TAP=1` (`activity {tap:true}` returns the recent frames, the replay stats and the last
-carry-forward), `AI_BRIDGE_TEST_HOSTNAME` (two loopback "hosts" on one machine) and `AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS`
-(v1.63.0: shifts the activity clock — report times, day files, the window, the rollover) are for tests.
-
-### Step 6c (v1.64.0) — the agent snippet, the connect reminders, and the plan / history / dashboard rules
-**How sessions learn to use the board.** Agents never see reminders, so an orchestrator pastes a ready-made block into each
-agent's prompt. Two new connect-reminder placeholders, expanded per session when the reminder is emitted (like
-`{doorbell_cmd}`; `lib/log-snippet.js`):
-- **`{log_snippet}`** — the ready-to-run `tools/aimb-log.mjs` command with this host's absolute node + script paths, the
-  session's `--session` / `--project`, `--token-file "<path>"` when the bridge read its token from a file (#75), and a
-  `--path <agent-path>` placeholder for the orchestrator to fill in; then ONE line (v1.73.0, #89):
-  ```
-  Report your status with: "<node>" "<…/src/tools/aimb-log.mjs>" --session "Orch" --project "AIMB" [--token-file "<path>"] --path <agent-path> --text "<text>"
-  - First run it with --guide agent in place of --text: it prints the rules (checklist, live items, finishing).
-  ```
-  **`--guide agent|session` (v1.73.0, #89).** The rules live in the SCRIPT, not in every brief (Robin, 2026-10-03: the
-  pasted rules were noise in the orchestrator's context, and a copy in a brief can drift from the script). `--guide agent`
-  prints the agent's how-to with its own ready command (its `--path`, `--token-file`): checklist first (`--item`), live
-  items (`--state running --text`, `--done`), unplanned work added first, the `@~root` headline, milestones and
-  `--stale-after`, asking (`--ask … --choice … --wait`), finishing, no secrets. `--guide session` prints an orchestrating
-  session's: its own reports, a truthful plan, tick only after checking the work, and the two-line agent brief
-  (`run <cmd> --path "<item>/<agent>" --guide agent` + its checklist). Both ask this host's gateway its version (≤ 1.5 s)
-  and leave out, or name, the flags it can't serve (e.g. no `--ask` on a 1.65 gateway). Plain text, exit 0; an unknown kind
-  is exit 64. The text is `agentGuide` / `sessionGuide` in `lib/log-snippet.js` — one place to maintain and extend.
-  So a brief is just: *"Before you start, run `<cmd> --path "<item>/<agent>" --guide agent` and follow it. Your checklist:
-  …"* plus the task. (The realm reminder still wraps `{log_snippet}`; pointing it at `--guide session` waits until every
-  host runs 1.73, since a 1.65 host's script has no `--guide`.)
-
-  **Realm guides (v1.74.0, #89 part 2) — published once, PULLED on request.** The realm can replace the built-in text with
-  its own, in the same `behaviors.realm` block as the realm reminders (in ANY one host's config; it replicates with them,
-  newest `updated_at` wins — so **bump `updated_at` whenever you change a guide**). `config.example.json` has no guides
-  block: the built-in text is the default.
-  ```json
-  "behaviors": { "realm": {
-    "updated_at": "2026-10-04T09:00:00Z",
-    "default": [ … the realm reminders, unchanged … ],
-    "guides": {
-      "agent":   { "text": [ "HOW WE REPORT (aimb-log {script}, gateway {gateway})",
-                             "  {cmd} --path \"{path}\" --text \"<text>\"",
-                             "1. Make your checklist first: --item \"A\" --item \"B\" …" ] },
-      "session": { "text": "… the orchestrator's rules …", "min_bridge": "1.75.0" }
-    } } }
-  ```
-  - `text` — a string, or an array of lines (joined with newlines); at most **4 KB** (UTF-8 bytes) each. That cap is
-    separate from the 365-character reminder cap: a guide is never sent in `register_self` or a connect reminder, only when
-    asked for. Placeholders, filled when served: **`{cmd}`** (the requester's ready aimb-log command: node + script +
-    `--session` / `--project` / `--token-file`), **`{path}`** (its `--path`, else `<your-path>`), **`{gateway}`** (the serving
-    gateway's version), **`{script}`** (the requester's aimb-log / bridge version). Any other `{word}` stays as written.
-  - `min_bridge` (optional, `"1.75"` or `"1.75.0"`) — served only when BOTH the requester and the serving gateway are on that
-    version or newer (a guide that names new flags is wrong for an older script or gateway); otherwise the built-in text.
-  - **Validated on load** (and on every gossip / store read): a guide over 4 KB, with control characters (newline and tab are
-    fine), an empty text or a malformed `min_bridge` is DROPPED — never cut — and the bridge logs why
-    (`behaviors.realm.guides: agent: text is 5000 bytes (at most 4096) — ignored …`); the rest of the block (the reminders,
-    the other guide) still applies. An unknown kind is ignored (logged). A newer block without `guides` clears them.
-  - **Who serves it:** `aimb-log --guide agent|session` asks its gateway first (`{type:"guide", kind, cmd, path, script}` on
-    the logger link → `{type:"guide", ok, kind, text|null, source:"realm"|"builtin", updated_at, origin, gateway}`; `text`
-    null = "use your own"). It prints the realm's text, or its OWN built-in text when the gateway is older than 1.74, can't
-    be reached (`AIMB_LOG_GUIDE_MS`, default 2500), or has no guide for that kind / that version. The gateway-capability
-    note ("This host's gateway runs …, so do NOT use: …") is appended whatever the source. The last line says which source
-    it used, e.g. `(Guide source: the realm's published agent guide, updated_at 2026-10-04T09:00:00.000Z from ROBIN-Z790.)`
-    or `(Guide source: built into aimb-log 1.74.0; the realm publishes no session guide.)`.
-  - **The `log` tool** (Cowork has no shell): `log({ as, secret, guide:"agent"|"session", path? })` logs NOTHING and returns
-    `{ ok, kind, text, source, updated_at, gateway }` — the realm's guide, else this bridge's built-in text (always text).
-    Only `path` may go with it (`bad-guide` otherwise). A follower answers from the record its gateway sent in the ROSTER.
-  - **Mixed versions:** 1.66 – 1.73 hosts accept the record (they keep the reminders and drop `guides`), so guides only
-    travel across 1.74+ hops; a 1.74 host prefers the copy WITH guides over the same record relayed without them.
-- **`{log_tool_hint}`** — the same guidance for a session without a shell (Cowork), phrased for the `log` tool: `log({
-  as:"<name>", secret, text })`, `path`, `log:false`, `stale_after:"60m"`, `plan:["A","B"]`, a tick with `path:"<path>/@~A",
-  state:"done"`, the finish line, no secrets.
-
-`config.example.json`'s realm block (`behaviors.realm`, published once at deploy time) keeps the doorbell reminder and
-adds two connect reminders: `client:code` and `client:cowork` (v1.66.0's text is in "Briefing agents" below). Both
-carry `"id":"activity"`: v1.64.0 lets a config default carry an optional `id` so several defaults share one
-(operation, scope, match) — a ≤1.63 host ignores the id and keeps only the last one, so publish the block once every host
-runs 1.64. The bridge's MCP server instructions now name the `log` / `activity` tools too.
-
-**The abandoned state.** (v1.69.0, #82: now valid on ANY context, and it cascades — see "The plan workflow" below.) `abandoned` (greyed, a dashed glyph with a slash) is valid only for **plans and plan items**: a
-plan item, or a plan node (a node holding plan items — a context, or an agent / the session, which it then finishes like
-done / failed). Anything else → `not-a-plan`. The tool and the script set it explicitly (`--state abandoned`, 6d adds a
-right-click). In "N of M done" an abandoned item counts as not done and stays in M (`progress.abandoned` counts them;
-skipped items stay out of M, as before — kept, since they are a deliberate decision, and a plan with a skipped item now
-simply stays open until it is marked complete).
-
-**When a plan ENDS (supersedes 6b's "done or skipped ends a plan").** A plan does not end while any item is anything but
-done — skipped, failed, idle, todo, running and blocked all keep it open, and its owner finishing no longer ends it. It ends
-only when **every item is done** (at the last one's time) or when **its node is set `done` (complete) or `abandoned`**
-(`plan_end_at` on the board). Knock-on effects: every node of an OPEN plan (its items, whatever their state, and their
-ancestors) never expires and is never evicted; an ended plan expires `finished_visible_hours` after it ended and is
-evictable; the carry-forward carries every item of an open plan; Active only hides ended plans.
-
-**Auto-abandon.** A session that has been **gone for `abandoned_plan_days`** (default 90) — not on its host's roster and
-quiet that long (its gone time, else its last message: a script-only session is never marked gone, and gone isn't kept
-across restarts) — has its open plans abandoned by the gateway: each open item (todo / running / blocked) and then the plan
-node itself get an `@~` line with state `abandoned` ("abandoned by the bridge — the session has been gone 90 days"),
-logged and persisted as entries with **`by:"bridge"`** (shown "by bridge" in the log). They are SYSTEM messages: they
-touch no activity, so the session doesn't look alive. The plans then expire a window later like any ended plan.
-
-**Gossiped entry counts.** Every gossiped node carries its OWN logged-entry count (`log_n`: memory + what the cap dropped)
-and `log_partial` when its run began before that host's replay window (the count then understates: older entries live
-only in its day files). The board's node `log` is `{entries, dropped, total, partial?}` locally and `{remote:true, total,
-partial?}` for another host's node, so a remote Log row says "N entries" too — the dashboard sums a subtree itself, and
-shows "N+" when a count understates.
-
-**Run-boundary history.** A node's history now stops at the start of its **current run** — the record that began this
-instance of the node (`new_from` at or above it on its chain): the page answers `run_start:true` (no `next_cursor`) and,
-when an earlier run of the same name left entries, `earlier_cursor`. "Show earlier runs" = `log:{…, cursor:earlier_cursor,
-earlier:true}` (the dashboard draws an "— earlier runs —" separator and keeps `earlier:true` for the following pages).
-When the run began in a day file that **retention already deleted** (e.g. a carried-forward node older than
-`log_retention_days`), the files run out before the run's start and the page says **`pruned:true`** — "earlier history
-pruned" on the dashboard, never a silent gap. Local and remote paging alike (the owner does the paging). A session's own
-run spans its children's runs (a child's new run is no boundary for the session).
-
-**The finished-plan window.** An ENDED plan stays **expanded** on the dashboard for `finished_plan_open_min` (per host,
-default 120, sent with the board in `head`), then collapses out of the default view — it isn't removed (the 7-day window
-still does that). A **"plans open"** slider beside "stale after" changes it live (0–8 h; not persisted, like the stale
-slider; v1.65.0: 0 – 7 days). Open plans always render expanded by default (a plan node's own click still wins; Collapse all
-closes them).
-
-**Home-host tags.** A top-level node's host tag now compares with the session's **HOME host** — the host it first appeared
-on: the earliest-created root across hosts, ties by host name (the board's `home`; `created_at` rides every gossip header
-and, since format v4, every record as `s0`, so it survives restarts). The headline still comes from the host that most
-recently set one, but the tags no longer flip with it.
-
-**The Plans filter.** A "plans" checkbox beside "active only" shows only plan nodes, plan items and their ancestors (the
-sessions and agents that hold them), across all sessions; with Active only too, only open plans. Remembered per browser.
-**Rollups follow the filters:** with Active only or Plans on, a rolled-up bar (and a line's `{progress}`) counts only what
-the filter shows — the dashboard recomputes it with the bridge's own rule; a reported bar is shown as reported. (6b's
-session rollup still counted an ended plan Active only hid.)
-
-**Dashboard details.** The Activity section is open by default. Pills now sit right after the name, so the bar column lines
-up on every row. Every row carries its identity for 6d's right-click menu: `data-kind` (project / session / host-line /
-node / log / entry), the node's ORIGIN `data-host` and `data-path`, `data-session` / `data-project` / `data-user`
-(`data-nkind`, `data-plan-item`, `data-plan-node`, an entry's `data-id`); `window.AimbActView.rowInfo[data-k]` holds the
-same object. (v1.65.0: the menu — "Step 6d" above.)
-
-**Formats (v1.64.0).** Records + slices are **v4** (`abandoned`, `by`, `s0` on every record, `log_n` / `log_partial` on
-gossip nodes); v2 and v3 records are still read; hubs declare `activity_gossip:4` (a 1.63 hub would misread `abandoned`,
-so the two don't exchange activity). Deploy = restart every host's gateway on 1.64.0 together.
-
-### Step 6d (v1.65.0) — dashboard actions, the log panel, pin / hide
-**Finishing an agent never completes its plan.** An agent (or the session) whose own line goes `done` or `failed` finishes,
-and the plan it holds stays exactly as it is: its open items stay open (they never expire, the carry-forward keeps them)
-until someone resolves them. A plan ends only when **every item is done**, when a **context** plan node is set `done`
-(complete) or `abandoned`, or — for a plan held by an agent or the session — through its **plan-end marker**, which only
-the dashboard's *Mark plan complete* / *Abandon plan* set (and *Reopen plan* clears). The tool's `abandoned` state on an
-agent keeps 6c's meaning: it finishes the agent **and** ends its plan (it sets the marker). The board's plan nodes now also
-carry `plan_end_how`: `all-done`, `done` (marked complete) or `abandoned`.
-
-**Right-click actions — the dashboard's first write path.** Right-click a row (or focus it and press the **Menu** key /
-**Shift+F10**; on a touch screen, **long-press**) for a menu with only the actions valid for that row in its current state:
-
-| On | Actions (wire name) |
-|---|---|
-| Plan item | Mark done (`done`) · Skip (`skip`) · Reopen, back to ☐ (`reopen`) · Abandon item (`abandon`) |
-| Plan node (open) | Mark plan complete (`complete`) · Abandon plan… (`abandon_plan`) |
-| Plan node (ended by complete / abandon) | Reopen plan (`reopen_plan`) — a plan that ended because every item is done reopens when an item does |
-| Agent / session holding open plan items | Abandon open plan items… (`abandon_plan`: only its OPEN items — todo / running / blocked — of the plans it holds without crossing another agent; those plans end; the agent or session itself **keeps running**) |
-| Agent / session that is stale or gone | Mark finished — done… / — failed… (`finish`, args `state`) |
-| Agent / session that is stale, gone or finished | Dismiss from the board… (`dismiss`) — never when its subtree holds part of an open plan (`has-open-items`) |
-| Any node / a session's own line (v1.70.0, a 1.70+ owner) | Edit text… (`edit_text`) · Message session… (`message`) — see "Edit a line, message the session" below (not on a question: its line is the question) |
-| An OPEN question (v1.71.0, a 1.71+ owner) | Answer… (`answer`, args `{choice?, text?}`) · Withdraw question… (`withdraw`) — see "Questions" below; a click on the row opens Answer… too |
-| An ANSWERED question (v1.75.0, a 1.75+ owner) | Change answer… (`change_answer`, args `{choice?, text?}`) — the same dialog, prefilled; see "Change an answer" below; a click on the row opens it too |
-| Any node / session | Copy path (a session: Copy session name) · Copy its aimb-log command · Pin / Unpin · Hide / Unhide |
-| A log entry (in the log panel) | Copy entry id · Copy path |
-
-- *Abandon plan*, *Mark finished* and *Dismiss* ask first (a dialog saying what happens — how many open items, that the
-  agent keeps running, that nothing is deleted — and how it will be logged; Cancel has the focus, Escape cancels).
-- **Who and how:** the dashboard sends `{type:"activity_action", ref, host, session, project, user, path, action, args}`
-  over its realm-token WS connection; only an authenticated **dashboard** socket is accepted (a page leaf, a logger or a
-  socket without a hello gets `unauthorized`). `host` is the node's ORIGIN: that host's gateway applies it — the bridge the
-  dashboard is attached to does it itself, or forwards it over the existing authenticated hub link as `ACTIVITY_ACT`
-  (queued and rate-limited like a remote history fetch: `busy` / `owner-unreachable` / `owner-unsupported`), so each host
-  still writes only its own nodes. The answer comes back as `{type:"activity_action", ref, result}`; the row shows a
-  spinner (with "queued" while a forward waits), then **✓** or the error code inline (the explanation on hover).
-- **Attribution:** every applied action is a logged entry on the node, attributed `by:{kind:"dashboard", user, host}` + `act`
-  (the action), its text "marked done by robin via dashboard (ROBIN-Z790)" — user = the OS user of the bridge the dashboard
-  is attached to (`AI_BRIDGE_USER` wins; else "dashboard"), host = that bridge's host (an owner takes it from the hub link,
-  never from the frame). An item's own line keeps its text (only its state changes). These are SYSTEM entries: they never
-  refresh an agent's activity or un-gone a session. They are persisted, gossiped and shown in the log like any entry.
-- **Stale** for *finish* / *dismiss* means what the viewer's slider says (`args.stale_min`); an implicit agent (it never
-  reported) counts as quiet when every reported agent below it is.
-- **Dismiss is not deletion.** The node and its subtree (or, on a gone session, the whole session) leave the board now
-  instead of after the 7-day window. A logged `dismiss:true` entry — shown in the PARENT's log — records it, and the restart
-  replay honours it like an eviction (older records at or under that path are an ended run), so a dismissal survives a
-  restart; a new report under the same name starts a new run. The day files are append-only: nothing is erased.
-- **Codes:** `not-a-plan-item`, `no-change`, `not-a-plan`, `already-ended`, `not-ended`, `all-items-done`, `no-open-plan`,
-  `not-an-agent`, `already-finished`, `not-stale`, `has-open-items`, `bad-action`, `bad-args`, `unknown-session`,
-  `unknown-node`, `unknown-host`, `not-owner` (a forwarded frame naming another host), `unauthorized`, `busy`,
-  `owner-unreachable`, `owner-unsupported`, `activity-loading`.
-- The MCP tools get no new actions: a session already resolves its own items and plans with states (`@~…/@~B` + `done` /
-  `skipped` / `todo` / `abandoned`; a context plan node `done` / `abandoned`). The dashboard is the manual override.
-- **The session is told (v1.68.0, #80)** — see "Dashboard-change notices" below.
-- **Copy its aimb-log command** builds the session's `{log_snippet}` command for the node's HOST: its absolute node + script
-  paths, `--session` / `--project`, `--token-file "<path>"` when that bridge reads its token from a file — never a token —
-  and `--path "<the node>"` (the board head now carries `log_cmd` for this host and each remote host, from its full slices).
-
-**The log panel replaces the Log rows.** The tree has no "Log" rows any more. **Click** a session, agent or context row to
-select it (highlighted); the **chevron** (or a double-click) expands it. The selected node's merged subtree log shows in a
-**panel to the right of the tree** (below it on a narrow screen): its path, host and entry count, entries newest first
-(time, a state dot, the `@ctx` / `@~ctx` tag relative to it, the text; details and JSON on click), "load older…", "start of
-this run · show earlier runs…", "earlier history pruned". A multi-host session's panel switches between its hosts; another
-host's log comes through the bridge's queued remote fetch (a spinner while it waits). The selection survives board deltas
-(the panel re-reads its first page when new entries arrive), and clears when the node leaves the board; ↻ refreshes, ×
-closes. (v1.72.0: the panel opens with the node's **details** section, and the log runs **oldest first** with a toggle — see
-"Details, data and the log order".)
-
-**Pin / Hide (this browser only).** *Pin* sorts a node (or a session) to the top of its parent, marked 📌. *Hide* collapses
-it away; its parent shows "N hidden — show" (shown, a hidden row is greyed and the control says "hide N again"). Both are
-undone from the same menu and kept in `localStorage` (`aimb.act.pins` / `aimb.act.hidden`; a private window just forgets).
-
-**Keyboard and touch.** Rows are focusable (`role="treeitem"`; log entries `listitem`): ↑/↓ move, Home / End jump, Enter
-selects, → / ← expand / collapse, the Menu key or Shift+F10 opens the menu (↑/↓ inside it, Enter runs an item, Escape
-closes and gives the focus back). A long-press (≈0.5 s) opens the menu on a touch screen; the tap that ends it does not
-select.
-
-**Other dashboard changes.** An open plan now expands its **ancestors** by default too (a plan under a collapsed agent or
-context is visible). The header and project counts **ignore the filters** (always the real totals; rolled-up bars still
-follow them). The "plans open" slider spans **0 – 7 days** in steps (minutes → hours → days; the bridge's
-`finished_plan_open_min` range is already 0–10080). The abandoned glyph has its own colour token, clearly visible in dark
-mode. The page has a viewport meta tag, and the phone layout rules now actually apply (the bar and name widths of the
-≤720 px block were overridden before).
-
-**Entry counts stay exact.** The day-rollover carry-forward record now carries the node's own entry count (`log_n`, +
-`log_partial` while it still understates), so a node whose run began before the replay window keeps its exact count after a
-restart — no "N+" from that cause.
-
-**Formats (v1.65.0).** Records + slices are **v5** (the plan-end marker on agents, `dismiss` entries, `line_text`, `act` and
-an object `by`, the cf `log_n`); v2–v4 records are still read; hubs declare `activity_gossip:5`. Deploy = restart every
-host's gateway on 1.65.0 together.
-
-### Dashboard-change notices — the session is told (v1.68.0, #80)
-A dashboard action used to be only LOGGED on the node, so an orchestrator could keep working on an item a person had just
-skipped or abandoned. Now the gateway that **owns** the node (the one that applied it — another host's node is applied, and
-notified, by that host) sends the node's session a **system message** after every state-changing action: `done`, `skip`,
-`reopen`, `abandon`, `complete`, `abandon_plan`, `reopen_plan`, `finish`, `dismiss`. Copy, pin and hide never reach the
-bridge (they live in the browser), and a refused action or a read sends nothing.
-
-- **Message:** verb **`activity_changed`**, from the owning gateway. Subject (public — status paths are realm-visible
-  anyway), e.g. `robin skipped @Dash test/@Docs`, `robin marked @Rplan/@R1 done`, `robin abandoned the open plans of lead`.
-  Body:
-  ```json
-  { "action": "skip", "path": "@\"Dash test\"/@Docs", "host": "ROBIN-Z790", "from_state": "todo", "to_state": "skipped",
-    "by": { "user": "robin", "host": "LITTLE-001" }, "entry_id": "act_…", "session": "Lead", "project": "ACTS",
-    "text": "Docs", "ts": 1790948729303 }
-  ```
-  `host` = the owner, `by.host` = the dashboard's host; `entry_id` = the logged entry that did it (`activity {entry:{id}}`).
-  For `complete` / `abandon_plan` / `reopen_plan`, `of:"plan"` and the two states are the PLAN's (`open`, `done`,
-  `all-done`, `abandoned`); `abandon_plan` adds `items:[{path, from_state, to_state, entry_id}]` for the items it abandoned.
-- **Batched:** actions on one session within **`activity.notice_batch_sec`** (default **3**, 0 – 60; 0 = each at once; env
-  `AI_BRIDGE_ACTIVITY_NOTICE_BATCH_SEC`) become ONE message — each new one re-arms the window, at most 5 windows after the
-  first. Subject e.g. `robin skipped 2 items and abandoned 1 in @Dash test`; body `{actions:[…the bodies above…], count,
-  session, project, host}`. `POST /admin/prepare-shutdown` and a clean exit flush every queue first.
-- **Recipient:** the session's registered sub-peer(s), anywhere on the mesh, matched by realm + project + user + session
-  name, case-insensitively (else a live bare session of that name). None live → the message is **parked** for the session's
-  durable registration in the owning host's store and delivered on its next `register_self`. A **script-only** session (no
-  sub-peer ever registered) gets the log entry only. A live session's doorbell wakes as for any mail.
-- **Consent:** it rides the system-message path #72's grant notices use (`system`, set only by bridge code for the
-  session's own board) — nothing else is opened.
-- **What the session does:** the server instructions and the `log` tool say it: summarise the change for the user and don't
-  act on it (stop or redo work) without their permission.
-- **For later notices (#83 edit text and #84 message the session — built in v1.70.0, below; #85 answers):** the gateway's one internal hook
-  `notifyActivitySession(ident, {verb, subject, body}, {now})` (`bridge.mjs`) batches per session and delivers as above;
-  `ACT_NOTICE_COMBINE[verb]` merges several notices of one verb (the default: `{notices:[…], count}`), `now:true` sends at
-  once.
-- **Compatibility:** no wire change (gossip and `ACTIVITY_ACT` are unchanged); a 1.65 / 1.66 host just sends no notices
-  for its own nodes. Receivers of any version accept the message (a `system` envelope, as since 1.56).
-
-### Three-part progress, colours and session glyphs (v1.66.0, #79)
-**Progress has three parts: done, skipped, total** (+ the unit). *Skipped* is resolved without being done — neither done
-nor remaining. Report it with `"3/6 1 skipped"` / `"4812/12000 tiles · 100 skipped"` or `{done, skipped, total, unit}`
-(done + skipped > total clamps skipped, `progress-clamped`); it defaults to 0.
-- **Rollups carry all three:** a common unit sums done, skipped and total; mixed units average each child's done fraction
-  and skipped fraction (each child weighted 1); a plan's "N of M done" counts every item — done items are done, **skipped
-  and abandoned** items are skipped (they won't be done), todo / in-progress / idle / **failed** items remain (failed may be
-  retried).
-- **A done node counts as 100% done** — a full bar, and its whole weight to its parent — whatever its reported or rolled-up
-  bar says; an **abandoned** node's remainder counts as skipped; a failed node keeps its bar. Otherwise reported progress
-  wins over a rollup, as before. The plan-end rule is unchanged (skipped items keep a plan open).
-- **Text:** `{progress}` → "1 of 5 done · 1 skipped" ("4,812 of 12,000 tiles" when nothing is skipped), `{pct}` = the
-  done %, `{skipped}`.
-- **Dashboard bars:** done (blue; a plan's green), then the **skipped segment** (a grey hatch, light and dark), then the
-  track; striped = a rollup; the tooltip reads "1 of 5 done · 2 skipped (20%) · incl. 1 abandoned — its plan: 5 items".
-- **Colours:** green means **done** only. **In progress is cyan** everywhere — the running ring and dot, a context's running
-  mark, the in-progress plan item, running log dots (one token, `--act-running`). Blocked stays orange, failed red, stale /
-  gone / skipped / abandoned grey.
-- **Session glyph:** a session row (and each host line of a multi-host session) shows a small rounded **window** instead of
-  the agent ring — its border empties towards stale like the ring, its colour is its state, and its face says the client:
-  code `>_`, cowork a speech bubble, a page a globe, anything else a plain window. The Sessions table and the mesh map use
-  the same glyph. The bridge takes the client kind from the mesh roster (`client_kind` on the dashboard's session units).
-- **Compatibility:** `skipped` is an optional field (only when > 0) on progress in records, carry-forwards and gossip; a
-  1.65 host ignores it (and shows no skipped segment), a 1.66 host reads a missing one as 0. The format stays v5, so hosts
-  can upgrade one at a time.
-
-### Briefing agents (v1.66.0; wording revised 2026-10-03)
-An orchestrating session keeps its agents' work visible, and its plan truthful:
-- Each piece of work is a **plan item**; an agent sits **under the item it serves**: paste `{log_snippet}` (the code
-  reminder hands it out) into its prompt with `--path "<plan item>/<agent>"` (e.g. `--path "@Next release/@#81 tests/agent-81"`),
-  and give it its checklist up front (or tell it to make one with `--item "A" --item "B"` as its first report).
-- The agent keeps its checklist live: `--path "<agent>/@~<item>" --state running --text "<what>"` when it starts an item,
-  a new `--text` at each sub-step, `--done` the moment it's done, `--text "@~root <what it's doing>"` current, and it
-  finishes with `--text "@~root <summary>" --state done` (or `failed`).
-- The orchestrator ticks the plan item **after checking the agent's work** (an agent finishing doesn't tick it), keeps its
-  own `@~root` current, **adds unplanned work as a plan item first**, and **reopens** an item (`--state running`) when work
-  on it resumes.
-
-The realm reminders (`config.example.json`, `behaviors.realm`) say this within the 365-char reminder cap. They avoid the
-v1.66 flags (`--text` / `--item`) in their own text, because a 1.65 host's script lacks them; `{log_snippet}` is expanded
-by each host from its own script, so it can use them:
-- `client:code`: "When you spawn agents, paste this into each prompt with --path "<plan item>/<agent>" (it sits under the
-  item it serves; you tick the item after checking its work) and a checklist: {log_snippet} Keep your board true with the
-  log tool: "@~root <what you are doing>" current; unplanned work added as an item first; an item reopened (state running)
-  when work resumes."
-- `client:cowork`: "Show what you are working on on the activity board: {log_tool_hint} Handing work to agents? Give each
-  a path under the plan item it serves ("<item>/<agent>") and a checklist; it ticks items and ends with "@~root
-  <summary>", state:"done". Keep your plan true: add unplanned work as an item first; reopen an item (state:"running")
-  when work resumes."
-- **2.0 (#88 build step 9):** both reminders now brief agents with `--agent <its key> --label "<its name>" --under <its
-  plan item's key>` (the tool form: `agent` / `label` / `under`), end with `state:"done", text:"@<summary>"`, and keep
-  within the 365-character cap — see `config.example.json`; the realm's copy in `config.json` is rewritten at the cutover.
-
-### The plan workflow — order, insert anywhere, move, abandon anything (v1.69.0, #82)
-**Order.** Siblings show **plan items first** (in their plan order), **then the other contexts, then agents**; a state
-change never moves a row. Each node's position is a **fractional rank** — a base-36 string (`0-9a-z`, compared as text,
-never ending in `0`), so there is always room between two ranks and a reorder writes **one** record; nothing is
-renumbered. Most nodes never store a rank: a node without one has its **derived** rank — its creation time (9 base-36
-digits of the ms) + its plan position (2 digits) + `i` — so the default is creation order, exactly as before, and a node
-created later always sorts after the existing ones. A node gets a **stored** rank only when it is placed (inserted at a
-position, reordered, moved), computed between its neighbours' ranks (an open end is bounded by the next millisecond's
-derived rank, so later nodes still go after it). The `activity` board gives every node its `rank` (+ `rank_set` when
-stored); gossip carries stored ranks only; checkpoints and carry-forwards persist them.
-
-**Insert anywhere** (Robin: "an agent should be able to insert steps into a plan at any position"):
+### `tools/aimb-log.mjs` — reporting without registering
 ```bash
-aimb-log … --path "@Next release" --item "Review" --before "Docs"   # or --after "Build" / --first / --last (default: the end)
-aimb-log … --path "@Next release" --item "A" --item "B" --after "Spec"   # several keep their order at that spot
+node src/tools/aimb-log.mjs --session S --project P --agent docs-agent --label "Docs agent" --under docs --guide agent
+node src/tools/aimb-log.mjs --session S --project P --agent docs-agent --item readme "Rewrite the README"
+node src/tools/aimb-log.mjs --session S --project P --agent docs-agent --key readme --state running --text "@Rewriting it"
+node src/tools/aimb-log.mjs --session S --project P --agent docs-agent --state done --text "@README done"
+node src/tools/aimb-log.mjs --session S --project P --path "Next release/Docs" --text "a plain log entry"
 ```
-The tool: `log {path:"@Next release", plan:["Review"], before:"Docs"}` (`after`, `position:"first"|"last"`). An anchor is a
-sibling: `"Docs"` / `"@Docs"` = a context, a bare name = an agent of that name first. Re-sending existing names never moves
-them (`position-unused`). Errors: `unknown-anchor`, `bad-anchor` (an anchor of another kind — plan items, contexts and
-agents are placed among their own kind), `bad-position` (two positions, or before itself).
+- It talks to this host's GATEWAY as a token-gated `logger` leaf on the WS port — the same trust as the doorbell (anyone
+  holding the realm token may report as any session) — except that the gateway refuses to speak for a session that is LIVE
+  on the roster under another user (`session-user-mismatch`). A script-only session is never marked gone; it can go stale.
+- **Identity:** `--session` and `--project` (required); `--user` (default `AI_BRIDGE_USER`, else the OS login); the realm
+  from `AI_BRIDGE_REALM`, else `config.json`'s `realm`. **Token / port:** `--token-file <path>` (#75), else
+  `AI_BRIDGE_TOKEN` / `AI_BRIDGE_TOKEN_FILE`, else `config.json` (found as `../config.json` from the script, or
+  `AI_BRIDGE_CONFIG`); `--ws-port` / `--url` / `AI_BRIDGE_WS_PORT`, else `wsPort`. `--token` is refused (argv is
+  world-readable). It validates locally with the gateway's own parser (`lib/activity2.js`), so it runs from inside `src/`.
+- **2.0 only:** it talks only to a gateway whose welcome says `activity_format: 6`; any other is `gateway-unsupported`
+  (exit 4) before anything is sent — except `--guide`, which prints its built-in text against anything.
+- **`--stream`:** ONE connection, NDJSON on stdin (an object, or an array = a batch, per line), one result line each in
+  order (`line` = the input line number; the result's own `line` flag is `line_set`); a dropped link is re-dialled.
+  Lines are sent one at a time (`AIMB_LOG_TIMEOUT_MS`, default 8000).
+- **Exit codes:** 0 ok · 4 the bridge said no / transport error / no 2.0 gateway · 64 the command line (incl.
+  `legacy-form`) · waits: 10 the wait ran out (the question stays open), 11 expired, 12 withdrawn, 13 the session left.
+- **Protocol** (the gateway's WS port): `{type:"hello", kind:"logger", token, ident:{session, project, user, realm}}` →
+  `{type:"welcome", logger:true, bridge_version, activity_format:6, realm, host, ident}` or `{type:"error", code, what}`
+  + close; then `{type:"log", ref, input}` → `{type:"logged", ref, result}` (an `input.items` = a batch),
+  `{type:"guide", kind, cmd, agent?, label?, under?, script}` → `{type:"guide", ok, kind, text, source, board?}`,
+  `{type:"resolve", …}` → `{type:"resolved", …}` and `wait_answer {node_id | agent + key|id|path}`. A logger socket is
+  not a page or a session: it never appears in `list_sessions`, the dashboard or the roster.
 
-**Reorder** an existing node with the same flags and no text: `--path "@Next release/@~Docs" --after "Ship"` (tool:
-`{path:"@Next release/@~Docs", after:"Ship"}`) — one logged entry "placed after @Ship" carrying the rank; the line is
-untouched. With text / a state it is a normal message that also places the node.
+### Guides, the snippet and the realm reminders
+Agents never see reminders, so an orchestrator puts ONE line in each agent's prompt: `{log_snippet}` = the ready
+aimb-log command for this host (absolute node + script paths, `--session` / `--project`, `--token-file` when the bridge
+read its token from a file) with `--agent <your-key> --label "<your name>" --under <item-key>` for the orchestrator to
+fill, plus "First run it with --guide agent in place of --text". `{log_tool_hint}` is the same for a session without a
+shell (Cowork: the `log` tool). The built-in guides (`lib/log-snippet.js`: `agentGuide`, `sessionGuide`; every line
+≤ 110 characters) teach the 2.0 rules. `config.example.json`'s `behaviors.realm` carries the two connect reminders
+(`client:code` / `client:cowork`, `"id":"activity"`) that brief orchestrators in 2.0 forms within the 365-character cap;
+publishing them — and any realm GUIDES (`behaviors.realm.guides.agent|session`: `text` ≤ 4 KB, placeholders `{cmd}`,
+`{agent}`, `{path}`, `{gateway}`, `{script}`, optional `min_bridge`; pulled on request, newest `updated_at` wins) — into
+the shared `config.json` is an operator step (bump `updated_at`). The bridge never writes `config.json`.
 
-**Move** a node and everything under it to another parent in the same session (each host writes only its own nodes):
-```bash
-aimb-log … --move "@Next release/@Telemetry" --to "@Potential changes" [--first | --before "X" | …]
-```
-The tool: `{move:"@Next release/@Telemetry", to:"@Potential changes"}`. Both paths are relative to `--path` / `path` (a
-leading `/` = from the session root; `--to "/"` = the root). The node keeps its line, state, bar, plan-item marker,
-created_at, log and count; it goes to the **end of its kind** under the new parent unless placed (a plan item at the end of
-the target plan); a new parent path is created (implicit). One logged entry at the NEW path: `moved by <session | user via
-dashboard (host)> from @Next release/@Telemetry to @Potential changes`, with `moved_from` and `rank` on the record. The
-result: `moved:{from, to, parent}`. Errors: `unknown-node`, `no-change` (already there — with a position it is a reorder),
-`target-exists`, `bad-move` (into itself, the root, text / state / plan with a move), `path-too-deep`. **History follows the
-node:** in memory its log moves with it; a restart's replay maps every older record under the old path onto the new one
-(node by node, so an OLD parent keeps the activity those records gave it); the node remembers `moved:[{from, at}]` (carried
-forward past the replay window), so its log pages on into the day files under the old path(s) — shown at its path now —
-and its count includes them. The new parent's merged log shows the moved-in node's newer entries; its older ones (written
-before the new parent began) come with "show earlier runs".
+### Reading — the `activity` tool
+`activity {project?, session?, user?, host?, log?, entry?}` — the mesh board: `sessions`, each with its nodes depth first
+(`id`, `parent_id`, `key`, `scope`, `label`, `path`, `kind`, `type` + the registry's display, `depth`, `host`; the line,
+the effective state — stale / gone computed here —, the bar, ETA, time, log counts). The head carries `format: 6`,
+`view_user`, `remote_hosts`, `unshared_hosts` (linked hosts still on 1.7x, below) and `fs_warnings` (Dropbox conflicted
+copies). `log:{ session, id | path, own?, removed?, earlier?, limit?, cursor? }` pages a node's MERGED log — the entries of
+every node in its subtree NOW, newest first, each tagged with where it was logged (`at`); `removed:true` adds the
+entries of removed nodes (ghosts, marked `removed`); a node's history stops at its current run (`run_start`, then
+`earlier_cursor` / `earlier:true` = "show earlier runs"; `pruned` when the run began before the oldest retained day).
+`entry:{ id, host? }` fetches one entry's details / data. A remote session's pages and entries are fetched from its
+owner.
 
-**Abandon anything.** `abandoned` is valid on **any context** (not only plans and plan items); an agent or the session
-keeps its rule (only when it holds plan items — it finishes and its plan ends). Abandoning **cascades**: every open context
-or plan item under it (todo / running / blocked, or a context whose plan is still open — not inside another agent: an
-agent's work is its own) gets an abandoned line too, deepest first, logged `abandoned with <path>` (+ the dashboard's
-attribution); the result lists them in `cascade:[{path, from_state}]`. Done / skipped / idle / failed nodes and agents keep
-theirs. The dashboard greys the abandoned node **and everything under it**.
+### One writer per host; the files
+The host's **gateway** owns its board and its files; a follower forwards its sessions' calls up its control link
+(`ACTIVITY` frame → `ACTIVITY_R`). Files (only with persistence on), in `<persist dir>`:
+- `activity/<host>/YYYY-MM-DD.jsonl` — the day file (local date): **v6** records — NODE records (`create`, `label`,
+  `move`, `rank`, `item`, `merge`, `remove`, `keep` …: structure, never shown in a log) and ENTRIES by node id (`n`) with
+  `at` (the path when written); `cp` checkpoints + an in-place `rep` repeat line for `log:false` activity (flushed every
+  `progress_checkpoint_sec`, on a clean exit and on prepare-shutdown); a `cf` carry-forward at each day start holds the
+  whole structure, so the replay never needs older files.
+- `activity/<host>/YYYY-MM-DD.idx.json` — the day's index (node id → entry offsets), written at the rollover and rebuilt
+  at open when missing or stale: a log page reads only the indexed spans, backwards.
+- `activity/<host>/format.json` — the format marker `{v:6, by, at, days, …}`.
+- `views/<host>.json` — the per-user view state this host holds (below).
+- `activity-v5-backup/<host>/` — exists only while `tools/aimb-migrate-v2.mjs` runs.
 
-**Agents on the item they work on.** A plan item with agent children shows the **working agent** (the most recently active
-one still running, else the latest) beside its box — its glyph, its name and its current line — even while the item is
-closed. Ticking stays explicit: an agent finishing doesn't tick the item.
+Every file lives under the WRITING host's name and only that host writes it (Dropbox-safe; atomic `*.tmp` + rename);
+readers match exact names only, and a Dropbox conflicted copy is WARNed once and listed in `fs_warnings`, never read or
+deleted. Retention deletes day files (with their index files) older than `log_retention_days`. A new gateway REPLAYS the
+retained window synchronously before it serves.
 
-**Dashboard.** Right-click a node → **Move up / Move down** (among its own kind; a reorder), **Move to…** (a picker of every
-node of the session on that host it may go under — not into itself, not its current parent, not past the depth limit,
-no name clash — then a confirm), **Abandon…** on an ordinary context (confirmed; it cascades). **Drag and drop:** drop a row
-on a sibling of its kind to put it before (upper half) / after (lower half) it, or on another node to move it there (asked
-first). They go through the 6d action path (`activity_action` → the owner, forwarded as `ACTIVITY_ACT` for another host's
-node), are attributed and logged like the other actions, and tell the session (#80): `robin moved @Next release/@Y before
-@X`, `robin moved @Next release/@B to @Later` (body `where` / `moved_from` + `to`; a batch "robin moved 1 node and
-reordered 1 in …"). New wire actions: `move` (`args.to`, + `before` / `after` / `position`) and `reorder` (`args.before |
-after | position`).
+**The start check (exit 78).** A gateway with v5 (1.7x) day files and no v6 marker, or with a leftover
+`activity-v5-backup/<host>/`, REFUSES TO START: one stderr line `activity: REFUSED TO START (exit 78): <why + the command
+to run>`, the same text in `<os temp>/aimb-start-refused-<wsPort>.txt` (the Windows tray shows it and stops relaunching
+until Restart Bridges…), exit 78. No day files and no marker = a fresh host: the marker is written and it starts.
+Followers own no activity: no check. **The migration:** `node src/tools/aimb-migrate-v2.mjs [--dry-run] [--dir <persist
+dir>] [--host <name>] [--port <n>] [--config <file>] [--json]` converts THIS host's directory in place — it refuses
+while this host's gateway answers on its port, backs up, converts, writes the index files and the marker, VERIFIES
+(sizes, sha256, every line v6, a fresh replay = the converter's model), removes the backup; a failed run RESTORES the v5
+files (exit 3). Exit 0 done / nothing to do, 2 refused (nothing written), 3 failed, 64 the command line. See
+`docs/cutover-2.0.md` and spec §7.
 
-**Compatibility (1.66 – 1.68 hosts).** The format stays **v5**: `rank` on a gossip node, `rank` / `moved_from` / `moved`
-on records are optional fields a 1.68 host ignores (its board orders by creation; a move reaches it as an ordinary
-removal + new node). A 1.69 hub declares `activity_plan:1` in PEER_HELLO; a 1.69 gateway forwards move / reorder only to an
-owner that declared it (else `owner-unsupported`), and its dashboard offers them only for such hosts (`remote_hosts[].plan`).
-A 1.69 follower refuses (`gateway-unsupported`) a `log` using move / to / before / after / position when its gateway is
-older (it would drop the fields silently), and so does the 1.69 script. Downgrading a host to ≤1.68 after a move is not
-supported: its replay would rebuild the moved node at both paths.
+**Config** — an `activity` block in `config.json` (live-reloaded), each key with an `AI_BRIDGE_ACTIVITY_<KEY>` env
+override: `log_retention_days` 7 · `log_entries_per_agent` 200 (in memory, per node) · `stale_after_min` 15 ·
+`finished_visible_hours` 168 (a finished / gone agent stays visible this long; also the replay window) ·
+`memory_budget_mb` 64 (over it the oldest finished agents / ended plans are evicted — written as `remove` records —, then
+the oldest in-memory log entries dropped) · `progress_checkpoint_sec` 60 (10 – 3600, 0 = off) · `abandoned_plan_days` 90
+(a gone session's open plans are abandoned by the bridge) · `finished_plan_open_min` 120 (an ended plan stays expanded on
+dashboards) · `notice_batch_sec` 3 (dashboard-change notices to one session within this long go as one message) ·
+`enabled` true. Env only (every host should agree): `AI_BRIDGE_ACTIVITY_GOSSIP_MS` (1000), `_SLICE_MAX_BYTES` (262144),
+`_PAGE_ENTRIES` (50), `_PAGE_BYTES` (32768), `_FETCH_RATE` (4/s), `_REMOTE_MS` (4000), `_DOWN_HOLD_MS` (30000),
+`_QUEUE_LINK` / `_QUEUE_DASH` / `_TOOL_WAIT_MS` (the remote-fetch queues), `_BELL_GRACE_MS`; view state
+`AI_BRIDGE_VIEW_TOMBSTONE_TTL_MS` (30 days), `_SAVE_MS` (10 s), `_GC_MS` (10 min). Test-only: `AI_BRIDGE_ACTIVITY_FWD_MS`,
+`_GC_MS`, `_ROLLOVER_CHECK_MS`, `_CHECKPOINT_MS`, `AI_BRIDGE_TEST_ACTIVITY_TAP=1`, `AI_BRIDGE_TEST_HOSTNAME`,
+`AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS`, `AI_BRIDGE_TEST_GOSSIP=v5` (a gateway that announces format 5: the tests'
+stand-in for a host left on 1.7x), `AIMB_TEST_VIEW_USER`.
 
-### Edit a line, message the session — from the dashboard (v1.70.0, #83 / #84)
-Two more right-click items on **any node** — a context, a plan item, an agent, or a session's own line (a multi-host
-session: each host's line, not the session row):
+**Lifecycle.** A session whose sub-peer leaves this host's roster shows **gone** (in memory; a report or its return
+clears it); a gone agent / session leaves the board after `finished_visible_hours` unless it holds an open plan. A plan
+ENDS when every item is done / skipped / abandoned, or its node is set done / abandoned; an open plan's nodes never expire
+and are never evicted. The doorbell's 🔔 shows on a session whose listener is armed.
 
-| Menu item | Wire action | What the owning host does | The session is told |
-|---|---|---|---|
-| **Edit text…** | `edit_text`, args `{text, state?}` | sets the node's **current line** (and optionally its state) for its session | `activity_text_edited`, batched |
-| **Message session…** | `message`, args `{text}` | **logs** the message on the node and delivers it to the session | `activity_message`, at once |
+### Mesh-wide — gossip v6
+Every gateway gossips its own board to every peer hub over the hub-to-hub link: a full slice on every (re)link, then
+deltas, ≤ 1 frame/s per link, `AI_BRIDGE_ACTIVITY_SLICE_MAX_BYTES` per frame (newest-active first). A **unit per node, by
+id** (no path: a rename or move changes ONE unit), current lines only — never details, data or entries. A link shares
+activity only when both ends announce `activity_gossip:6` in PEER_HELLO: **a host still on 1.7x shares nothing** (the
+message mesh still works) and every 2.0 host lists it in the board head's `unshared_hosts` — a RED row on the dashboard
+("LITTLE-001 is still on 1.7x (1.75.1): not on this board"). Remote log pages, entries and dashboard actions go to the
+node's OWNER by id (`ACTIVITY_REQ` / `ACTIVITY_ACT`), rate-limited per link; a host that goes down shows its agents gone
+until it returns (`host_down`), and leaves the board after `finished_visible_hours`.
 
-Both travel the 6d action path (`activity_action` → the node's owner; another host's node is forwarded as `ACTIVITY_ACT`),
-are SYSTEM entries attributed to the viewer (`by:{kind:"dashboard", user, host}` + `act`; they never refresh an agent's
-activity), and reach the session through #80's notice hook.
-
-**Edit text… (#83).** A dialog prefilled with the node's RAW line (`{progress}`, `{pct}`, `{eta}` … stay placeholders and
-still render), a state picker — "keep <state>" or one of the states that node can take (a plan item: any; another context:
-all but `todo` / `skipped`; an agent / the session: `running` · `blocked` · `failed` · `done` · `idle`, + `abandoned` only
-while it holds plan items) — a live "N / 240" counter, and Save (disabled with a reason: empty, too long, nothing changed;
-Enter saves, Escape cancels).
-- The same limits as a report: 240 characters (the bridge truncates a longer one with `text-truncated`, as for a report),
-  newlines become spaces, and the text is taken **literally** (a leading `@Docs` is text, not a path). No state → the line
-  keeps its state (an edit doesn't start a ☐ item). Only the text and state change: the line keeps its details and data.
-- **Attribution:** the line remembers who wrote it — `current.by = {user, host}` on the board (a raw / rendered line, the
-  `activity` tool, gossip, checkpoints, the carry-forward and the restart replay all carry it; the record field is
-  `line_by`). The dashboard shows a small **✎** right after the text (hover: "Edited by robin via dashboard (HOST) — its
-  session's next report replaces it"). The logged entry reads `Docs: README first (edited by robin via dashboard (ROBIN-Z790))`
-  (`act:"edit_text"`; the record's `line_text` keeps the line alone).
-- **The session's next report** replaces the line and its ✎ as usual; a tick that keeps the text (`@~…/@~Docs` + a state)
-  keeps the attribution — the text is still the viewer's.
-- Codes: `bad-args` (no text), `bad-state` (a state that node can't take), `no-change` (the same text and state), + the 6d ones.
-- **Notice:** verb `activity_text_edited`, batched with the session's other notices (`notice_batch_sec`). Subject e.g.
-  `robin edited @Rel/@Docs (todo → running)` (no arrow without a state change); body
-  ```json
-  { "action": "edit_text", "path": "@Rel/@Docs", "host": "ROBIN-Z790", "from_state": "todo", "to_state": "running",
-    "by": { "user": "robin", "host": "LITTLE-001" }, "entry_id": "act_…", "session": "Lead", "project": "AIMB",
-    "text": "Docs: README first {progress}", "from_text": "Docs", "ts": 1790956444869 }
-  ```
-  Several edits in one window merge into ONE message (`ACT_NOTICE_COMBINE.activity_text_edited`): `robin edited 2 lines in
-  @Rel`, body `{actions:[…], count, session, project, host}`.
-
-**Message session… (#84).** A text box (up to **2000** characters; newlines kept; a live counter; Ctrl+Enter sends) titled
-"Message <session> about <path>".
-- The owner **logs** it on the node: `robin via dashboard: <the first 120 characters on one line>…` (`act:"message"`, not
-  a current line — the node's line is untouched), the full text in the entry's `details` (cut to 4 KB only for a very long
-  non-ASCII message; the delivered body always has all of it).
-- It **delivers** it at once (`now:true` — not held for the batch window), verb `activity_message`. The **subject is public
-  (not encrypted)**, so it names only who, the node's path and a few words (≤ 6 words / 40 characters): `robin about
-  @Rel/@Code: Please also cover the empty-plan case…`. The **body** (encrypted like any body) carries the text:
-  ```json
-  { "action": "message", "path": "@Rel/@Code", "host": "ROBIN-Z790", "text": "Please also cover the empty-plan case.\nAnd say what the default is.",
-    "by": { "user": "robin", "host": "ROBIN-Z790" }, "entry_id": "act_…", "session": "Lead", "project": "AIMB", "ts": 1790956445112 }
-  ```
-- **Delivery** is #80's: the session's live sub-peers mesh-wide, else **parked** for its registration on the owning host,
-  else nothing. The action's result says which — `delivered:true, delivery:"live" | "parked"`, or for a **script-only**
-  session `delivered:false, delivery:"none"`, warning `not-delivered`, `what: "not delivered: the session has no inbox (a
-  script-only session) — the message is logged on the node"`. The dashboard shows "✓ sent" + "Message sent to Lead" (or
-  "parked for Lead (offline)…"), and for none an amber "⚠ logged · not delivered: the session has no inbox" + a toast.
-- Codes: `bad-args` (empty), `message-too-long` (over 2000 characters), + the 6d ones. The log panel marks a message entry
-  💬 (its details hold the full text) and an edit entry ✎.
-
-**Trust.** Both verbs are a REQUEST relayed from a dashboard viewer, not authorization: the server instructions and the
-`log` tool's description say so next to #80's `activity_changed` sentence — summarise it for your user and act on it only
-with their permission. (Anyone holding the realm token can open a dashboard — #70 "Questions after 6d".)
-
-**Compatibility (1.66 – 1.69 hosts).** The format stays **v5**: `line_by` on records / a cp's or cf's line and `by` on a
-gossiped line are optional fields a 1.69 host ignores (it shows the edited text without the ✎; its replay keeps the text).
-A 1.70 hub declares **`activity_msg:1`** in PEER_HELLO; a 1.70 gateway forwards `edit_text` / `message` only to an owner
-that declared it (else `owner-unsupported`, "… runs a bridge older than 1.70.0 …"), and its dashboard offers the two items
-only for such hosts (`remote_hosts[].msg`; this gateway's own nodes always). An older host's dashboard keeps its own menu
-and its actions on a 1.70 node work as before. `AI_BRIDGE_TEST_NO_ACTIVITY_MSG=1` (tests only) makes a hub leave the flag
-out, to stand in for a 1.69 owner.
-
-### Questions — ask, answer from the dashboard, wait for the answer (v1.71.0, #85)
-A session or one of its agents asks the person watching the dashboard a QUESTION, and gets the answer back — as a message,
-or by waiting for it in a script.
-
-```bash
-# an agent (a script): ask, then WAIT for the answer on the same connection (≤ 24h)
-node "<abs>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --path "@Next release/@#85/ask-85" \
-     --ask "Postgres or SQLite for the cache?" --choice "Postgres" --choice "SQLite" --free --expires 2h --wait 30m
-# → {"ok":true,"outcome":"answered","path":"…/ask-85/@?1","question":"Postgres or SQLite for the cache?","choices":["Postgres","SQLite"],
-#    "free":true,"answer":{"choice":"SQLite","text":"smaller to ship"},"by":{"user":"robin","host":"ROBIN-Z790"},"at":…,"waited_ms":41250,
-#    "asked":{"id":"act_…","path":"…/ask-85/@?1"}}          exit 0
-# wait for an existing question (default 30m):   --wait-answer --path "…/ask-85/@?1" [--wait 30m]
-# withdraw your own question:                     --path "…/ask-85/@?1" --state withdrawn [--text "decided myself"]
-```
-The tool form: `log({ as, secret, path:"ask-85", ask:"Postgres or SQLite?", choices:["Postgres","SQLite"], free?, expires?,
-details?, data? })` — it returns AT ONCE with the question's `path` and `question:{status:"asked", …}`; the answer arrives as
-an `activity_answer` message.
-
-**The model.** A question is a **context whose current line carries `question`** — `{status, choices, free, asked_at,
-expires_at?, answer?{choice?, text?}, by?, at?}`; the line's text IS the question. Asked on a context that is new, has no line
-and no children (and isn't a plan item), or is already a question, THAT node becomes it (`--path "lead/@db" --ask …` →
-`lead/@db`); asked anywhere else — an agent, the session, a context with a line or children, a plan item — it becomes a new
-child `@?1`, `@?2` … (`--path ask-85` → `ask-85/@?1`). The result's `path` names it. Questions ride the line everywhere the
-line goes (records, checkpoints, the carry-forward, gossip, the restart replay), so they need no new record or slice format.
-
-| Status | How | The line's state (what a ≤1.70 host shows) | In "N of M done" |
-|---|---|---|---|
-| `asked` (awaiting an answer) | `ask` | `blocked` | remaining |
-| `answered` | the dashboard's `answer` (a choice and / or free text, attributed) | `done` | done |
-| `expired` | `expires` ran out — the bridge closes it (`by:"bridge"`, "expired — nobody answered within 2h") | `abandoned` | skipped |
-| `withdrawn` | the asker's `state:"withdrawn"`, the dashboard's `withdraw`, or any abandon of it (an ancestor's cascade, Abandon plan, a ≤1.70 dashboard's Abandon…) | `abandoned` | skipped |
-
-- **Limits:** the question ≤ 240 characters (refused `question-too-long`, never cut — put background in `details`); ≤ 8
-  choices, each ≤ 60 characters, distinct (`bad-choices`); free text allowed by default only without choices (`free:true` /
-  `--free` allows both); a free-text answer ≤ 1000 characters (`answer-too-long`); `expires` > 0 and ≤ 7 days (`bad-expires`).
-  `ask` takes no `text` / `state` / bar / plan / position, and is always logged (`bad-ask`).
-- **Rollup:** a question counts as an ITEM in "N of M done" — of its parent, and of the plan above it when its parent holds
-  plan items (an open question keeps that plan open; answered counts as done). A plain report can't overwrite a question's
-  line (`question-node`); a log-only message to it (no `@~`) is fine. Asking again on a closed question starts a new one
-  there; on an open one → `question-open` (withdraw it first).
-- **Answering (the dashboard).** A question shows a speech-bubble **"?"** (fuchsia while open, green ✓ answered, greyed
-  expired / withdrawn), an "awaiting answer" pill and a tinted row; an answered one shows its answer after the question
-  ("→ SQLite — smaller to ship"). **Click an open question** (or right-click → **Answer…**) for the dialog: the question, its
-  choices as buttons (a radio group), a text box when free text is allowed, Answer disabled until something is picked / typed.
-  **Withdraw question…** asks first. Neither offers Edit text… or Abandon… on a question.
-- **The owner applies it** (the 6d path, `ACTIVITY_ACT` for another host's node): an entry `answered by robin via dashboard
-  (ROBIN-Z790): "SQLite" — note: smaller to ship` (`act:"answer"`; v1.75.0: the choice quoted, the free text as a note; free text
-  alone is quoted: `…: "after the review"`), the line → done with the answer on it, then (1) every script
-  WAITING on it is released and (2) the session is told AT ONCE (`now:true`), verb **`activity_answer`**:
-  subject (PUBLIC) `robin answered @Next release/@#85/ask-85/@?1: Postgres or SQLite for the cache?` — who, the path and the
-  question's first words, **never the answer**; body (encrypted):
-  ```json
-  { "action": "answer", "status": "answered", "path": "…/ask-85/@?1", "host": "ROBIN-Z790", "question": "Postgres or SQLite for the cache?",
-    "choices": ["Postgres", "SQLite"], "free": true, "answer": { "choice": "SQLite", "text": "smaller to ship" },
-    "by": { "user": "robin", "host": "ROBIN-Z790" }, "entry_id": "act_…", "session": "Bridget", "project": "AIMB",
-    "agent": "@Next release/@#85/ask-85", "asked_at": 1790958497365, "ts": 1790958498854 }
-  ```
-  `agent` = the asking agent's path (null = the session itself): an AGENT's question goes to its SESSION — the orchestrator
-  relays it (a subagent usually has no inbox; it waits with `--wait` instead). A withdrawal from the dashboard sends the
-  same verb (`robin withdrew …`, status `withdrawn`), an expiry too (`question expired …`, `by:"bridge"`). The action's result
-  says `released` (waiting scripts) and `delivery` (live / parked / none); "not delivered" is warned only when nobody got it.
-- **Waiting (`--wait`, `--wait-answer`).** The script sends `{type:"wait_answer", ref, path, timeout_ms}` on its logger
-  connection — a long poll on the gateway (no board polling) — and gets ONE `{type:"answer", ref, result}` when the question
-  closes or the time runs out. A dropped link is re-dialled and the wait resumed. **Exit codes: 0 answered · 10 the wait ran
-  out (the question stays open) · 11 expired · 12 withdrawn · 13 gone** (it left the board, e.g. its agent was dismissed) ·
-  4 / 64 as always (`not-a-question`, `gateway-unsupported` … / usage).
-- **Attention badge.** A collapsed row with open questions below it shows **"? N"**; the session and project rows always show
-  their count, and the section header says "? N open questions". Rows keep their order.
-
-**Trust.** An `activity_answer` is the dashboard viewer's answer to a question the session ITSELF asked: the server
-instructions and the `log` tool say the session may proceed on it within what its user already approved (it doesn't widen
-that; expired / withdrawn = no answer).
-
-**Compatibility (1.66 – 1.70 hosts).** The format stays **v5**: `question` is an optional field on a line (records, cp / cf,
-gossip) that a 1.70 host drops — it shows an open question as an ordinary **blocked** context whose text is the question, an
-answered one as done, a closed one as abandoned. A 1.71 hub declares **`activity_ask:1`** in PEER_HELLO; a 1.71 gateway
-forwards `answer` / `withdraw` only to an owner that declared it (else `owner-unsupported`, "… older than 1.71.0 …"), and its
-dashboard offers Answer… / Withdraw only for such hosts (`remote_hosts[].ask`). A 1.70 dashboard's Abandon… on a 1.71 question
-withdraws it. A 1.71 follower or script refuses `ask` / `choices` / `free` / `expires` / `state withdrawn` / `--wait` against a
-≤1.70 gateway (`gateway-unsupported`; it would drop them). `AI_BRIDGE_TEST_NO_ACTIVITY_ASK=1` (tests only) leaves the flag out.
-
-### Change an answer; what a question's log entries hold (v1.75.0, #90)
-**The entries' details (a fix).** Before v1.75.0, expanding a question's "answered by …" entry showed the QUESTION's background
-(the asker's `--details`): the answer entry copied the line's details, and shared its id with the line. Now every STATUS entry of a
-question carries details of its own — what happened — and the background stays with the question:
-
-```
-Answer: SQLite
-Note: smaller to ship
-Answered by robin via dashboard (ROBIN-Z790) at 2026-10-03 14:05:09 (UTC+13:00)
-Question: Postgres or SQLite for the cache? (asked 2026-10-03 13:58:00 (UTC+13:00))
-```
-(free text alone: `Answer: <text>`; a change adds `Changed by …` + `Previous answer: SQLite — smaller to ship — by … at …`; a
-withdrawal says `Withdrawn by robin via dashboard (HOST) | by its session at …` + the asker's `Note: …` or why — `(abandoned with
-@X)`; an expiry `Expired at … — nobody answered within 2h`; always the one-line `Question: …` reminder; ≤ 4 KB, a long answer is
-cut with "…"; no data.) The question's LINE keeps the ask entry's id, its details and data — so the node's DETAILS section and
-the ask entry still show the background, and the answer entry (fetched by its own id from the owner's day file) shows the answer.
-The records say so for the restart replay (`line_id` / `line_details` / `line_data` on a status entry; a ≤1.74 host ignores them).
-
-**Change answer…** On an ANSWERED question (a 1.75+ owner), right-click → **Change answer…** — or just click the row — opens the
-Answer dialog PREFILLED with the current answer (shown as "Current answer: …"); **Change answer** stays disabled until the choice
-or the note differs. The owner applies `change_answer` `{choice?, text?}` (the same checks as `answer`; `no-change` for the same
-answer, `question-open` on an unanswered one, `question-closed` on an expired / withdrawn one):
-- a new attributed entry `answer changed by robin via dashboard (ROBIN-Z790): "Postgres" — note: it is already in the stack`
-  (`act:"change_answer"`); the earlier answer entries stay in the log;
-- the question stays **answered** (line done) with the NEW answer, `revised` (how many times it was changed) and `previous`
-  `{answer, by, at}` (the answer it replaced). The DETAILS facts show **Answer** "<latest> (changed)", **Answer changed** by whom /
-  when (· "changed N times"), **Previous answer**; the row shows the latest answer, its tooltip the old one;
-- the session hears it AT ONCE: `activity_answer`, subject (public) `robin changed the answer to @…/@?1: <the question's first
-  words>`, body `{action:"change_answer", status:"revised", answer:{…the new one}, previous:{answer, by, at}, revised:1, by,
-  entry_id, path, host, question, choices, free, agent, session, project, asked_at, ts}`;
-- **waiting scripts:** a `--wait` that already returned is not told again, and a revision does not reopen the question — a new
-  `--wait-answer` returns at once with the LATEST answer (+ `revised`, `previous`).
-
-**An open question never goes stale** (v1.75.0): it waits for a person, so — like a plan item — it has no `stale_at` and is never
-shown stale or gone, even under a quiet or departed agent; only its host being down greys it (stale + "host down"). Answered,
-expired and withdrawn questions follow the normal rules.
-
-**Compatibility (1.66 – 1.74 hosts).** Still format v5: `revised` / `previous` on a question and `line_id` / `line_details` /
-`line_data` on a record are optional fields a ≤1.74 host drops (it shows the latest answer). A 1.75 hub declares
-**`activity_revise:1`** in PEER_HELLO; a 1.75 gateway forwards `change_answer` only to such an owner (else `owner-unsupported`,
-"… older than 1.75.0 …") and its dashboard offers Change answer… only there (`remote_hosts[].revise`).
-`AI_BRIDGE_TEST_NO_ACTIVITY_REVISE=1` (tests only) leaves the flag out. (Downgrading a host to ≤1.74 after a status change: its
-replay reads the status entry's own details as the question's line details — the background shows again only on the ask entry.)
-
-### Details, data and the log order — the log panel (v1.72.0, #86 / #87)
-A line's `details` (≤ 4 KB text) and `data` (≤ 16 KB JSON) were only reachable by expanding a log entry. Now the dashboard shows
-them for the selected node, and the log reads like a chat.
-
-- **The details section** sits at the top of the log panel (above the entries, its own scroll, at most 45 % of the window's
-  height; ▾ / ▸ folds it to one line). For the selected node — or a session's own line on that host — it shows the rendered
-  line, then: **Kind** (agent / context / plan item / question / session), **State** (stale / gone with what it was, the
-  host down, a plan item's state), **Progress** (three parts: "3 of 8 files · 1 skipped (37%) — reported" or the rollup),
-  **ETA**, **Who** (session · project · user on its host), **Line set** (when, and "edited by robin via dashboard (HOST)" for
-  a #83 line), **When** (started / created · last activity · finished or gone), a question's **Choices / Asked / Expires /
-  Answer / Answered**, and the **Log** count. Then its **details** as plain text and its **data** as a collapsible **JSON tree**
-  (objects and arrays fold; open two levels deep, a container of more than 50 starts closed; strings, numbers, booleans and
-  null coloured by type), each with **Copy** (the data as pretty-printed JSON).
-- **On demand.** Gossip and the boards carry only a line's entry id and `has_details` / `has_data`. The section asks for the
-  current line by that id — `activity {entry:{id, host}}`, the v1.60 request: this gateway answers its own nodes, another
-  host's come from their **owner** over the hub link (queued at its fetch rate like any remote fetch). One fetch at a time
-  per node; while a newer line's entry is on its way the last one stays shown ("updating — its line has changed…"); a
-  folded section fetches nothing. Refusals become a sentence + **Retry**: "The details are on HOST-B, which can't be reached
-  right now", "… which runs an older bridge", "Not available on HOST-B any more …", "HOST-B is busy — retry in a moment".
-- **Log entries** with details / data expand into the same block (details text + the JSON tree + Copy) — it was a `<pre>` of
-  JSON before.
-- **Markers.** A line with details shows **¶**, with data **{}** (both: "¶{}") — a small box right after the line's text on
-  the tree's rows (after ✎ when edited) and at the end of a log entry; the section header repeats it.
-- **Escaping.** Details and data are user-supplied: the section and the entries build them from DOM nodes with
-  `textContent` only — never HTML (a `<script>` key or an `<img onerror>` detail shows as text).
-- **Oldest first (default).** The log runs chat-style: the oldest entry at the top, the newest at the bottom. The panel opens
-  scrolled to the bottom and **follows** new entries while the reader is within 24 px of it. Scrolling up **pauses**:
-  new entries arrive below without moving the view and a **"N new ↓"** chip floats at the bottom of the list — click it to
-  jump down and follow again. **"load older…"** moves to the top, and the entries it adds above keep the reader's place
-  (the first visible entry stays where it was). "show earlier runs" / "— earlier runs —", "earlier history pruned" and #82's
-  history under a moved node's old path work the same in either order.
-- **New entries are merged.** When the board's count for the selection moves (or after a dashboard action), the panel reads
-  the first page again and merges it: only the newer entries are added, the older pages, their cursor and the separator stay
-  (6d re-read the whole log and dropped loaded pages). More than a page at once → the page replaces the list.
-- **The toggle.** "⇅ oldest first" / "⇅ newest first" in the panel header switches the order (newest first: the newest on
-  top, following the top, an "N new ↑" chip). Each viewer's choice is kept in `localStorage` (`aimb.act.logOrder`), wrapped
-  in try/catch — a private window or blocked storage just starts at oldest first, and the toggle still works for the page.
-- **Layout.** The panel is a column — header, details, the list (its own scroll) — beside the tree, and under 900 px below
-  it at up to 85 % of the screen's height, so the list still scrolls by itself on a phone.
-
-**Compatibility.** No wire change, no capability: the fetch is the v1.60 `entry` request, which every host on a v5 board
-(≥ 1.65) answers — a 1.66 – 1.71 owner's details show the same way (checked live against a real 1.71 owner). Only the page
-changed; `BRIDGE_VERSION` is 1.72.0 so the mesh map shows who has it.
-
-### Mesh-wide — gossip + on-demand history (v1.60.0, step 4)
-Every gateway keeps its own host's board and **gossips** it to every peer hub over the existing hub-to-hub link
-(one-hop, like the roster slices; followers hold no board and forward their reads to the gateway as before, so a
-follower's `activity` shows the mesh too):
-- **What travels:** current lines only — never details, data or log entries (a line carries `has_details`/`has_data`).
-- **Full, then deltas:** a peer gets a **full slice** on every (re)link (and when it asks — `resync`), then **deltas**:
-  only the entities that changed (inside their session record) and removals. Each frame carries the sender's `epoch`
-  and a `seq`; a delta applies only on top of exactly the held `seq` (`base`), otherwise the receiver drops it and asks
-  for a full slice. The #63 heartbeat adds a sync beat once a minute.
-- **Rate:** at most **one frame per second per link**. A change only schedules the link's next frame, so a burst (a 1/s
-  `--stream` script plus many agents) coalesces into one frame carrying the latest state.
-- **Byte cap:** `AI_BRIDGE_ACTIVITY_SLICE_MAX_BYTES` (256 KB) per frame. Over it, the newest-active entities go first and
-  the frame is marked `truncated`; the rest follows in the next second(s).
-- **Ownership:** a slice belongs to the host of the link it arrived on (the peer gateway's authenticated `PEER_HELLO`
-  session) — never to a field in the frame. A frame naming another origin is dropped; host fields inside are ignored.
-  Every limit is re-validated on receive. A host never accepts a slice for itself.
-- **Gone:** when a host's link drops, it is retired or expired (#63), or it sends a **going-down notice**, its agents show
-  as **gone** at once, with their last-known lines; when the host comes back its fresh full slice clears it. A slice
-  that stays down is forgotten after `finished_visible_hours`.
-- **Going down:** `POST /admin/prepare-shutdown` (the tray, below) flushes, then sends every peer hub `ACTIVITY_DOWN`;
-  a clean exit (SIGINT / SIGTERM) does too, best effort. After the notice the bridge sends no slices for 30 s (then full
-  ones, if it is still alive).
-- **Remote history, on demand:** `activity {log}` / `{entry}` for another host's entity is a request over the same link
-  to the **owning** gateway: a log comes in **pages** (at most 50 entries / 32 KB, set by the owner; `cursor` →
-  `next_cursor`; since v1.61.0 the pages continue into the owner's **day files**, below); details and data only on an
-  explicit `entry` fetch. The owner serves at most 4 fetches per second per link; since v1.61.0 the **requesting**
-  gateway queues its fetches at that rate (below) instead of passing `rate-limited` on. Owner down or not answering in
-  4 s → `owner-unreachable` (its agents stay on the board, gone); a pre-1.60 owner → `owner-unsupported`.
-- **Dashboards** subscribe and get deltas (v1.61.0 — "The Activity page" below).
-- **Mixed versions:** a ≤1.59 hub doesn't declare `activity_gossip`, so it gets no activity frames (and would ignore
-  them); its agents simply don't appear on 1.60 boards. Deploy = restart each host's gateway on 1.60.0.
-
-### The Activity page (v1.61.0, step 5; the node tree v1.62.0, step 6a)
-The dashboard's **Activity** section is the mesh board as a tree: **project → session → its node tree (agents and
-contexts, to any depth) → log entry**. (v1.65.0: logs moved out of the tree into the **log panel**, and rows got a
-right-click menu — see "Step 6d" above; the "Log" rows described below are gone.)
-- **Projects** show their counts (sessions · active agents — reported, unfinished agents). Clicking a project heading
-  cycles **sessions + top-level nodes → sessions only → collapsed**; the **Projects / Sessions / Nodes** control sets
-  every project at once (v1.62.0: "Nodes" — formerly "Agents" — means *expand down to each session's top-level nodes*).
-  The default view shows every session with its top-level nodes' current lines; deeper nodes and logs start closed.
-- **Every node expands on its own:** open it for its **Log** (the merged log of its subtree, "N entries, this node and
-  below", each entry tagged with its path relative to the node — `@~root`, `@Tharsis/@~z12`, `research/@~root`) and
-  then its children, one level (16 px) deeper — readable down to depth 6. Children are listed in creation order.
-- **Agents** keep the status **ring** glyph and their name (monospace). **Contexts** (`@name`, in the info colour)
-  show a smaller **state mark** without a ring — they have no staleness of their own: a context under a stale agent
-  greys out with a stale pill, and its tooltip names the agent it follows. A node with no line of its own (an implicit
-  grouping node) shows a hollow mark and "no current line".
-- **A session row:** its name, a **host tag** per host (a session on several hosts is ONE row; its headline is the most
-  recently active host's; its agents are tagged by host), the `@root` line with its placeholders filled, the status
-  glyph (v1.66.0: the SESSION glyph, a window — see "Three-part progress, colours and session glyphs"), the progress bar, ⌛ when there is an ETA, 🔔 when a doorbell is armed for it, and pills.
-- **A node row:** the glyph / mark, its name, a host tag when the session spans hosts, its line with the placeholders
-  filled, the bar (striped = a rollup of what is below it), ⌛, pills. The **Log** pages newest first (time, a state dot,
-  the relative tag, the text; "load older…" at the end pages on). An entry with details / data expands into the text and
-  the pretty-printed JSON. A session row's Log is the whole session's (one per host).
-- **The status glyph** (16 px): the centre is the state (a dot for running / blocked / idle, a tick for done, a cross for
-  failed); a live item's **ring empties** as the time left before it goes stale runs out. **No time text is inline** —
-  hover the glyph for the actual times (started, running for, last activity, stale at — or done / failed at and how long
-  it took), the bar for the exact counts (reported or a rollup), ⌛ for "ETA ~15m (estimated), about 19:27".
-- **Pills** only for **blocked, failed, stale, gone**, plus a distinct **host down** badge (violet; its host sent a
-  going-down notice or its link dropped — every agent of that host) as opposed to **gone** (the session left). A stale
-  row's text greys out.
-- **Controls:** **active only** (hides finished and gone agents and sessions with nothing active; remembered per
-  browser); **stale after** 5–60 min (starts at the bridge's `stale_after_min`; an item's own `stale_after` still wins) —
-  stale is computed **in the page** from the raw times, so the slider is instant; **Expand all / Collapse all**. A legend
-  explains the glyphs. The colours are the page's tokens: light by default, dark with the OS setting (or `?theme=dark`
-  / `?theme=light`); `dashboard.html#activity` opens the section directly.
-
-**Data path — deltas, not boards.** The section is **open by default** (v1.64.0; it was collapsed before — your own
-open / closed choice is remembered per browser), and a dashboard subscribes only while it is open and the browser tab is
-visible — one that closes it costs the bridge nothing:
-- `{type:"activity_sub"}` → `{type:"activity_board", full:true, epoch, seq:1, head, upsert:[…]}`: every **unit** — one
-  per session group (header, `self` / `selves`, `bell`, `hosts_down`) and one per **node** (v1.62.0: `kind:"node"`,
-  `nkind` agent | context, `path`, `key`, `parent_key`, `depth`, its own `progress` and the rolled-up `bar`) — in the **raw** form: the
-  reported state (`gone` included), the raw line template, the raw times; no `rendered` or `stale_at` (the page computes
-  those), so time passing is never a change.
-- Then at most once a second, when anything changed: `{type:"activity_delta", epoch, seq, base, head, upsert:[changed
-  units], remove:[unit ids]}`, diffed against what THAT dashboard was last sent. A delta whose `base` isn't the page's
-  `seq` means one was lost: the page sends `{type:"activity_sub", resync:true}` and starts again from a full board.
-  `head` = `{host, now, stale_after_min, remote_hosts, loading?}` (the page corrects for clock skew with `now`).
-- `{type:"activity_unsub"}` when the section closes (or the tab is hidden).
-- Reads stay `{type:"activity", ref, query}` → `{type:"activity", ref, result}`; a remote fetch that has to wait first
-  sends `{type:"activity_queued", ref, host, wait_ms, position}` (the page shows a spinner).
-
-**Paging into the day files.** Once an entity's in-memory entries (`log_entries_per_agent`) run out, `activity {log}`
-pages on into the host's daily JSONL — read backwards in chunks with the same reader as the restart replay (async per
-chunk, so it yields to the event loop), back through `log_retention_days` (older instances of the same agent name
-included). A file page's cursor is `f1.<day>.<offset>` (continue before that byte of that day's file). Pages stay
-bounded (a page never exceeds `log_entries_per_agent` entries, a remote owner's 50 entries / 32 KB; 32 KB locally),
-and a page reads at most 8 MB of file (`AI_BRIDGE_ACTIVITY_SCAN_BYTES`) — a rarely-reporting agent in a busy file may
-get a short or empty page with a cursor to go on (the page follows it automatically). Remote pages do the same on the
-owner. `from_files` counts a page's entries that came from the files.
-
-**Queued remote fetches.** The requesting gateway queues its remote `log` / `entry` fetches per link and paces them with
-a mirror of the owner's token bucket (4/s, or the `rate` an owner's `rate-limited` answer names — such a fetch goes back
-to the head of the queue for its `retry_after_ms`, at most 4 times). Bounds: 64 waiting per link
-(`AI_BRIDGE_ACTIVITY_QUEUE_LINK`) and 16 queued + in flight per dashboard (`AI_BRIDGE_ACTIVITY_QUEUE_DASH`); beyond
-either → `{ok:false, code:"busy", retry_after_ms}`. A follower's forwarded read may wait ≈0.7 s at most (it must answer
-inside the follower's 5 s timeout), the `activity` tool on the gateway 10 s (`AI_BRIDGE_ACTIVITY_TOOL_WAIT_MS`); longer
-→ `busy`. A result that waited carries `queued_ms`.
-
-**Read access.** The activity board's pushes and the WS `activity` reads are for **dashboards** (and registered sessions,
-through the `activity` tool) — **never page leaves**: a page's `activity` / `activity_sub` is answered
-`dashboard-only`, and a connection gets one `hello` (a page can't re-hello into a dashboard: `already-hello`).
-
-**Host down vs gone, and the bell.** Every entity of a host that went down carries `host_down` (when), and its session
-group lists `hosts_down` — a session that LEFT is `gone` without it (both in the `activity` tool too). A session's `bell`
-is true while a doorbell `listener` on its host's gateway watches its name (+ project); it rides the gossip header, so
-every board shows it, and stays ~5 s after the listener closes (`AI_BRIDGE_ACTIVITY_BELL_GRACE_MS`; the doorbell
-re-arms after each wake).
-
-**Duplicate host names** are accepted (#70 decision) but logged: a gateway that links two peer hubs with the same host
-name at different addresses (or one with its own name; or, after a liveness probe, at the same address on another port)
-logs `WARN duplicate host name "<name>": …` once per name per 10 min (`AI_BRIDGE_DUP_HOST_WARN_MS`) — their activity
-slices overwrite each other.
-
-### The script — `tools/aimb-log.mjs` (v1.59.0, step 3)
-For agents (which never register) and long-running scripts. The orchestrator puts one line in each agent's prompt and the
-agent reports with it; no `register_self`, no secret:
-
-```bash
-node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agent spec-70/research "@~root reading the spec"
-node "<abs path>/src/tools/aimb-log.mjs" --session Bridget --project AIMB --agent tiles --ctx "@~Tharsis" --progress 4812/12000:tiles --eta 1h25m
-```
-
-`--session <name> --project <P> [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles]
-[--eta 1h25m] [--stale-after 60m] [--details "..."] [--data '{...}' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …]
-[--before "Y" | --after "Y" | --first | --last] [--move "<node>" --to "<new parent>"]` — the
-`log` tool's fields as flags (v1.62.0: `--path` addresses any node — `--path "@#70/@step4/spec-70"`, `--path
-"spec-70/@~Tharsis"` — and combines with `--agent` / `--ctx` / a text prefix exactly as the tool's fields do).
-**`--plan "A" "B" …`** (v1.63.0) creates ☐ plan items under the node `--path` / `--agent` names, in that order — every
-argument after `--plan` up to the next `--flag` is a name, so put text BEFORE `--plan` (or after `--`): `--path "@~#70"
-"the 6b plan" --plan Spec Build Test`. v1.66.0 (#79): a `--plan` name that looks like status text (`@~…` or "@ctx
-words") is refused locally with `bad-plan`: `"@~root headline" looks like
-status text — put text before --plan`. **v1.66.0 (#79, the call signature):** `--text "<text>"` names the text explicitly and
-`--item "A"` adds ONE plan item per flag (repeatable, in command-line order, mixable with `--plan`), so no argument's meaning
-depends on where it sits: `--path "@~#70" --text "the 6b plan" --item Spec --item Build --item Test`. Positional text and
-`--plan "A" "B"` still work (1.65 snippets use them); `--text` plus positional text is refused, and an `--item` that looks
-like status text is `bad-plan` ("pass text with --text"). Programs keep using JSON via `--batch` / `--stream`. **`--done`** = `--state done`, and a tick needs no text: `--path "@#70/@~Build"
---done`. **v1.69.0 (#82):** `--before "Y"` / `--after "Y"` / `--first` / `--last` place new `--item`s there (else they
-REORDER the `--path` node: `--path "@Plan/@~X" --before "Y"`), and `--move "<node>" --to "<new parent>"` re-parents a
-node with its subtree (relative to `--path`; see "The plan workflow" above). Against a ≤1.68 gateway these flags are
-refused with `gateway-unsupported` (exit 4) — that gateway would ignore them. **v1.71.0 (#85):** `--ask "<question>"
-[--choice "A" --choice "B" …] [--free] [--expires 2h] [--wait 30m]` posts a question (ONE choice per `--choice`, repeatable,
-like `--item` — a value that looks like status text or is a flag is refused; `--wait` waits for the answer), `--wait-answer --path <question> [--wait 30m]` waits for an existing
-one, `--state withdrawn` withdraws yours — see "Questions" above (exit codes 0 / 10 / 11 / 12 / 13 for a wait). **`--batch <items.json|->`** (v1.62.0) sends a JSON array of items (the tool's item fields + `ref`; ≤64, ≤64 KB) in ONE
-call — `--agent` / `--path` / `--ctx` / `--no-log` are the defaults (v1.63.0: an item's own path is relative to them; a
-leading `/` = absolute) — and prints ONE line `{ok, results, applied,
-failed}`: exit 0 when every item applied, 4 when the bridge refused the call or any item failed, 64 for a bad file or
-the bounds. The text is the positional argument (several words are joined; anything after `--` is
-text); it is optional when `--progress`/`--eta` is given (default `"{progress}"` / `"{eta}"`). `--ctx` sets the context
-(the text is then literal), `--no-log` = `log:false`, `--data-file` may start with a BOM. The report is validated
-locally with the bridge's own parser first, so a bad one costs no connection.
-- **Output:** ONE JSON line on stdout — the `log` tool's result (`{ok, id, ts, session, agent, context, current, state,
-  stale_at, logged}`), or `{ok:false, code, what}`. Usage text goes to stderr.
-- **Exit codes** (doorbell conventions): **0** ok · **4** the bridge said no or the transport failed (`link-error` = no
-  bridge, `unauthorized`, `session-user-mismatch`, `gateway-unsupported` = a pre-1.59 gateway, `timeout`, …) · **64**
-  bad usage (a missing `--session`/`--project`, an unknown flag, bad `--data` JSON, a report the bridge would reject
-  such as `bad-state` / `bad-text`, `token-in-argv`, `no-token`). v1.71.0 (#85) — a wait (`--wait` / `--wait-answer`):
-  **0** answered · **10** the wait ran out (still open) · **11** expired · **12** withdrawn · **13** gone.
-- **Identity:** realm + project + user + session — `--session` and `--project` are required, `--user` defaults to
-  `AI_BRIDGE_USER`, else the OS login user (`os.userInfo().username`); the realm is `AI_BRIDGE_REALM`, else
-  `config.json`'s `realm`, else `default` (the bridge's rule; the gateway refuses another realm). A script-only session
-  is **never marked gone** (it has no roster presence to lose) but it goes **stale** like anything else.
-- **Who may report as whom (Robin, 2026-10-01):** anyone holding the realm token may report as any session — the
-  doorbell's trust — **except** a session that is LIVE on the mesh roster (a registered sub-peer on ANY host, gossiped
-  slices included, or — v1.60.0 — a BARE process-level session: a bridge started with its own project + user, whose
-  name is the session name) with the same realm + project + name under a **different user** (case-insensitive): that
-  report is refused with `session-user-mismatch`. Checked by the gateway against its roster on every report. Same user →
-  accepted; once the session leaves the roster, accepted.
-- **Token / port:** like the doorbell — v1.64.0 (#75): **`--token-file <path>`** (a bare token or a `KEY=VALUE` env file,
-  `~` expanded) is AUTHORITATIVE when given (an unreadable or empty one is exit 64, `no-token`, naming the file — never a
-  silent fallback); else `AI_BRIDGE_TOKEN` / `AI_BRIDGE_TOKEN_FILE`, else the bridge's `config.json` found relative to the
-  **script** (`../config.json`; `AI_BRIDGE_CONFIG` names another); and
-  `--ws-port` / `--url` / `AI_BRIDGE_WS_PORT`. **`--token` is refused** (exit 64, `token-in-argv`; the value is not
-  echoed): argv is readable in the process list and the realm token is also the body-encryption key. The script never
-  prints the token.
-
-**`--stream`** — for scripts that report often (every second): ONE connection, newline-delimited JSON on stdin, one
-result line per input line, **in input order**:
-
-```bash
-my-seeder | node aimb-log.mjs --stream --session Bridget --project AIMB --agent seeder --ctx "@~tiles" --no-log
-#   stdin:  {"progress":"4812/12000:tiles"}          stdout: {"line":1,"ok":true,…,"logged":false}
-#           {"text":"@~root done","state":"done","log":true,"ref":"fin"}   {"line":2,"ref":"fin","ok":true,…}
-```
-
-- A line carries the `log` tool's fields minus auth (`path agent text context state progress eta stale_after details data
-  log`, + an optional `ref`, echoed back) — or (v1.62.0) a JSON **array** of them: a batch, answered by ONE result line
-  `{line, ok, results, applied, failed}`. The command line's identity applies to every line; `--agent`, `--path`, `--ctx`
-  and `--no-log` are defaults a line may override (a line naming its own `path` / `agent` takes none of the address
-  defaults; one with only a `context` keeps `--agent` / `--path`). Any other field (e.g. `session`) → that line gets `bad-field`; bad JSON
-  → `bad-json` — answered in place, the stream goes on. Only identity flags, those defaults, `--ws-port`/`--url` are
-  allowed with `--stream`.
-- **Exit 0 at stdin EOF**, once every line is answered. A fatal hello error (`unauthorized`, `bad-ident`,
-  `realm-mismatch`, `gateway-unsupported`) reports every pending line and exits 4.
-- **Reconnects** with backoff (200 ms doubling to 5 s; `AIMB_LOG_BACKOFF_MAX_MS`) when the link drops, e.g. a gateway
-  restart. A line in flight when it dropped is reported `link-lost` and NOT resent (it may have been applied; a resend
-  could duplicate a logged entry); a line that waits longer than `AIMB_LOG_LINE_WAIT_MS` (default 10000) for a link is
-  reported `no-bridge`. Lines are sent one at a time (each waits for its answer; `AIMB_LOG_TIMEOUT_MS`, default 8000).
-
-**Protocol** (the gateway's WS port; only the gateway serves it): `hello {type:"hello", kind:"logger", token,
-ident:{session, project, user, realm}}` → `{type:"welcome", logger:true, bridge_version, realm, host, ident}` or
-`{type:"error", code, what}` + close (`unauthorized`, `ident-required`, `bad-ident`, `realm-mismatch`); then
-`{type:"log", ref, input:{…log fields}}` → `{type:"logged", ref, result}` per report (v1.62.0: `input:{items:[…], …defaults}` is a batch → `result:{ok, results, applied, failed}`). A logger socket is **not** a page
-or a session: it never appears in `list_sessions`, the dashboard or the roster, and gets no roster pushes. A pre-1.59
-gateway takes the hello for a page and answers a plain `welcome` (no `logger:true`); the script then closes at once
-with `gateway-unsupported`.
+### The dashboard's Activity view
+Projects → sessions → the node tree, merged per session across hosts. Rows show the label, the type's glyph (☰ plan, ▤
+group, ⚑ test run, ◌ transient), the line, the bar (or a group's count, a test run's tests bar, a question's pills) and the
+time. Click a row: its subtree log in the panel beside the tree ("show earlier runs", "show removed", the log order,
+"— new since you last looked —"). **Right-click** (or Menu / Shift+F10, long-press on touch) = the node type's menu: Done /
+Skip / Reopen / Abandon, Complete / Abandon / Reopen plan, Finish, Dismiss, Edit text…, Message session…, Answer… /
+Change answer… / Withdraw, Rename…, Merge into…, Move to… / Move up / Move down (drag and drop too), Show as group / Show
+as plan, the copy commands (`--agent …` / `--key …` / `--id …`), Pin / Hide. Actions go BY ID to the node's owner
+(`activity_action {host, session, project, user, id, action, args}`), are logged "… by <user> via dashboard (<host>)",
+and the owning session is told (`activity_changed`, `activity_text_edited`, `activity_message`, `activity_answer` — a
+REQUEST relayed from a viewer, not authorization). A move or merge onto a same-label sibling opens the CLASH DIALOG (merge
+them, or a suggested label). **The per-user view** (pins, hidden, open / closed, Expand / Collapse all, the options,
+"seen") belongs to the serving gateway's OS login and follows it to every 2.0 host (a replicated last-writer-wins set,
+`views/<host>.json`); a node you closed shows "N new" / "? N" instead of reopening; Reset view clears it. The board
+streams as deltas (`activity_sub` → full board + `types`, then ≤ 1 delta/s; `view_set` / `view` for the view state).
 
 ### Prepare-shutdown — `POST /admin/prepare-shutdown` (v1.59.0)
 The Task Tray's Restart Bridges… and Shut down all kill the bridges with TerminateProcess, which runs no exit handler, so
 the `log:false` progress since the last checkpoint used to be lost. Now the tray first calls the **gateway's** HTTP
 server (the WS port): `POST http://127.0.0.1:<wsPort>/admin/prepare-shutdown` with **`Authorization: Bearer <realm
 token>`** (a token in the URL is not accepted). The gateway waits out an in-flight checkpoint tick, writes every dirty
-context's `cp` line **and** the repeat line now (so the unchanged contexts' last activity survives too), drains the
+node's `cp` line **and** the repeat line now (v6 records since 2.0) (so the unchanged contexts' last activity survives too), drains the
 activity file's write queue (queued log entries included), and only then answers
-`200 {ok:true, role, bridge_version, flushed:{cp, rep, files_drained[, skipped]}, ms}` (`skipped`: `replaying`,
-`checkpoints-off`, `no-persistence`). Non-loopback callers get 403, a missing/bad token 401, a non-POST 405, another
+`200 {ok:true, role, bridge_version, flushed:{cp, rep, files_drained[, skipped]}, notices, down_notified, ms}`
+(`skipped`: `checkpoints-off`, `no-persistence`). Non-loopback callers get 403, a missing/bad token 401, a non-POST 405, another
 `/admin/…` path 404. **Only the gateway needs it:** followers write no activity files and keep no deferred writes (their
 persistence writes are issued immediately), so nothing is propagated to them. v1.60.0: after the flush the gateway also
 sends its peer hubs the going-down notice (`down_notified` = how many) so their boards show this host's agents gone at
