@@ -1202,6 +1202,30 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.74.0):** *#89 part 2 — realm guides, pulled not pushed.* `behaviors.realm` gains an optional `guides`
+  `{ agent?: { text, min_bridge? }, session?: { text, min_bridge? } }` (`lib/realm-defaults.js` `checkGuides` / `normGuide`):
+  each text a string or an array of lines, ≤ 4096 UTF-8 bytes (separate from the 365-char reminder cap), newline / tab the only
+  control characters, `min_bridge` a version ("1.75" → "1.75.0"); an invalid guide is DROPPED, never cut, and the bridge logs why
+  at load; the rest of the record stands. **Replication:** the guides are part of the one LWW realm record, so they ride
+  `PEER_ROSTER.realm_defaults` / `ROSTER.realm_defaults` / `REALM_DEFAULTS` and the per-host `.rdef` store exactly as the
+  reminders do (a newer record replaces or clears them). `beatsRealm`'s tie rule gained a step — updated_at, default JSON,
+  **guides JSON**, origin — so the record WITH guides beats the same record without them: a 1.66 – 1.73 host accepts the record,
+  drops `guides` and re-gossips a guide-less copy with the same `updated_at`, which must not block the real one on a 1.74 host
+  (merge stays a total order: idempotent + commutative). Guides therefore travel only across 1.74+ hops. **Serving (pulled):**
+  never in `register_self` or a connect reminder. A logger link's `{type:"guide", ref, kind, cmd?, path?, script?}` →
+  `{type:"guide", ref, ok, kind, text|null, source:"realm"|"builtin", updated_at, origin?, reason?, min_bridge?, gateway}` on
+  the gateway (`serveGuide` / `loggerGuide`): the realm text rendered by `lib/log-snippet.js` `guideText` (`{cmd}` `{path}`
+  `{gateway}` `{script}`; any other `{word}` untouched) + `gatewayNote` (the capability note, appended whatever the source);
+  `text:null` (reason `none` | `min_bridge`) tells the script to use its own built-in text. `min_bridge` is checked against the
+  LOWER of the requester's version (the frame's `script`; none = never meets one) and the serving gateway's. A ≤1.73 gateway
+  answers the frame `{type:"logged", result:{code:"bad-op"}}`. `aimb-log --guide` asks only a ≥1.74 gateway (the welcome's
+  `bridge_version`), waits ≤ `AIMB_LOG_GUIDE_MS` (2500), and falls back to its built-in text on an old / unreachable / mute
+  gateway or `text:null`; its last line (`guideSourceLine`) names the source. The **`log` tool's `guide:"agent"|"session"`**
+  (with as + secret; only `path` beside it, else `bad-guide`) is served in the tool's own process from the record it holds
+  (a follower's came in the gateway's ROSTER), always as text: the realm's, else the bridge's built-in with `{cmd}` = the
+  session's `logCmd`. Wire-compatible with 1.66 – 1.73 (one new optional record field, one new logger frame type). Tests:
+  `test_lib_unit` (+23: validation, the 4 KB byte cap, placeholders, `min_bridge`, the tie rule with a guide-less relay,
+  commutativity) and new `test_realm_guides_live` (31; +4 with `AIMB_TEST_OLD_BRIDGE` = a real 1.73 host).
 - **Built (v1.73.0):** *#89 — the agent and session guides come from the script.* `aimb-log --guide agent|session` prints
   the how-to (`agentGuide` / `sessionGuide` in `lib/log-snippet.js`), tailored to the gateway it asks (≤1.5 s; flags the gateway
   can't serve are left out or named). `{log_snippet}` is now the command + one line pointing at `--guide agent`. No wire change.

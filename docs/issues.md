@@ -404,7 +404,7 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
-## #89 — agent and session guides from the script: `aimb-log --guide agent|session`  ·  **DONE (v1.73.0)**
+## #89 — agent and session guides from the script: `aimb-log --guide agent|session`  ·  **DONE (v1.73.0; part 2, realm guides: v1.74.0)**
 Robin, 2026-10-03: the logging rules pasted into every agent brief are noise in the orchestrator's context, and a copy in a
 brief can drift from the script. The rules now come from the script itself.
 - **`aimb-log --guide agent`** prints the agent's how-to: its own ready command (its `--path`, `--token-file`), checklist first,
@@ -417,6 +417,40 @@ brief can drift from the script. The rules now come from the script itself.
 - The text is `agentGuide` / `sessionGuide` in `lib/log-snippet.js`: one place to maintain.
 - **Later:** point the realm reminder at `--guide session` once every host runs 1.73 (a 1.65 script has no `--guide`); a
   `log({guide})` tool form for Cowork; maybe realm-published guide text (see Robin's question below).
+
+**#89 part 2 as built (v1.74.0, 2026-10-03): realm guides, pulled not pushed** — see README "Realm guides" (step 6c) and
+architecture.md §13 "Built (v1.74.0)". Robin asked for guides published in the realm and fetched on request.
+- **Config:** `behaviors.realm.guides` = `{ agent?: { text, min_bridge? }, session?: { text, min_bridge? } }` in any one host's
+  config, beside the realm reminders; it replicates with them (one LWW record, newest `updated_at` wins; bump it on every change).
+  `config.example.json` has NO guides block: the built-in text stays the default.
+- **Validation (on load, gossip and store reads, like the reminders):** text = a string or an array of lines, ≤ 4096 UTF-8 bytes
+  (separate from the 365-char reminder cap), newline / tab the only control characters, not empty; `min_bridge` a version
+  ("1.75" → "1.75.0"). **Chosen: an invalid guide is DROPPED, not cut** (reminders are sliced to 365, but a cut guide loses its
+  ending — "finish with …"); the bridge logs why at load; the reminders and the other guide still apply. Unknown kinds are ignored.
+- **Placeholders:** `{cmd}` (the requester's ready aimb-log command), `{path}` (its `--path`, else `<your-path>`), `{gateway}`,
+  `{script}`; any other `{word}` (a JSON example) stays as written. Filled by the gateway (the script sends cmd / path / script).
+- **Gateway request:** logger frame `{type:"guide", ref, kind, cmd?, path?, script?}` → `{type:"guide", ref, ok, kind,
+  text|null, source:"realm"|"builtin", updated_at, origin?, reason?, min_bridge?, gateway}`. **Chosen: `text:null` when the realm
+  has none for that kind / that version** — the script then prints its OWN built-in text, which matches the script's flags
+  (the gateway's built-in could be from another install). The capability note is appended to realm text too.
+- **`min_bridge`:** checked against the LOWER of the requester's version and the serving gateway's (a guide naming newer flags
+  is wrong if either side lacks them); a request naming no version never meets one.
+- **Script:** `aimb-log --guide` asks only a ≥ 1.74 gateway (the welcome's version), waits ≤ `AIMB_LOG_GUIDE_MS` (2500), and
+  falls back to its built-in text on an older / unreachable / mute gateway, a `bad-op` answer or `text:null`. Its last line names
+  the source: `(Guide source: the realm's published agent guide, updated_at … from HOST.)` / `(Guide source: built into aimb-log
+  1.74.0; <why>.)`.
+- **`log` tool:** `guide:"agent"|"session"` (as + secret; only `path` beside it, else `bad-guide`) logs nothing and returns
+  `{ ok, kind, text, source, updated_at, gateway }` — always text (the realm's, else the bridge's built-in). Served in the tool's
+  own process from the record it holds (a follower's arrived in its gateway's ROSTER) — no new follower → gateway frame.
+- **Mixed versions:** 1.66 – 1.73 accept the record and drop `guides`, so guides travel only across 1.74+ hops. `beatsRealm`'s tie
+  rule now compares the guides JSON before the origin, so the copy WITH guides wins over the same record relayed by an old host
+  (checked live against a real 1.73 host).
+- **Tests:** `test_lib_unit` +23; new `test_realm_guides_live` (31 checks: B's guide served by A's gateway after replication,
+  the frame, `min_bridge` 1.73 vs 1.74, the `log` tool on a gateway and on a follower, logs nothing, `bad-guide`, a newer record
+  replaces / gates / clears, an empty gateway, a > 4 KB guide dropped at load, fake 1.73 / bad-op / mute gateways, no gateway;
+  +4 with `AIMB_TEST_OLD_BRIDGE` = a real 1.73 host).
+- **Open (for Robin):** guides add up to 8 KB to every `PEER_ROSTER` / `ROSTER` frame (the realm record rides each one); fine at
+  today's sizes — if it matters, send the record only when a link hasn't seen its version (as the retained set does).
 
 ## #88 — stable node identity: creator-chosen keys, internal ids, paths as a shorthand (v2.0)  ·  **OPEN (next release)**
 Robin, 2026-10-03: "moving a context is extremely messy … decoupling names/labels from what we log so the logs are more

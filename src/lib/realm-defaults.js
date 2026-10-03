@@ -12,6 +12,18 @@
 // holds. bridge.mjs seeds the local candidate from its config (start + live-reload), moves the winner over PEER_ROSTER /
 // ROSTER / REALM_DEFAULTS frames, and never touches the record directly; `onChange` hands the winner's list to the
 // reminders module, which merges it UNDER the host's local defaults (lib/reminders.js effectiveDefaults).
+//
+// v1.74.0 (#89 part 2): the record may also carry GUIDES — `behaviors.realm.guides` = { agent?: { text, min_bridge? },
+// session?: { text, min_bridge? } }: the realm's own text for `aimb-log --guide agent|session` (and the log tool's guide),
+// PULLED on request from a gateway, never pushed (no register_self, no connect reminder carries it). Each text ≤ 4 KB (UTF-8
+// bytes; separate from the 365-char reminder cap), a string or an array of lines (joined with "\n"), no control characters
+// but newline / tab; placeholders {cmd} {path} {gateway} {script} are filled when served (lib/log-snippet.js guideText).
+// min_bridge (optional, "1.75" or "1.75.0") = the guide is served only to a requester (and by a gateway) on that version or
+// newer; others get the built-in text. An invalid guide is DROPPED (never cut: a cut guide loses its ending), the rest of the
+// record stands. Guides ride the same record, so they replicate (and are replaced, and cleared) exactly as the reminders do.
+// Mixed versions: a ≤1.73 host keeps the reminders and drops `guides` from what it holds and re-gossips, so guides travel
+// only across 1.74+ hops; beatsRealm() therefore ranks a record WITH guides above the same record without (same updated_at),
+// so a guide-less copy relayed by an old host never blocks the real one.
 import { normDefaults } from './reminders.js'
 
 const MAX_ENTRIES = 64   // same cap as a session's own reminders (reminders.js MAX_COUNT) — bounds a junk/huge gossip record
@@ -31,20 +43,80 @@ function canonList(d) {
     .sort((a, b) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); return ja < jb ? -1 : ja > jb ? 1 : 0 })
 }
 
+// ---- v1.74.0 (#89 part 2): realm GUIDES
+export const GUIDE_KINDS = Object.freeze(['agent', 'session'])
+export const GUIDE_MAX_BYTES = 4096
+export const GUIDE_PLACEHOLDERS = Object.freeze(['cmd', 'path', 'gateway', 'script'])
+/** "1.75" / "1.75.0" → "1.75.0"; anything else → null */
+export function normVersion(v) {
+  const m = typeof v === 'string' ? /^\s*(\d{1,4})\.(\d{1,5})(?:\.(\d{1,6}))?\s*$/.exec(v) : null
+  return m ? `${Number(m[1])}.${Number(m[2])}.${Number(m[3] || 0)}` : null
+}
+/** a < b for "x.y.z" versions (missing parts = 0) */
+export const verLt = (a, b) => { const x = String(a || '0').split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); return false }
+/** One guide → { guide: { text, min_bridge? } } | { problem: "<why it is dropped>" }. A bare string / array = the text alone. */
+export function normGuide(g) {
+  if (typeof g === 'string' || Array.isArray(g)) g = { text: g }
+  if (!g || typeof g !== 'object') return { problem: 'not an object { text, min_bridge? }' }
+  let t = g.text
+  if (Array.isArray(t)) { if (!t.every(x => typeof x === 'string')) return { problem: 'text as an array must hold only strings (one per line)' }; t = t.join('\n') }
+  if (typeof t !== 'string') return { problem: 'text is missing (a string, or an array of lines)' }
+  t = t.replace(/\r\n?/g, '\n').replace(/^\n+|\s+$/g, '')
+  if (!t.trim()) return { problem: 'text is empty' }
+  if (/[\u0000-\u0008\u000b-\u001f\u007f]/.test(t)) return { problem: 'text has control characters (only newline and tab are allowed)' }
+  const bytes = Buffer.byteLength(t, 'utf8')
+  if (bytes > GUIDE_MAX_BYTES) return { problem: `text is ${bytes} bytes (at most ${GUIDE_MAX_BYTES})` }
+  let min_bridge = null
+  if (g.min_bridge != null && g.min_bridge !== '') { min_bridge = normVersion(String(g.min_bridge)); if (!min_bridge) return { problem: `min_bridge "${String(g.min_bridge).slice(0, 20)}" is not a version like "1.74.0"` } }
+  return { guide: { text: t, ...(min_bridge ? { min_bridge } : {}) } }
+}
+/** A raw `guides` object → { guides: canonical { agent?, session? } | null, problems: ["agent: …", …] }. Unknown kinds are
+ *  reported and ignored. Key order is fixed (agent, session; text, min_bridge) so equal guides serialise identically. */
+export function checkGuides(raw) {
+  const problems = []
+  if (raw == null) return { guides: null, problems }
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { guides: null, problems: ['guides must be an object { agent?, session? }'] }
+  const out = {}
+  for (const k of Object.keys(raw)) if (!GUIDE_KINDS.includes(k)) problems.push(`${String(k).slice(0, 40)}: unknown guide kind (agent / session)`)
+  for (const k of GUIDE_KINDS) {
+    if (raw[k] == null) continue
+    const r = normGuide(raw[k])
+    if (r.problem) problems.push(`${k}: ${r.problem}`)
+    else out[k] = r.guide
+  }
+  return { guides: Object.keys(out).length ? out : null, problems }
+}
+
 /** Canonicalise a realm-defaults record (from config, the wire, or the store). Null unless it has a valid updated_at
- *  AND a `default` list (array, or a string = one all-scope receive default). */
+ *  AND a `default` list (array, or a string = one all-scope receive default). v1.74.0: + `guides` (only when one is valid). */
 export function normRealmDefaults(r) {
   if (!r || typeof r !== 'object' || Array.isArray(r)) return null
   const updated_at = toMs(r.updated_at)
   if (!updated_at || !(Array.isArray(r.default) || typeof r.default === 'string')) return null
-  return { updated_at, default: canonList(r.default), origin: typeof r.origin === 'string' ? r.origin.slice(0, 200) : '' }
+  const { guides } = checkGuides(r.guides)
+  return { updated_at, default: canonList(r.default), ...(guides ? { guides } : {}), origin: typeof r.origin === 'string' ? r.origin.slice(0, 200) : '' }
 }
 /** The local CANDIDATE from a config's `behaviors.realm` block (origin = this host), or null if there's no valid block.
  *  A block with no `default` key means "no realm defaults" (an empty list), so it can clear an older record. */
 export function realmFromConfig(cfg, origin) {
   const b = cfg && cfg.behaviors && cfg.behaviors.realm
   if (!b || typeof b !== 'object') return null
-  return normRealmDefaults({ updated_at: b.updated_at, default: b.default == null ? [] : b.default, origin })
+  return normRealmDefaults({ updated_at: b.updated_at, default: b.default == null ? [] : b.default, guides: b.guides, origin })
+}
+/** v1.74.0: why a config block's guides (or some of them) are dropped — for the bridge's log at load. */
+export function realmGuideProblems(cfg) {
+  const b = cfg && cfg.behaviors && cfg.behaviors.realm
+  return b && typeof b === 'object' ? checkGuides(b.guides).problems : []
+}
+/** v1.74.0: the guide a held record publishes for `kind`, or why not: { guide, updated_at, origin } | { reason: 'none' } |
+ *  { reason: 'min_bridge', min_bridge }. `version` must meet min_bridge: the bridge passes the LOWER of the requester's and
+ *  the serving gateway's (a guide naming newer flags is wrong if either side lacks them); unknown → never meets one. */
+export function realmGuideFor(rec, kind, version) {
+  const g = rec && rec.guides && rec.guides[kind]
+  if (!g) return { reason: 'none' }
+  const v = normVersion(String(version || ''))
+  if (g.min_bridge && (!v || verLt(v, g.min_bridge))) return { reason: 'min_bridge', min_bridge: g.min_bridge }
+  return { guide: g, updated_at: rec.updated_at, origin: rec.origin || '' }
 }
 /** LWW total order: does record `a` beat record `b`? Greater updated_at wins; on a tie the greater canonical JSON of the
  *  list, then the greater origin — so two hosts holding the same pair always keep the same survivor. Identical
@@ -55,6 +127,8 @@ export function beatsRealm(a, b) {
   if (a.updated_at !== b.updated_at) return a.updated_at > b.updated_at
   const ja = JSON.stringify(a.default), jb = JSON.stringify(b.default)
   if (ja !== jb) return ja > jb
+  const ga = JSON.stringify(a.guides || null), gb = JSON.stringify(b.guides || null)   // v1.74.0: with guides ('{…}') > without ('null')
+  if (ga !== gb) return ga > gb
   return a.origin > b.origin
 }
 /** Pure merge: the winner of `cur` (a held record, or null) and `incoming` (raw — normalised here). */
@@ -69,7 +143,7 @@ export function mergeRealm(cur, incoming) {
  *   per machine and rehydrate() takes the LWW winner of them all.
  */
 export function createRealmDefaults({ persistence, persist, writer, onChange }) {
-  let cur = null   // the winning record { updated_at, default, origin } | null (no realm defaults known)
+  let cur = null   // the winning record { updated_at, default, guides?, origin } | null (no realm defaults known)
   /** Fold a record (a peer's, a follower's, or this host's own config candidate) in, last-writer-wins. Persists and
    *  fires onChange when it wins. Returns true if the held record changed. */
   function merge(incoming) {
@@ -81,7 +155,7 @@ export function createRealmDefaults({ persistence, persist, writer, onChange }) 
     return true
   }
   /** The held record, for gossip (a copy; null when none). */
-  const current = () => cur ? { updated_at: cur.updated_at, default: cur.default.map(d => ({ ...d })), origin: cur.origin } : null
+  const current = () => cur ? { updated_at: cur.updated_at, default: cur.default.map(d => ({ ...d })), ...(cur.guides ? { guides: JSON.parse(JSON.stringify(cur.guides)) } : {}), origin: cur.origin } : null
   /** Re-hydrate the durable winner at startup, so a restarted host keeps the latest even if it can reach no one. */
   async function rehydrate() {
     if (!persist) return
@@ -91,5 +165,7 @@ export function createRealmDefaults({ persistence, persist, writer, onChange }) 
       if (best !== cur) { cur = best; if (onChange) onChange(cur) }
     } catch { }
   }
-  return { merge, current, rehydrate }
+  /** v1.74.0 (#89 part 2): the held record's guide for `kind` (see realmGuideFor). */
+  const guide = (kind, version) => realmGuideFor(cur, kind, version)
+  return { merge, current, rehydrate, guide }
 }

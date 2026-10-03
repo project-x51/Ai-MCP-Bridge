@@ -74,8 +74,9 @@ export function agentGuide(o) {
   return L.join('\n')
 }
 
-/** The flags this host's gateway can't serve (or that it couldn't be reached), for the end of a guide. */
-function gatewayNote(g, canAsk) {
+/** The flags this host's gateway can't serve (or that it couldn't be reached), for the end of a guide. v1.74.0: exported —
+ * appended to a realm-published guide too (guideText), whatever its source. */
+export function gatewayNote(g, canAsk = !g || !verLt(g, '1.71.0')) {
   if (!g) return [`(This host's gateway could not be reached just now: if a report says gateway-unsupported, drop that flag.)`]
   const no = []
   if (verLt(g, '1.69.0')) no.push('--before / --after / --first / --last / --move (1.69+)')
@@ -116,6 +117,43 @@ export function sessionGuide(o) {
 
 /** The guide kinds `aimb-log --guide <kind>` prints. */
 export const GUIDE_KINDS = Object.freeze(['agent', 'session'])
+
+/**
+ * v1.74.0 (#89 part 2): fill a REALM-published guide's placeholders — {cmd} (the requester's ready command), {path} (its
+ * --path, else "<your-path>"), {gateway} (the serving gateway's version), {script} (the requester's aimb-log / bridge
+ * version). Only these four are replaced; any other {word} (a JSON example, say) stays as written. Pure.
+ * @param {string} text @param {{ cmd?: string|null, path?: string|null, gateway?: string|null, script?: string|null }} v
+ */
+export function renderGuide(text, v) {
+  const vars = { cmd: v.cmd || '<command>', path: v.path || '<your-path>', gateway: v.gateway || '?', script: v.script || '?' }
+  return String(text).replace(/\{(cmd|path|gateway|script)\}/g, (m, k) => vars[k])
+}
+
+/**
+ * v1.74.0 (#89 part 2): the guide text to hand out — the realm's `template` (rendered, see renderGuide) when given, else the
+ * built-in agentGuide / sessionGuide. The gateway-capability note ("do NOT use …") is ALWAYS appended for the gateway that
+ * serves the reports, whatever the source: a realm author can't know which hosts are behind. Pure.
+ * @param {{ kind: 'agent'|'session', template?: string|null, cmd: string, path?: string|null, gateway?: string|null, script?: string|null }} o
+ */
+export function guideText(o) {
+  if (!o.template) return o.kind === 'session' ? sessionGuide(o) : agentGuide(o)
+  return [renderGuide(o.template, o), ...gatewayNote(o.gateway || null)].join('\n')
+}
+
+/**
+ * v1.74.0 (#89 part 2): the ONE short line saying where a printed guide came from.
+ * @param {{ source: 'realm'|'builtin', kind: string, updated_at?: number|null, origin?: string|null, by?: string|null, reason?: string|null, min_bridge?: string|null, gateway?: string|null }} o
+ *   by = what holds the built-in text ("aimb-log 1.74.0" / "bridge 1.74.0"); reason = why not the realm's: 'none' |
+ *   'min_bridge' | 'old-gateway' | 'unreachable'
+ */
+export function guideSourceLine(o) {
+  if (o.source === 'realm') return `(Guide source: the realm's published ${o.kind} guide, updated_at ${new Date(o.updated_at || 0).toISOString()}${o.origin ? ` from ${o.origin}` : ''}.)`
+  const why = o.reason === 'min_bridge' ? `the realm's ${o.kind} guide needs ${o.min_bridge}+`
+    : o.reason === 'old-gateway' ? `gateway ${o.gateway || '?'} serves no realm guides (1.74+)`
+      : o.reason === 'unreachable' ? 'the gateway could not be asked for the realm\'s'
+        : `the realm publishes no ${o.kind} guide`
+  return `(Guide source: built into ${o.by || 'this version'}; ${why}.)`
+}
 
 /** The guidance lines of the tool form (a session without a shell: Cowork). */
 export const LOG_TOOL_LINES = Object.freeze([

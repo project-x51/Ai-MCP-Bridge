@@ -8,7 +8,8 @@ import { createHash } from 'node:crypto'
 import { TOOLS } from '../../lib/tool-schemas.js'
 import { createConsent, parseTtlMin } from '../../lib/consent.js'
 import { createReminders, effectiveDefaults } from '../../lib/reminders.js'
-import { createRealmDefaults, normRealmDefaults, mergeRealm, beatsRealm, realmFromConfig } from '../../lib/realm-defaults.js'
+import { createRealmDefaults, normRealmDefaults, mergeRealm, beatsRealm, realmFromConfig, checkGuides, realmGuideProblems, realmGuideFor, normVersion } from '../../lib/realm-defaults.js'
+import { renderGuide, guideText, guideSourceLine, agentGuide, sessionGuide } from '../../lib/log-snippet.js'
 import { createRetainedSet, normRetained, beatsRetained, retainedKey } from '../../lib/retained.js'
 import { createTraces } from '../../lib/traces.js'
 import { create as createEgress } from '../../services/egress.js'
@@ -258,6 +259,56 @@ check('parseTtlMin forever/invalid -> null', parseTtlMin('forever') === null && 
   const rd2 = createRealmDefaults({ persistence: { realmDefaults: { put: async () => {}, all: async () => [R(10, L1, 'a'), R(30, L2, 'b'), { junk: 1 }, R(20, L1, 'c')] } }, persist: true, writer: 'H', onChange: r => seen.push('re:' + text(r)) })
   await rd2.rehydrate()
   check('#66b module: rehydrate keeps the newest stored copy', rd2.current().updated_at === 30 && text(rd2.current()) === 'ring it LOUDER' && seen.at(-1) === 're:ring it LOUDER')
+}
+// ---- #89 part 2 (v1.74.0): realm GUIDES ride the realm record — validated, capped, version-gated, rendered
+{
+  const R = (ts, guides, origin = 'h', list = []) => ({ updated_at: ts, default: list, guides, origin })
+  const G = { agent: { text: 'AGENT {cmd} --path "{path}" (gw {gateway}, script {script}) keep {other} and {CMD}' }, session: { text: ['line one', 'line two {cmd}'], min_bridge: '1.75' } }
+  const n = normRealmDefaults(R(1, G))
+  check('#89p2 norm: guides kept (canonical: a line array joined with \\n, min_bridge "1.75" → "1.75.0")', n.guides.agent.text.startsWith('AGENT {cmd}') && !('min_bridge' in n.guides.agent)
+    && n.guides.session.text === 'line one\nline two {cmd}' && n.guides.session.min_bridge === '1.75.0' && JSON.stringify(Object.keys(n.guides)) === '["agent","session"]', JSON.stringify(n))
+  check('#89p2 norm: a bare string = the text; \\r\\n → \\n; leading blank lines / trailing space trimmed', normRealmDefaults(R(1, { agent: '\r\n\r\nA\r\nB  \r\n' })).guides.agent.text === 'A\nB')
+  const big = 'é'.repeat(2048), over = 'é'.repeat(2049)   // 2 bytes each: exactly 4096 bytes / 4098
+  check('#89p2 cap: 4096 UTF-8 BYTES is the limit (kept whole); one byte more drops that guide (never cut), the other kind stays',
+    normRealmDefaults(R(1, { agent: big })).guides.agent.text === big && (r => !r.guides.agent && r.guides.session.text === 's')(normRealmDefaults(R(1, { agent: over, session: 's' }))))
+  check('#89p2 cap: separate from the 365-char reminder cap (a 4 KB guide beside a capped reminder)', (r => r.guides.agent.text.length === 4000 && r.default[0].behavior.length === 365)(normRealmDefaults(R(1, { agent: 'x'.repeat(4000) }, 'h', [{ operation: 'receive', scope: 'all', behavior: 'y'.repeat(999) }]))))
+  const ck = checkGuides({ agent: { text: 'ok', min_bridge: 'soon' }, session: { text: 'a\u0007b' }, robot: { text: 'x' } })
+  check('#89p2 validate: a bad min_bridge / control characters / an unknown kind → that guide dropped, each problem named', !ck.guides
+    && ck.problems.some(p => /^agent: min_bridge "soon"/.test(p)) && ck.problems.some(p => /^session: text has control characters/.test(p)) && ck.problems.some(p => /^robot: unknown guide kind/.test(p)), JSON.stringify(ck))
+  const junkG = [5, 'x', [], { agent: 7 }, { agent: { text: '' } }, { agent: { text: '   ' } }, { agent: { text: [1, 2] } }, { agent: {} }, { session: null }]
+  check('#89p2 validate: junk guides never throw and leave no guides key (the reminders still stand)', junkG.every(j => { const r = normRealmDefaults(R(1, j)); return r && !('guides' in r) && Array.isArray(r.default) }))
+  check('#89p2 validate: tabs + newlines are allowed', normRealmDefaults(R(1, { agent: 'a\tb\nc' })).guides.agent.text === 'a\tb\nc')
+  check('#89p2 config: realmFromConfig carries behaviors.realm.guides; realmGuideProblems lists what is dropped',
+    realmFromConfig({ behaviors: { realm: { updated_at: 5, guides: { agent: 'A' } } } }, 'H').guides.agent.text === 'A'
+    && JSON.stringify(realmGuideProblems({ behaviors: { realm: { updated_at: 5, guides: { agent: { text: 'x'.repeat(5000) } } } } })) === JSON.stringify(['agent: text is 5000 bytes (at most 4096)']) && realmGuideProblems({}).length === 0)
+  // LWW: guides are part of the record — newer wins (replaces / clears); a guide-less copy (a ≤1.73 relay) never beats the guided one
+  const g1 = R(100, { agent: 'V1' }), g2 = R(200, { agent: 'V2' }), cleared = R(300, undefined)
+  check('#89p2 merge: a newer record replaces the guides; a newer guide-less record clears them', mergeRealm(mergeRealm(null, g1), g2).guides.agent.text === 'V2' && !('guides' in mergeRealm(mergeRealm(null, g2), cleared)))
+  const relayed = R(100, undefined, 'h')   // what a 1.73 host re-gossips for g1: the same record minus guides
+  check('#89p2 merge: same updated_at — the record WITH guides beats the guide-less copy, in either order', mergeRealm(mergeRealm(null, relayed), g1).guides?.agent.text === 'V1' && mergeRealm(mergeRealm(null, g1), relayed).guides?.agent.text === 'V1')
+  const recs = [R(700, { agent: 'A' }, 'p'), R(700, { agent: 'B' }, 'q'), R(700, undefined, 'r'), R(700, { session: 'S' }, 'a')]
+  const outs = [[0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1], [1, 3, 0, 2]].map(p => JSON.stringify(p.reduce((cur, i) => mergeRealm(cur, recs[i]), null)))
+  check('#89p2 merge: still commutative with guides in the tie rule', outs.every(o => o === outs[0]), JSON.stringify(outs))
+  const rdg = createRealmDefaults({ persistence: { realmDefaults: { put: async () => {}, all: async () => [] } }, persist: false, writer: 'H' })
+  rdg.merge(R(10, G))
+  check('#89p2 module: current() carries a COPY of the guides (gossip / ROSTER / the store)', (() => { const c = rdg.current(); c.guides.agent.text = 'mutated'; return rdg.current().guides.agent.text.startsWith('AGENT') })())
+  check('#89p2 min_bridge: no min_bridge → served to anyone (even an unknown version)', rdg.guide('agent', null).guide?.text.startsWith('AGENT') && rdg.guide('agent', '1.0.0').updated_at === 10)
+  check('#89p2 min_bridge: 1.75.0 → refused for 1.74.0 / an unknown version (reason min_bridge), served for 1.75.0 / 1.75 / 2.0.0',
+    rdg.guide('session', '1.74.0').reason === 'min_bridge' && rdg.guide('session', '1.74.0').min_bridge === '1.75.0' && rdg.guide('session', null).reason === 'min_bridge'
+    && rdg.guide('session', '1.75.0').guide && rdg.guide('session', '1.75').guide && rdg.guide('session', '2.0.0').guide)
+  check('#89p2 none: no guide for a kind / no record → reason none', realmGuideFor(null, 'agent', '9.9.9').reason === 'none' && realmGuideFor(normRealmDefaults(R(1, { agent: 'A' })), 'session', '9.9.9').reason === 'none')
+  check('#89p2 normVersion', normVersion('1.75') === '1.75.0' && normVersion(' 2.0.1 ') === '2.0.1' && normVersion('v1.2') === null && normVersion('1.2.3.4') === null)
+  // rendering (lib/log-snippet.js): the four placeholders, nothing else; the gateway note always appended
+  const rr = renderGuide(G.agent.text, { cmd: '"node" "log.mjs" --session "S"', path: '@X/agent', gateway: '1.74.0', script: '1.74.0' })
+  check('#89p2 render: {cmd} {path} {gateway} {script} filled; {other} / {CMD} left as written', rr === 'AGENT "node" "log.mjs" --session "S" --path "@X/agent" (gw 1.74.0, script 1.74.0) keep {other} and {CMD}', rr)
+  check('#89p2 render: no path → "<your-path>", unknown gateway / script → "?"', renderGuide('{path} {gateway} {script}', { cmd: 'c' }) === '<your-path> ? ?')
+  check('#89p2 guideText: a realm template + the capability note for an OLD gateway (whatever the source)', (t => t.startsWith('AGENT ') && /This host's gateway runs 1\.65\.0, so do NOT use: --before .*; --ask/.test(t))(guideText({ kind: 'agent', template: G.agent.text, cmd: 'c', gateway: '1.65.0' })))
+  check('#89p2 guideText: a current gateway adds no note; no template → the built-in agentGuide / sessionGuide', guideText({ kind: 'agent', template: 'T', cmd: 'c', gateway: '1.74.0' }) === 'T'
+    && guideText({ kind: 'agent', cmd: 'c', gateway: '1.74.0' }) === agentGuide({ cmd: 'c', gateway: '1.74.0' }) && guideText({ kind: 'session', cmd: 'c', gateway: '1.74.0' }) === sessionGuide({ cmd: 'c', gateway: '1.74.0' }))
+  check('#89p2 guideSourceLine: one short line per source', /^\(Guide source: the realm's published agent guide, updated_at 2026-10-03T00:00:00\.000Z from HOST-A\.\)$/.test(guideSourceLine({ source: 'realm', kind: 'agent', updated_at: Date.parse('2026-10-03T00:00:00Z'), origin: 'HOST-A' }))
+    && /built into aimb-log 1\.74\.0; the realm publishes no session guide/.test(guideSourceLine({ source: 'builtin', kind: 'session', by: 'aimb-log 1.74.0', reason: 'none' }))
+    && /needs 1\.75\.0\+/.test(guideSourceLine({ source: 'builtin', kind: 'agent', reason: 'min_bridge', min_bridge: '1.75.0' })) && /gateway 1\.73\.0 serves no realm guides/.test(guideSourceLine({ source: 'builtin', kind: 'agent', reason: 'old-gateway', gateway: '1.73.0' }))
+    && ['realm', 'builtin'].every(s => !guideSourceLine({ source: s, kind: 'agent', updated_at: 1, reason: 'unreachable' }).includes('\n')))
 }
 // #66b effective defaults: realm defaults layered UNDER the local behaviors.default (local key wins; realm fills gaps)
 {

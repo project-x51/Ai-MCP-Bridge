@@ -87,7 +87,8 @@
 // stdout is ONE JSON line (the bridge's `log` result, or {ok:false, code, what}); usage text goes to stderr.
 // Protocol: hello {type:"hello", kind:"logger", token, ident:{session, project, user, realm}} → {type:"welcome", logger:true,
 // bridge_version, ident} | {type:"error", code, what}; then {type:"log", ref, input} → {type:"logged", ref, result}; #85:
-// {type:"wait_answer", ref, path, timeout_ms} → {type:"answer", ref, result} (one, when the question closes or the time runs out).
+// {type:"wait_answer", ref, path, timeout_ms} → {type:"answer", ref, result} (one, when the question closes or the time runs out);
+// v1.74.0 (#89 part 2, --guide): {type:"guide", ref, kind, cmd, path, script} → {type:"guide", ref, ok, kind, text|null, source, updated_at, …}.
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -96,7 +97,7 @@ import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
 import { parseMessage, splitBatch, withDefaults, MESSAGE_FIELDS, usesPlan82, usesAsk, parseDuration } from '../lib/activity.js'
-import { logCmd, agentGuide, sessionGuide, GUIDE_KINDS } from '../lib/log-snippet.js'   // v1.73.0 (#89): --guide
+import { logCmd, guideText, guideSourceLine, GUIDE_KINDS } from '../lib/log-snippet.js'   // v1.73.0 (#89): --guide; v1.74.0: + the realm's guide
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const USAGE = 'usage: aimb-log.mjs --session <name> --project <P> [--token-file f] [--user U] [--agent a/b] [--path "a/@Ctx"] [--ctx "@~Ctx"] [--state S | --done] [--progress 4812/12000:tiles] [--eta 1h25m] [--stale-after 60m] [--details "..."] [--data \'{...}\' | --data-file f.json] [--no-log] [--text "<text>"] [--item "A" --item "B" …] [--before "Y" | --after "Y" | --first | --last]\n       aimb-log.mjs --session <name> --project <P> [--path p] --ask "<question>" [--choice "A" --choice "B" …] [--free] [--expires 2h] [--details "..."] [--wait 30m]   (a question; --wait = wait for the answer: exit 0 answered, 10 still open, 11 expired, 12 withdrawn, 13 gone)\n       aimb-log.mjs --session <name> --project <P> --wait-answer --path <question> [--wait 30m]   (wait for an existing question\'s answer)\n       aimb-log.mjs --session <name> --project <P> [--path base] --move "<node>" --to "<new parent>" [--before "Y" | --after "Y" | --first | --last]   (re-parent a node + its subtree; "/" = the session root)\n       aimb-log.mjs --stream --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (NDJSON on stdin — an object or an array per line — one result line each)\n       aimb-log.mjs --batch <items.json|-> --session <name> --project <P> [--user U] [--agent a] [--path p] [--ctx "@~Ctx"] [--no-log]   (a JSON array of items, one call)'
@@ -471,21 +472,39 @@ if (!exiting && STREAM) {
 }
 
 // v1.73.0 (#89): --guide agent|session — print the how-to (plain text, not JSON). The command it shows is the one this
-// script was run as (node + script + --session / --project / --token-file); the gateway is asked its version (≤1.5 s,
-// only when a token is at hand) so flags it can't serve are named. Never reports anything.
+// script was run as (node + script + --session / --project / --token-file); the gateway is asked its version (only when a
+// token is at hand) so flags it can't serve are named. Never reports anything.
+// v1.74.0 (#89 part 2): the guide is PULLED from the gateway first — {type:"guide", ref, kind, cmd, path, script} on the logger
+// link → the realm's published guide (behaviors.realm.guides, placeholders filled, the capability note appended). The script
+// prints its OWN built-in text when the gateway is older than 1.74 (it answers bad-op; the welcome's version already says so),
+// can't be reached within AIMB_LOG_GUIDE_MS (default 2500), or the realm has none for this kind / for this version
+// (min_bridge). The last line says which source it used.
 function runGuide() {
   const kind = String(flags.guide).toLowerCase(), fwd = p => String(p).split(path.sep).join('/')
   let ver = null
   try { ver = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'package.json'), 'utf8')).version || null } catch { }
   const cmd = logCmd({ node: fwd(process.execPath), script: fwd(fileURLToPath(import.meta.url)), session: ident.session || '<session>', project: ident.project || '<project>', tokenFile: TOKEN_FILE_ARG })
-  const print = gw => { process.stdout.write((kind === 'session' ? sessionGuide({ cmd, gateway: gw, script: ver }) : agentGuide({ cmd, path: flags.path || null, gateway: gw, script: ver })) + '\n', () => process.exit(0)) }
-  if (!TOKEN || !ident.session || !ident.project || !ident.user) return print(null)
-  let ws, settled = false
-  const end = gw => { if (settled) return; settled = true; clearTimeout(t); try { ws.close() } catch { } print(gw) }
-  const t = setTimeout(() => end(null), 1500)
-  try { ws = new WebSocket(URL_) } catch { return end(null) }
+  const by = `aimb-log ${ver || '?'}`
+  const out = text => { process.stdout.write(text + '\n', () => process.exit(0)) }
+  const builtin = (gw, why) => out(guideText({ kind: /** @type {any} */ (kind), cmd, path: flags.path || null, gateway: gw, script: ver }) + '\n' + guideSourceLine({ source: 'builtin', kind, by, gateway: gw, ...why }))
+  if (!TOKEN || !ident.session || !ident.project || !ident.user) return builtin(null, { reason: 'unreachable' })
+  let ws, settled = false, gw = null
+  const end = fn => { if (settled) return; settled = true; clearTimeout(t); try { ws.close() } catch { } fn() }
+  const t = setTimeout(() => end(() => builtin(gw, { reason: gw ? 'old-gateway' : 'unreachable' })), num(process.env.AIMB_LOG_GUIDE_MS, 2500))
+  try { ws = new WebSocket(URL_) } catch { return end(() => builtin(null, { reason: 'unreachable' })) }
   ws.on('open', () => hello(ws))
-  ws.on('message', raw => { let m = null; try { m = JSON.parse(raw.toString()) } catch { return } if (m.type === 'welcome') end(m.logger ? m.bridge_version || null : null); else if (m.type === 'error') end(null) })
-  ws.on('error', () => end(null))
-  ws.on('close', () => end(null))
+  ws.on('message', raw => {
+    let m = null; try { m = JSON.parse(raw.toString()) } catch { return }
+    if (m.type === 'welcome') {
+      if (!m.logger) return end(() => builtin(null, { reason: 'unreachable' }))
+      gw = m.bridge_version || null
+      if (verLt(gw, '1.74.0')) return end(() => builtin(gw, { reason: 'old-gateway' }))   // a ≤1.73 gateway serves no guides
+      ws.send(JSON.stringify({ type: 'guide', ref: 1, kind, cmd, path: flags.path || null, script: ver }))
+    } else if (m.type === 'guide' && m.ref === 1) {
+      if (m.ok && m.source === 'realm' && typeof m.text === 'string') return end(() => out(m.text + '\n' + guideSourceLine({ source: 'realm', kind, updated_at: m.updated_at, origin: m.origin })))
+      end(() => builtin(gw, m.ok ? { reason: m.reason || 'none', min_bridge: m.min_bridge || null } : { reason: 'unreachable' }))
+    } else if (m.type === 'logged' || m.type === 'error') end(() => builtin(gw, { reason: gw ? 'old-gateway' : 'unreachable' }))   // bad-op = no guide request there
+  })
+  ws.on('error', () => end(() => builtin(gw, { reason: 'unreachable' })))
+  ws.on('close', () => end(() => builtin(gw, { reason: 'unreachable' })))
 }

@@ -824,6 +824,45 @@ agent's prompt. Two new connect-reminder placeholders, expanded per session when
   So a brief is just: *"Before you start, run `<cmd> --path "<item>/<agent>" --guide agent` and follow it. Your checklist:
   …"* plus the task. (The realm reminder still wraps `{log_snippet}`; pointing it at `--guide session` waits until every
   host runs 1.73, since a 1.65 host's script has no `--guide`.)
+
+  **Realm guides (v1.74.0, #89 part 2) — published once, PULLED on request.** The realm can replace the built-in text with
+  its own, in the same `behaviors.realm` block as the realm reminders (in ANY one host's config; it replicates with them,
+  newest `updated_at` wins — so **bump `updated_at` whenever you change a guide**). `config.example.json` has no guides
+  block: the built-in text is the default.
+  ```json
+  "behaviors": { "realm": {
+    "updated_at": "2026-10-04T09:00:00Z",
+    "default": [ … the realm reminders, unchanged … ],
+    "guides": {
+      "agent":   { "text": [ "HOW WE REPORT (aimb-log {script}, gateway {gateway})",
+                             "  {cmd} --path \"{path}\" --text \"<text>\"",
+                             "1. Make your checklist first: --item \"A\" --item \"B\" …" ] },
+      "session": { "text": "… the orchestrator's rules …", "min_bridge": "1.75.0" }
+    } } }
+  ```
+  - `text` — a string, or an array of lines (joined with newlines); at most **4 KB** (UTF-8 bytes) each. That cap is
+    separate from the 365-character reminder cap: a guide is never sent in `register_self` or a connect reminder, only when
+    asked for. Placeholders, filled when served: **`{cmd}`** (the requester's ready aimb-log command: node + script +
+    `--session` / `--project` / `--token-file`), **`{path}`** (its `--path`, else `<your-path>`), **`{gateway}`** (the serving
+    gateway's version), **`{script}`** (the requester's aimb-log / bridge version). Any other `{word}` stays as written.
+  - `min_bridge` (optional, `"1.75"` or `"1.75.0"`) — served only when BOTH the requester and the serving gateway are on that
+    version or newer (a guide that names new flags is wrong for an older script or gateway); otherwise the built-in text.
+  - **Validated on load** (and on every gossip / store read): a guide over 4 KB, with control characters (newline and tab are
+    fine), an empty text or a malformed `min_bridge` is DROPPED — never cut — and the bridge logs why
+    (`behaviors.realm.guides: agent: text is 5000 bytes (at most 4096) — ignored …`); the rest of the block (the reminders,
+    the other guide) still applies. An unknown kind is ignored (logged). A newer block without `guides` clears them.
+  - **Who serves it:** `aimb-log --guide agent|session` asks its gateway first (`{type:"guide", kind, cmd, path, script}` on
+    the logger link → `{type:"guide", ok, kind, text|null, source:"realm"|"builtin", updated_at, origin, gateway}`; `text`
+    null = "use your own"). It prints the realm's text, or its OWN built-in text when the gateway is older than 1.74, can't
+    be reached (`AIMB_LOG_GUIDE_MS`, default 2500), or has no guide for that kind / that version. The gateway-capability
+    note ("This host's gateway runs …, so do NOT use: …") is appended whatever the source. The last line says which source
+    it used, e.g. `(Guide source: the realm's published agent guide, updated_at 2026-10-04T09:00:00.000Z from ROBIN-Z790.)`
+    or `(Guide source: built into aimb-log 1.74.0; the realm publishes no session guide.)`.
+  - **The `log` tool** (Cowork has no shell): `log({ as, secret, guide:"agent"|"session", path? })` logs NOTHING and returns
+    `{ ok, kind, text, source, updated_at, gateway }` — the realm's guide, else this bridge's built-in text (always text).
+    Only `path` may go with it (`bad-guide` otherwise). A follower answers from the record its gateway sent in the ROSTER.
+  - **Mixed versions:** 1.66 – 1.73 hosts accept the record (they keep the reminders and drop `guides`), so guides only
+    travel across 1.74+ hops; a 1.74 host prefers the copy WITH guides over the same record relayed without them.
 - **`{log_tool_hint}`** — the same guidance for a session without a shell (Cowork), phrased for the `log` tool: `log({
   as:"<name>", secret, text })`, `path`, `log:false`, `stale_after:"60m"`, `plan:["A","B"]`, a tick with `path:"<path>/@~A",
   state:"done"`, the finish line, no secrets.
@@ -1577,7 +1616,8 @@ may itself name an `operation`) applies to every session unless that session set
 `operation`+`scope`+`match`. **Realm-wide defaults (#66b, v1.47.0):** a `config.behaviors.realm` block
 `{ updated_at, default:[...] }` in ANY one host's config replicates to every 1.47+ bridge (last-writer-wins on the
 explicit `updated_at`); a host's own `behaviors.default` entry wins its key, realm entries fill the rest (tagged
-`realm:true`). **No reminder and no default for an operation ⇒ it is silent** — so an operation
+`realm:true`). (v1.74.0: the same block may also carry `guides` — the realm's text for `aimb-log --guide`, pulled on
+request, never sent as a reminder; see "Realm guides" under step 6c.) **No reminder and no default for an operation ⇒ it is silent** — so an operation
 costs nothing until opted into. A `send` reminder never fires on `receive` (or vice-versa); to cover both
 directions register one per operation. *(#47: the incoming operation was renamed `deliver`→`receive`; `deliver`
 is still accepted as a legacy alias — from a stale client or an existing durable reminder — and folded to

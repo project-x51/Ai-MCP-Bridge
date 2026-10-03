@@ -29,12 +29,12 @@ import { hydrateEnvFromRegistry } from './lib/win-env.js'
 import { procCapKeyInput, pageCapKeyInput } from './lib/capkeys.js'
 import { createConsent, parseTtlMin } from './lib/consent.js'
 import { createReminders } from './lib/reminders.js'
-import { createRealmDefaults, realmFromConfig } from './lib/realm-defaults.js'
+import { createRealmDefaults, realmFromConfig, realmGuideProblems, GUIDE_KINDS } from './lib/realm-defaults.js'
 import { createProjectNames } from './lib/project-names.js'
 import { createRetainedSet, envBytes, RETAIN_REPLICATE_MAX_BYTES, RETAIN_GOSSIP_MAX_BYTES } from './lib/retained.js'
 import { createTraces } from './lib/traces.js'
 import * as Act from './lib/activity.js'
-import { logSnippet, logToolHint } from './lib/log-snippet.js'
+import { logSnippet, logToolHint, logCmd, guideText } from './lib/log-snippet.js'
 import { create as createEgress } from './services/egress.js'
 
 // ---------------------------------------------------------------- config / identity
@@ -114,7 +114,7 @@ function persistAliases() {
   } catch (e) { log('alias persist failed', e.message) }
 }
 
-const BRIDGE_VERSION = '1.73.0'           // bump on every behavioural change; surfaced in my_identity,
+const BRIDGE_VERSION = '1.74.0'           // bump on every behavioural change; surfaced in my_identity,
                                            // roster entries and the page welcome so peers can detect a changed bridge
 // T14 feature detection. `wake` stays FALSE — the set_wake tool is still unsupported; `doorbell` (#39) is
 // the WS `listener` attach point, which IS implemented and needs nothing durable to work.
@@ -391,6 +391,7 @@ function seedRealmDefaults(cfg, why) {
   if (!(cfg && cfg.behaviors && cfg.behaviors.realm)) return false
   const cand = realmFromConfig(cfg, HOSTNAME)
   if (!cand) { log(`behaviors.realm ignored (${why}): it needs an explicit "updated_at" ISO timestamp`); return false }
+  for (const p of realmGuideProblems(cfg)) log(`behaviors.realm.guides: ${p} — ignored (${why}); the built-in text is used instead`)   // v1.74.0 (#89 part 2)
   const changed = realmDefaults.merge(cand)
   if (changed) log(`realm default reminders adopted from this host's config (${why}; updated_at ${new Date(cand.updated_at).toISOString()})`)
   return changed
@@ -1504,6 +1505,38 @@ async function actExpireQuestions() {
     log(`activity: ${ex.expired.length} question(s) expired unanswered: ${ex.expired.map(e => `${e.ident.session}/${e.path}`).join(', ').slice(0, 300)}`)
     for (const e of ex.expired) notifyActivitySession(e.ident, Act.answerNotice(e, { host: HOSTNAME, ts: now }), { now: true }).catch(() => { })   // #85: the asker hears it at once
   } finally { actQBusy = false; actChanged() }
+}
+// v1.74.0 (#89 part 2): GUIDES, PULLED on request — never pushed (no register_self or connect reminder carries one). The
+// realm may publish its own agent / session guide in behaviors.realm.guides (lib/realm-defaults.js: ≤ 4 KB each, an optional
+// min_bridge; replicated with the realm record). A request is served from the record this process holds:
+//   - a logger link (tools/aimb-log.mjs --guide): {type:"guide", ref, kind, cmd?, path?, script?} → {type:"guide", ref, ok,
+//     kind, text, source:"realm"|"builtin", updated_at, origin?, reason?, min_bridge?, gateway}. text = the realm's guide, its
+//     placeholders filled from the request ({cmd} {path} {script}) and this gateway ({gateway}), + the gateway-capability note;
+//     null with source "builtin" when there is none for that kind (reason "none") or the requester / this gateway is older than
+//     its min_bridge (reason "min_bridge") — the script then prints its OWN built-in text (it matches the script's flags).
+//     A ≤1.73 gateway answers {type:"logged", result:{code:"bad-op"}}: the script falls back the same way.
+//   - the log tool's guide:"agent"|"session" (Cowork, no shell): the realm's guide, else this bridge's built-in text — always text.
+// min_bridge is checked against the LOWER of the requester's version and the serving gateway's.
+const GUIDE_FIELD_MAX = 2048   // a request's cmd / path / script
+const lowerVer = (a, b) => (!a || !b) ? null : (verLt(a, b) ? a : b)
+/** @param {{ kind: string, cmd?: any, path?: any, script?: any, requester?: string|null, gateway: string, builtin: boolean }} q */
+function serveGuide(q) {
+  const kind = String(q.kind || '').toLowerCase()
+  if (!GUIDE_KINDS.includes(kind)) return { ok: false, code: 'bad-guide', what: `guide takes one of: ${GUIDE_KINDS.join(' / ')}` }
+  const s = v => (typeof v === 'string' && v.length <= GUIDE_FIELD_MAX && !/[\u0000-\u001f\u007f]/.test(v) ? v : null)
+  const cmd = s(q.cmd), p = s(q.path), script = s(q.script)
+  const r = realmDefaults.guide(kind, lowerVer(q.requester || null, q.gateway))
+  const base = { ok: true, kind, gateway: q.gateway }
+  if (r.guide) return { ...base, text: guideText({ kind: /** @type {any} */ (kind), template: r.guide.text, cmd: cmd || '<command>', path: p, gateway: q.gateway, script }), source: 'realm', updated_at: r.updated_at, origin: r.origin || null, ...(r.guide.min_bridge ? { min_bridge: r.guide.min_bridge } : {}) }
+  return { ...base, text: q.builtin ? guideText({ kind: /** @type {any} */ (kind), cmd: cmd || '<command>', path: p, gateway: q.gateway, script }) : null, source: 'builtin', updated_at: null, reason: r.reason, ...(r.min_bridge ? { min_bridge: r.min_bridge } : {}) }
+}
+function loggerGuide(ws, m) {
+  const ref = m && m.ref != null ? m.ref : null
+  let result
+  if (role !== 'gateway') result = { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
+  else if (!ACT_CFG.enabled) result = actDisabled()
+  else result = serveGuide({ kind: m.kind, cmd: m.cmd, path: m.path, script: m.script, requester: typeof m.script === 'string' ? m.script : null, gateway: BRIDGE_VERSION, builtin: false })
+  try { ws.send(JSON.stringify({ type: 'guide', ref, ...result })) } catch { }
 }
 async function loggerLog(ident, input) {
   if (role !== 'gateway') return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
@@ -2913,9 +2946,11 @@ function onWsConnection(ws) {
           try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result })) } catch {}
         } else if (m.type === 'wait_answer' && ws.kind === 'logger') {   // v1.71.0 (#85): wait for the answer to one of this session's questions (a long poll)
           loggerWait(ws, m).catch(e => { try { ws.send(JSON.stringify({ type: 'answer', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'gateway-error', what: String((e && e.message) || e) } })) } catch { } })
+        } else if (m.type === 'guide' && ws.kind === 'logger') {   // v1.74.0 (#89 part 2): the realm's guide, pulled (aimb-log --guide)
+          loggerGuide(ws, m)
         } else if (ws.kind === 'logger') {
           if (m.type === 'activity_action') { try { ws.send(JSON.stringify({ type: 'activity_action', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'unauthorized', what: 'activity actions are for dashboards only (a logger only reports)' } })) } catch {} ; return }   // v1.65.0 (#70 6d)
-          try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'bad-op', what: `a logger sends only {type:"log"} or {type:"wait_answer"} (got ${JSON.stringify(String(m.type)).slice(0, 40)})` } })) } catch {}
+          try { ws.send(JSON.stringify({ type: 'logged', ref: m.ref != null ? m.ref : null, result: { ok: false, code: 'bad-op', what: `a logger sends only {type:"log"}, {type:"wait_answer"} or {type:"guide"} (got ${JSON.stringify(String(m.type)).slice(0, 40)})` } })) } catch {}
         } else if ((m.type === 'activity' || m.type === 'activity_sub' || m.type === 'activity_unsub') && ws.kind !== 'dashboard') {   // #70 step 5: dashboards only — never a page leaf
           const deny = { ok: false, code: 'dashboard-only', what: 'the activity board is for dashboards and registered sessions (the activity tool), not page leaves' }
           try { ws.send(JSON.stringify(m.type === 'activity' ? { type: 'activity', ref: m.ref != null ? m.ref : null, result: deny } : { type: 'activity_board', ...deny })) } catch {}
@@ -3623,6 +3658,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const { sp, err } = authSub(String(a.as), a.secret)
       if (err) return ok(err)
       if (!ACT_CFG.enabled) return ok(actDisabled())
+      if (a.guide !== undefined) {   // v1.74.0 (#89 part 2): return the guide INSTEAD of logging (Cowork has no shell for aimb-log --guide)
+        const extra = LOG_FIELDS.filter(k => k !== 'path' && a[k] !== undefined)
+        if (extra.length) return ok({ ok: false, code: 'bad-guide', what: `guide returns the how-to text instead of logging: pass only guide (and path) — not ${extra.join(' / ')}` })
+        const gw = role === 'gateway' ? BRIDGE_VERSION : String(roster.get(gatewayId)?.bridge_version || BRIDGE_VERSION)
+        const project = projName(sp.identity?.project || 'unclassified')
+        return ok(serveGuide({ kind: String(a.guide), cmd: logCmd({ node: NODE_PATH, script: LOGGER_PATH, session: sp.name, project, tokenFile: TOKEN_FILE_PATH }), path: typeof a.path === 'string' ? a.path : null,
+          script: BRIDGE_VERSION, requester: BRIDGE_VERSION, gateway: gw, builtin: true }))
+      }
       const input = {}
       for (const k of LOG_FIELDS) if (a[k] !== undefined) input[k] = a[k]
       const pre = input.items !== undefined ? Act.splitBatch(input) : Act.parseMessage(input, { now: Date.now(), tzOffsetMin: tzOff(Date.now()) })   // validate here: a bad call costs no round trip (v1.62.0: a batch's bounds; its items are answered one by one)
