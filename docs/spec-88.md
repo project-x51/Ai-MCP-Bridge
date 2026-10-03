@@ -10,7 +10,8 @@ and of message types — an answer is an `answer` entry). All his decisions
 are in §9 "Decisions". The build (§8) has started (steps 1, 2a and 2b done; 2c and 2d built, see §8 — 2d made `test-run` and
 `test-result` real types and filled the registry's `menu` slot for #92; Robin then answered Q50 – Q60, changing Q56 (one
 tests bar) and Q57 (with Q61 / Q62: state is progress, result is outcome — a test-result sets the state to done) and added
-TIME in the logs (§5.7); step 3 built the v6 records + replay, the day / index files and the time — no question is open).
+TIME in the logs (§5.7); step 3 built the v6 records + replay, the day / index files and the time; step 4 built the
+conversion library — Robin accepted its Q63 – Q65 as built; no question is open).
 The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
@@ -1219,6 +1220,69 @@ existing checks keep passing while the core is written.
    (`tests/fixtures/activity-v174.js`, from `git show`), then (a) its own replay and (b) the converted days through the 2.0
    replay and paging must give the same tree and pages (paths ↔ ids, lines, states, bars, plans, ranks, logs, counts, run
    boundaries); converting twice gives byte-identical days; the agent / context duplicate is relabelled.
+   **4 as built** (2026-10-03): `src/lib/activity2-convert.js` (not `lib/activity-v5.js`: the v5 reading primitives —
+   `recordKind`, `parsePath`, `formatPath`, `pathKey`, `normBy`, `normQuestion` — are still imported from `lib/activity.js`,
+   so step 11 must keep them there or move them into this module), still wired into nothing. `convertV5(days, { host,
+   config, forget? })` → `{ days, report, model, paths }`: the same days (each record filed in the day file its source came
+   from), the report (records in / out, skipped lines, entries, created / restated / moved, `removed` by why, `relabelled`,
+   `keyed` — agent names that are not valid keys, `per_day`), the 2.0 model the converted days replay to, and each live
+   node's final v5 path → id. `readV5Dir(dir)` (exact day-file names only; a conflicted copy or any odd name is listed with
+   its WARN line and never read) and `convertDir({ srcDir, dstDir, host, config })` (another directory only, never its own
+   input: every day file + its index file written atomically, `files` with size + sha256 for step 5's marker).
+   HOW IT WORKS: one chronological forward pass, record by record; every v6 record it writes is FOLDED at once into a 2.0
+   model by the replay's own fold (`createFold2`, split out of `createReplay2` for this — the replay is that fold over its
+   buffer), so the converted model IS the replay of what was written. Beside it, per session, the v5 PATH MAP (lc v5 path
+   → the id there now) finds each record's node: held → used; not held and `new_from` at or above it → `create` (`run:true`;
+   a held node there ended unseen → `remove` why expire first; `new_from` 0 → the root's `remove`, the whole session); not
+   held and not new (it began before the history held — the oldest day, or a node the pass had dropped) → RESTATED by a
+   `cf`. `evicted` → `remove` why evict; `dismiss` → the 2.0 dismissal (an event entry on the PARENT with `of`, Q54, then
+   `remove` why dismiss); `moved_from` → `move` (+ `label`), the subtree re-keyed in the map; `plan_item` → `item` (a create
+   carries it when it has a plan position, else an `item` record follows: the fold makes a plan item only from an
+   integer `plan_ix`); a first question line → `type` question; `rank` → on the create / move, else a `rank` record (a cp
+   restates it too, as 1.7x's replay reads it). EXPIRY: 1.7x's gc pass wrote nothing but ran every minute, so before each
+   record at T the pass removes (`remove` why expire, at T) what 1.7x's `expire` had certainly removed by T — finished
+   agents, ended plans by 1.7x's plan rules (`planOf17`: a question node's own plan counts, unlike 2.0's `planOf2`), never
+   part of an open plan — once a gc minute has passed after both its due time and the record that made it a candidate (an
+   item added to a plan that had ended); in the order they fell due (a pass per due time) and, within one, in 1.7x's node
+   order (a moved subtree goes last) — the order decides what an ended plan takes; never a node the record itself names
+   (1.7x still held it), never between the records of one call; checked fully only after a change that can make something
+   due now (structure, a final state, a plan end), else at the next due time. TIME: the entry that ends an attempt gets
+   `took` (+ `took_total` / `attempts`) as 2.0 writes it; a cp whose line changed carries its stepped `timing`.
+   DECISIONS (mechanics): ids — two passes, the first with provisional ids learns each run's final path; runs that share a
+   final path share the id (a later run reuses the first's key, creator and kind, `runs` counted) unless their lifetimes
+   overlap (a node moved onto a path another had held): the one that ends last keeps the plain legacy id, the other
+   `legacyId(…, path + "\u0001<n>")`; the root keeps `mintId(session, "", "")`. Every DAY FILE starts with a whole-board
+   `cf` (planCarryForward2 at the day's first record — what a 2.0 bridge writes at each rollover; the 2.0 window needs every
+   node's structure restated): the day's leading 1.7x cf lines are folded first, silently, then the board is written once
+   (a mid-day 1.7x cf group after a restart → v6 cf lines for its nodes). A RESTATED node's created_at / last activity are
+   what 1.7x's replay made of it (the record's time, or a carried descendant's created_at for the ancestors it names). Keys:
+   an agent's segment (slugged when invalid — a `:`; reported), a context's slug(label), `?N` (the next free `?M` on a
+   clash), `-2` … per creator (the owner at creation); two agents of one name under one owner → `sub`, `sub-2` (the second's
+   chain is `w1/sub-2`). Labels: the segment; the agent / context duplicate → the YOUNGER gets "x (2)" — on a create
+   (`asked`), and on a move onto it (a `label` record for whichever is younger). The `line` flag: every v5 line entry sets
+   the line's details / data (1.7x's rule), so `line:true` unless it is a tick that changes none of them.
+   Tests: `tests/unit/test_activity4_unit.mjs` with a FROZEN copy of the 1.7x library, `tests/fixtures/activity-v175.js`
+   (v1.75.1, the last 1.7x release — not `-v174`), which writes the history (entries, cp / rep every 5 min, the gc pass
+   every minute, a cf at each rollover, restarts, a clean stop's flush): hand-made cases (the records, ids, keys,
+   moves, questions, time, eviction, dismissal + a new run, the session dismissed, relabels, overlapping runs, a question
+   holding children, forgetting) and four seeded CONVERSION FUZZES, each comparing the 2.0 bridge's start on the converted
+   days (its replay + its first expiry pass) with 1.7x's LIVE board at the stop (+ its gc pass) — base (12 histories × 500
+   calls, up to ~9 days: paths ↔ ids, kind, label, parent, created_at, line, bar, plan, rank, question, log + count (within
+   the 7-day window), activity, sibling order, all exact; also = 1.7x's own replay for a history inside the window but for
+   created_at / order / activity of a moved-in node and the logs, where 1.7x's replay is lossy; the converter's model = the
+   replay of its output; converting twice = the same bytes), 1.7x RESTARTS + 30 % log:false (no moves; counts and
+   created_at aside — a restart makes them its replay's), EXPIRY (a 3 h window: paths re-used after expiry) and RETENTION
+   + the WINDOW (only the newest 3 days, a 24 h window, entries within it) — and the files (a directory in, another out,
+   index = buildIndex, the conflicted copy warned about and never read, the written days replayed backwards through the
+   files as a bridge reads them). Sweeps of ~400 seeds per fuzz during the build: base, restarts and retention clean; the
+   3 h EXPIRY fuzz differs in about 1 history in 400, always at the moment 1.7x's minute gc ran relative to a plan change
+   in the same minute (no record says when it ran); with the real 7-day window such coincidences are far rarer. Speed:
+   22 000 records (8 MB, one session of 2 400 nodes — far more than a real one) convert in ~3 s, both passes. Where the
+   fuzz found 1.7x's own replay LOSSY (its live board and its replay differ), the conversion follows the live board and the
+   evidence in the files: created_at / activity of an ancestor a moved node came under, a moved node's log; a plan item
+   1.7x's gc had expired that an older cf in the window restates; after a restart, nodes 1.7x's replay mixed up.
+   Left for later: the migration script (step 5: backup, marker, verify, the start check), wiring (step 6). Questions
+   Q63 – Q65: accepted as built (§9).
 5. **The migration script** `src/tools/aimb-migrate-v2.mjs` (§7.2) + the bridge's start check (§7.5). *Tests* (new
    `test_migrate_v2`, temp persistence dirs, fixture days WRITTEN BY A REAL 1.7x GATEWAY — `git archive v1.74.0` build,
    `AIMB_TEST_OLD_BRIDGE` — with moves, plans, questions, dismissals over 3 days):
@@ -1291,7 +1355,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built) and Q56 – Q60 those of step 2d (Q56 and Q57 changed); GROUPS, ROLLUP and TYPES are decisions
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3 and Q63 – Q65 those of step 4 (accepted as built); GROUPS, ROLLUP and TYPES are decisions
 Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
@@ -1360,6 +1424,9 @@ answer overrides an earlier one (noted in the earlier row).
 | 60 | (build step 2d) The per-type menus | **Accepted as built:** the registry lists the model's actions only; Robin gives feedback once he uses the menus; Kick comes after 2.0 (§1.7, §5.4). |
 | 61 | (build step 3) A test-result `skip` on a test that is not a plan item | **Option C (Robin):** any CONTEXT that receives a test-result counts as a test; a skip works on it whether or not it is a plan item (no `not-a-plan-item` refusal — the state is just done). An agent or the session can't take a test-result at all (`not-a-test`: an agent runs tests, it isn't one) (§1.7). |
 | 62 | (build step 3) A test-result whose call also gives a `--state` | **Decided (Robin):** `--state done` with a result is consistent and accepted; a result with `--state` running / todo / blocked / abandoned (or failed / skipped) is refused `bad-state` — a test can't have an outcome while unfinished; the error says a result means done (§1.7). |
+| 63 | (build step 4) An empty grouping context (no line, no children) no 1.7x record has named for longer than the replay window | **Accepted as built (Robin):** Dropped by the conversion at the next day start (a `remove`, why expire) — the rule a 1.7x restart applies (its replay never rebuilds it); 2.0 would keep it for good. `forget:false` keeps the live tree instead (§8 step 4). |
+| 64 | (build step 4) A 1.7x question that also holds children (items added under it after it was asked) | **Accepted as built (Robin):** It stays type `question`: answerable, one item of its parent's plan; its children stay under it but are no plan in 2.0 after the cutover (no plan end / expiry of their own, no protection for their agent). The conversion follows 1.7x's rules up to the cutover (§8 step 4). |
+| 65 | (build step 4) The message type of converted 1.7x move / placement entries | **Accepted as built (Robin):** `note` with their `act` (move / reorder), as 1.7x applied them (the session's own move refreshed its activity; any made the node non-implicit) — not `event` as 2.0 writes them (Q55); dismissals are events (Q54) (§8 step 4). |
 | TIME | (Robin, 2026-10-03) Time in the logs | **Accepted into 2.0 (built in step 3):** a node times each attempt from running to done / failed / skipped / abandoned (`took`, on the node and the ending entry); a reopen / restart is a new attempt (latest `took` + `took_total` / `attempts`); no start → no took; a test-result's duration is its took; plans, test runs and agents get their own start-to-end time; it survives checkpoints and the replay and shows in `displayOf2` ("took 4m 12s") (§2.2, §5.7). |
 | GROUPS | (Robin, 2026-10-03, new) Lists that are not plans | **Accepted into 2.0 (step 2b):** a context can be a GROUP — a list, not a plan: no bar, no plan-end, nothing added to its parent's rollup; where the bar would be, an optional COUNT ("4 items" / "3 open · 1 done"; abandoned and hidden items not counted). Set at creation (`--group` / `group:true`) or toggled from the dashboard (Show as group / Show as plan); its items keep their states. Candidates: Potential changes, Planned changes, Deployed releases, Questions; Next release stays a plan (§1.3, §2.1, §5.7). *The flag was then folded into TYPES: a group is `--context-type=group`.* |
 | TYPES | (Robin, 2026-10-03, "typed nodes and entries") | **Accepted into 2.0:** every node has a `type` from a small built-in REGISTRY held as data — per type its allowed fields, display (glyph, what shows in place of a bar), rollup behaviour, allowed children and menu actions (the slot the context-aware menu, #92, folds into). Types: `context` (the default, plan-capable), `plan`, `group`, `agent`, `question`, and `test-run` (reserved; built in step 2d). The flag is `--context-type=<type>` (tool `context_type`; kebab-case flag, values case-insensitive); it REPLACES `--group` / `group:true`; a question is a node of type `question`. ENTRIES are typed too: `--message-type=<type>` (tool `message_type`; default `note`), each type declaring typed fields that are validated so the bridge can count them (later: `--message-type=test-result --result pass --checks 22 --duration 4.1s`); `--data` stays free-form. Answers are `answer` entries; the node state still drives plans and progress. 2b builds the registries, the mechanism and the types questions need (`note`, `question`, `answer`, `withdrawal`, `expiry`, + `event` for structural entries); a new step 2d builds `test-run` + `test-result`; #81's test reporter is the first user of `test-run`. QUESTIONS read naturally: state the question, its options listed below it as the answers; the text never restates the options; choices stay structured (`--choice`) — in §5.8, the Answer dialog (§5.4) and the agent guide (§4.3) (§1.7, §2, §4, §5.7, §5.8, §8). |
@@ -1430,7 +1497,7 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q62, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). No question is open.
+Q40 – Q65, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). No question is open.
 
 ---
 

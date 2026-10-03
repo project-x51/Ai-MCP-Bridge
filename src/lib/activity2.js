@@ -101,6 +101,8 @@
 // - TIME in the logs (Robin): timingStep times each node's attempts (running → done / failed / skipped / abandoned; a
 //   test-result's duration is its took; re-runs add up), the ending entry carries `took`, cp / cf carry `timing`, the
 //   replay re-derives it; timing2 / fmtTook, and `took` in displayOf2 ("took 4m 12s").
+// - Step 4 (the conversion, lib/activity2-convert.js) uses: createFold2 (the replay's chronological fold on its own — one
+//   record at a time; createReplay2 is that fold over its buffer), carryOf2 (one node's cf) and timingStep, now exported.
 //
 // STUBS LEFT FOR LATER STEPS (said where they bite):
 // - Step 6 wires the bridge: the facet appends `writes` / cp / cf through it, index files at rollover, paging via the
@@ -211,7 +213,7 @@ function newNode({ id, key, creator, chain, scope, kind, label, parent, now, ask
 // attempt); back to `todo` mid-attempt drops it (no took). Ticked straight from todo (never running): no start, no took.
 const END_STATES = new Set(['done', 'failed', 'skipped', 'abandoned'])
 /** The timing change a line-state change makes (s1 = the new state; durMs = a test-result's duration) → a patch. */
-function timingStep(n, s1, ts, durMs) {
+export function timingStep(n, s1, ts, durMs) {
   const open = n.started_at != null && n.ended_at == null, p = /** @type {any} */ ({})
   if (s1 === 'running' && !open) { p.started_at = ts; p.ended_at = null; if (n.first_started_at == null) p.first_started_at = ts }
   else if (END_STATES.has(s1) && (open || durMs != null)) {
@@ -3142,7 +3144,7 @@ export function flushCheckpoints2(state, now, opts = {}) {
 /** One node's carry-forward record: its structure (creator + its chain, key, kind, type, label, parent, rank, plan item,
  * transient + grace + empty_since, merged_into / from, implicit, runs, created_at, run_at), its line state, its own entry
  * count (`log_n`) and the aliases that name it. The root's also carries the session's last_activity. */
-function carryOf2(sess, node, now) {
+export function carryOf2(sess, node, now) {
   const aliases = [...sess.aliases.values()].filter(a => a.id === node.id).map(a => ({ path: a.path, at: a.at, used: a.used }))
   return { v: ACTIVITY2_FORMAT, kind: 'cf', ts: now, n: node.id, c: node.creator, scope: node.scope, key: node.key, nk: node.kind, type: node.type, label: node.label,
     ...(node.asked ? { asked: node.asked } : {}), p: node.parent, rank: node.rank || null, ...(node.plan ? { plan_item: true, plan_ix: node.plan_ix } : {}),
@@ -3276,6 +3278,189 @@ function rNewNode(rec, at, parent) {
 }
 
 /**
+ * Step 4: the replay's chronological FOLD on its own — one record at a time, oldest first — so the conversion
+ * (lib/activity2-convert.js) keeps a model that IS the replay of what it has written so far. createReplay2's finish() is
+ * this fold over its buffer. fold(rec, kind?, day?, mapOnly?) applies one record (kind = recordKind2(rec) when not given;
+ * day = the file it came from, default its own local day — a cp key is per file; mapOnly = a cp read past the window only
+ * for its key); `sessions` is the live result while folding; finish() drops what hangs from no root, installs the
+ * sessions into state.sessions (with the entry seq and today's cp keys) and answers the stats.
+ * @param {any} state @param {{ now?: number|null, cutoff?: number }} [o]  now: "today" (cf_today, today's cp keys); cutoff:
+ *   the window start (a node a cf restates whose run began before it gets log_floor = cutoff)
+ */
+export function createFold2(state, { now = null, cutoff = -Infinity } = {}) {
+  const N = state.config.log_entries_per_agent, sessions = new Map(), pend = new Map(), cpKeys = new Map(), today = Number.isFinite(now) ? localDay(now) : null
+  const st = { entries: 0, records: 0, cps: 0, reps: 0, cfs: 0, cf_today: false, pending_dropped: 0 }
+  let maxSeq = 0
+  const findNode = id => { for (const s of sessions.values()) { const n = s.nodes.get(id); if (n) return { sess: s, node: n } } return null }
+  const pushLog = (node, small) => { node.log.push(small); if (node.log.length > N) { const d = node.log.length - N; node.log.splice(0, d); node.log_dropped += d } }
+  /** @param {any} rec @param {string|null} [kind] @param {string|null} [day] @param {boolean} [mapOnly] */
+  function fold(rec, kind = null, day = null, mapOnly = false) {
+    kind = kind || recordKind2(rec)
+    if (!kind) return
+    day = day || localDay(kind === 'rep' ? rec.last : rec.ts)
+    if (kind === 'cp') { let m = cpKeys.get(day); if (!m) cpKeys.set(day, m = new Map()); m.set(rec.k, rec.n); if (mapOnly) return }
+    if (kind === 'rep') {
+      st.reps++
+      const m = cpKeys.get(day)
+      for (const k of rec.rep) { const id = m ? m.get(k) : null, f = id && findNode(id); if (f) rTouch(f.sess, f.node, rec.last, null, null, false) }
+      return
+    }
+    const sess = rSession(state, sessions, rec)
+    if (kind === 'entry') {
+      st.entries++
+      if (typeof rec.id === 'string' && rec.id.startsWith(state.idPrefix)) { const m = /-([0-9a-z]+)$/.exec(rec.id); if (m) maxSeq = Math.max(maxSeq, parseInt(m[1], 36) || 0) }
+      const report = rec.type !== 'event', touches = report && !rec.by
+      const node = sess.nodes.get(rec.n)
+      if (!node) {   // not held (yet): its run began before the window — a cf restates it later (its log's head), else dropped
+        if (!sess.ghosts.has(rec.n)) { let p = pend.get(rec.n); if (!p) pend.set(rec.n, p = []); p.push(smallOf(rec)) }
+        if (touches) sess.last_activity = Math.max(sess.last_activity, rec.ts)
+        return
+      }
+      if (rec.current) {
+        const c0 = node.current, kept = typeof rec.line_id === 'string', set = rec.line === true && !kept
+        node.current = { id: kept ? rec.line_id : rec.id, ts: rec.ts, text: typeof rec.line_text === 'string' && rec.line_text ? rec.line_text : rec.text, state: rec.state,
+          details: set ? (rec.details != null ? rec.details : null) : kept ? (rec.line_details != null ? rec.line_details : null) : c0 ? c0.details || null : null,
+          data: set ? (rec.data != null ? rec.data : null) : kept ? (rec.line_data != null ? rec.line_data : null) : c0 && c0.data != null ? c0.data : null,
+          ...(rec.line_by ? { by: rec.line_by } : {}), ...(rec.question ? { question: rec.question } : {}) }
+        if (node.kind !== 'context') node.finished_at = Number.isFinite(rec.finished_at) ? rec.finished_at : FINAL.has(rec.state) ? node.finished_at || rec.ts : null
+        Object.assign(node, timingStep(node, rec.state, rec.ts, rec.type === 'test-result' && rec.fields && Number.isFinite(rec.fields.duration) ? rec.fields.duration : null))
+      }
+      if (typeof rec.plan_end === 'string') node.plan_end = rec.plan_end === 'open' ? null : { state: rec.plan_end, ts: rec.ts }
+      if ('progress' in rec) node.progress = rec.progress ? { ...rec.progress } : null
+      if ('eta_at' in rec) node.eta_at = rec.eta_at || null
+      if (FINAL.has(stateOf(node))) node.eta_at = null
+      const keepAs = MESSAGE_TYPES[rec.type] && MESSAGE_TYPES[rec.type].keep
+      if (keepAs) node[keepAs] = { ...(rec.fields || {}), ts: rec.ts, entry: rec.id, state: stateOf(node) }
+      else if (rec.test_cleared) node.test = null
+      if (report) node.implicit = false
+      if (touches) rTouch(sess, node, rec.ts, rec.stale_after_ms, rec.caller || null)
+      pushLog(node, smallOf(rec))
+      node.cp_sig = cpSig(node)
+      return
+    }
+    if (kind === 'cp') {
+      st.cps++
+      const node = sess.nodes.get(rec.n)
+      if (!node) return   // its cf (later) restates it
+      rLineSnap(node, rec)
+      node.implicit = false
+      rTouch(sess, node, Number.isFinite(rec.last_activity) ? rec.last_activity : rec.ts, rec.stale_after_ms, null)
+      node.cp_sig = cpSig(node)
+      return
+    }
+    if (kind === 'cf') {
+      st.cfs++
+      if (day === today) st.cf_today = true
+      let node = sess.nodes.get(rec.n)
+      if (rec.n === sess.rootId) {
+        if (Number.isFinite(rec.session_last_activity)) sess.last_activity = Math.max(sess.last_activity, rec.session_last_activity)
+      } else {
+        const fresh = !node
+        if (fresh) {
+          unGhost(sess, rec.n)
+          node = rNewNode(rec, Number.isFinite(rec.created_at) ? rec.created_at : rec.ts, rec.p)
+          sess.nodes.set(node.id, node)
+          if (node.creator != null) sess.scope.set(scopeKey(node.creator, node.key), node.id)
+          node.log = (pend.get(rec.n) || []).slice(-N)
+          pend.delete(rec.n)
+        } else rDetach(sess, node)
+        node.type = rec.type || node.type
+        node.asked = rec.asked || null
+        node.merged_into = rec.merged_into || null; node.merged_from = rec.merged_into ? rec.merged_from || null : null
+        node.parent = rec.p
+        node.label = String(rec.label)
+        rAttach(sess, node)
+        node.rank = rec.rank || null
+        node.plan = rec.plan_item === true; node.plan_ix = node.plan && Number.isInteger(rec.plan_ix) ? rec.plan_ix : null
+        node.transient = rec.transient === true; node.grace_ms = node.transient && rec.grace_ms ? rec.grace_ms : null; node.empty_since = node.transient && Number.isFinite(rec.empty_since) ? rec.empty_since : null
+        node.runs = Number.isInteger(rec.runs) && rec.runs > 0 ? rec.runs : node.runs
+        node.created_at = Number.isFinite(rec.created_at) ? rec.created_at : node.created_at
+        node.run_at = Number.isFinite(rec.run_at) ? rec.run_at : node.created_at
+        if (fresh && node.run_at < cutoff) node.log_floor = cutoff
+      }
+      node.implicit = rec.implicit === true
+      rLineSnap(node, rec)
+      node.last_activity = Number.isFinite(rec.last_activity) ? rec.last_activity : node.last_activity
+      node.stale_after_ms = rec.stale_after_ms > 0 ? rec.stale_after_ms : null
+      if (Number.isInteger(rec.log_n) && rec.log_n >= node.log.length) node.log_dropped = rec.log_n - node.log.length
+      for (const a of Array.isArray(rec.aliases) ? rec.aliases : []) {
+        if (!a || typeof a.path !== 'string') continue
+        const k = labelKey(a.path), had = sess.aliases.get(k)
+        if (!had || had.at <= a.at) sess.aliases.set(k, { id: rec.n, path: a.path, at: a.at, used: Number.isFinite(a.used) ? a.used : a.at })
+      }
+      node.cp_sig = cpSig(node)
+      return
+    }
+    // ---- a node record (§2.1)
+    st.records++
+    const node = sess.nodes.get(rec.n)
+    if (rec.op === 'create') {
+      if (node) rRemove(sess, node.id, 'run', rec.ts)   // a new run of a node still held (never written so; defensive)
+      // a new run starts EMPTY: children hung under this id by the window's records while the replay did not hold it went
+      // with its earlier run (removed with an ancestor the replay never held)
+      for (const k of [...(sess.kids.get(rec.n) || [])]) rRemove(sess, k, 'parent', rec.ts)
+      sess.kids.delete(rec.n)
+      unGhost(sess, rec.n)
+      pend.delete(rec.n)   // entries before a create belong to an earlier run
+      const n = rNewNode(rec, rec.ts, rec.p)
+      sess.nodes.set(n.id, n)
+      rAttach(sess, n)
+      if (n.creator != null) sess.scope.set(scopeKey(n.creator, n.key), n.id)
+    } else if (rec.op === 'remove') {
+      if (rec.n === sess.rootId) sessions.delete(sess.key)
+      else rRemove(sess, rec.n, rec.why || 'dismiss', rec.ts)
+    } else if (!node) {
+      /* not held: its cf restates it (or it is gone) */
+    } else if (rec.op === 'label') { rRelabel(sess, node, String(rec.label)); if (rec.was) rAlias(sess, rec.was, node.id, rec.ts) }
+    else if (rec.op === 'move') { const from0 = node.parent; rDetach(sess, node); node.parent = rec.p; rAttach(sess, node); node.rank = rec.rank || null; if (rec.was) rAlias(sess, rec.was, node.id, rec.ts); rLeft(sess, from0, rec.ts) }
+    else if (rec.op === 'rank') node.rank = rec.rank || null
+    else if (rec.op === 'item') { node.plan = true; if (Number.isInteger(rec.plan_ix)) node.plan_ix = rec.plan_ix }
+    else if (rec.op === 'type') { if (typeof rec.type === 'string') node.type = rec.type }
+    else if (rec.op === 'keep') { node.transient = false; node.grace_ms = null; node.empty_since = null }
+    else if (rec.op === 'merge') {
+      const kids = Array.isArray(rec.kids) ? rec.kids : [], ranks = Array.isArray(rec.kid_ranks) ? rec.kid_ranks : []
+      kids.forEach((id, j) => { const k = sess.nodes.get(id); if (!k) return; rDetach(sess, k); k.parent = rec.into; rAttach(sess, k); if (j < ranks.length) k.rank = ranks[j] || null })
+      const from0 = node.parent
+      rDetach(sess, node)
+      node.merged_into = rec.into; node.merged_from = rec.from != null ? rec.from : from0; node.parent = rec.into
+      rAttach(sess, node)
+      if (rec.was) rAlias(sess, rec.was, node.id, rec.ts)
+      rLeft(sess, from0, rec.ts)
+    } else if (rec.op === 'unmerge') {
+      rDetach(sess, node)
+      node.merged_into = null; node.merged_from = null; node.parent = rec.p
+      rAttach(sess, node)
+      node.rank = rec.rank || null
+    }
+  }
+  function finish() {
+    // the tree holds only what hangs from a root (a node whose parent never came back is dropped, with its subtree)
+    for (const s of sessions.values()) {
+      const seen = new Set(), stack = [s.rootId]
+      while (stack.length) { const x = stack.pop(); if (seen.has(x)) continue; seen.add(x); for (const c of s.kids.get(x) || []) stack.push(c) }
+      for (const id of [...s.nodes.keys()]) {
+        if (seen.has(id)) continue
+        const n = s.nodes.get(id)
+        s.nodes.delete(id)
+        if (n.creator != null && s.scope.get(scopeKey(n.creator, n.key)) === id) s.scope.delete(scopeKey(n.creator, n.key))
+        const ix = labelIx(n.parent, n.label); if (s.labels.get(ix) === id) s.labels.delete(ix)
+      }
+      for (const [k, ids] of [...s.kids]) { if (!seen.has(k)) { s.kids.delete(k); continue } for (const id of [...ids]) if (!s.nodes.has(id)) ids.delete(id); if (!ids.size) s.kids.delete(k) }
+      for (const [k, a] of [...s.aliases]) if (!s.nodes.has(a.id)) s.aliases.delete(k)   // an alias names a node on the board (§3.3 (b))
+    }
+    st.pending_dropped = [...pend.values()].reduce((a, p) => a + p.length, 0)
+    state.sessions = sessions
+    state.seq = Math.max(state.seq, maxSeq)
+    const tk = cpKeys.get(today)
+    if (tk && tk.size) { const keys = new Map(); let next = 1; for (const [k, id] of tk) { keys.set(id, k); next = Math.max(next, k + 1) } state.cp = { day: today, keys, next, rep: null } }
+    else state.cp = null
+    let nodes = 0, ghosts = 0
+    for (const s of sessions.values()) { nodes += s.nodes.size; ghosts += s.ghosts.size }
+    return { ...st, sessions: sessions.size, nodes, ghosts }
+  }
+  return { sessions, fold, finish, stats: st }
+}
+/**
  * The REPLAY of a host's v6 records (§8 step 3) — the 2.0 createReplay. feed() takes the records NEWEST FIRST, as the
  * backwards reader yields them (today's file from its end, then earlier days), with the DAY of the file each came from
  * (a cp key is per file); finish() folds them CHRONOLOGICALLY into a fresh set of sessions and installs it
@@ -3323,171 +3508,9 @@ export function createReplay2(state, { now, from } = /** @type {any} */ ({})) {
   /** Does `day`'s file still hold an older cp that an in-window rep line needs (keep reading it past the window)? */
   const wantsOlder = day => { const s = repNeed.get(day); return !!(s && s.size) }
   function finish() {
-    const N = state.config.log_entries_per_agent, sessions = new Map(), pend = new Map(), cpKeys = new Map(), today = localDay(now)
-    const st = { entries: 0, records: 0, cps: 0, reps: 0, cfs: 0, cf_today: false, pending_dropped: 0 }
-    let maxSeq = 0
-    const findNode = id => { for (const s of sessions.values()) { const n = s.nodes.get(id); if (n) return { sess: s, node: n } } return null }
-    const pushLog = (node, small) => { node.log.push(small); if (node.log.length > N) { const d = node.log.length - N; node.log.splice(0, d); node.log_dropped += d } }
-    for (let i = buf.length - 1; i >= 0; i--) {
-      const { rec, kind, day, mapOnly } = buf[i]
-      if (kind === 'cp') { let m = cpKeys.get(day); if (!m) cpKeys.set(day, m = new Map()); m.set(rec.k, rec.n); if (mapOnly) continue }
-      if (kind === 'rep') {
-        st.reps++
-        const m = cpKeys.get(day)
-        for (const k of rec.rep) { const id = m ? m.get(k) : null, f = id && findNode(id); if (f) rTouch(f.sess, f.node, rec.last, null, null, false) }
-        continue
-      }
-      const sess = rSession(state, sessions, rec)
-      if (kind === 'entry') {
-        st.entries++
-        if (typeof rec.id === 'string' && rec.id.startsWith(state.idPrefix)) { const m = /-([0-9a-z]+)$/.exec(rec.id); if (m) maxSeq = Math.max(maxSeq, parseInt(m[1], 36) || 0) }
-        const report = rec.type !== 'event', touches = report && !rec.by
-        const node = sess.nodes.get(rec.n)
-        if (!node) {   // not held (yet): its run began before the window — a cf restates it later (its log's head), else dropped
-          if (!sess.ghosts.has(rec.n)) { let p = pend.get(rec.n); if (!p) pend.set(rec.n, p = []); p.push(smallOf(rec)) }
-          if (touches) sess.last_activity = Math.max(sess.last_activity, rec.ts)
-          continue
-        }
-        if (rec.current) {
-          const c0 = node.current, kept = typeof rec.line_id === 'string', set = rec.line === true && !kept
-          node.current = { id: kept ? rec.line_id : rec.id, ts: rec.ts, text: typeof rec.line_text === 'string' && rec.line_text ? rec.line_text : rec.text, state: rec.state,
-            details: set ? (rec.details != null ? rec.details : null) : kept ? (rec.line_details != null ? rec.line_details : null) : c0 ? c0.details || null : null,
-            data: set ? (rec.data != null ? rec.data : null) : kept ? (rec.line_data != null ? rec.line_data : null) : c0 && c0.data != null ? c0.data : null,
-            ...(rec.line_by ? { by: rec.line_by } : {}), ...(rec.question ? { question: rec.question } : {}) }
-          if (node.kind !== 'context') node.finished_at = Number.isFinite(rec.finished_at) ? rec.finished_at : FINAL.has(rec.state) ? node.finished_at || rec.ts : null
-          Object.assign(node, timingStep(node, rec.state, rec.ts, rec.type === 'test-result' && rec.fields && Number.isFinite(rec.fields.duration) ? rec.fields.duration : null))
-        }
-        if (typeof rec.plan_end === 'string') node.plan_end = rec.plan_end === 'open' ? null : { state: rec.plan_end, ts: rec.ts }
-        if ('progress' in rec) node.progress = rec.progress ? { ...rec.progress } : null
-        if ('eta_at' in rec) node.eta_at = rec.eta_at || null
-        if (FINAL.has(stateOf(node))) node.eta_at = null
-        const keepAs = MESSAGE_TYPES[rec.type] && MESSAGE_TYPES[rec.type].keep
-        if (keepAs) node[keepAs] = { ...(rec.fields || {}), ts: rec.ts, entry: rec.id, state: stateOf(node) }
-        else if (rec.test_cleared) node.test = null
-        if (report) node.implicit = false
-        if (touches) rTouch(sess, node, rec.ts, rec.stale_after_ms, rec.caller || null)
-        pushLog(node, smallOf(rec))
-        node.cp_sig = cpSig(node)
-        continue
-      }
-      if (kind === 'cp') {
-        st.cps++
-        const node = sess.nodes.get(rec.n)
-        if (!node) continue   // its cf (later) restates it
-        rLineSnap(node, rec)
-        node.implicit = false
-        rTouch(sess, node, Number.isFinite(rec.last_activity) ? rec.last_activity : rec.ts, rec.stale_after_ms, null)
-        node.cp_sig = cpSig(node)
-        continue
-      }
-      if (kind === 'cf') {
-        st.cfs++
-        if (day === today) st.cf_today = true
-        let node = sess.nodes.get(rec.n)
-        if (rec.n === sess.rootId) {
-          if (Number.isFinite(rec.session_last_activity)) sess.last_activity = Math.max(sess.last_activity, rec.session_last_activity)
-        } else {
-          const fresh = !node
-          if (fresh) {
-            unGhost(sess, rec.n)
-            node = rNewNode(rec, Number.isFinite(rec.created_at) ? rec.created_at : rec.ts, rec.p)
-            sess.nodes.set(node.id, node)
-            if (node.creator != null) sess.scope.set(scopeKey(node.creator, node.key), node.id)
-            node.log = (pend.get(rec.n) || []).slice(-N)
-            pend.delete(rec.n)
-          } else rDetach(sess, node)
-          node.type = rec.type || node.type
-          node.asked = rec.asked || null
-          node.merged_into = rec.merged_into || null; node.merged_from = rec.merged_into ? rec.merged_from || null : null
-          node.parent = rec.p
-          node.label = String(rec.label)
-          rAttach(sess, node)
-          node.rank = rec.rank || null
-          node.plan = rec.plan_item === true; node.plan_ix = node.plan && Number.isInteger(rec.plan_ix) ? rec.plan_ix : null
-          node.transient = rec.transient === true; node.grace_ms = node.transient && rec.grace_ms ? rec.grace_ms : null; node.empty_since = node.transient && Number.isFinite(rec.empty_since) ? rec.empty_since : null
-          node.runs = Number.isInteger(rec.runs) && rec.runs > 0 ? rec.runs : node.runs
-          node.created_at = Number.isFinite(rec.created_at) ? rec.created_at : node.created_at
-          node.run_at = Number.isFinite(rec.run_at) ? rec.run_at : node.created_at
-          if (fresh && node.run_at < cutoff) node.log_floor = cutoff
-        }
-        node.implicit = rec.implicit === true
-        rLineSnap(node, rec)
-        node.last_activity = Number.isFinite(rec.last_activity) ? rec.last_activity : node.last_activity
-        node.stale_after_ms = rec.stale_after_ms > 0 ? rec.stale_after_ms : null
-        if (Number.isInteger(rec.log_n) && rec.log_n >= node.log.length) node.log_dropped = rec.log_n - node.log.length
-        for (const a of Array.isArray(rec.aliases) ? rec.aliases : []) {
-          if (!a || typeof a.path !== 'string') continue
-          const k = labelKey(a.path), had = sess.aliases.get(k)
-          if (!had || had.at <= a.at) sess.aliases.set(k, { id: rec.n, path: a.path, at: a.at, used: Number.isFinite(a.used) ? a.used : a.at })
-        }
-        node.cp_sig = cpSig(node)
-        continue
-      }
-      // ---- a node record (§2.1)
-      st.records++
-      const node = sess.nodes.get(rec.n)
-      if (rec.op === 'create') {
-        if (node) rRemove(sess, node.id, 'run', rec.ts)   // a new run of a node still held (never written so; defensive)
-        // a new run starts EMPTY: children hung under this id by the window's records while the replay did not hold it went
-        // with its earlier run (removed with an ancestor the replay never held)
-        for (const k of [...(sess.kids.get(rec.n) || [])]) rRemove(sess, k, 'parent', rec.ts)
-        sess.kids.delete(rec.n)
-        unGhost(sess, rec.n)
-        pend.delete(rec.n)   // entries before a create belong to an earlier run
-        const n = rNewNode(rec, rec.ts, rec.p)
-        sess.nodes.set(n.id, n)
-        rAttach(sess, n)
-        if (n.creator != null) sess.scope.set(scopeKey(n.creator, n.key), n.id)
-      } else if (rec.op === 'remove') {
-        if (rec.n === sess.rootId) sessions.delete(sess.key)
-        else rRemove(sess, rec.n, rec.why || 'dismiss', rec.ts)
-      } else if (!node) {
-        /* not held: its cf restates it (or it is gone) */
-      } else if (rec.op === 'label') { rRelabel(sess, node, String(rec.label)); if (rec.was) rAlias(sess, rec.was, node.id, rec.ts) }
-      else if (rec.op === 'move') { const from0 = node.parent; rDetach(sess, node); node.parent = rec.p; rAttach(sess, node); node.rank = rec.rank || null; if (rec.was) rAlias(sess, rec.was, node.id, rec.ts); rLeft(sess, from0, rec.ts) }
-      else if (rec.op === 'rank') node.rank = rec.rank || null
-      else if (rec.op === 'item') { node.plan = true; if (Number.isInteger(rec.plan_ix)) node.plan_ix = rec.plan_ix }
-      else if (rec.op === 'type') { if (typeof rec.type === 'string') node.type = rec.type }
-      else if (rec.op === 'keep') { node.transient = false; node.grace_ms = null; node.empty_since = null }
-      else if (rec.op === 'merge') {
-        const kids = Array.isArray(rec.kids) ? rec.kids : [], ranks = Array.isArray(rec.kid_ranks) ? rec.kid_ranks : []
-        kids.forEach((id, j) => { const k = sess.nodes.get(id); if (!k) return; rDetach(sess, k); k.parent = rec.into; rAttach(sess, k); if (j < ranks.length) k.rank = ranks[j] || null })
-        const from0 = node.parent
-        rDetach(sess, node)
-        node.merged_into = rec.into; node.merged_from = rec.from != null ? rec.from : from0; node.parent = rec.into
-        rAttach(sess, node)
-        if (rec.was) rAlias(sess, rec.was, node.id, rec.ts)
-        rLeft(sess, from0, rec.ts)
-      } else if (rec.op === 'unmerge') {
-        rDetach(sess, node)
-        node.merged_into = null; node.merged_from = null; node.parent = rec.p
-        rAttach(sess, node)
-        node.rank = rec.rank || null
-      }
-    }
-    // the tree holds only what hangs from a root (a node whose parent never came back is dropped, with its subtree)
-    for (const s of sessions.values()) {
-      const seen = new Set(), stack = [s.rootId]
-      while (stack.length) { const x = stack.pop(); if (seen.has(x)) continue; seen.add(x); for (const c of s.kids.get(x) || []) stack.push(c) }
-      for (const id of [...s.nodes.keys()]) {
-        if (seen.has(id)) continue
-        const n = s.nodes.get(id)
-        s.nodes.delete(id)
-        if (n.creator != null && s.scope.get(scopeKey(n.creator, n.key)) === id) s.scope.delete(scopeKey(n.creator, n.key))
-        const ix = labelIx(n.parent, n.label); if (s.labels.get(ix) === id) s.labels.delete(ix)
-      }
-      for (const [k, ids] of [...s.kids]) { if (!seen.has(k)) { s.kids.delete(k); continue } for (const id of [...ids]) if (!s.nodes.has(id)) ids.delete(id); if (!ids.size) s.kids.delete(k) }
-      for (const [k, a] of [...s.aliases]) if (!s.nodes.has(a.id)) s.aliases.delete(k)   // an alias names a node on the board (§3.3 (b))
-    }
-    st.pending_dropped = [...pend.values()].reduce((a, p) => a + p.length, 0)
-    state.sessions = sessions
-    state.seq = Math.max(state.seq, maxSeq)
-    const tk = cpKeys.get(today)
-    if (tk && tk.size) { const keys = new Map(); let next = 1; for (const [k, id] of tk) { keys.set(id, k); next = Math.max(next, k + 1) } state.cp = { day: today, keys, next, rep: null } }
-    else state.cp = null
-    let nodes = 0, ghosts = 0
-    for (const s of sessions.values()) { nodes += s.nodes.size; ghosts += s.ghosts.size }
-    return { fed, skipped, ...st, sessions: sessions.size, nodes, ghosts }
+    const f = createFold2(state, { now, cutoff })
+    for (let i = buf.length - 1; i >= 0; i--) { const { rec, kind, day, mapOnly } = buf[i]; f.fold(rec, kind, day, mapOnly) }
+    return { fed, skipped, ...f.finish() }
   }
   return { feed, wantsOlder, finish, stats: () => ({ fed, skipped, buffered: buf.length }) }
 }
