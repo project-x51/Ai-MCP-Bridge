@@ -1,9 +1,10 @@
 # #88 spec (final pass) — stable node identity, v2.0
 
-Status: FINAL PASS, 2026-10-03. Robin has answered Q01 – Q39 and confirmed two follow-ups (no v5 network projection; how
-duplicate labels behave). All his decisions are in §9 "Decisions"; the few questions this pass raises are Q40 + (§9). Nothing
-is built. The agreed design is in `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0
-(`src/lib/activity.js` unless another file is named); the guide references (#89) are to v1.74.0.
+Status: FINAL, 2026-10-03. Robin has answered Q01 – Q41 and confirmed two follow-ups (no v5 network projection; how
+duplicate labels behave). He then added `--move-to` and transient contexts (Q43, §3.8). All his decisions are in §9
+"Decisions". Two small questions on §3.8 are open (Q44, Q45). The build (§8) has started at step 1. The agreed design is in
+`docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
+named); the guide references (#89) are to v1.74.0.
 
 **One paragraph.** Today a node's PATH is its key (`newNode`: `key = lc(path)`), so a move rewrites history: `applyMove` /
 `rekeySubtree` re-key memory, the replay remaps every older record through later moves (`createReplay`: `remapSegs`, `foreign`,
@@ -97,7 +98,7 @@ node's log. A report LOGS an entry; it SETS the line only when asked to (§4.0).
   `--key` / `--id` / `--path` — and that call must give its label (`--label "Spec final pass"`; the label never defaults to
   the key, Q31 → `label-required`). It goes under its creator unless `--under` places it (§4.1). A missing EARLIER step, or a
   missing agent on a call that targets another node, → `unknown-agent` ("start it first: --agent <chain> --label "…" --guide
-  agent"). A step that names a context → `not-an-agent`. (Q40: should agents be exempt from the label rule?)
+  agent"). A step that names a context → `not-an-agent`. (Q40: agents are not exempt from the label rule.)
 - Migrated agents (§7.3) get creator = their OWNER at the time (§3.4), key = their v5 segment — so `--agent a/b` names the
   node the old `--agent a/b` path named, and it keeps naming it after a move.
 - **Moving a running agent** is allowed (Q15) — within its session only. Its next report (`--agent` / `--key`) lands in the
@@ -164,11 +165,12 @@ path BEFORE the change (it seeds the alias table, §3.3, and lets a log say "mov
 - `create`: `n` id, `c` creator id (the session root's id for the session), `key`, `nk` (agent | context), `label`, `p` parent,
   `rank` (null = derived), `plan_item` / `plan_ix` when born a plan item, `run:true` (it BEGINS a run — replaces `new_from`;
   §5.3), and `asked` when the label was auto-renamed (§1.6: `"label":"notes (2)","asked":"notes"`). A create for a key whose
-  node is a GHOST (§5.1) re-uses its id and starts a new run.
-- `move`: new `p` (+ the rank it got there). `label`, `rank`, `item`: the one attribute.
+  node is a GHOST (§5.1) re-uses its id and starts a new run. `transient:true` marks a transient context (§3.8).
+- `move`: new `p` (+ the rank it got there). `label`, `rank`, `item`: the one attribute. `keep`: a transient context becomes
+  permanent (§3.8), with no other field.
 - `merge`: A (`n`) into B (`into`); `from` = A's parent then (for an unmerge); `kids` = A's children at that moment, which
   move under B (no separate move records).
-- `remove`: the node and its subtree leave memory (`why`: dismiss | evict). Replaces 6d's `dismiss:true` replay rule and the
+- `remove`: the node and its subtree leave memory (`why`: dismiss | evict | transient, §3.8). Replaces 6d's `dismiss:true` replay rule and the
   entry's `evicted:[paths]`. The 6d dismissal ENTRY ("dismissed from the board by …") is still written, on the PARENT (§2.2).
   Expiry writes nothing (as today; the replay re-runs `expire`).
 
@@ -302,6 +304,78 @@ A reference is, by its syntax (keys can't contain `/` or `:` outside the chain, 
 - The node was removed (expired / evicted / dismissed: a GHOST) → `create` with the SAME id and `run:true` → a NEW RUN of it;
   its old entries are an earlier run ("show earlier runs", §5.3). Same rule as today's re-used path name.
 
+### 3.8 Report and move in one call (`--move-to`); transient contexts (Q43)
+**Motivating example: a test run under `Tests`.** The reporter creates `Tests/Pending` with `--transient` and one plan item
+per test. Each test then moves `--move-to "../In progress"` when it starts and `--move-to "../Passed"` or `"../Failed"` when
+it ends, each bucket created on first use. `Pending` and `In progress` vanish once they are empty, which leaves `Passed`, plus
+`Failed` if anything failed. The `Tests` bar rolls up across the buckets, so it reads done / total for the whole run. The next
+run brings the same buckets back (same ids, a new run each). The report for one test is a single call:
+`--key t42 --state done --text "@22/22 passed" --move-to "../Passed"`.
+
+**`--move-to "<path>"`** (the tool's `move_to`, also per item in `--batch` / `--stream`). This is a report that also moves its
+target.
+- **Order and atomicity.** The report's state, line and log entry are applied first, then the node moves. It is ONE
+  all-or-nothing change: the destination is resolved and every check below passes BEFORE anything is written. A refused move
+  refuses the whole call, including the report.
+- **The path** is a §3.3 path (labels, quoting per Q37, no `@`) with two additions:
+  - A LEADING `/` makes it absolute from the session root, even with `--agent`.
+  - Otherwise it is RELATIVE to the node's CURRENT parent. Each leading `..` segment goes up one level, so `../X` is a
+    sibling of the parent and a plain `X` is a child of the parent (a sibling of the node). `..` is navigation only as a
+    leading segment. A label that is literally `..` is written quoted (`".."`), and going above the session root →
+    `bad-path`.
+- **Resolution, segment by segment, from that base:**
+  1. a LIVE child with that label (§3.3 step 1: by label, else an agent by key), whoever created it;
+  2. else a GHOST (§5.1) whose last parent is this node and whose label matches (labelKey), the newest if there are several.
+     It is RESURRECTED: same id, same key, same creator, back in the tree under this parent, transient (below). This is
+     §3.7's rule: the resurrection is a `create` with the ghost's id and `run:true`, so it starts a NEW RUN. Its log shows the
+     current run, and its earlier uses sit behind "show earlier runs" (§5.3);
+  3. else a NEW context is created: label = the segment, creator = the CALLER (the call's `--agent`, else the session), key =
+     the first of `slug(segment)`, `-2`, `-3` … (§1.1) that no node in the caller's scope holds, live or ghost (a ghost key
+     elsewhere is never pulled here), transient. Staleness ownership stays tree-derived (§1.4).
+
+  In the normal case steps 2 and 3 agree: a bucket's key comes from its label under the same creator, so bringing it back IS
+  that key. Each bucket keeps one id for its whole life; a test run does not leave a new ghost behind.
+- **Arrival:** the node goes LAST in the destination (a stored rank after the last child, §1.3). The label rule is that of
+  `--move` (§1.6): a destination child that already has the node's label → `duplicate-label` (nothing is written). The other
+  `--move` rules also apply: the same session only (`cross-session`), never under itself, depth ≤ 6 for the node's whole
+  subtree, and the session root cannot move. Agents may move (Q15). `--move-to` with `--move` → `bad-input` (one destination
+  per call). `--move-to` is not the removed `--to` (§4.5): it is a path, and it travels with a report.
+- **Idempotent on retry.** When the node's current parent already IS the resolved destination, the move part is a no-op: no
+  `move` record and no rank change. The report applies again as a normal report (a logged retry logs twice, §3.5). Absolute
+  paths, and relative ones with as many leading `..` as segments after them (`../Passed`, `../../Run 2/Passed`), resolve to the
+  same place on a retry. A plain `X` (one level DOWN) does not: a retry after a lost response would move it again, into `X/X`.
+  The guide therefore teaches `../X` and `/…` (whether to refuse the down form is Q45, §9).
+- **Records:** the report's entry; any `create` records for created or resurrected contexts (`transient:true`, `c` = the
+  caller); the `move` record plus its move entry (§2.2); then any `remove` records for transient contexts that emptied (below).
+  All belong to one call, in that order.
+
+**Transient contexts.** This behaviour is gated, so an ordinary empty context never vanishes.
+- **Which contexts are transient:** those auto-created (or resurrected) by `--move-to`, and those created explicitly with
+  `--transient` (the tool's `transient:true`). The flag is set only when the call CREATES the node (on an existing node
+  `--transient` is ignored with warning `exists`, §3.5), and contexts only (never an agent). Every other context is permanent,
+  as today.
+- **Vanishing:** a transient context disappears as soon as its LAST LIVE CHILD LEAVES. That means the child moves out, merges
+  away, or is removed (dismissed, evicted, expired). It becomes a GHOST (§5.1, with its history kept): one entry on itself
+  ("emptied — removed from the board (transient)"), then a `remove` record with `why:"transient"`. If its parent is
+  transient and now empty too, the parent vanishes the same way (bottom-up, in the same call). A transient context that
+  never had a child does not vanish, because nothing left it.
+- **Becoming PERMANENT** (for good; a permanent context never auto-disappears, and an unpin does not undo it):
+  - a user PINS it (the owner sees a live `pin:<id>` record of any user in the view set it holds, §5.6);
+  - it is RENAMED (`--rename`, or the dashboard's Rename…);
+  - it gets its OWN LINE (a call that sets its line: a leading `@` text on it, §4.0);
+  - `--keep` (the tool's `keep:true`) on it.
+
+  Each writes one `keep` node record (`{"v":6,"kind":"node","op":"keep","ts":…,"n":…,…ident}`, with `by` / `act` when a
+  dashboard did it). `create`, `cf` and the v6 slice unit carry `transient:true` while it holds.
+- **Ghosts and resurrection:** a resurrected context is no longer a ghost. It leaves the ghost table and is live again, still
+  transient. Its earlier-run entries remain its OWN entries (same id), reachable through "show earlier runs" (§5.3) rather
+  than "show removed". When it vanishes again it re-enters the ghost table. The ghost lifetime (§5.1: until retention drops
+  its last entry) counts the entries of all its runs, since they share one id. Ghost children it had when it vanished stay
+  ghosts under it (visible with "show removed").
+- **A side effect of sequential runs:** in a sequential run, `In progress` empties between two tests. It therefore vanishes and
+  comes back once per test, one run each (a `create` + `remove` pair and two entries per test). This is correct by the rules
+  above. Whether a short grace period should hold it is Q44 (§9).
+
 ---
 
 ## 4. API
@@ -337,6 +411,8 @@ Q19 FINAL).
 | `--move <ref>` | move the TARGET under `<ref>` (+ a position); a label clash → `duplicate-label` (§1.6) |
 | `--rename "<label>"` | the target's new label; a clash → `duplicate-label`; with `--move`, one checked change (§1.6) |
 | `--merge <ref>` / `--unmerge` | §3.6 |
+| `--move-to "<path>"` | after the report is applied, move the target there (relative to its parent: `../X`, `X`; absolute: `/…`), creating missing transient contexts; one all-or-nothing change (§3.8) |
+| `--transient` / `--keep` | a NEW context is transient (it vanishes when its last child leaves) / make a transient context permanent (§3.8) |
 | `--text "<text>"` | log an entry; a leading `@` also sets the line (§4.0) |
 | `--guide agent\|session` | print the guide; with `--agent` it is also the agent's first report (§4.4) |
 | `--ctx`, `--state`, `--done`, `--progress`, `--eta`, `--stale-after`, `--details`, `--data`, `--no-log`, `--ask` …, `--stream`, `--batch` | unchanged |
@@ -348,7 +424,8 @@ Q19 FINAL).
 
 ### 4.2 The `log` and `activity` tools
 - `log` takes `agent` (the chain), `key`, `id`, `path`, `under` / `under_id`, `label`, `plan:[ "label" | { key, label } ]`,
-  `before` / `after` / `*_id`, `move` / `move_id`, `rename`, `merge` / `merge_id`, `unmerge`, `text` (§4.0), `guide`. Batch
+  `before` / `after` / `*_id`, `move` / `move_id`, `move_to`, `transient`, `keep` (§3.8), `rename`, `merge` / `merge_id`,
+  `unmerge`, `text` (§4.0), `guide`. Batch
   items take the same; `agent` is a batch default. The tool's `plan` field is the `--item` list, kept (it is the tool's only
   form for items).
 - **Results always name the node:** `{ ok, id:<ENTRY id, as today>, ts, node:{ id, key, scope:"spec-88", label, path, kind,
@@ -711,14 +788,36 @@ existing checks keep passing while the core is written.
    on a tool / script rename / move / merge / unmerge, move + rename as one checked change, the dashboard's clash answer
    (`merges` / `label`) applied as one all-or-nothing action; `cross-session` / `unknown-agent` refusals; plans, questions,
    cascade, ranks, plan-end, eviction, expiry, `applyAction` on ids. 2a structure + resolution, 2b lines (§4.0) / plans /
-   questions, 2c actions + notices. *Tests:* new resolution / idempotency / label-uniqueness (auto-rename incl. the
-   60-code-point cut, a retry not making `(3)`, `--label` = `asked` raising no `exists`; refusals; a clash answer that went
-   stale) / duplicate-key / merge (incl. clashes) / unmerge / alias / ghost / running-agent-move checks, and the existing
-   `test_activity_unit` behaviours re-expressed in 2.0 forms.
+   questions, 2c actions + notices + moves. 2c includes **`--move-to` and transient contexts (§3.8, Q43)**:
+   - the `move_to` field (message, batch and stream items);
+   - its path parser (a leading `/`, leading `..`; `formatPath2` also quotes a `..` label);
+   - report-then-move as one checked change, with the no-op move on a retry;
+   - the per-segment walk: live child → this parent's same-label ghost RESURRECTED (same id, `create` + `run:true`) → a new
+     context in the caller's scope with a key unused there, live or ghost;
+   - arrival last; the `--move` refusals;
+   - the `transient` flag (`--transient` / `transient:true` on create), the bottom-up vanish when the last live child leaves
+     (an entry + `remove` `why:"transient"`, chained up through emptied transient parents);
+   - permanence: the `keep` record on `--keep` / `keep:true`, a rename, or a line of its own (the PIN trigger lands with
+     step 8's view state).
+
+   After the 2.0 cutover, the #81 dashboard test reporter (`tests/reporters/aimb-dashboard.mjs`) switches to this pattern:
+   §3.8's `Tests` / `Pending` / `In progress` / `Passed` / `Failed` example.
+   *Tests:* new resolution / idempotency / label-uniqueness (auto-rename incl. the 60-code-point cut, a retry not making
+   `(3)`, `--label` = `asked` raising no `exists`; refusals; a clash answer that went stale) / duplicate-key / merge (incl.
+   clashes) / unmerge / alias / ghost / running-agent-move checks. For `--move-to`:
+   - §3.8's test-run example end to end: buckets created on first use; `Pending` / `In progress` vanish; the `Tests` bar
+     across the buckets;
+   - a second run resurrects the same bucket ids, each with a new run and earlier runs behind "show earlier runs";
+   - a retry is a no-op move;
+   - refusals: `duplicate-label` on arrival (nothing written, report included), depth, `..` above the root, cross-session;
+   - permanence by `--keep` / rename / own line;
+   - a non-transient empty context never vanishes.
+
+   Plus the existing `test_activity_unit` behaviours, re-expressed in 2.0 forms.
 3. **v6 records + replay.** `recordKind` v6 only; `createReplay` folds node records (newest wins per field, `create` seals
    the run) and attaches entries by `n` — no remapping. cp / cf / rep v6; `planCarryForward` carries structure. *Tests:* a
-   seeded REPLAY FUZZ like #82's (400 random sequences of reports, plans, moves, renames, merges, unmerges, dismissals,
-   evictions, expiry, day rollovers with cf) — replay ≡ chronological apply (lines, bars, structure, logs, counts, runs).
+   seeded REPLAY FUZZ like #82's (400 random sequences of reports, plans, moves, `--move-to` with transient vanish /
+   resurrect / keep, renames, merges, unmerges, dismissals, evictions, expiry, day rollovers with cf) — replay ≡ chronological apply (lines, bars, structure, logs, counts, runs).
 4. **Conversion library** (`lib/activity-v5.js`: the v5 record reader moved out of `activity.js` + `convertV5`, pure).
    *Tests:* a CONVERSION FUZZ — random histories applied with a FROZEN copy of the last 1.7x library
    (`tests/fixtures/activity-v174.js`, from `git show`), then (a) its own replay and (b) the converted days through the 2.0
@@ -753,7 +852,8 @@ existing checks keep passing while the core is written.
    dashboard's skip / move / rename / merge on a remote node, remote log pages both ways.
 8. **Per-user view state** (§5.6). `lib/view-state.js` (LWW set, max register for `seen:`, `reset`, `all`, GC, budget),
    `view_set` / `view` WS messages, the `VIEW` frame + `view_v`, the user = the serving gateway's OS login (Q29; the
-   `AIMB_TEST_VIEW_USER` hook for tests), `views/<host>.json` persistence + rehydrate, pruning on remove. *Tests:* unit
+   `AIMB_TEST_VIEW_USER` hook for tests), `views/<host>.json` persistence + rehydrate, pruning on remove, a pin making a
+   transient context permanent (the owner writes `keep`, §3.8). *Tests:* unit
    (order + ties, idempotent + commutative merge, stamp bump under skew, max register, reset voids older, `all` vs newer
    `open:`, tombstone GC, budget); live `test_view_state_live` — two gateways + a third via the first: a pin on A shows on
    C, a close on B survives new activity on A (badge "N new"), Reset view everywhere, a selection change NOT applied live
@@ -794,7 +894,9 @@ existing checks keep passing while the core is written.
 ## 9. Decisions, holes and questions
 
 ### Decisions (Robin, 2026-10-03)
-Q01 – Q28 answer the first draft, Q29 – Q39 the revision; C1 / C2 are the two follow-ups Robin confirmed in chat. A later
+Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
+build; C1 / C2 are the two follow-ups Robin
+confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
 
 | Q | Question | Decision |
@@ -838,6 +940,9 @@ answer overrides an earlier one (noted in the earlier row).
 | 37 | Labels containing `/` | **Accepted** — double-quoted path segments (`""` = `"`) (§3.3). |
 | 38 | Other per-browser settings | **Accepted** — log order, Active only, Plans only into the view state as `opt:` records; the depth slider stays per browser (§5.6). |
 | 39 | Starting 1.7x on converted history by mistake | **Changed:** old bridges are NOT supported; 2.0 is a clean, no-legacy cutover — no stray-v5 handling, no way back (§7.5). |
+| 40 | Do agents need a label too? | **Accepted** — yes, one rule for every create: the orchestrator's `{log_snippet}` fills in `--agent <key> --label "<name>" --under <item>`, so it costs the agent nothing; a missing agent is never made as a side effect of a call aimed at another node (`unknown-agent`, §1.5, §4.3). |
+| 41 | Hosts whose OS logins differ | **Accepted for 2.0** — the view state follows the serving gateway's OS login (Q29); the board head shows "view: <login>" so a mismatch is visible. A realm-level login alias map only if it bites; no per-host `view_user` setting now (§5.6). |
+| 43 | (Robin, 2026-10-03, new) Report + move in one call; transient contexts | **Accepted into 2.0:** `--move-to "<path>"` / `move_to` (also per batch / stream item) applies the report, then moves the node, as one all-or-nothing change that is idempotent on retry. The path is relative to the node's current parent (`../X`, `X`) or absolute (`/…`). Missing contexts are created on the way (creator = the caller, label = the segment, key = its slug), and the node arrives LAST. The `--move` checks apply (`duplicate-label`, no cross-session, depth ≤ 6). TRANSIENT contexts (auto-created by `--move-to`, or `--transient` / `transient:true`) vanish into ghosts when their last live child leaves. They become permanent for good on a pin, a rename, their own line, or `--keep` / `keep:true`; every other context is permanent. **Correction (same day):** a move into a path whose transient context has vanished RESURRECTS that ghost (same id, key and creator, still transient) as a NEW RUN, so its log shows the current run and earlier uses sit behind "show earlier runs". It leaves the ghost table, and each bucket keeps one id for its whole life (§3.8, §3.7). |
 | C1 | (confirmation) Drop the v5 network projection? | **Yes** — 2.0 speaks only 2.0; no `activity_gossip:5` / `activity_ids:1` dual handshake, no 2.1 cleanup step; every host is upgraded together with the stop-all runbook (§6, §7.1). |
 | C2 | (confirmation) Duplicate labels, all cases | **Yes** — auto-rename on CREATE; refuse a deliberate rename / move through the tool or script (`duplicate-label`); the dashboard's clash dialog offers merge or a suggested label — "see how it plays out" (§1.6). |
 
@@ -879,9 +984,10 @@ answer overrides an earlier one (noted in the earlier row).
   `--label "notes"` → the create keeps `asked`, and a `--label` equal to it is no difference (§2.1, §3.5).
 - **H20** (final pass) with a required label, a missing agent can no longer be created as a side effect of a call aimed at
   another node (it would have no label) → only a call that targets the agent creates it; earlier chain steps must exist
-  (§1.5) — Q40.
+  (§1.5) — Q40 (accepted).
 - **H21** (final pass) the OS login is per machine: if a host's gateway runs under another login (a service account, a
-  Linux user), its "robin" is a different user and the view does not follow him there → shown in the board head; Q41.
+  Linux user), its "robin" is a different user and the view does not follow him there → shown in the board head; Q41
+  (accepted for 2.0).
 
 ### Risks
 - The replay and the conversion are the risky parts; both get seeded fuzzing against a ground truth (chronological apply; the
@@ -902,21 +1008,17 @@ answer overrides an earlier one (noted in the earlier row).
 - The required label adds one flag to every first call (`--label`); a briefing that forgets it gets `label-required` on the
   agent's first report — loud, and the guide names the fix.
 
-### New questions for Robin (final pass; answer by number; my recommendation after each)
-Q29 – Q39 are answered (Decisions above). This pass raises two; nothing else is open, and the build (§8) can start with the
-recommendations below if you accept them.
+### Open questions
+Q40 and Q41 were accepted as recommended (Decisions above), and the build (§8) has started. Q43's write-up (§3.8) raises two
+small questions, posted to the board. The spec follows the recommendation for each until Robin answers.
 
-40. **Do agents need a label too?** "Creation requires a label" (Q31) is applied to EVERY create, agents included: the
-    orchestrator's `{log_snippet}` carries `--agent <key> --label "<name>" --under <item>`, the agent's `--guide agent`
-    first report creates it with that label, and a missing agent can no longer be made as a side effect of a call aimed at
-    another node (it would have no label → `unknown-agent`, §1.5). Alternative: exempt agents — an agent's label is its key
-    (as in 1.7x), and `--agent` keeps creating missing chain steps. *Recommend: agents need a label too* — one rule, and the
-    board shows "Spec final pass" rather than "spec88-final"; the orchestrator fills it, so it costs the agent nothing.
-41. **Hosts whose OS logins differ.** The view state belongs to the serving gateway's OS login (Q29). If a gateway runs under
-    another account — a Linux `systemd --user` service as `ubuntu`, a Mac login `robinalden`, a Windows service account —
-    robin's pins and open / closed choices don't follow him to that host's dashboard (a different user). *Recommend: accept
-    for 2.0* — show "view: <login>" in the board head so a mismatch is visible, and add a realm-level login alias map only if
-    it bites. Alternative: an optional per-host `view_user` setting in config now.
+44. **A grace period for emptied transient contexts?** In a sequential run, `In progress` vanishes and comes back once per test
+    (§3.8). *Recommend: accept as is for 2.0.* It is correct, each bucket keeps one id, and the churn is one `create` +
+    `remove` pair per test. Alternative: a transient context vanishes only after ~60 s without a child (the owner's expiry
+    pass would remove it).
+45. **`--move-to "X"` (one level down) is not retry-safe** (§3.8). *Recommend: allow it and teach `../X` and `/…` in the
+    guide.* Alternative: refuse a relative path with fewer leading `..` than segments after them (`bad-path`, naming the
+    absolute form).
 
 ---
 

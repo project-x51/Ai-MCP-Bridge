@@ -166,6 +166,12 @@
 // the record's line_id / line_details / line_data let the replay rebuild the line. `change_answer` (REVISE_ACTIONS) gives an
 // answered question a new answer: still answered, + `revised` (count) and `previous` {answer, by, at}; its notice is
 // activity_answer with status "revised". An OPEN question never goes stale or gone (staleAt / effectiveState, like a plan item).
+//
+// #88 (v2.0) build step 1: the IDENTITY PRIMITIVES (section "#88 identity primitives", docs/spec-88.md §1, §3, §4.0) — pure
+// functions written BESIDE the 1.7x model, used by nothing yet: mintId / legacyId (stable node ids), validKey / slugKey /
+// uniqueKey (keys), normLabel / labelKey (labels), parseRef / parsePath2 / formatPath2 (references and `@`-free paths) and
+// parseText (the leading-`@` rule). The bridge still runs the 1.7x path model below until step 9 switches it.
+import { createHash } from 'node:crypto'
 import { lc, projKey } from './keys.js'
 
 /** The locked #70 limits (6a: depth/nodes replace "agent path depth 3" + "32 contexts per agent"). text/context in code
@@ -825,6 +831,231 @@ export function resolveAddress(input, o = {}) {
   return { ok: true, segs: f.segs, current: f.current, path, key: pathKey(path), text }
 }
 const ownerIndex = segs => { for (let i = segs.length - 1; i >= 0; i--) if (segs[i].kind === 'agent') return i + 1; return 0 }   // index into the chain [root, …segs]
+
+// ---------------------------------------------------------------------------------------------------------------
+// #88 identity primitives (v2.0 build step 1; docs/spec-88.md §1, §3, §4.0). Pure, and used by nothing yet: the 2.0 model is
+// built beside the 1.7x one above, which keeps serving the bridge until step 9.
+
+/** Key limits (spec §1.1): a key is 1 – 48 code points; a slug made from a label is cut to 40. */
+export const KEY_LIMITS = Object.freeze({ key: 48, slug: 40 })
+const KEY_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_.#+-]*$/u        // today's agent-segment charset (SEGMENT) MINUS ':' (hole H1)
+const QKEY_RE = /^\?\d+$/                                     // a bridge-made question key (?1, ?2 …; #85's @?N)
+const B32 = 'abcdefghijklmnopqrstuvwxyz234567'               // RFC 4648 base32, lower-case, no padding
+const base32 = buf => { let out = '', v = 0, n = 0; for (const b of buf) { v = ((v << 8) | b) & 0xffff; n += 8; while (n >= 5) { out += B32[(v >>> (n - 5)) & 31]; n -= 5 } } return n > 0 ? out + B32[(v << (5 - n)) & 31] : out }
+const hashId = parts => base32(createHash('sha256').update(JSON.stringify(parts)).digest()).slice(0, 16)
+const sessParts = i => { const x = i && typeof i === 'object' ? i : {}; return [lc(x.host), lc(x.realm) || 'default', lc(x.project), lc(x.user), lc(x.session)] }
+const chainText = c => (Array.isArray(c) ? c.join('/') : c == null ? '' : String(c))
+
+/**
+ * The stable id of a v2-born node (spec §1.2): the first 16 chars of base32(sha256(JSON ["aimb-node/2", lc(host),
+ * lc(realm)||"default", lc(project), lc(user), lc(session), lc(creatorChain), lc(key)])). The session root = chain '', key ''.
+ * Minted ONCE at creation and stored — never recomputed. Pass keys as validKey returns them (NFC).
+ * @param {{ host?: string, realm?: string, project?: string, user?: string, session?: string }} ident
+ * @param {string|string[]} chain  the creator chain ("spec-88/research"; '' = the session itself); an array is joined by '/'
+ * @param {string} key
+ * @returns {string} 16 chars of [a-z2-7]
+ */
+export const mintId = (ident, chain, key) => hashId(['aimb-node/2', ...sessParts(ident), lc(chainText(chain)), lc(key)])
+
+/**
+ * The id the migration gives a v5 node (spec §1.2, §7.3): ["aimb-node/legacy", …the same session parts…, pathKey], where
+ * pathKey is the v5 key (lc canonical 1.7x path, `@` included) of the node's FINAL path. A different prefix from mintId, so
+ * the two families never meet.
+ * @param {{ host?: string, realm?: string, project?: string, user?: string, session?: string }} ident
+ * @param {string} v5PathKey
+ * @returns {string}
+ */
+export const legacyId = (ident, v5PathKey) => hashId(['aimb-node/legacy', ...sessParts(ident), lc(v5PathKey)])
+
+/**
+ * Validate a node KEY (spec §1.1): NFC, trimmed, 1 – 48 code points, first `\p{L}` `\p{N}` or `_`, then those plus `. # + -`
+ * (no `:`, no `/`, no spaces). `root` (any case) is reserved. `?<digits>` (a question key) only with { question:true } — the
+ * bridge minting one, or a caller REFERENCING one.
+ * @param {any} raw @param {{ question?: boolean }} [o]
+ * @returns {ActivityResult} { ok:true, key } or { ok:false, code:'bad-key', what }
+ */
+export function validKey(raw, o = {}) {
+  if (typeof raw !== 'string') return bad('bad-key', 'key must be a string like "docs" or "spec-88"')
+  const k = raw.normalize('NFC').trim()
+  if (!k) return bad('bad-key', 'key is empty')
+  if (cpLen(k) > KEY_LIMITS.key) return bad('bad-key', `key "${cpSlice(k, 20)}…" is longer than ${KEY_LIMITS.key} chars`)
+  if (QKEY_RE.test(k)) return o.question ? { ok: true, key: k } : bad('bad-key', `"${k}" is a question key: only the bridge makes those`)
+  if (lc(k) === 'root') return bad('bad-key', '"root" is reserved')
+  if (!KEY_RE.test(k)) return bad('bad-key', `key "${cpSlice(k, 40)}" may only use letters, digits and _ . # + - (starting with a letter, digit or _)`)
+  return { ok: true, key: k }
+}
+
+/**
+ * The KEY made from a label (spec §1.1, for path-created nodes and a label-only `--item`): NFC, whitespace runs → '-', drop
+ * everything outside [\p{L}\p{N}_.-], collapse '-' runs, strip leading non-[\p{L}\p{N}_] and trailing '-' / '.', ≤ 40 code
+ * points; empty or `root` → `node`. Case is kept (keys compare case-insensitively). Always a valid key. A clash in its scope
+ * is settled by uniqueKey.
+ * @param {any} label @returns {string}
+ */
+export function slugKey(label) {
+  const strip = s => s.replace(/^[^\p{L}\p{N}_]+/u, '').replace(/[-.]+$/, '')
+  let s = strip(String(label == null ? '' : label).normalize('NFC').trim().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_.-]/gu, '').replace(/-{2,}/g, '-'))
+  s = strip(cpSlice(s, KEY_LIMITS.slug))
+  return !s || lc(s) === 'root' ? 'node' : s
+}
+
+/**
+ * The first free key in a scope (spec §1.1): `base` itself, else `base-2`, `base-3` … (base cut so the result stays ≤ 48
+ * code points). `taken` = a Set of lc() keys, or a predicate given the lc() candidate.
+ * @param {string} base @param {Set<string>|((lcKey: string) => boolean)} taken @returns {string}
+ */
+export function uniqueKey(base, taken) {
+  const isTaken = typeof taken === 'function' ? taken : k => !!taken && taken.has(k)
+  if (!isTaken(lc(base))) return base
+  for (let n = 2; ; n++) {
+    const sfx = `-${n}`, k = cpSlice(base, KEY_LIMITS.key - sfx.length).replace(/[-.]+$/, '') + sfx
+    if (!isTaken(lc(k))) return k
+  }
+}
+
+/**
+ * Canonicalise a LABEL (spec §1.3: today's context-name rule minus its `/` and `"` bans): whitespace runs → one space,
+ * trimmed, 1 – 60 code points, no control characters. Any text otherwise — `root`, `@x`, `a/b` are all labels.
+ * @param {any} raw @returns {ActivityResult} { ok:true, label } or { ok:false, code:'bad-label', what }
+ */
+export function normLabel(raw) {
+  if (typeof raw !== 'string') return bad('bad-label', 'label must be a string')
+  const label = raw.normalize('NFC').replace(/\s+/g, ' ').trim()
+  if (!label) return bad('bad-label', 'label is empty')
+  if (/[\u0000-\u001f\u007f]/.test(label)) return bad('bad-label', 'label may not contain control characters')
+  if (cpLen(label) > ACTIVITY_LIMITS.context) return bad('bad-label', `label is longer than ${ACTIVITY_LIMITS.context} chars`)
+  return { ok: true, label }
+}
+
+/** The COMPARISON form of a label (spec §1.6: sibling labels are unique by this): NFC + lc. @param {any} label */
+export const labelKey = label => lc(String(label == null ? '' : label).normalize('NFC')).normalize('NFC')
+
+// A path segment needs quotes when it holds '/', starts with '"' or '@' (an unquoted '@' start is the 1.7x form), or is '.'
+// (a leading './' is the "this is a path" marker, §3.2). Labels are trimmed, so the "starts / ends with a space" case of Q37
+// never arises. `"` inside is doubled.
+const quoteLabel = l => (/\/|^["@]|^\.$/.test(l) ? `"${l.replace(/"/g, '""')}"` : l)
+/** The display path of labels (spec §3.3: labels joined by '/', no `@`; quoted where needed). @param {string[]} labels */
+export const formatPath2 = labels => labels.map(quoteLabel).join('/')
+
+// The 1.7x path → its 2.0 spelling, for the legacy-form message: each segment loses its `@` / `@~`, `@"…"` is unquoted,
+// `@root` (the node itself) is dropped. Best effort: a malformed 1.7x path still gets a useful message.
+function convertLegacyPath(s) {
+  const out = []
+  let tilde = false
+  for (let i = 0; i < s.length;) {
+    while (s[i] === ' ') i++
+    let j = i
+    if (s[j] === '@') { j++; if (s[j] === '~') { tilde = true; j++ } }
+    let name
+    if (s[j] === '"') { const close = s.indexOf('"', j + 1); name = s.slice(j + 1, close < 0 ? s.length : close); j = close < 0 ? s.length : close + 1 }
+    else { let k = j; while (k < s.length && s[k] !== '/') k++; name = s.slice(j, k); j = k }
+    const atRoot = s[i] === '@' && lc(name) === 'root'
+    name = name.replace(/\s+/g, ' ').trim()
+    if (name && !atRoot) out.push(name)
+    while (j < s.length && s[j] !== '/') j++
+    i = j + 1
+  }
+  return { path: formatPath2(out), tilde }
+}
+const legacyPath = raw => {
+  const c = convertLegacyPath(raw)
+  return c.tilde
+    ? { ok: false, code: 'legacy-form', what: `@~ was removed in 2.0: use --text "@…" on the node (${c.path ? `--path "${c.path}" or its --key` : 'no --key / --path: your own node'})`, path: c.path }
+    : { ok: false, code: 'legacy-form', what: `paths have no @ in 2.0: write ${c.path ? `"${c.path}"` : 'no path (the node itself)'}`, path: c.path }
+}
+
+/**
+ * Parse a 2.0 PATH (spec §3.3, Q37): segments separated by '/', each a LABEL (normLabel). A segment holding '/' (or one
+ * starting with '"', '@' or being '.') is written in double quotes, `""` inside for a literal '"'; an unquoted segment runs
+ * to the next '/', quotes inside it literal. Leading / trailing slashes and one leading './' (§3.2's "force a path") are
+ * dropped; '' = the scope itself; ≤ 6 segments. An UNQUOTED segment starting with '@' is the 1.7x form: refused
+ * `legacy-form`, the message (and `path`) giving the converted 2.0 path (§4.5).
+ * @param {any} raw
+ * @returns {ActivityResult} { ok:true, segs:[label…], path, key } (key = labelKey(path)) or { ok:false, code, what, path? }
+ */
+export function parsePath2(raw) {
+  if (typeof raw !== 'string') return bad('bad-path', 'path must be a string like "Next release/Docs"')
+  let s = raw.trim()
+  if (s.startsWith('./')) s = s.slice(2)
+  s = s.replace(/^\/+|\/+$/g, '')
+  if (!s) return { ok: true, segs: [], path: '', key: '' }
+  /** @type {string[]} */
+  const segs = []
+  for (let i = 0; ;) {
+    while (s[i] === ' ') i++
+    let label
+    if (s[i] === '"') {
+      let j = i + 1, t = ''
+      for (;;) {
+        if (j >= s.length) return bad('bad-path', 'unterminated quoted segment ("…")')
+        if (s[j] === '"') { if (s[j + 1] === '"') { t += '"'; j += 2; continue } j++; break }
+        t += s[j++]
+      }
+      while (s[j] === ' ') j++
+      if (j < s.length && s[j] !== '/') return bad('bad-path', 'a quoted segment must end its segment (…"/…)')
+      label = t; i = j
+    } else {
+      if (s[i] === '@') return legacyPath(s)
+      let j = i
+      while (j < s.length && s[j] !== '/') j++
+      label = s.slice(i, j); i = j
+    }
+    if (!label.trim()) return bad('bad-path', 'path has an empty segment')
+    const n = normLabel(label); if (!n.ok) return n
+    segs.push(n.label)
+    if (i >= s.length) break
+    i++   // the '/'
+    if (i >= s.length) return bad('bad-path', 'path has an empty segment')
+  }
+  if (segs.length > ACTIVITY_LIMITS.depth) return tooDeep(segs.length)
+  const path = formatPath2(segs)
+  return { ok: true, segs, path, key: labelKey(path) }
+}
+
+/**
+ * Parse a REFERENCE (`--under`, `--before`, `--after`, `--move`, `--merge`; spec §3.2), by its syntax:
+ * - `chain:key` → { kind:'chain', chain, creators, key } — exactly that scope (`:88` = the session's `88`; `spec-89:docs`).
+ * - a bare valid key (incl. a question key `?3`) → { kind:'key', key } — your scope, then your creator's … up to the session's.
+ * - anything else (contains '/', a label with spaces, a quoted segment, a leading './') → { kind:'path', segs, path, key }
+ *   (parsePath2: refused `legacy-form` for a 1.7x `@` path).
+ * @param {any} raw @returns {ActivityResult}
+ */
+export function parseRef(raw) {
+  if (typeof raw !== 'string') return bad('bad-ref', 'a reference must be a string: a key, chain:key, or a path')
+  const s = raw.trim()
+  if (!s) return bad('bad-ref', 'the reference is empty')
+  const asPath = () => { const p = parsePath2(s); return p.ok ? { ok: true, kind: 'path', segs: p.segs, path: p.path, key: p.key } : p }
+  if (s.startsWith('./')) return asPath()
+  const colon = s.lastIndexOf(':')
+  if (colon >= 0) {
+    const chain = s.slice(0, colon), k = validKey(s.slice(colon + 1), { question: true })
+    const creators = chain ? chain.split('/').map(c => validKey(c)) : []
+    if (k.ok && creators.every(c => c.ok)) return { ok: true, kind: 'chain', chain: creators.map(c => c.key).join('/'), creators: creators.map(c => c.key), key: k.key }
+  }
+  const k = validKey(s, { question: true })
+  return k.ok ? { ok: true, kind: 'key', key: k.key } : asPath()
+}
+
+/**
+ * Split a report's TEXT by the leading-`@` rule (spec §4.0, Q36): count the run of '@' at the start; each PAIR stands for one
+ * literal '@', an odd one left over is the set-the-line marker. `@x` → line "x"; `@@x` → logs "@x"; `@@@x` → line "@x"; an
+ * '@' anywhere else is just a character (`x@` is plain). The text is trimmed first. `@~…` (the 1.7x marker) is refused
+ * `legacy-form`, naming the 2.0 form.
+ * @param {any} raw
+ * @returns {ActivityResult} { ok:true, text, line } (line = it sets the current line) or { ok:false, code, what }
+ */
+export function parseText(raw) {
+  if (typeof raw !== 'string') return bad('bad-text', 'text must be a string')
+  const t = raw.trim()
+  let n = 0
+  while (t[n] === '@') n++
+  if (n === 1 && t[1] === '~') {
+    const m = /^@~("[^"]*"|\S*)\s*(.*)$/s.exec(t), target = m ? m[1].replace(/^"|"$/g, '') : '', rest = m ? m[2] : ''
+    const own = !target || lc(target) === 'root'
+    return { ok: false, code: 'legacy-form', what: `@~ was removed in 2.0: use --text "@${rest || '…'}" on the node (${own ? 'no --key: your own node' : `--key <its key>, or --path "${formatPath2([target])}"`})` }
+  }
+  return { ok: true, text: ('@'.repeat(n >> 1) + t.slice(n)).trim(), line: n % 2 === 1 }
+}
 
 /**
  * @typedef {{ done:number, total:number, unit:string, skipped?:number }} ActivityProgress

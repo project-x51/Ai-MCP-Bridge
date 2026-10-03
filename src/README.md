@@ -138,7 +138,9 @@ federation via translator bridges: see [`../docs/architecture.md`](../docs/archi
   `test_activity_unit.mjs` — the pure #70 activity-board core (`lib/activity.js`; #70, 664 — v1.63.0: todos, plans, the
   rollup variants, lifetime, eviction, carry-forward across rollovers + a restart; v1.64.0: abandoned, the plan-end rule,
   auto-abandon, entry counts, the home host + s0, the run boundary / pruned paging; v1.65.0: the agent-finish rule, the
-  plan-end marker, every dashboard action + its codes, dismiss + its replay, the cf entry count); `test_activity_gossip_live.mjs`
+  plan-end marker, every dashboard action + its codes, dismiss + its replay, the cf entry count); `test_node_id_unit.mjs` —
+  the #88 (v2.0) identity primitives in `lib/activity.js`: node ids, keys, slugs, labels, references, `@`-free paths and the
+  leading-`@` text rule (#88 step 1, 103); `test_activity_gossip_live.mjs`
   — four loopback "hosts" + a follower: the mesh board, deltas ≤1/s per link, truncation, remote paging / entries /
   queued fetches, going-down, owner down, forged slices, a legacy hub, dashboards, plans (#70 step 4 / 6b, 51);
   `test_dashboard_activity.mjs` — the dashboard's Activity view in jsdom: client-side stale, the status glyph + ring,

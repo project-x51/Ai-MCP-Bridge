@@ -570,7 +570,7 @@ replay rewriting older records through later moves, re-keying day files). Agreed
 snippet, the dashboard changes, a build in steps), reviewed by Robin; then build step by step as v2.0.0.
 
 ### #88 spec (final pass)
-The full spec is **[docs/spec-88.md](spec-88.md)** (2026-10-03; nothing built). Robin answered Q01 – Q39 and confirmed two
+The full spec is **[docs/spec-88.md](spec-88.md)** (2026-10-03). Robin answered Q01 – Q41 and confirmed two
 follow-ups (spec §9 "Decisions"); **2.0 is a clean, no-legacy cutover**. In short:
 - **Ids:** 16 base32 chars of sha256(host, session, creator chain, key) — minted once, stored; migrated nodes get
   sha256(host, session, final path). Keys: today's agent-name charset minus `:`, ≤ 48, case-insensitive, unique per creator
@@ -609,8 +609,12 @@ follow-ups (spec §9 "Decisions"); **2.0 is a clean, no-legacy cutover**. In sho
 - **No old bridges at all:** 2.0 speaks only 2.0 on the wire too — PEER_HELLO announces `activity_gossip:6`; no v5
   projection, no dual handshake, no 2.1 cleanup step, no stray-v5 handling. **Every host is upgraded together** with the
   stop-all runbook; a host left on 1.7x shares no activity until it is upgraded.
-- **Holes:** H1 – H21 in the spec §9. **New questions:** Q40 (do agents need a label too?) and Q41 (hosts whose OS logins
-  differ), each with a recommendation (spec §9), posted to the board.
+- **Holes:** H1 – H21 in the spec §9. **Q40 / Q41 decided as recommended** (spec §9): agents need a label too (the snippet
+  fills it in); the view follows the serving gateway's OS login, the board head shows "view: <login>". Build step 1 (the
+  identity primitives) is in progress.
+- **Q43 `--move-to` + transient contexts** (spec §3.8, step 2c). One call reports, then moves (`--move-to "../Passed"`), and
+  missing buckets are created TRANSIENT. They vanish into ghosts when empty, and are resurrected with the same id and a new
+  run. Q44 / Q45 are open.
 
 ## #87 — log panel order: oldest first, auto-scroll to the bottom  ·  **DONE (v1.72.0)**
 Robin, 2026-10-03, asking whether the log panel should run the other way.
