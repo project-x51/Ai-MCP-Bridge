@@ -676,6 +676,24 @@ const nDesc = (list, id) => { const f = (l) => l.reduce((n, t) => n + 1 + f(t.ki
 const whole = fall.filter(t => nDesc(ft79.kids, t.u.id) === nDesc(tree79.kids, t.u.id))
 check('#79 client == bridge (buildTree, Plans filter): every node whose subtree the filter left whole shows the bridge\'s bar — @Release 1 of 5 · 2 skipped, the done @Test plan full', whole.length >= 8 && whole.every(t => same(t.fbar, t.u.bar))
   && (b => b.done === 1 && b.skipped === 2 && b.total === 5 && b.abandoned === 1)(fall.find(t => t.u.path === '@Release').fbar) && (b => b.done === 3 && b.total === 3 && b.forced === 'done')(fall.find(t => t.u.path === '@"Test plan"').fbar), J(whole.filter(t => !same(t.fbar, t.u.bar)).map(t => [t.u.path, t.fbar, t.u.bar])))
+// seen live (#88): an OPEN plan whose node also holds FINISHED helper agents (their own plans all done → full bars) and a
+// questions context showed a FULL bar under Plans (the agents' 6 of 6 won over the plan's 2 of 3) and ~98% without a filter.
+// A plan node's bar is its items; its helpers show their bars on their own rows.
+const st88 = A.createActivity({ config: {}, origin: 'HOST-A' }), I88 = { session: 'Bar88', project: 'Bar88', user: 'robin', host: 'HOST-A' }
+const say88 = (input, dt = 0) => { const p = A.parseMessage(input, { now: t79 + dt, tzOffsetMin: 0 }); if (!p.ok) throw new Error(`fixture: ${J(input)} → ${p.code}`); const r = A.apply(st88, I88, p.msg, t79 + dt); if (!r.ok) throw new Error(`fixture apply: ${J(input)} → ${r.code}`) }
+say88({ path: '@~P88', text: 'building', plan: ['Spec', 'Build 1', 'Build 2a'] }, 1000)
+say88({ path: '@P88/@~Spec', state: 'done' }, 2000); say88({ path: '@P88/@~Build 1', state: 'done' }, 3000); say88({ path: '@P88/@~Build 2a', text: 'in progress' }, 4000)
+say88({ path: '@P88/spec88', plan: ['r1', 'r2', 'r3', 'r4'] }, 5000); for (const [i, k] of ['r1', 'r2', 'r3', 'r4'].entries()) say88({ path: `@P88/spec88/@~${k}`, state: 'done' }, 5100 + i)
+say88({ path: '@P88/spec88/@~root', text: 'spec done', state: 'done' }, 5500)
+say88({ path: '@P88/q88', plan: ['q1', 'q2'] }, 6000); say88({ path: '@P88/q88/@~q1', state: 'done' }, 6100); say88({ path: '@P88/q88/@~q2', state: 'done' }, 6200); say88({ path: '@P88/q88/@~root', text: 'posted', state: 'done' }, 6300)
+say88({ path: '@P88/@Notes', text: 'notes', progress: '9/10 done' }, 7000)
+const U88 = Object.fromEntries([...A.dashUnits(A.boardView(st88, NOW, { raw: true })).values()].map(u => [u.obj.id, u.obj]))
+const p88 = o => { const s = X.buildTree(U88, o).find(p => p.key === 'bar88').sessions[0]; return s.kids.find(t => t.u.path === '@P88') }
+const is2of3 = b => !!b && b.done === 2 && b.total === 3 && b.items === true && b.pct < 100 && !b.forced
+check('#88 plan bar: an OPEN plan whose node also holds finished helper agents + a context with its own bar shows its ITEMS (2 of 3 done) — bridge, no filter, Active only, Plans, both; never a full bar',
+  is2of3(A.rollup(A.getSession(st88, I88), A.getNode(st88, I88, '@P88'))) && is2of3(X.barOf(p88({}).u)) && ['activeOnly', 'plansOnly'].every(k => is2of3(p88({ [k]: true }).fbar)) && is2of3(p88({ activeOnly: true, plansOnly: true }).fbar),
+  J([A.rollup(A.getSession(st88, I88), A.getNode(st88, I88, '@P88')), p88({ plansOnly: true }).fbar, p88({ activeOnly: true }).fbar]))
+check('#88 plan bar: ... the helpers keep their own full bars on their rows', (t => ['spec88', 'q88'].every(n => (b => b && b.pct === 100)(X.barOf(t.kids.find(k => k.u.name === n).u))))(p88({})))
 // rendered
 doc.getElementById('actPlans').checked = false; doc.getElementById('actPlans').dispatchEvent(new win.Event('change'))
 ao.checked = false; ao.dispatchEvent(new win.Event('change'))

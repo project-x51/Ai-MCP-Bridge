@@ -2766,7 +2766,9 @@ export const progressPct = p => (p && p.total > 0 ? Math.min(100, (p.done / p.to
 // the node's ORDINARY children (every child that is not a plan item, with a bar) and its PLAN ITEMS, and returns a bar or
 // null. 6b ("Decisions before 6b"; the build's choice for MIXED children): a plan item counts ONLY as a todo of its parent
 // (its own bar — e.g. an agent working under it — shows on its own row, never in the parent's sum / mean), so a plan node
-// shows "N of M done" unless it also has ordinary children with bars, which win by 6a's precedence (sum, then mean %).
+// shows "N of M done". #88: that holds even when it also has ordinary children with bars (helper agents, a questions
+// context) — they show their bars on their own rows (was 6c decision 7, "ordinary children win": an open plan whose helper
+// agents had finished showed a full bar).
 // #79 (v1.66.0): every bar has THREE parts — done, skipped (resolved, not done: never counted as remaining), total — and
 // each strategy carries all three: a common unit SUMS done, skipped and total; mixed units AVERAGE each child's done
 // fraction and skipped fraction (each child weighted 1); "N of M done" counts ALL items in M (replaces 6b/6c's "skipped
@@ -2813,7 +2815,8 @@ export function forceBar(node, r) {
 /**
  * A node's BAR (recursive): its REPORTED progress (rollup:false), else its children rolled up (rollup:true): the sum of its
  * ordinary children's bars when they share a unit, else their mean percent — through any depth — else (6b) "N of M done"
- * over its plan items (`todos:true` + `items:true`, unit "done"). #79: every bar is { done, skipped, total } (skipped 0 when
+ * over its plan items (`todos:true` + `items:true`, unit "done") — #88 (v1.75.1): a node holding ANY plan item gets only
+ * that, its ordinary children's bars staying on their own rows. #79: every bar is { done, skipped, total } (skipped 0 when
  * none; `abandoned` = how many of an items bar's skipped were abandoned), and a done / abandoned node's own state overrides
  * it (forceBar). null when nothing applies. `memo` (a Map) caches per call when walking a whole board.
  * @param {ActivitySession} sess @param {ActivityNode} node @param {Map<string, any>} [memo]
@@ -2827,7 +2830,8 @@ export function rollup(sess, node, memo) {
   else {
     const kids = childrenOf(sess, node).sort((a, b) => cmp(a.key, b.key))
     const bars = kids.filter(c => !c.plan && !isQuestion(c)).map(c => rollup(sess, c, memo)).filter(Boolean), items = kids.filter(c => c.plan || isQuestion(c))   // #85: a question counts as an item (open = remaining, answered = done, expired / withdrawn = skipped)
-    if (bars.length || items.length) for (const f of rollupStrategies) { r = f(bars, items); if (r) break }
+    if (items.some(c => c.plan)) r = rollupStrategies[2]([], items)   // a PLAN node: its items are its bar (helper agents / contexts show theirs on their own rows)
+    else if (bars.length || items.length) for (const f of rollupStrategies) { r = f(bars, items); if (r) break }
   }
   r = forceBar(node, r)
   if (memo) memo.set(node.key, r)

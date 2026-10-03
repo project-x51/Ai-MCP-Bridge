@@ -683,8 +683,11 @@ Opt-in: nothing becomes a todo unless it is created as one, and ordinary context
   skipped"; `items:true`, `skipped`, `abandoned` = how many of the skipped were abandoned). (6b–6c left skipped items out
   of M and drew no bar when every item was skipped.) **Mixed children:** a plan item
   counts ONLY as a todo of its parent — its own bar (e.g. an agent under it reporting files) shows on its own row, never in
-  the parent's sum. The precedence stays 6a's: the node's reported progress, then the SUM of its ordinary children's bars
-  when they share a unit, then their MEAN %, then the plan's N of M — so ordinary children with bars win over the plan.
+  the parent's sum. **v1.75.1 (#88): a node that holds plan items gets its bar from those items ONLY** ("N of M done",
+  questions counting as items) — its helper agents and contexts keep their own bars on their own rows, never mixed in.
+  (Until v1.75.0 ordinary children with bars won over the plan, so an open plan whose helper agents had finished showed a
+  full bar.) A node with no plan items rolls up as before: its reported progress, then the SUM of its ordinary children's
+  bars when they share a unit, then their MEAN %. The node's own reported progress still wins over its plan.
   Up the tree, plan bars sum like any shared unit (two plans → "3 of 9 done").
 - **Lifetime** (v1.64.0 changed when a plan ENDS — see "Step 6c": only all-done, or the plan marked complete / abandoned;
   what follows is 6b's rule): `finished_visible_hours` now defaults to **168 (7 days)** (per host as before). **Open** items (todo /

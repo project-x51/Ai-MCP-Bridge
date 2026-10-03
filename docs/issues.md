@@ -6,8 +6,14 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-03, v1.75.0) — read this first after a compact
-**Current version: v1.75.0** (#90: **Change answer…** on an answered question from the dashboard — `change_answer` {choice?,
+## RESUME STATE (updated 2026-10-03, v1.75.1) — read this first after a compact
+**v1.75.1 (2026-10-03):** a node holding plan items rolls up ONLY its items ("N of M"); its helper agents / contexts keep their
+bars on their own rows — reverses 6c decision 7 (seen live on #88: a full green bar while a step was still running). `rollup` +
+dashboard `rollKids`; wire-compatible; code done in a worktree for review, NOT committed, NOT deployed. See §13 "Built (v1.75.1)".
+Tests: `test_activity_unit` 879 (2 "6b rollup MIXED" checks flipped), `test_dashboard_activity` 346 (+2). Full `npm test`: 3117 of
+3118 checks in 63 files; one load flake (#74 family, new member): `test_activity_gossip_live` "legacy hub: still federated
+(roster) with the 1.60 hubs" — green alone 51/51.
+**Before that v1.75.0** (#90: **Change answer…** on an answered question from the dashboard — `change_answer` {choice?,
 text?}, a new attributed entry "answer changed by …", the question stays answered with `revised` + `previous`, the session hears
 `activity_answer` status `revised` at once, waiting scripts are not reopened; PEER_HELLO `activity_revise:1` → `remote_hosts[].revise`,
 older owners `owner-unsupported`. **Fixes:** a question's answer / withdraw / expiry entries now carry their OWN details (the
@@ -1879,7 +1885,10 @@ Any node may contain either kind, so agents can be grouped under the task they s
    - **A plan does NOT end** while any item is anything but done. Skipped, failed and idle items keep it open;
      only all-done ends it. Otherwise it ends only when marked complete or abandoned (6d right-click).
      **This supersedes 6b's "done or skipped ends a plan".**
-   - On a mixed node, ordinary children's bars win over "N of M".
+   - ~~On a mixed node, ordinary children's bars win over "N of M".~~ **REVERSED (Robin, 2026-10-03, v1.75.1):** a node
+     that holds plan items gets its bar from those items only ("N of M"); its helper agents and contexts keep their own bars
+     on their own rows; a node with no plan items rolls up its children as before. Why: on #88 an open plan showed a full
+     green bar while a step was still running, because two finished helper agents' full bars won over its 2 of 3.
    - **Top-level host tags compare with the session's HOME host** (the host it first registered on), not the
      headline host, so tags don't flip.
 8. Replay reading up to 7 days of files at startup is accepted.

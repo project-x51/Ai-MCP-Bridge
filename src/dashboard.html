@@ -1103,13 +1103,15 @@
     function hostTagOn(t,multi){ return !!multi&&!!t&&!!t.u&&String(t.parentHost==null?'':t.parentHost).toLowerCase()!==String(t.u.host).toLowerCase(); }
     // 6c: ROLLUPS FOLLOW THE FILTERS — with Active only / Plans on, a node without reported progress rolls up only the children
     // the filter shows (a port of lib/activity.js rollup: the SUM of ordinary children sharing a unit, else their MEAN %, else
-    // "N of M done" over its plan items — #79: three parts, M = every item, skipped + abandoned → skipped; a done node = 100%);
+    // "N of M done" over its plan items — #79: three parts, M = every item, skipped + abandoned → skipped; a done node = 100%;
+    // #88: a node holding plan items rolls up its items only, never its ordinary children);
     // without a filter the bridge's own `bar` is shown as sent
     function ownBar(p){ return {done:p.done,skipped:skOf(p),total:p.total,unit:p.unit,pct:pct(p),rollup:false,n:1}; }
     function rollKids(kids){
       var ks=(kids||[]).slice().sort(function(a,b){ var x=String(a.u.key), y=String(b.u.key); return x<y?-1:x>y?1:0; }), bars=[], items=[];
       ks.forEach(function(t){ if(t.u.plan_item||isQuestion(t.u)) items.push(t.u); else if(t.fbar) bars.push(t.fbar); });   // #85: a question counts as an item (open = remaining, answered = done)
-      if(bars.length){
+      var plan=items.some(function(u){ return !!u.plan_item; });   // a PLAN node: its items are its bar (its helper agents / contexts show theirs on their own rows)
+      if(bars.length&&!plan){
         var u0=String(bars[0].unit||'').toLowerCase();
         if(u0!=='%'&&bars.every(function(p){ return String(p.unit||'').toLowerCase()===u0; })){ var d=0, sk0=0, tt=0; bars.forEach(function(p){ d+=p.done; sk0+=skOf(p); tt+=p.total; });
           var r={done:d,skipped:sk0,total:tt,unit:bars[0].unit,pct:pct({done:d,total:tt}),rollup:true,n:bars.length}; if(bars.every(function(p){ return p.todos; })) r.todos=true; return r; }

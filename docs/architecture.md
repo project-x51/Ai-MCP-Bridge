@@ -1202,6 +1202,10 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.75.1):** *A plan node's bar is its items only (Robin, 2026-10-03; reverses 6c decision 7).* `rollup` (lib/activity.js)
+  and the dashboard's `rollKids`: a node holding any plan item gets "N of M done" over its items (questions still count as items);
+  its helper agents and contexts keep their own bars on their own rows; a node with no plan items rolls up its children as before.
+  Seen live on #88: an open plan showed a full green bar because two finished helper agents' bars won. Wire-compatible (format v5).
 - **Built (v1.75.0):** *#90 — change an answer from the dashboard; a question's status entries carry their own details; open
   questions never go stale.* **Wire-compatible with 1.66 – 1.74** (format stays v5). **The bug (Robin, 2026-10-03):** expanding a
   question's "answered by …" entry showed the QUESTION's background — `apply` copied the line's details / data onto a status change's
@@ -1713,7 +1717,8 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   children, the PLAN-ITEM children)` — sum (shared unit), then mean %, then "N of M done" (`{done, total: items −
   skipped, unit:'done', todos:true, skipped, n}`; all skipped → no bar; failed = not done). So a plan item counts only as a
   todo of its parent (its own bar — e.g. from an agent under it — stays on its row) and ordinary children with bars win on
-  a mixed node (6a's precedence); plan bars sum up the tree (`todos` kept). **Lifetime:** `finished_visible_hours`
+  a mixed node (6a's precedence) — **REVERSED in v1.75.1 (#88): a node holding plan items rolls up its items only; its
+  ordinary children keep their bars on their own rows** (see §13 "Built (v1.75.1)"); plan bars sum up the tree (`todos` kept). **Lifetime:** `finished_visible_hours`
   defaults to **168** (also the replay window). `expire` never removes anything holding an OPEN item (todo / running /
   blocked: `openPlanKeys` = the open items and all their ancestors) — a finished agent or a GONE session with one stays;
   a plan ENDS when its last item became done / skipped or its owner (the plan node if an agent, else its nearest agent /
