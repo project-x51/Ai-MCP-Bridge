@@ -11,7 +11,8 @@ are in §9 "Decisions". The build (§8) has started (steps 1, 2a and 2b done; 2c
 `test-result` real types and filled the registry's `menu` slot for #92; Robin then answered Q50 – Q60, changing Q56 (one
 tests bar) and Q57 (with Q61 / Q62: state is progress, result is outcome — a test-result sets the state to done) and added
 TIME in the logs (§5.7); step 3 built the v6 records + replay, the day / index files and the time; step 4 built the
-conversion library — Robin accepted its Q63 – Q65 as built; no question is open).
+conversion library — Robin accepted its Q63 – Q65 as built; step 5 the migration script — Robin accepted its Q66 – Q68 as built; step 6 wired
+the bridge files into the gateway behind the pre-cutover switch `AI_BRIDGE_ACTIVITY_V2` — Robin accepted its Q69 as built; no question is open).
 The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
@@ -1368,6 +1369,76 @@ existing checks keep passing while the core is written.
    `actLogPage` via the index, the ghost table at startup, "show removed", the conflicted-copy check at start / rollover.
    *Tests:* paging reads only indexed ranges (a counter in the facet), ghost entries appear only with `removed:true`, a ghost
    leaves when its last day is pruned, a rebuilt index equals the written one.
+
+   **6 as built** (2026-10-03): the first step wired into the bridge. THE STAGING (the spec has the bridge switch models
+   only in step 9, gossip in 7, the dashboard in 10): the 2.0 board runs behind a PRE-CUTOVER SWITCH, the environment
+   variable `AI_BRIDGE_ACTIVITY_V2=1` — set, this host's gateway holds the 2.0 store INSTEAD of the 1.7x board (`activity`
+   stays null, `act2` holds the store); unset (the default, and every live bridge), the 1.7x board serves exactly as before,
+   so main's suite stays green and the bridges stay runnable on their v5 history. Step 9 removes the switch (2.0 always).
+   With it on, what later steps build answers `not-in-2.0-yet` (+ the step): another host's board / gossip (7: the gateway
+   announces no `activity_gossip`, so no 1.7x peer sends it slices), a batch `items`, `--wait` / `--wait-answer` (9), the
+   dashboard's board pushes and actions (10). No new config key (§10.5).
+   NEW: `src/lib/activity2-store.js` — `createStore2({ host, fsx, config, idPrefix, log })`, the gateway's 2.0 store (the
+   model + its files; the bridge keeps the timers, tools and wire): `start` (§7.5's check; a fresh host's marker), `open`
+   (retention first — a day goes with its index file —, the conflicted-copy scan, the replay of the window
+   (`createReplay2` over the facet's newest-first reader), the indexes, `rebuildGhosts2` + each ghost's `last_ts` from the
+   indexes + `pruneGhosts`), `apply` (`applyCall`, its `writes` through the writer), `action` (`applyAction2`, for step 10
+   and the tests), `checkpoint` / `flush` (cp + rep), `expire` (`expirePass2` + `expireAliases`), `rollover(now, why)` (the
+   cf once a day — and after a restart whose replay found none today —, `writer.rollover` = the index file of every closed
+   day, retention, the scan, the ghosts' days + `pruneGhosts`), `board`, `entry`, `logPage`, `head` (`format: 6`,
+   `fs_warnings`). The FACET: `persistence.activity2` (`facets/persistence/file.js`; `null` in `none.js` = a memory-only
+   2.0 board) binds `lib/activity2-files.js` to its directory, with `stats` = the PAGING COUNTER (`span_reads`, `span_bytes`
+   for pages; `day_reads`, `day_bytes` for the replay and entry lookups), `startCheck` / `writeFreshMarker`. Files lib:
+   `readSpanBackwards` (the records starting in [from, to], newest first, read BACKWARDS in chunks from `to`'s line end or
+   a cursor, counted), the writer's `openIndex` / `lookup` (today's in-memory index, opened on demand).
+   THE GATEWAY (`bridge.mjs`, switch on): at promotion `startActivity2` runs the START CHECK before anything else — v5
+   history or a leftover backup → one stderr line `activity: REFUSED TO START (exit 78): <§7.5 message>` (written
+   synchronously), the same message in the TRAY'S FILE `<os temp>/aimb-start-refused-<ws port>.txt`, exit 78; a start
+   removes that file. Then the store opens SYNCHRONOUSLY (no "loading" phase: the replay is done before the gateway serves),
+   the startup rollover and a first expiry pass run, and the timers drive it: checkpoints (as 1.7x), the rollover check
+   (every `ACT_ROLLOVER_CHECK_MS`, acting once per local day), the expiry pass (every `ACT_GC_MS`), prepare-shutdown and a
+   clean exit flush the cp lines. A follower promoted later runs the same check at its promotion (followers own no
+   activity until then). The `log` tool and the logger link take the 2.0 fields (`LOG2_FIELDS`; the tool pre-validates with
+   `parseCall`); the `activity` read answers this host's board (`board`: each session's visible nodes depth first —
+   `nodeView` + parent, depth, state (stale), line, bar, `displayOf2`), a log page (`log:{ session, id | path, own,
+   removed, earlier, limit, cursor }`) or an entry; the head carries `format: 6` and `fs_warnings`; `tap` adds the facet's
+   counter, the open stats and the last cf.
+   THE TRAY (`tray/windows/AiMcpBridgeTray.cs`): it keeps the gateway process it launched; when that exits 78 it reads
+   the tray's file, shows the message in a balloon and a "Bridge refused to start - details..." menu item, and STOPS the
+   keep-alive relaunch until Restart Bridges... (which clears it and tries again) — Q69.
+   LOG PAGES (§5.1 – §5.3), mechanics decided here: MEMBERS = the node + its subtree now by id (kids, merged ones too) and,
+   with `removed:true`, every ghost hanging below a member (through `gkids`, so a ghost chain links a removed grandchild);
+   a ghost's entries carry `removed:true` and their path = the ghost's last labels under its live ancestor. With files, a
+   page comes from the DAY FILES ONLY (every write is synchronous, so the files are complete; memory is not merged in):
+   `spansOf`-style per retained day — closed days' index files (cached, re-checked by size), today's index in the writer's
+   memory — newest day first, each day's [min first, max last] read backwards; a full page stops reading at once
+   (`next_cursor` = `f2.<day>.<offset>` of its last entry; the next page may come back empty with the run's end). RUNS: a
+   live member contributes the entries of its CURRENT run (ts ≥ its `run_at`; a moved-in node its whole run), a ghost all its
+   retained entries; exhausted → `run_start:true`, and `earlier_cursor` when an earlier run of a member left entries;
+   `earlier:true` (with that cursor) pages the EARLIER runs' entries only (no entry twice); `pruned:true` instead of
+   `run_start` when the queried node's run began before the oldest retained day. `total` = the members' entry count from
+   the indexes. Without files (no persistence) the live members' in-memory logs serve (entry-id cursors). GHOST LIFETIME
+   (§5.1): at open and each rollover every ghost's `last_ts` = the start of the newest retained day whose index lists one of
+   its entries (null = none), then `pruneGhosts` from the oldest retained day — a ghost with no retained entry stays only
+   while a ghost below it has one. INDEXES: a closed day's index file is written at the rollover (from memory when the
+   writer holds the whole day, else one scan) and REBUILT at open when missing or stale (a WARN-free log line); the migrated
+   index of the day a gateway then appends to goes stale until that rollover rewrites it (it is never read meanwhile: today
+   is served from memory).
+   Tests: `tests/unit/test_activity6_unit.mjs` (the store on temp dirs: start check, writes / cp / cf once a day, index at
+   the rollover = a rebuild, a missing / stale index rebuilt, paging — one span, backwards tail, cursors across days, a day
+   without the node never read —, ghosts with `removed`, a dismissal's parent entry, runs + `earlier_cursor` / `earlier`,
+   the ghost table rebuilt from the index files after a restart past the window, a ghost leaving with its last day, ghost
+   chains, `pruned`, the conflicted copy warned once and never pruned, a memory-only store, `readSpanBackwards`) and
+   `tests/activity/test_activity2_files_live.mjs` (2.0 gateways on a temp dir, the shifted clock: exit 78 on v5 history and
+   on a leftover backup, with the tray's file and no byte changed; the SAME history served by a 1.7x gateway without the
+   switch; the migration library converts it; a 2.0 gateway starts on it — board, format 6, the tray's file removed —,
+   writes v6 records through the `log` tool (agent, context, `move_to` into a transient bucket that then vanishes),
+   pages through the index (the facet's counter), ghosts only with `removed`; the midnight ROLLOVER writes the closed day's
+   index = its rebuild and the new day's cf; a planted conflicted copy in `fs_warnings`; a restart a week later rebuilds
+   the ghost table from the index files (the dismissed helper's entries only with `removed`); a restart with a shorter
+   retention deletes the days with their index files and the ghost leaves). No 1.7x test changed. Left for later: gossip v6
+   and remote pages (7), the view state and `opt:show_removed` (8), the 2.0 script / batches / waits / guides and removing
+   the switch (9), the dashboard's units, actions, "show removed" toggle and `earlier` (10). Question Q69: accepted as built (§9).
 7. **Gossip v6** (§6). `activity_gossip:6` (the 1.7x feature flags no longer sent or read), v6 slices, id-addressed
    `ACTIVITY_REQ` / `ACTIVITY_ACT`, the rename / merge / unmerge actions and the clash answer across hosts. No projection, no
    translation, no mixed-version code. *Tests:* unit (slice deltas by id: a rename / move changes one unit); live between
@@ -1418,7 +1489,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built) and Q66 – Q68 those of step 5 (open, below); GROUPS, ROLLUP and TYPES are decisions
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built) and Q69 that of step 6 (accepted as built); GROUPS, ROLLUP and TYPES are decisions
 Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
@@ -1490,6 +1561,10 @@ answer overrides an earlier one (noted in the earlier row).
 | 63 | (build step 4) An empty grouping context (no line, no children) no 1.7x record has named for longer than the replay window | **Accepted as built (Robin):** Dropped by the conversion at the next day start (a `remove`, why expire) — the rule a 1.7x restart applies (its replay never rebuilds it); 2.0 would keep it for good. `forget:false` keeps the live tree instead (§8 step 4). |
 | 64 | (build step 4) A 1.7x question that also holds children (items added under it after it was asked) | **Accepted as built (Robin):** It stays type `question`: answerable, one item of its parent's plan; its children stay under it but are no plan in 2.0 after the cutover (no plan end / expiry of their own, no protection for their agent). The conversion follows 1.7x's rules up to the cutover (§8 step 4). |
 | 65 | (build step 4) The message type of converted 1.7x move / placement entries | **Accepted as built (Robin):** `note` with their `act` (move / reorder), as 1.7x applied them (the session's own move refreshed its activity; any made the node non-implicit) — not `event` as 2.0 writes them (Q55); dismissals are events (Q54) (§8 step 4). |
+| 66 | (build step 5) How the migration script tells that a bridge is running on this host | **Accepted as built (Robin):** there is no lock, pid or port file, so it makes a TCP connect to the gateway's well-known port (and `bind` when that is a specific address) and hangs up without sending a byte — the gateway ignores such a connection; an answer → refused, no answer in time → refused "could not tell" (§7.2, §8 step 5). |
+| 67 | (build step 5) The `--backup <dir>` option of §7.2 | **Accepted as built (Robin):** not built — the backup always lives at `persistence/activity-v5-backup/<host>/`, where the 2.0 gateway's start check looks for an unfinished migration (§7.2, §7.5). |
+| 68 | (build step 5) What a failed migration run leaves | **Accepted as built (Robin):** the v5 files are restored from the backup and the backup removed — the directory exactly as before, exit 3 (only a failed restore keeps the backup, named); §7.2 had the backup kept and the directory half-converted until the next run (§7.2, §8 step 5). |
+| 69 | (build step 6) What the Windows tray does when the 2.0 gateway it launched refuses to start (exit 78, §7.5) | **Accepted as built (Robin):** it shows the message once in a balloon, keeps it in a "Bridge refused to start - details..." menu item, and stops relaunching the gateway (until now it relaunched every 3 s) until Restart Bridges... is chosen (§8 step 6). |
 | TIME | (Robin, 2026-10-03) Time in the logs | **Accepted into 2.0 (built in step 3):** a node times each attempt from running to done / failed / skipped / abandoned (`took`, on the node and the ending entry); a reopen / restart is a new attempt (latest `took` + `took_total` / `attempts`); no start → no took; a test-result's duration is its took; plans, test runs and agents get their own start-to-end time; it survives checkpoints and the replay and shows in `displayOf2` ("took 4m 12s") (§2.2, §5.7). |
 | GROUPS | (Robin, 2026-10-03, new) Lists that are not plans | **Accepted into 2.0 (step 2b):** a context can be a GROUP — a list, not a plan: no bar, no plan-end, nothing added to its parent's rollup; where the bar would be, an optional COUNT ("4 items" / "3 open · 1 done"; abandoned and hidden items not counted). Set at creation (`--group` / `group:true`) or toggled from the dashboard (Show as group / Show as plan); its items keep their states. Candidates: Potential changes, Planned changes, Deployed releases, Questions; Next release stays a plan (§1.3, §2.1, §5.7). *The flag was then folded into TYPES: a group is `--context-type=group`.* |
 | TYPES | (Robin, 2026-10-03, "typed nodes and entries") | **Accepted into 2.0:** every node has a `type` from a small built-in REGISTRY held as data — per type its allowed fields, display (glyph, what shows in place of a bar), rollup behaviour, allowed children and menu actions (the slot the context-aware menu, #92, folds into). Types: `context` (the default, plan-capable), `plan`, `group`, `agent`, `question`, and `test-run` (reserved; built in step 2d). The flag is `--context-type=<type>` (tool `context_type`; kebab-case flag, values case-insensitive); it REPLACES `--group` / `group:true`; a question is a node of type `question`. ENTRIES are typed too: `--message-type=<type>` (tool `message_type`; default `note`), each type declaring typed fields that are validated so the bridge can count them (later: `--message-type=test-result --result pass --checks 22 --duration 4.1s`); `--data` stays free-form. Answers are `answer` entries; the node state still drives plans and progress. 2b builds the registries, the mechanism and the types questions need (`note`, `question`, `answer`, `withdrawal`, `expiry`, + `event` for structural entries); a new step 2d builds `test-run` + `test-result`; #81's test reporter is the first user of `test-run`. QUESTIONS read naturally: state the question, its options listed below it as the answers; the text never restates the options; choices stay structured (`--choice`) — in §5.8, the Answer dialog (§5.4) and the agent guide (§4.3) (§1.7, §2, §4, §5.7, §5.8, §8). |
@@ -1560,14 +1635,7 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q65, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). Open — step 5's, each built as described
-(posted on the board under Questions / "Step 5 (Q66–Q68)"):
-- **Q66** How the migration script tells that a bridge is running on this host: there is no lock, pid or port file, so it
-  makes a TCP connect to the gateway's port and hangs up without sending a byte (the gateway ignores such a connection).
-- **Q67** The `--backup <dir>` option of §7.2: not built — the backup always lives at `persistence/activity-v5-backup/<host>/`,
-  where the 2.0 gateway's start check looks for an unfinished migration.
-- **Q68** What a failed migration run leaves: the v5 files restored and the backup removed (the directory exactly as before,
-  exit 3) — §7.2 had the backup kept and the directory half-converted until the next run.
+Q40 – Q69, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). No question is open.
 
 ---
 

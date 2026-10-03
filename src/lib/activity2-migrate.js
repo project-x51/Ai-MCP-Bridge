@@ -1,8 +1,8 @@
 // #88 (v2.0) build step 5: the MIGRATION — a host's 1.7x activity history (v5 day files) converted IN PLACE into 2.0
 // history (v6 day files + index files + the format marker), docs/spec-88.md §7.1, §7.2, §7.5, §10. The library behind
 // src/tools/aimb-migrate-v2.mjs (the script parses the command line, finds the config / dir / host / port the bridge would
-// use, prints); this module does the work on a persistence DIRECTORY, so the tests run it on temp dirs. Wired into nothing
-// else yet: step 6 calls startCheck2 / writeFreshMarker at gateway start.
+// use, prints); this module does the work on a persistence DIRECTORY, so the tests run it on temp dirs. Step 6 wired
+// startCheck2 / writeFreshMarker into the 2.0 gateway's start (the persistence facet's `activity2`, lib/activity2-store.js).
 //
 // THE CUTOVER (§7.1, Q09 / Q21 / Q24 / Q26 / Q35 / Q39: clean, no legacy reader, no rollback): every bridge is stopped; each
 // host runs the script once; the bridges then start in any order and a 2.0 gateway refuses unconverted history (§7.5).
@@ -156,7 +156,7 @@ function readDays(d, names, expect) {
 const v6Count = days => days.reduce((a, d) => a + d.records.filter(r => r && r.v === ACTIVITY2_FORMAT && recordKind2(r)).length, 0)
 
 // ---------------------------------------------------------------------------------------------------------------
-// the 2.0 gateway's start check (§7.5) — step 6 wires it
+// the 2.0 gateway's start check (§7.5) — wired in step 6 (bridge.mjs startActivity2 → exit 78)
 
 /**
  * May a 2.0 GATEWAY start on this host's history? → { ok:true } (converted), { ok:true, fresh:true } (no day files and no

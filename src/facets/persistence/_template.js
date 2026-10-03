@@ -77,6 +77,7 @@ export function create(ctx) {
       async *readBackwards(host, opts) {},                        // every record NEWEST FIRST ({ rec|null, day, offset, length }), chunked from the end; opts { fromDay, chunk, before:{day, offset} }
       async prune(host, beforeDay) { return [] },                 // retention: delete days before beforeDay
     },
+    activity2: null,                               // #88 step 6 (2.0): the v6 day + index files, or null (memory-only board) — see file.js `activity2` for the shape
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
   }
 }

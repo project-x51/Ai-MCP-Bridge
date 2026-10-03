@@ -8,6 +8,8 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import readline from 'node:readline'
+import * as A2F from '../../lib/activity2-files.js'
+import { startCheck2, writeFreshMarker } from '../../lib/activity2-migrate.js'
 
 export const meta = { facet: 'persistence', name: 'file' }
 
@@ -590,6 +592,38 @@ export function create(ctx) {
     },
   }
 
+  // ---- #88 step 6 (2.0): the host's v6 DAY files + per-day INDEX files (docs/spec-88.md §2.4, §5.2, §7.5, §10) — the same
+  // activity/<host>/ directory, through lib/activity2-files.js bound to this facet's root (synchronous; ONE writer per host:
+  // the 2.0 gateway's store, lib/activity2-store.js). `stats` counts what log paging reads (spans and bytes) and what the
+  // replay reads (whole days), so a test can see that a page reads only the byte ranges the index names (§8 step 6).
+  const act2stats = { span_reads: 0, span_bytes: 0, day_reads: 0, day_bytes: 0 }
+  const activity2 = {
+    dir: root,
+    stats: act2stats,
+    /** The day-file writer of `host` (createDayWriter: append / replaceTail / writeAll, today's index in memory, rollover, prune). */
+    writer: host => A2F.createDayWriter({ dir: root, host }),
+    /** The host's directory listing by the exact-name rules (+ each odd name's WARN line once per `seen`). */
+    scan: (host, seen) => A2F.scanHostDir(root, host, { seen }),
+    scanViews: seen => A2F.scanViewsDir(root, { seen }),
+    days: host => A2F.days(root, host),
+    daySize: (host, day) => { try { return fs.statSync(A2F.dayFile(root, host, day)).size } catch { return -1 } },
+    /** A CLOSED day's index (rebuilt + written when missing or stale) → { index, rebuilt }. */
+    ensureIndex: (host, day) => A2F.ensureIndex(root, host, day),
+    hasIndex: (host, day) => fs.existsSync(A2F.indexFile(root, host, day)),
+    /** Every record NEWEST FIRST down to `fromDay` (the replay), whole day files at a time. */
+    *readBackwards(host, o = {}) {
+      let day = null
+      for (const r of A2F.readBackwards(root, host, o)) { if (r.day !== day) { day = r.day; act2stats.day_reads++ } act2stats.day_bytes += r.length + 1; yield r }
+    },
+    /** One day's records in file order (an entry lookup by id). */
+    readDay(host, day) { const ls = A2F.readDay(root, host, day); act2stats.day_reads++; for (const l of ls) act2stats.day_bytes += l.length + 1; return ls },
+    /** The records starting in [from, to] of one day, newest first (readSpanBackwards) — counted. */
+    readSpanBackwards(host, day, from, to, o = {}) { act2stats.span_reads++; return A2F.readSpanBackwards(root, host, day, from, to, { ...o, onRead: n => { act2stats.span_bytes += n } }) },
+    /** §7.5: may a 2.0 gateway start on this host's history? (lib/activity2-migrate.js startCheck2) */
+    startCheck: host => startCheck2(root, host),
+    writeFreshMarker: (host, now) => writeFreshMarker(root, host, now),
+  }
+
   // a read-only summary of every store for the dashboard's persistence view. Records are self-describing,
   // so this shows real identities/topics (not opaque hashes). Capped per store to bound the payload.
   async function snapshot() {
@@ -628,7 +662,7 @@ export function create(ctx) {
   }
 
   return {
-    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, behaviors, realmDefaults, projectNames, activity, snapshot,
+    meta, root, readable, mailbox, claims, grants, registrations, subscriptions, vault, retained, keptTopics, behaviors, realmDefaults, projectNames, activity, activity2, snapshot,
     // config-resolved knobs (parsed once) for the bridge to apply in later stages
     limits: {
       messageTtlMs: (Number(cfg.messageTtlDays) || 14) * 86400000,

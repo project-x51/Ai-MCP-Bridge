@@ -105,9 +105,10 @@
 //   record at a time; createReplay2 is that fold over its buffer), carryOf2 (one node's cf) and timingStep, now exported.
 //
 // STUBS LEFT FOR LATER STEPS (said where they bite):
-// - Step 6 wires the bridge: the facet appends `writes` / cp / cf through it, index files at rollover, paging via the
-//   index (log_floor marks a replayed node whose older entries are only in the files), rebuildGhosts2 + pruneGhosts at
-//   startup / rollover, the conflicted-copy WARN. The session ROOT writes no create record (its id is derivable).
+// - Step 6 WIRED the bridge (behind the pre-cutover switch AI_BRIDGE_ACTIVITY_V2 until step 9): lib/activity2-store.js
+//   appends `writes` / cp / cf through the facet's writer, writes index files at rollover, pages via the index,
+//   runs rebuildGhosts2 + pruneGhosts at startup / rollover and the conflicted-copy WARN. The session ROOT writes no
+//   create record (its id is derivable).
 // - Step 9 wires the script's typed-field flags (--result / --checks / --failed / --duration → `fields`); step 10 the
 //   dashboard's use of displayOf2 (`tests`: testBar2) and menuOf2.
 import { lc } from './keys.js'
@@ -537,6 +538,8 @@ const cpSig = n => JSON.stringify([n.current, n.progress, n.eta_at, n.finished_a
 /** The small form a node's in-memory log keeps (no details / data, no identity). */
 const smallOf = e => compact({ id: e.id, ts: e.ts, type: e.type, fields: e.fields, current: !!e.current, text: e.text, state: e.state, progress: e.progress, eta_at: e.eta_at,
   stale_after_ms: e.stale_after_ms, has_details: e.details ? true : undefined, has_data: e.data != null ? true : undefined, by: e.by, act: e.act })
+/** Step 6: the same small form for a day-file entry (the store's log pages, lib/activity2-store.js). */
+export const smallOf2 = smallOf
 /**
  * Write one v6 ENTRY on `node` (§2.2): { v:6, id, ts, n, type, fields?, current, text, state, at, …f.extra, by?, act?, …ident,
  * details, data }. `type` = its MESSAGE TYPE (default note) and `fields` its typed fields (MESSAGE_TYPES; omitted when none).

@@ -6,6 +6,8 @@
 // Quit weighs what is connected and offers: Cancel / Close tray only / Shut down all bridges.
 // Restart Bridges (confirmed) stops every bridge process on this machine and starts a fresh gateway.
 // Both stops first POST /admin/prepare-shutdown to the gateway (bridge 1.59.0+, #70) so it persists before the kill.
+// #88 (2.0): a gateway that REFUSES TO START (exit 78: its activity history is not converted, or a migration did not finish)
+// is not relaunched every few seconds — the tray shows its message (balloon + menu) until Restart Bridges... is chosen.
 //
 // Built with the in-box .NET Framework compiler (no SDK / runtime install) — see build.cmd.
 // C# 5 compatible (no string interpolation / null-conditional) so legacy csc.exe accepts it.
@@ -37,6 +39,9 @@ class TrayApp : ApplicationContext
     Icon _onIcon, _offIcon;
     int _emptyTicks;
     ToolStripMenuItem _header;
+    Process _launched;     // the gateway this tray started last (its exit code tells a refusal from a crash)
+    string _refused;       // #88: the refusal message while the bridge refuses to start (no relaunch meanwhile), else null
+    ToolStripMenuItem _refusedItem;
 
     [STAThread]
     static void Main(string[] args)
@@ -63,6 +68,9 @@ class TrayApp : ApplicationContext
         var header = new ToolStripMenuItem(_version.Length > 0 ? ("Ai MCP Bridge  v" + _version) : "Ai MCP Bridge");
         header.Enabled = false;        // non-clickable label: the running bridge version, at a glance
         menu.Items.Add(header);
+        _refusedItem = new ToolStripMenuItem("Bridge refused to start - details...", null, delegate { ShowRefusal(); });
+        _refusedItem.Visible = false;
+        menu.Items.Add(_refusedItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Open Dashboard", null, delegate { OpenDashboard(); });
         menu.Items.Add(new ToolStripSeparator());
@@ -89,18 +97,19 @@ class TrayApp : ApplicationContext
     // ---- lifecycle ----------------------------------------------------------
     void Tick()
     {
+        CheckLaunched();
         int n = CountBridges();
         bool up = n > 0;
         _icon.Icon = up ? _onIcon : _offIcon;
-        _icon.Text = Tip(up, n);
+        _icon.Text = _refused != null && !up ? "Ai MCP Bridge - refused to start (see menu)" : Tip(up, n);
         if (_ephemeral)
         {
             if (!up) { _emptyTicks++; if (_emptyTicks >= 2) ExitApp(); }
             else _emptyTicks = 0;
         }
-        else if (!up)
+        else if (!up && _refused == null)
         {
-            LaunchBridge();            // persistent: keep a gateway alive
+            LaunchBridge();            // persistent: keep a gateway alive (not while it refuses to start: #88)
         }
     }
 
@@ -142,6 +151,7 @@ class TrayApp : ApplicationContext
             if (CountBridges() > 0)
                 MessageBox.Show("Some bridge processes did not exit; starting a gateway anyway.", "Ai MCP Bridge");
             LoadConfig();                              // pick up a new version / ports from the updated checkout
+            ClearRefusal();                            // #88: a deliberate restart tries again (e.g. after the migration ran)
             if (_header != null) _header.Text = _version.Length > 0 ? ("Ai MCP Bridge  v" + _version) : "Ai MCP Bridge";
             LaunchBridge();
             _emptyTicks = 0;
@@ -193,9 +203,47 @@ class TrayApp : ApplicationContext
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
             psi.EnvironmentVariables["AI_BRIDGE_CLIENT"] = "Task Tray";   // label this headless gateway
-            Process.Start(psi);
+            if (_launched != null) { try { _launched.Dispose(); } catch { } }
+            _launched = Process.Start(psi);
         }
         catch { }
+    }
+
+    // #88 (bridge 2.0, docs/spec-88.md §7.5): the gateway this tray launched exited 78 = it REFUSED TO START (its activity
+    // history is format v5 and must be converted with src/tools/aimb-migrate-v2.mjs, or a migration did not finish). The
+    // bridge wrote its message to %TEMP%\aimb-start-refused-<wsPort>.txt; show it once (balloon) and keep it in the menu,
+    // and stop the keep-alive relaunch until Restart Bridges... (a gateway that starts deletes the file).
+    void CheckLaunched()
+    {
+        if (_launched == null) return;
+        try
+        {
+            if (!_launched.HasExited) return;
+            int code = _launched.ExitCode;
+            _launched.Dispose(); _launched = null;
+            if (code != 78) return;
+            string msg = null;
+            try { msg = File.ReadAllText(RefusedFile()).Trim(); } catch { }
+            if (string.IsNullOrEmpty(msg)) msg = "The bridge refused to start (exit 78). Start it from a terminal (node src/bridge.mjs) to see why.";
+            _refused = msg;
+            _refusedItem.Visible = true;
+            _icon.ShowBalloonTip(30000, "Ai MCP Bridge did not start", msg.Length > 250 ? msg.Substring(0, 247) + "..." : msg, ToolTipIcon.Error);
+        }
+        catch { _launched = null; }
+    }
+
+    string RefusedFile() { return Path.Combine(Path.GetTempPath(), "aimb-start-refused-" + _wsPort + ".txt"); }
+
+    void ShowRefusal()
+    {
+        if (_refused == null) return;
+        MessageBox.Show(_refused + "\n\nAfter fixing it, choose Restart Bridges... to start the bridge again.", "Ai MCP Bridge did not start", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    void ClearRefusal()
+    {
+        _refused = null;
+        if (_refusedItem != null) _refusedItem.Visible = false;
     }
 
     void ShutdownAllBridges()

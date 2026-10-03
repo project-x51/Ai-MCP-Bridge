@@ -18,6 +18,7 @@ export function create() {
     projectNames: { async put() {}, async all() { return [] } },
     activity: { async append() { return null }, async replaceTail() { return null }, async drain() { return 0 }, appendSync() { return null }, async readAt() { return null }, async find() { return null },
       async days() { return [] }, async *readBackwards() {}, async prune() { return [] } },   // #70: no daily JSONL (the board is memory-only)
+    activity2: null,   // #88 step 6 (2.0): no v6 day / index files — the 2.0 board is memory-only
     async snapshot() { return { enabled: false } },
     limits: { messageTtlMs: 0, retainedTtlMs: 0, graceMs: 0, hardExpiryMs: 0, ownerlessTtlMs: 0, mailboxMaxCount: 0, mailboxMaxBytes: 0 },
   }

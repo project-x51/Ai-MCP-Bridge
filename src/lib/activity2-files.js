@@ -1,9 +1,10 @@
 // #88 (v2.0) build step 3: the v6 DAY FILES and the per-day INDEX FILES of one host (docs/spec-88.md §2, §2.4, §5.2, §10).
 //
-// Beside lib/activity2.js (the model, its records and the replay), used by nothing but its tests yet — step 6 wires the
-// bridge's persistence facet to it (index files at rollover + rebuild, prune, paging via the index, the ghost table at
-// startup, the conflicted-copy check at start / rollover). Synchronous and dependency-free: every function takes the
-// persistence DIRECTORY, so the tests run on temp dirs.
+// Beside lib/activity2.js (the model, its records and the replay). Step 6 wired it: the persistence facet's `activity2`
+// (facets/persistence/file.js) binds these functions to its directory (+ the paging counter), and the 2.0 gateway's store
+// (lib/activity2-store.js) writes through createDayWriter, indexes closed days at rollover, prunes days with their index,
+// pages through readSpanBackwards, rebuilds the ghost table from the index files and warns about conflicted copies.
+// Synchronous and dependency-free: every function takes the persistence DIRECTORY, so the tests run on temp dirs.
 //
 // THE LAYOUT (§2.4, §10): `<dir>/activity/<lslug(host)>/` holds this host's
 //   YYYY-MM-DD.jsonl       the day files (v6 records, one per line, appended; the trailing repeat line rewritten in place)
@@ -186,6 +187,8 @@ export function indexBuilder(day) {
       }
     },
     index(size) { return { v: INDEX_FORMAT, day, size, sessions: sessions.map(x => ({ ...x })), nodes: Object.fromEntries([...nodes].map(([k, v]) => [k, v.slice()])), struct: struct.map(x => ({ ...x })) } },
+    /** Step 6: one node's [first, last, count] (live, not a copy), or null. */
+    get(id) { return nodes.get(id) || null },
   }
 }
 /** The index of a day file's bytes (one scan). */
@@ -215,6 +218,44 @@ export function ensureIndex(dir, host, day) {
 }
 /** Every retained day's index (ensureIndex each: a missing / stale one is rebuilt), oldest first. */
 export function readIndexes(dir, host) { return days(dir, host).map(d => ensureIndex(dir, host, d).index).filter(Boolean) }
+/**
+ * Step 6: the records of one day whose line STARTS within [from, to] — NEWEST FIRST, read BACKWARDS in `chunk`-byte pieces
+ * from the end of the line at `to` (or from `before`, a record start: a page cursor) down to `from`, so a page that fills
+ * up early reads only the tail of the range (§5.2). `from` must be a record start (an index offset). `onRead(bytes)` hears
+ * every byte read (the facet's paging counter). Yields { rec (null = garbled), day, offset, length }.
+ * @param {string} dir @param {string} host @param {string} day @param {number} from @param {number} to
+ * @param {{ before?: number|null, chunk?: number, onRead?: (n: number) => void }} [o]
+ */
+export function* readSpanBackwards(dir, host, day, from, to, o = {}) {
+  let fd
+  try { fd = fs.openSync(dayFile(dir, host, day), 'r') } catch { return }
+  const count = n => { if (o.onRead) o.onRead(n) }
+  const emit = (buf, offset) => { let rec = null; try { rec = JSON.parse(buf.toString('utf8')) } catch { } return { rec, day, offset, length: buf.length } }
+  try {
+    const size = fs.fstatSync(fd).size
+    if (from >= size || to < from) return
+    let end = -1   // the end of the line that starts at `to` (past its "\n")
+    for (let p = to; p < size && end < 0;) { const n = Math.min(4096, size - p), b = Buffer.alloc(n); fs.readSync(fd, b, 0, n, p); count(n); const i = b.indexOf(0x0a); if (i >= 0) end = p + i + 1; else p += n }
+    if (end < 0) end = size
+    if (o.before != null && Number.isFinite(o.before)) end = Math.min(end, Math.max(0, o.before))
+    const chunk = Math.max(256, Number(o.chunk) || 65536)
+    let pos = end, tail = Buffer.alloc(0)
+    while (pos > from) {
+      const n = Math.min(chunk, pos - from); pos -= n
+      const b = Buffer.alloc(n)
+      fs.readSync(fd, b, 0, n, pos); count(n)
+      const data = tail.length ? Buffer.concat([b, tail]) : b   // `data` starts at file offset `pos`
+      let e = data.length
+      for (let i = data.length - 1; i >= 0; i--) {
+        if (data[i] !== 0x0a) continue
+        if (e > i + 1) yield emit(data.subarray(i + 1, e), pos + i + 1)
+        e = i
+      }
+      tail = Buffer.from(data.subarray(0, e))   // the (partial) line that started before this chunk
+    }
+    if (tail.length) yield emit(tail, from)
+  } finally { fs.closeSync(fd) }
+}
 /**
  * PAGING via the index (§5.2): the days that hold any of `ids` (a subtree's members) and the byte range [min first, max
  * last] in each → [{ day, from, to, count }], newest day first. A day without an index entry for them is not read at all.
@@ -297,6 +338,12 @@ export function createDayWriter({ dir, host }) {
     },
     /** The in-memory index of a day this writer has open (a copy), or null. */
     index(day) { const s = open.get(day); return s ? s.b.index(s.size) : null },
+    /** Step 6: the in-memory index of `day` (today's), OPENING it first when the writer has not touched it yet (one scan
+     * of the file; nothing is written). A copy. */
+    openIndex(day) { const s = dayState(checkDay(day)); return s.b.index(s.size) },
+    /** Step 6: a LIVE lookup into `day`'s in-memory index (opened as openIndex): id → [first, last, count] or null — no copy,
+     * for paging today's file on every page. */
+    lookup(day) { const s = dayState(checkDay(day)); return id => s.b.get(id) },
     /** The local day rolled over to `today`: write the index file of every earlier day without a current one. → days indexed */
     rollover(today) {
       const done = []
