@@ -55,12 +55,26 @@
 // - Q46: parseMoveTo accepts only `/…` and `../X`; a refused relative form answers `suggest:"/…"`; resolveCall = the
 //   read-only `resolve` tool.
 //
+// BUILD STEP 2c (docs/spec-88.md §4.1, §1.6, §5.4, §5.5, §6.3) adds, still beside the 1.7x model:
+// - POSITIONS (#82's ranks on ids): before / after (a §3.2 reference to a sibling, or *_id) and position first | last on
+//   a NEW target, on the plan items a call creates, on --move (where it lands), and alone on an existing target = a REORDER
+//   (a `rank` record + its "placed before Build" entry; a no-op when already there, so a retry reorders nothing). Ranks are
+//   derived; a stored one only where needed. A position given with --under on an EXISTING target is ignored (`exists`).
+// - The per-session NODE LIMITS (≤ 4096 nodes, ≤ 128 agents; createModel's `limits`): a call that creates past them
+//   EVICTS the oldest finished agents / ended plans (`remove` why:"evict"; never what the call touches, never an open plan),
+//   else it is refused `too-many-nodes` / `too-many-agents`.
+// - applyAction2: the dashboard's actions ON IDS (done / skip / reopen / abandon, complete / reopen_plan / abandon_plan,
+//   finish, dismiss + its PARENT entry, move (+ a position), reorder, rename, merge, edit_text, message, answer /
+//   change_answer / withdraw (2b's answerQuestion2 / withdrawQuestion2), show_as_group / show_as_plan (2b's setType2)), each
+//   all-or-nothing and attributed. The CLASH DIALOG (§1.6, Q32): clashes2 lists what a move / merge would clash with (and
+//   the clashes "merge them" would create one level down); the answer (`label`, `merges:[{ id, into_id } | { id, label }]`)
+//   rides the move / merge action and is applied as ONE checked change — `clash-changed` (with the fresh list) when the tree
+//   moved on.
+// - NOTICES (§5.5; model output, not wired): actionNotice2 / messageNotice2 / answerNotice2 / combineActionNotices2 — what
+//   an action notifies, to whom (the node's session + its nearest agent) and when (batched / at once); subjects name the
+//   node's path at SEND time, from its id.
+//
 // STUBS LEFT FOR LATER STEPS (said where they bite):
-// - 2c (actions / notices / positions): positions (--before / --after / --first / --last) are not parsed; a move / merge /
-//   unmerge places the node LAST in its group (a stored rank after the last sibling). The dashboard clash answer
-//   (`merges` / `label`), applyAction on ids (done / skip / reopen / abandon, complete / reopen / abandon plan, finish,
-//   dismiss + its parent entry, edit text, message, and the Show as group / plan toggle — the model calls are here:
-//   setType2, answerQuestion2, withdrawQuestion2), the #80 – #85 notices, eviction and the per-session node limits are 2c.
 // - 2d (types): the reserved `test-run` node type and `test-result` message type are named in the registries but refused
 //   `type-reserved`; the registry's `menu` slots are empty until #92.
 // - Step 3 (records + replay): records are produced here (v:6, kind:"node") but not replayed; the session ROOT writes no
@@ -69,7 +83,8 @@
 import { lc } from './keys.js'
 import { DEPTH2, ACTIVITY_LIMITS, ACTIVITY_STATES, mintId, validKey, slugKey, uniqueKey, normLabel, labelKey, parsePath2, parseRef, formatPath2,
   parseDuration, parseProgress, parseEta, parseText, sessionKey, rankOf, rankGroup, rankBetween, derivedRank, resolveConfig, normBy, byText,
-  normQuestion, questionView, questionEntryDetails, answerEntryText, sameAnswer, QUESTION_LIMITS, fmtEta, progressPct, forceBar, stateOf } from './activity.js'
+  normQuestion, questionView, questionEntryDetails, answerEntryText, sameAnswer, QUESTION_LIMITS, fmtEta, progressPct, forceBar, stateOf, validRank,
+  MESSAGE_LIMITS, firstWords, NOTICE_VERB, EDIT_NOTICE_VERB, MESSAGE_NOTICE_VERB, ANSWER_NOTICE_VERB } from './activity.js'
 
 /** The v6 record format this model writes (spec §2). */
 export const ACTIVITY2_FORMAT = 6
@@ -109,11 +124,15 @@ const has = (o, k) => o && o[k] !== undefined && o[k] !== null && o[k] !== false
  * this host (every local node's owner host, §1.2). `config` = the resolved `activity` block (resolveConfig: log_retention_days
  * bounds alias lifetime (§3.3), log_entries_per_agent each node's in-memory log, stale_after_min the stale window). Entry
  * ids are `<idPrefix><ts36>-<seq36>` as in 1.7x.
- * @param {{ origin?: string, config?: any, idPrefix?: string }} [o]
+ * `limits` (2c) = the per-session node limits (ACTIVITY_LIMITS: ≤ 4096 nodes, ≤ 128 agents, the root not counted); a test
+ * may lower them.
+ * @param {{ origin?: string, config?: any, idPrefix?: string, limits?: { nodesPerSession?: number, agentsPerSession?: number } }} [o]
  */
-export function createModel({ origin = 'local', config = {}, idPrefix = 'act_' } = {}) {
+export function createModel({ origin = 'local', config = {}, idPrefix = 'act_', limits = {} } = {}) {
   const cfg = resolveConfig(config || {}, {})
-  return { v: ACTIVITY2_FORMAT, origin: String(origin || 'local'), config: cfg, retentionMs: cfg.log_retention_days * DAY, idPrefix: String(idPrefix), seq: 0, sessions: new Map() }
+  const lim = n => (Number.isInteger(n) && n > 0 ? n : null)
+  return { v: ACTIVITY2_FORMAT, origin: String(origin || 'local'), config: cfg, retentionMs: cfg.log_retention_days * DAY, idPrefix: String(idPrefix), seq: 0, sessions: new Map(),
+    limits: Object.freeze({ nodesPerSession: lim(limits && limits.nodesPerSession) || ACTIVITY_LIMITS.nodesPerSession, agentsPerSession: lim(limits && limits.agentsPerSession) || ACTIVITY_LIMITS.agentsPerSession }) }
 }
 
 /**
@@ -484,7 +503,7 @@ function attach(t, node, parent) {
   if (!node.merged_into) mset(t, sess.labels, labelIx(parent.id, node.label), node.id)
   arrived(t, parent.id)
 }
-/** The stored rank that puts a node LAST in its group under `parent` (§3.8 "arrival"; 2c adds positions). */
+/** The stored rank that puts a node LAST in its group under `parent` (§3.8 "arrival"; the default when no position is given). */
 function lastRank(t, parent, node) {
   const g = rankGroup(node)
   let hi = null
@@ -617,11 +636,12 @@ function renameNode(t, node, label) {
  * MOVE under `dest` (§1.6, §3.8 arrival): the root can't move, never under itself, a merged node can't move, same session
  * (callers resolve `dest` in the session: `cross-session` is raised there), the label (or `rename`, one checked change)
  * must be free at the destination, the whole subtree must stay ≤ 32 deep. Already there → a no-op (no record; a rename
- * still applies). Arrives LAST in its group. One `move` record (+ a `label` record with a rename); the old path is an alias;
- * a transient old parent that emptied vanishes.
- * @returns {any} { moved } | { noop:true } | a refusal
+ * still applies). Arrives LAST in its group — or, 2c, where `pos` (a position: before / after a sibling there, first, last)
+ * puts it; a position with the node already under `dest` is a REORDER. One `move` record (+ a `label` record with a rename);
+ * the old path is an alias; a transient old parent that emptied vanishes.
+ * @returns {any} { moved } | { noop:true } | { placed } | a refusal
  */
-function moveNode(t, node, dest, rename = null) {
+function moveNode(t, node, dest, rename = null, pos = null, scopeNode = null) {
   const { sess } = t
   if (node.parent == null) return bad('bad-move', 'the session root cannot move')
   if (node.merged_into) return bad('bad-move', `"${node.label}" is merged — unmerge it first`)
@@ -632,23 +652,33 @@ function moveNode(t, node, dest, rename = null) {
   const label = rename != null ? rename : node.label
   if (node.parent === dest.id) {
     if (rename != null) { const e = renameNode(t, node, rename); if (e) return e }
+    if (pos) return reorderNode(t, node, pos, scopeNode || rootOf(sess))   // 2c: the same parent + a position = a reorder (#82)
     return { noop: true }
   }
   const sib = clashAt(sess, dest.id, label, node.id)
   if (sib) return dupLabel(sess, dest.id, label, sib, node.id, `can't move "${node.label}" under "${pathOf(sess, dest) || sess.ident.session}"${rename != null ? ` as "${label}"` : ''}`)
+  // 2c: where it lands among its new siblings (resolved before anything changes; its group is the one it has now)
+  let pr = null
+  if (pos) {
+    const rp = resolvePos(t, pos, dest, scopeNode || rootOf(sess))
+    if (rp.ok === false) return rp
+    if (rp.anchor && rankGroup(rp.anchor) !== rankGroup(node)) return badAnchor(rp.anchor, node)
+    pr = placeRanks2(t, dest, rankGroup(node), rp, 1, new Set([node.id]), false)
+    if (pr.ok === false) return pr
+  }
   const was = pathOf(sess, node), from = node.parent, relabel = label !== node.label
   detach(t, node)
   if (relabel) fset(t, node, 'label', label)   // before attach: the label index must take the NEW label
   attach(t, node, dest)
-  const rank = lastRank(t, dest, node)
+  const rank = (pr && pr.ranks[0]) || lastRank(t, dest, node)
   fset(t, node, 'rank', rank)
   const e = checkDepth(t, node); if (e) return e
   record(t, 'move', node, { p: dest.id, rank, was })
   if (relabel) { record(t, 'label', node, { label, was }); keepNode(t, node) }
   addAlias(t, was, node.id)
-  entryStub(t, node, 'move', `moved from ${was} to ${pathOf(sess, node)}`)
+  entryStub(t, node, 'move', `moved from ${was} to ${pathOf(sess, node)}${pr ? ` (${pr.text})` : ''}`)
   left(t, from)
-  return { moved: { from: was, to: pathOf(sess, node), parent_id: dest.id } }
+  return { moved: { from: was, to: pathOf(sess, node), parent_id: dest.id, rank, ...(pr ? { where: pr.text } : {}) } }
 }
 
 /**
@@ -656,9 +686,54 @@ function moveNode(t, node, dest, rename = null) {
  * root, A holding an OPEN question; `duplicate-label` listing EVERY clash of A's children with B's. A's children move under
  * B (last in their groups), A becomes a HIDDEN child of B (`merged_into`, `merged_from` = its parent then). One `merge`
  * record (kids listed, no move records); A's path becomes an alias (resolution redirects A to B).
+ * 2c — the dashboard's CLASH ANSWER (§1.6, Q32): `ans` = { map: id → { into_id } (merge them) | { label } (a different
+ * label), used: Set } settles each clash of A's children instead of refusing: "merge them" merges that child into its
+ * same-label sibling under B (recursively, its own children's clashes answered the same way), a label relabels it as it
+ * lands (a `label` record + its entry). A clash with no answer → `duplicate-label`; an answer that no longer fits the tree
+ * (the sibling changed, the new label is taken) → `clash-changed`. The tool and the script pass no answers (they refuse).
  */
-function mergeNode(t, a, b) {
+function mergeNode(t, a, b, ans = null) {
   const { sess } = t
+  const no = canMergeWhy(sess, a, b)
+  if (no) return no
+  const kids = childrenOf2(sess, a)
+  const clashes = [], plan = []
+  let stale = false
+  for (const k of kids) {
+    const s = clashAt(sess, b.id, k.label), an = ans ? ans.map.get(k.id) : null
+    if (!s) { plan.push({ k }); continue }
+    if (an && an.into_id != null && an.into_id === s.id) { ans.used.add(k.id); plan.push({ k, into: s }); continue }
+    if (an && an.label != null) { ans.used.add(k.id); plan.push({ k, label: an.label }); continue }
+    if (an) { ans.used.add(k.id); stale = true }
+    clashes.push({ label: k.label, key: k.key, id: k.id, sibling: brief(s), suggestion: freeLabel(sess, b.id, k.label).label, can_merge: !canMergeWhy(sess, k, s) })
+  }
+  if (clashes.length) return bad(stale ? 'clash-changed' : 'duplicate-label', `can't merge "${a.label}" into "${b.label}": ${clashes.map(c => `"${c.label}" is already there (suggest "${c.suggestion}")`).join('; ')}`, { clashes })
+  const was = pathOf(sess, a), from = a.parent, moved = []
+  for (const p of plan) {
+    if (p.into) { const r = mergeNode(t, p.k, p.into, ans); if (r.ok === false) return r; continue }
+    const label = p.label != null ? p.label : p.k.label, kwas = pathOf(sess, p.k), old = p.k.label, relabel = label !== old
+    const sib = clashAt(sess, b.id, label, p.k.id)
+    if (sib) return bad(ans ? 'clash-changed' : 'duplicate-label', `can't merge "${a.label}" into "${b.label}": "${label}" is already there (key ${sib.key})`, { sibling: brief(sib), suggestion: freeLabel(sess, b.id, label, p.k.id).label })
+    detach(t, p.k)
+    if (relabel) fset(t, p.k, 'label', label)
+    attach(t, p.k, b)
+    fset(t, p.k, 'rank', lastRank(t, b, p.k))
+    const e = checkDepth(t, p.k); if (e) return e
+    if (relabel) { record(t, 'label', p.k, { label, was: kwas }); addAlias(t, kwas, p.k.id); entryStub(t, p.k, 'rename', `renamed from "${old}" to "${label}"`); keepNode(t, p.k) }
+    moved.push(p.k)
+  }
+  detach(t, a)
+  fset(t, a, 'merged_into', b.id); fset(t, a, 'merged_from', from)
+  attach(t, a, b)
+  const e = checkDepth(t, a); if (e) return e
+  record(t, 'merge', a, { into: b.id, from, was, kids: moved.map(k => k.id) })
+  addAlias(t, was, a.id)
+  entryStub(t, a, 'merge', `merged into ${pathOf(sess, b)}`, was)
+  left(t, from)
+  return { merged: { into_id: b.id, path: pathOf(sess, b), kids: moved.map(k => k.id) } }
+}
+/** Why A can't merge into B (§3.6), or null: the `bad-merge` refusals. */
+function canMergeWhy(sess, a, b) {
   if (a.id === b.id) return bad('bad-merge', "can't merge a node into itself")
   if (a.parent == null || b.parent == null) return bad('bad-merge', "the session root can't be merged (or merged into)")
   if (a.kind !== 'context' || b.kind !== 'context') return bad('bad-merge', `only contexts merge: "${(a.kind !== 'context' ? a : b).label}" is an agent (a key namespace)`)
@@ -666,25 +741,7 @@ function mergeNode(t, a, b) {
   if (atOrUnder(sess, b, a)) return bad('bad-merge', `can't merge "${a.label}" into its own descendant "${b.label}"`)
   if (isOpenQuestion2(a)) return bad('bad-merge', `"${a.label}" holds an open question — answer or withdraw it first`)
   if (typeOf(b).children && !typeOf(b).children.length) return bad('bad-merge', `"${b.label}" is a ${b.type} — nothing merges into it`)
-  const kids = childrenOf2(sess, a)
-  const clashes = []
-  for (const k of kids) { const s = clashAt(sess, b.id, k.label); if (s) clashes.push({ label: k.label, key: k.key, id: k.id, sibling: brief(s), suggestion: freeLabel(sess, b.id, k.label).label }) }
-  if (clashes.length) return bad('duplicate-label', `can't merge "${a.label}" into "${b.label}": ${clashes.map(c => `"${c.label}" is already there (suggest "${c.suggestion}")`).join('; ')}`, { clashes })
-  const was = pathOf(sess, a), from = a.parent
-  for (const k of kids) {
-    detach(t, k); attach(t, k, b)
-    fset(t, k, 'rank', lastRank(t, b, k))
-    const e = checkDepth(t, k); if (e) return e
-  }
-  detach(t, a)
-  fset(t, a, 'merged_into', b.id); fset(t, a, 'merged_from', from)
-  attach(t, a, b)
-  const e = checkDepth(t, a); if (e) return e
-  record(t, 'merge', a, { into: b.id, from, was, kids: kids.map(k => k.id) })
-  addAlias(t, was, a.id)
-  entryStub(t, a, 'merge', `merged into ${pathOf(sess, b)}`, was)
-  left(t, from)
-  return { merged: { into_id: b.id, path: pathOf(sess, b), kids: kids.map(k => k.id) } }
+  return null
 }
 
 /**
@@ -712,6 +769,113 @@ function unmergeNode(t, a, label = null) {
   if (relabel) record(t, 'label', a, { label: want })
   entryStub(t, a, 'unmerge', `unmerged back to ${pathOf(sess, a)}`)
   return { unmerged: { parent_id: from.id, path: pathOf(sess, a) } }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2c: POSITIONS (§4.1: --before / --after <ref>, --first / --last; #82's ranks on ids)
+
+const GROUP_NAMES = Object.freeze(['plan items', 'contexts', 'agents'])
+const badAnchor = (a, n) => bad('bad-anchor', `"${a.label}" is among the ${GROUP_NAMES[rankGroup(a)]} — plan items come first, then contexts, then agents; place it among the ${GROUP_NAMES[rankGroup(n)]}`)
+/**
+ * Resolve a POSITION under `parent` → { kind: 'before'|'after'|'first'|'last', anchor (the sibling, before / after only) }.
+ * The anchor is a §3.2 reference — `*_id` exact; `chain:key` exactly; a bare key in your scope, then your creator's … — and,
+ * since an anchor is always a SIBLING, a bare key that names none there (or names a node elsewhere) is also tried as the
+ * label (or agent key) of one of `parent`'s children, as is a one-segment path. It must be a visible child of `parent`
+ * (`bad-anchor`); nothing found → `unknown-anchor`.
+ */
+function resolvePos(t, pos, parent, scopeNode) {
+  if (pos.kind === 'first' || pos.kind === 'last') return { kind: pos.kind, anchor: null }
+  const { sess } = t, where = pathOf(sess, parent) || sess.ident.session
+  let n = null
+  if (pos.ref_id != null) { const r = byId(t, pos.ref_id, `${pos.kind}_id`); if (r.ok === false) return r.code === 'unknown-node' ? bad('unknown-anchor', r.what) : r; n = r.node }
+  else {
+    const p = parseRef(pos.ref)
+    if (!p.ok) return p
+    if (p.kind === 'chain') { const c = creatorByChain(t, p.creators), id = c && sess.scope.get(scopeKey(c.id, p.key)); n = (id && sess.nodes.get(id)) || null }
+    else if (p.kind === 'key') {
+      let hit = null
+      for (let s = scopeNode; s && !hit; s = s.creator != null ? sess.nodes.get(s.creator) : null) { const id = sess.scope.get(scopeKey(s.id, p.key)); hit = (id && sess.nodes.get(id)) || null }
+      n = hit && hit.parent === parent.id && !hit.merged_into ? hit : childBySeg(sess, parent, p.key) || hit
+    } else if (p.segs.length === 1) n = childBySeg(sess, parent, p.segs[0])
+    else { const w = walkPath(t, scopeNode, p.segs, false); n = w.ok === false ? null : w.node }
+    if (!n) return bad('unknown-anchor', `no sibling "${cpSlice(String(pos.ref), 60)}" under "${where}" to place it ${pos.kind}`)
+  }
+  if (n.parent !== parent.id || n.merged_into) return bad('bad-anchor', `"${n.label}" is not under "${where}" — ${pos.kind} names a sibling there`)
+  return { kind: pos.kind, anchor: n }
+}
+/**
+ * k ranks for nodes of rank group g placed per `rp` (resolvePos) under `parent` — #82's placeRanks on ids. `skip` = the ids
+ * being placed (left out of their own siblings). `fresh` (nodes this call creates): "last" stores NO rank — their derived
+ * rank (creation time) already puts them last (a stored one only where 2b's "needed" rule already gave it). → { ok, ranks
+ * (string|null)[], text } or `bad-anchor` / `bad-position` / `rank-exhausted`.
+ */
+function placeRanks2(t, parent, g, rp, k, skip, fresh) {
+  const sibs = childrenOf2(t.sess, parent).filter(n => !skip.has(n.id) && rankGroup(n) === g)
+  const openHi = derivedRank(t.now + 1, null), nulls = text => ({ ok: true, ranks: new Array(k).fill(null), text })
+  let lo = null, hi = null, text
+  if (rp.anchor) {
+    const a = rp.anchor
+    if (skip.has(a.id)) return bad('bad-position', `a node can't be placed ${rp.kind} itself`)
+    if (rankGroup(a) !== g) return bad('bad-anchor', `"${a.label}" is among the ${GROUP_NAMES[rankGroup(a)]} — plan items come first, then contexts, then agents; place it among the ${GROUP_NAMES[g]}`)
+    const i = sibs.indexOf(a)
+    if (rp.kind === 'before') { lo = i > 0 ? rankOf(sibs[i - 1]) : null; hi = rankOf(a) } else { lo = rankOf(a); hi = i < sibs.length - 1 ? rankOf(sibs[i + 1]) : openHi }
+    text = `${rp.kind} ${a.label}`
+  } else if (rp.kind === 'first') {
+    text = 'first'
+    if (!sibs.length) return nulls(text)
+    hi = rankOf(sibs[0])
+  } else {
+    text = 'last'
+    if (fresh || !sibs.length) return nulls(text)
+    lo = rankOf(sibs[sibs.length - 1]); hi = openHi
+  }
+  if (lo !== null && hi !== null && lo >= hi) hi = null
+  const ranks = []
+  for (let i = 0; i < k; i++) { const r = rankBetween(lo, hi); if (!validRank(r)) return bad('rank-exhausted', 'too many insertions at one spot — place it elsewhere'); ranks.push(r); lo = r }
+  return { ok: true, ranks, text }
+}
+/**
+ * Place NEW nodes (the call's target, or the plan items it created) per `pos` among `parent`'s children: each gets its rank
+ * on the node and on its own `create` record (still unwritten: the call's records go out together). → { placed:{ where } }.
+ */
+function placeNew(t, nodes, parent, pos, scopeNode) {
+  const rp = resolvePos(t, pos, parent, scopeNode)
+  if (rp.ok === false) return rp
+  const pr = placeRanks2(t, parent, rankGroup(nodes[0]), rp, nodes.length, new Set(nodes.map(n => n.id)), true)
+  if (pr.ok === false) return pr
+  nodes.forEach((n, i) => {
+    const r = pr.ranks[i]
+    if (r == null) return
+    fset(t, n, 'rank', r)
+    const rec = t.records.find(x => x.op === 'create' && x.n === n.id)
+    if (rec) rec.rank = r
+  })
+  return { placed: { where: pr.text, ...(nodes.length === 1 && nodes[0].rank ? { rank: nodes[0].rank } : {}) } }
+}
+/**
+ * REORDER an existing node among its siblings (§4.1: a position alone on an existing target; the dashboard's reorder; a
+ * same-parent move with a position): one `rank` record + its entry ("placed before Build", §2.2). Already there (directly
+ * before / after the anchor, first, last) → a no-op: nothing written, so a retry never reorders anything again.
+ * @returns {any} { placed:{ where, rank } } | { noop:true } | a refusal
+ */
+function reorderNode(t, node, pos, scopeNode) {
+  const { sess } = t
+  if (node.parent == null) return bad('bad-position', 'the session root has no siblings')
+  const parent = sess.nodes.get(node.parent), g = rankGroup(node)
+  const rp = resolvePos(t, pos, parent, scopeNode)
+  if (rp.ok === false) return rp
+  if (rp.anchor && rp.anchor.id === node.id) return bad('bad-position', `a node can't be placed ${rp.kind} itself`)
+  if (rp.anchor && rankGroup(rp.anchor) !== g) return badAnchor(rp.anchor, node)
+  const full = childrenOf2(sess, parent).filter(n => rankGroup(n) === g), i = full.indexOf(node)
+  const there = rp.kind === 'before' ? full[i + 1] === rp.anchor : rp.kind === 'after' ? full[i - 1] === rp.anchor : rp.kind === 'first' ? i === 0 : i === full.length - 1
+  if (there) return { noop: true }
+  const pr = placeRanks2(t, parent, g, rp, 1, new Set([node.id]), false)
+  if (pr.ok === false) return pr
+  const rank = pr.ranks[0] || lastRank(t, parent, node)
+  fset(t, node, 'rank', rank)
+  record(t, 'rank', node, { rank })
+  entryStub(t, node, 'reorder', `placed ${pr.text}`)
+  return { placed: { where: pr.text, rank } }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1269,7 +1433,7 @@ function parsePlan2(v, warnings) {
  * label-only item, a same-label ghost of this target) comes back as a new run; anything else is CREATED in the caller's
  * scope (born a plan item: `plan_item` / `plan_ix` on the create record). Each new or adopted item gets a ☐ line (its label,
  * todo) and a logged entry. Ranks: derived (creation time + plan position) — a stored one only where the derived one would
- * sort before an item already there (positions are 2c).
+ * sort before an item already there (an explicit position: placeNew, 2c).
  * @returns {any} { items:[{ key, id, label, path, created, adopted?, plan_item, state, warning? }] } or a refusal
  */
 function applyPlan2(t, target, items, scope) {
@@ -1650,12 +1814,13 @@ export function questionOutcome2(state, ident, id) {
  * move_to | merge | unmerge, rename, transient ("30s" = a grace, Q44), keep — plus 2b's context_type (a NEW context's type,
  * NODE_TYPES), plan and the REPORT (parseReport: text / state / progress / eta / stale_after / details / data / log /
  * message_type + fields, or ask … / state withdrawn). A refused
- * relative move_to that could be resolved is kept (`move_to_refused`) so the call answers its `suggest` (Q46). Positions
- * are 2c. o = { now, tzOffsetMin } for an eta / expires.
+ * relative move_to that could be resolved is kept (`move_to_refused`) so the call answers its `suggest` (Q46). 2c: a
+ * POSITION (before / after / before_id / after_id, or position "first" | "last") → q.pos = { kind, ref? | ref_id? } — not
+ * with move_to / merge / unmerge / ask. o = { now, tzOffsetMin } for an eta / expires.
  * @returns {any} { ok:true, q } or a refusal
  */
 export function parseCall(input, o = {}) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return bad('bad-input', 'expected an object { agent?, key? | id? | path?, label?, under?, text?, state?, plan?, move? | move_to?, rename?, merge?, unmerge?, transient?, keep?, context_type?, message_type?, fields? }')
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return bad('bad-input', 'expected an object { agent?, key? | id? | path?, label?, under?, text?, state?, plan?, move? | move_to?, rename?, merge?, unmerge?, transient?, keep?, context_type?, message_type?, fields?, before? | after? | position? }')
   const q = /** @type {any} */ ({ warnings: [] })
   if (has(input, 'agent')) {
     if (typeof input.agent !== 'string') return bad('bad-agent', 'agent must be a key chain like "spec-88" or "spec-88/research"')
@@ -1687,15 +1852,30 @@ export function parseCall(input, o = {}) {
       q.transient = { grace_ms: ms }
     } else return bad('bad-input', 'transient must be true or a grace period like "30s"')
   }
+  // 2c: a POSITION (§4.1 --before / --after <ref> | --first / --last; the tool's before / after / before_id / after_id /
+  // position "first" | "last") — one of them
+  for (const f of ['before', 'after']) if (has(input, f) && has(input, f + '_id')) return bad('bad-input', `give ${f} or ${f}_id, not both`)
+  const pk = ['before', 'after', 'position'].filter(k => has(input, k) || has(input, k + '_id'))
+  if (pk.length > 1) return bad('bad-position', `give ONE of before / after / position (got ${pk.join(' + ')})`)
+  if (pk[0] === 'position') {
+    const p = typeof input.position === 'string' ? lc(input.position.trim()) : ''
+    if (p !== 'first' && p !== 'last') return bad('bad-position', 'position must be "first" or "last" (or give before / after a sibling)')
+    q.pos = { kind: p }
+  } else if (pk.length) {
+    const f = pk[0]
+    if (has(input, f + '_id')) { if (typeof input[f + '_id'] !== 'string' || !ID_RE.test(input[f + '_id'])) return bad('bad-ref', `${f}_id must be a node id (16 chars of a-z 2-7)`); q.pos = { kind: f, ref_id: input[f + '_id'] } }
+    else { if (typeof input[f] !== 'string') return bad('bad-ref', `${f} must be a reference to a sibling: a key, chain:key or a label`); q.pos = { kind: f, ref: input[f] } }
+  }
   const verbs = ['move', 'move_to', 'merge', 'unmerge'].filter(v => v === 'move' ? q.move != null || q.move_id != null : v === 'merge' ? q.merge != null || q.merge_id != null : v === 'unmerge' ? q.unmerge : !!(q.move_to || q.move_to_refused))
   if (verbs.length > 1) return bad('bad-input', `one structural change per call: ${verbs.join(' + ')} (--move-to with --move: one destination per call)`)
   if (q.rename != null && (q.merge != null || q.merge_id != null || q.unmerge || q.move_to || q.move_to_refused)) return bad('bad-input', '--rename goes alone or with --move (one checked change)')
   if (q.keep && q.transient) return bad('bad-input', '--keep with --transient: pick one')
+  if (q.pos && (q.move_to || q.move_to_refused || q.merge != null || q.merge_id != null || q.unmerge)) return bad('bad-position', 'a position goes with a create, --item, --move or alone (a reorder) — --move-to arrives last, and a merge / unmerge places nothing')
   const rp = parseReport(input, o, q.warnings)
   if (!rp.ok) return rp
   q.report = rp.rep
   if (input.plan !== undefined && input.plan !== null) { const pl = parsePlan2(input.plan, q.warnings); if (!pl.ok) return pl; q.plan = pl.items }
-  if (q.report && q.report.ask && (verbs.length || q.rename != null || q.plan)) return bad('bad-ask', 'a question goes alone: no move / move_to / merge / unmerge / rename / plan with ask')
+  if (q.report && q.report.ask && (verbs.length || q.rename != null || q.plan || q.pos)) return bad('bad-ask', 'a question goes alone: no move / move_to / merge / unmerge / rename / plan / position with ask')
   if (has(input, 'context_type')) { const ct = parseContextType(input.context_type, { ask: !!(q.report && q.report.ask) }); if (!ct.ok) return ct; q.context_type = ct.type }
   q.given = REPORT_FIELDS.filter(f => input[f] !== undefined && input[f] !== null && !(f === 'text' && input.text === ''))   // checked against the target's type (NODE_TYPES fields)
   return { ok: true, q }
@@ -1738,6 +1918,7 @@ function existsCheck(t, node, q, scopeNode) {
   }
   if (q.transient && !q.move_to) ignored.push('transient')
   if (q.context_type && q.context_type !== node.type && !(q.context_type === 'question' && q.report && q.report.ask)) ignored.push('context_type')
+  if (q.pos && !q.plan && q.move == null && q.move_id == null && (q.under != null || q.under_id != null)) ignored.push('position')   // 2c: a create-shaped retry never reorders (H2)
   if (ignored.length) warn(t, { code: 'exists', ignored, what: `${node.scope}:${node.key} exists — ${ignored.map(f => '--' + f.replace('_', '-')).join(', ')} ignored (location, label and type are set only at creation; use --move / --rename)` })
 }
 
@@ -1755,7 +1936,8 @@ function existsCheck(t, node, q, scopeNode) {
  *   SYSTEM call — attributed, refreshing no activity
  * @returns {any} { ok:true, id (the ENTRY id, H10), ts, node:{ …, created }, created, agent?, state, current (the line
  *   changed), line (its text was set), logged, stale_at, question?, plan?, cascade?, moved? / merged? / unmerged?,
- *   records, entries, writes, warnings } or a refusal
+ *   placed? { where, rank? } (2c: a position), evicted? [{ id, key, label, path }] (2c: the limits), records, entries,
+ *   writes, warnings } or a refusal
  */
 export function applyCall(state, ident, input, now, opts = {}) {
   if (!state || !(state.sessions instanceof Map)) return bad('bad-state-object', 'pass a createModel() state')
@@ -1769,6 +1951,13 @@ export function applyCall(state, ident, input, now, opts = {}) {
   const t = newTx(state, sess, now, opts)
   const r = run(t, q)
   if (r.ok === false) { rollback(t); if (fresh) state.sessions.delete(sess.key); return r }
+  // 2c: the per-session NODE LIMITS — a call that created nodes past them evicts the oldest finished agents / ended plans
+  // (never what this call touched or an ancestor of it), else it is refused as a whole
+  if (t.records.some(x => x.op === 'create')) {
+    const ev = enforceLimits(t, [r.node && r.node.id, r.agent && r.agent.id, r.moved && r.moved.parent_id, ...t.records.filter(x => x.op === 'create').map(x => x.n)])
+    if (ev.ok === false) { rollback(t); if (fresh) state.sessions.delete(sess.key); return ev }
+    if (ev.length) r.evicted = ev
+  }
   if (t.deepest > LIMITS2.depthWarn) warn(t, { code: 'deep-tree', depth: t.deepest, what: `the tree is ${t.deepest} deep here (over ${LIMITS2.depthWarn}; the limit is ${LIMITS2.depthMax})` })
   return { ok: true, ...r, records: t.records, entries: t.entries, writes: t.writes, warnings: [...q.warnings, ...t.warnings] }
 }
@@ -1843,12 +2032,32 @@ function run(t, q) {
   }
   if (q.plan) { const p = applyPlan2(t, node, q.plan, scopeNode); if (p.ok === false) return p; out.plan = p.items }
   const hasMove = q.move != null || q.move_id != null
+  // 2c: a POSITION (§4.1) — with a plan it places the items this call CREATED (a re-plan never moves an item); else it places
+  // a NEW target among its siblings, or REORDERS an existing one (a no-op when it is already there). On an existing target
+  // a create-shaped call (one giving --under) does not reorder: the position is ignored with `exists` (§3.5, hole H2: a
+  // retried create must not undo a dashboard reorder). With --move it says where the node lands (moveNode).
+  if (q.pos && !hasMove) {
+    if (q.plan) {
+      const made = (out.plan || []).filter(i => i.created).map(i => sess.nodes.get(i.id)).filter(Boolean)
+      if (!made.length) warn(t, { code: 'position-unused', what: 'no new plan item was made — a re-plan never moves an item (reorder one on its own)' })
+      else {
+        const pl = placeNew(t, made, node, q.pos, scopeNode)
+        if (pl.ok === false) return pl
+        for (const i of out.plan) { const n = sess.nodes.get(i.id); if (i.created && n && n.rank) i.rank = n.rank }
+        out.placed = pl.placed
+      }
+    } else if (node.parent == null) return bad('bad-position', 'the session root has no siblings')
+    else if (created) { const pl = placeNew(t, [node], sess.nodes.get(node.parent), q.pos, scopeNode); if (pl.ok === false) return pl; out.placed = pl.placed }
+    else if (q.under != null || q.under_id != null) { /* ignored: existsCheck warned `exists` (ignored: position) */ }
+    else { const pl = reorderNode(t, node, q.pos, scopeNode); if (pl.ok === false) return pl; if (pl.placed) out.placed = pl.placed }
+  }
   if (hasMove) {
     const d = resolveRef(t, q.move, q.move_id, scopeNode, 'move')
     if (d.ok === false) return d
-    const m = moveNode(t, node, d.node, q.rename != null ? q.rename : null)
+    const m = moveNode(t, node, d.node, q.rename != null ? q.rename : null, q.pos || null, scopeNode)
     if (m.ok === false) return m
     if (m.moved) out.moved = m.moved
+    if (m.placed) out.placed = m.placed
   } else if (q.rename != null) {
     const e = renameNode(t, node, q.rename); if (e) return e
   } else if (q.move_to) {
@@ -1868,6 +2077,545 @@ function run(t, q) {
   out.stale_at = staleAt2(sess, rnode, t.state.config.stale_after_min)
   if (q.agent) out.agent = nodeView(sess, scopeNode)
   return out
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2c: node limits and EVICTION (6a / 6c on ids)
+
+/** Every node holding part of an OPEN plan: its open plans' items and their ancestors (never evicted, never dismissed). */
+function openPlanIds(sess) {
+  const out = new Set()
+  for (const n of sess.nodes.values()) {
+    if (n.merged_into) continue
+    const p = planOf2(sess, n)
+    if (!p || planEndAt2(sess, n, p) != null) continue
+    for (const it of p.items) for (let x = it; x && !out.has(x.id); x = x.parent != null ? sess.nodes.get(x.parent) : null) out.add(x.id)
+  }
+  return out
+}
+/** What removing an ENDED plan takes (6b): the plan node itself (with its items) when it is a plain context — not the root,
+ * not an agent, not itself a plan item — holding nothing but the items and no live line; else just its items. */
+function planRemoval2(sess, n, p) {
+  if (n.kind === 'context' && n.parent != null && !n.plan && childrenOf2(sess, n).length === p.items.length && !(n.current && LIVE.has(n.current.state))) return [n]
+  return p.items
+}
+/**
+ * The subtrees that may be EVICTED (6a / 6c), oldest first: FINISHED agents (by finished_at) and ENDED plans (by when they
+ * ended; planRemoval2). Never one holding part of an OPEN plan, never one at or above a node in `keep` (the call's target,
+ * its agent, what it created — and their ancestors), never a plan whose node is in `keep` (bar the session's own).
+ * → [{ at, id, roots:[nodes] }]
+ */
+function evictionCandidates2(sess, keep) {
+  const open = openPlanIds(sess), out = []
+  for (const n of sess.nodes.values()) {
+    if (n.merged_into) continue
+    if (n.kind === 'agent' && n.finished_at && !keep.has(n.id) && !open.has(n.id)) out.push({ at: n.finished_at, id: n.id, roots: [n] })
+    const p = planOf2(sess, n), end = p ? planEndAt2(sess, n, p) : null
+    if (end == null || p.items.some(i => open.has(i.id)) || (n.parent != null && keep.has(n.id))) continue
+    const roots = planRemoval2(sess, n, p)
+    if (!roots.some(r => keep.has(r.id))) out.push({ at: end, id: n.id, roots })
+  }
+  return out.sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+/** A session's node counts (the root not counted; merged nodes count — they are in memory). */
+function countOf(sess) { let nodes = 0, agents = 0; for (const n of sess.nodes.values()) { if (n.parent == null) continue; nodes++; if (n.kind === 'agent') agents++ } return { nodes, agents } }
+/**
+ * The per-session LIMITS (ACTIVITY_LIMITS, state.limits: ≤ 4096 nodes, ≤ 128 agents): over them, EVICT the oldest
+ * candidates (each a `remove` record why:"evict", its subtree into the ghost table) until the session fits; nothing that
+ * `protect` names or holds may go. Can't make room → `too-many-agents` / `too-many-nodes` (the call is refused as a whole).
+ * → [{ id, key, label, path }] (what was evicted) or a refusal
+ */
+function enforceLimits(t, protect) {
+  const { sess } = t, L = t.state.limits
+  let c = countOf(sess)
+  const fits = () => c.nodes <= L.nodesPerSession && c.agents <= L.agentsPerSession
+  if (fits()) return []
+  const keep = new Set()
+  for (const id of protect) for (let n = id ? sess.nodes.get(id) : null; n && !keep.has(n.id); n = n.parent != null ? sess.nodes.get(n.parent) : null) keep.add(n.id)
+  const evicted = []
+  for (const cand of evictionCandidates2(sess, keep)) {
+    if (fits()) break
+    let any = false
+    for (const r of cand.roots) if (sess.nodes.get(r.id) === r) { evicted.push({ id: r.id, key: r.key, label: r.label, path: pathOf(sess, r) }); removeNode(t, r, 'evict'); any = true }
+    if (any) c = countOf(sess)
+  }
+  if (c.agents > L.agentsPerSession) return bad('too-many-agents', `this session already has ${L.agentsPerSession} agents and none (outside this call's nodes, holding no open plan item) has finished — report a done / failed line when an agent ends`)
+  if (c.nodes > L.nodesPerSession) return bad('too-many-nodes', `this session already has ${L.nodesPerSession} nodes and not enough finished agents or ended plans to evict (open plan items are never evicted)`)
+  return evicted
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2c: DASHBOARD ACTIONS on ids (6d / #80 / #82 / #83 / #84 / #85 / #90 on ids, + 2.0's rename / merge / Show as group / plan)
+
+/** The actions (wire names, §5.4). Plan items: done / skip / reopen (→ todo) / abandon (any context); plan nodes: complete /
+ * abandon_plan / reopen_plan; agents and the session: abandon_plan / finish (args.state done | failed) / dismiss; any node:
+ * move (args.to_id + a position + the clash answer), reorder, rename (args.label), edit_text, message; contexts: merge
+ * (args.into_id + the clash answer), show_as_group / show_as_plan; questions: answer / change_answer / withdraw. */
+export const ACTIONS2 = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss', 'move', 'reorder', 'rename', 'merge',
+  'edit_text', 'message', 'answer', 'withdraw', 'change_answer', 'show_as_group', 'show_as_plan'])
+const ITEM_ACTIONS = Object.freeze({ done: 'done', skip: 'skipped', reopen: 'todo', abandon: 'abandoned' })
+const ACTION_LABEL = Object.freeze({ done: 'marked done', skip: 'skipped', reopen: 'reopened (back to to do)', abandon: 'abandoned', complete: 'plan marked complete',
+  abandon_plan: 'plan abandoned', reopen_plan: 'plan reopened', finish: 'marked finished', dismiss: 'dismissed from the board', withdraw: 'withdrawn' })
+const actText = (label, by) => cut(`${label} ${byText(by)}`.trim())
+/** #84: a message's text as kept — control characters out except newlines / tabs (CRLF → LF), trimmed. */
+// eslint-disable-next-line no-control-regex
+const msgText = s => (typeof s === 'string' ? s.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim() : '')
+/** #84: the first `max` code points of a text as ONE line ("…" when cut). */
+const preview = (s, max) => cut(normText(String(s || '')), max)
+
+/**
+ * #83: the states the dashboard's Edit text… may set on a node — what a report could set there: a plan item any state;
+ * another context any but todo / skipped; an agent / the session running | blocked | failed | done | idle, + abandoned only
+ * while it holds plan items. A question none (its line is the question).
+ * @param {any} sess @param {any} node @returns {string[]}
+ */
+export function editStates2(sess, node) {
+  if (!node || isQuestion2(node)) return []
+  if (node.kind === 'context') return node.plan ? [...ACTIVITY_STATES] : ACTIVITY_STATES.filter(s => !PLAN_STATES.has(s))
+  return ACTIVITY_STATES.filter(s => !PLAN_STATES.has(s) && (s !== 'abandoned' || holdsItems(sess, node)))
+}
+/** The visible subtree of a node (it first). */
+function subtree2(sess, node) { const out = []; const walk = n => { out.push(n); for (const c of childrenOf2(sess, n)) walk(c) }; walk(node); return out }
+/** 6d: the OPEN plans `node` holds — itself and its subtree, not crossing another agent (an agent's plans, not its sub-agents'). */
+function heldPlans2(sess, node) {
+  const out = []
+  const walk = n => { const p = planOf2(sess, n); if (p && planEndAt2(sess, n, p) == null) out.push(n); for (const c of childrenOf2(sess, n)) if (c.kind !== 'agent') walk(c) }
+  walk(node)
+  return out
+}
+/** 6d: is this agent (or the session root) QUIET — finished, stale (by `sm` minutes) or gone; an implicit one (it never
+ * reported) when every reported agent below it is quiet. */
+function quiet2(sess, n, now, sm) {
+  if (n.finished_at || n.gone_at) return true
+  if (effectiveState2(sess, n, now, sm).stale) return true
+  if (!n.implicit) return false
+  return subtree2(sess, n).slice(1).every(x => x.kind !== 'agent' || x.implicit || quiet2(sess, x, now, sm))
+}
+/** A line action: `st` on the node, keeping the line's text (a tick); the LOGGED entry's text is `text` (the attribution). */
+const lineAct = (t, node, st, text) => applyReport(t, node, { state: st, text: null, line: false, log: true, stale_after_ms: null }, { entryText: text })
+/** A logged (non-current) entry on an agent / the session that sets ('done' | 'abandoned') or clears ('open') its plan-end marker. */
+const markerAct = (t, node, planEnd, text) => applyReport(t, node, { text, line: false, state: null, log: true, stale_after_ms: null }, { planEnd })
+/**
+ * End OPEN plans by abandoning them (the dashboard's abandon_plan), DEEPEST first: each plan's OPEN items get an abandoned
+ * line, then the plan node itself — a CONTEXT by its line, an agent / the session by the plan-end marker (it keeps running).
+ * → [{ id, path, item, from, entry_id, cascade? }]
+ */
+function abandonPlans2(t, plans, text) {
+  const { sess } = t, done = []
+  const one = (n, item) => {
+    const from = item ? stateOf(n) : 'open', path = pathOf(sess, n)
+    const r = !item && n.kind !== 'context' ? markerAct(t, n, 'abandoned', text) : lineAct(t, n, 'abandoned', text)
+    if (r.ok === false) return
+    done.push({ id: n.id, path, item, from, entry_id: r.entry ? r.entry.id : null })
+    for (const c of r.cascade || []) done.push({ id: c.id, path: c.path, item: !!(sess.nodes.get(c.id) || {}).plan, from: c.from, entry_id: c.entry_id, cascade: true })
+  }
+  for (const n of [...plans].sort((a, b) => depthOf(sess, b) - depthOf(sess, a) || (a.id < b.id ? -1 : 1))) {
+    if (!sess.nodes.has(n.id)) continue
+    const p = planOf2(sess, n)
+    if (!p || planEndAt2(sess, n, p) != null) continue
+    for (const it of p.items) if (OPEN_ITEM.has(stateOf(it))) one(it, true)
+    one(n, false)
+  }
+  return done
+}
+/** A dashboard action's position (args.before_id | after_id | position "first" | "last") → { kind, ref_id? } | null. */
+function actionPos(a) {
+  const given = ['before_id', 'after_id', 'position'].filter(k => a[k] != null && a[k] !== '')
+  if (!given.length) return { ok: true, pos: null }
+  if (given.length > 1) return bad('bad-position', `give ONE of before_id / after_id / position (got ${given.join(' + ')})`)
+  if (given[0] === 'position') { const p = typeof a.position === 'string' ? lc(a.position.trim()) : ''; return p === 'first' || p === 'last' ? { ok: true, pos: { kind: p } } : bad('bad-position', 'position must be "first" or "last"') }
+  const v = a[given[0]]
+  if (typeof v !== 'string' || !ID_RE.test(v)) return bad('bad-ref', `${given[0]} must be a node id`)
+  return { ok: true, pos: { kind: given[0] === 'before_id' ? 'before' : 'after', ref_id: v } }
+}
+/**
+ * The dialog's CLASH ANSWER (§1.6, Q32; §6.3 `merges`) → { ok, map: id → { into_id } | { label }, used: Set }: `label` (the
+ * moved node's new label) and `merges:[{ id, into_id } | { id, label }]` — per clash, "merge them" (into its same-label
+ * sibling `into_id`) or "use a different label".
+ */
+function parseAnswers(a, nodeId) {
+  const map = new Map()
+  if (a.label != null) { const l = normLabel(a.label); if (!l.ok) return bad('bad-args', `label: ${l.what}`); map.set(nodeId, { label: l.label }) }
+  if (a.merges != null) {
+    if (!Array.isArray(a.merges) || a.merges.length > ACTIVITY_LIMITS.nodesPerSession) return bad('bad-args', 'merges must be a list of { id, into_id } (merge them) or { id, label } (use a different label)')
+    for (const x of a.merges) {
+      if (!x || typeof x !== 'object' || typeof x.id !== 'string' || !ID_RE.test(x.id)) return bad('bad-args', 'each merges entry names its node: { id, into_id } or { id, label }')
+      if (map.has(x.id)) return bad('bad-args', `${x.id} is answered twice`)
+      if (x.into_id != null && x.label != null) return bad('bad-args', `${x.id}: one answer per clash — into_id (merge them) or label`)
+      if (x.into_id != null) { if (typeof x.into_id !== 'string' || !ID_RE.test(x.into_id)) return bad('bad-args', `${x.id}: into_id must be a node id`); map.set(x.id, { into_id: x.into_id }) }
+      else if (x.label != null) { const l = normLabel(x.label); if (!l.ok) return bad('bad-args', `${x.id}: label: ${l.what}`); map.set(x.id, { label: l.label }) }
+      else return bad('bad-args', `${x.id}: give into_id (merge them) or label (a different label)`)
+    }
+  }
+  return { ok: true, map, used: new Set() }
+}
+
+/**
+ * ONE dashboard ACTION on a LOCAL node, by id (6d on ids, §5.4) → { ok, action, id, path (before), node (now; null when it
+ * left), ident, kind, type, key, scope, text (the line's, before), from_state, to_state, of? ("plan"), entry_id, applied:[{
+ * id, path, state, from?, entry_id?, item? }], owner (the nearest agent at or above, or null = the session), records,
+ * entries, writes, warnings? } + per action: moved_from / to / to_id / where / rank (move, reorder), from_label / label
+ * (rename), into_id / into (merge, or a move answered "merge them"), from_text / new_text (edit_text), message, question /
+ * answer / previous (answer / change_answer / withdraw), from_type / to_type (show_as_*), dismissed. ALL-OR-NOTHING, a
+ * SYSTEM change attributed `by` + `act` (no activity). What it notifies: actionNotice2.
+ * q = { session, project?, user?, realm?, id, action, args? }; opts.by = { kind:"dashboard", user, host } (required).
+ * Codes: bad-action, bad-by, unknown-session, bad-id, unknown-node, bad-args, not-a-plan-item, no-change, not-a-plan,
+ * already-ended, not-ended, all-items-done, no-open-plan, not-an-agent, already-finished, not-stale, has-open-items, the
+ * position / move / merge / rename refusals, duplicate-label (an unanswered clash: `clashes` = the dialog's list,
+ * clashes2), clash-changed (the answer no longer fits the tree: the dialog reopens with `clashes`), and the question codes.
+ * args.stale_min (1..1440; default the host's) = the dashboard slider, so "stale" means what the viewer saw.
+ * @param {any} state @param {any} q @param {number} now @param {{ by?: any }} [opts]
+ * @returns {any}
+ */
+export function applyAction2(state, q, now, opts = {}) {
+  if (!state || !(state.sessions instanceof Map)) return bad('bad-state-object', 'pass a createModel() state')
+  if (!Number.isFinite(now)) return bad('bad-now', 'now must be a ms epoch')
+  if (!q || typeof q !== 'object') return bad('bad-action', 'an action is { session, project?, user?, realm?, id, action, args? }')
+  const action = typeof q.action === 'string' ? q.action.trim().toLowerCase() : ''
+  if (!ACTIONS2.includes(action)) return bad('bad-action', `action must be one of ${ACTIONS2.join('|')}`)
+  const by = normBy(opts && opts.by)
+  if (!by || typeof by === 'string') return bad('bad-by', 'an action needs its author ({ kind:"dashboard", user, host })')
+  const args = q.args && typeof q.args === 'object' && !Array.isArray(q.args) ? q.args : {}
+  const sess = typeof q.session === 'string' && q.session.trim() ? getSession2(state, { session: q.session, project: q.project, user: q.user, realm: q.realm }) : null
+  if (!sess) return bad('unknown-session', `no activity from a session "${String(q.session).slice(0, 80)}" (${String(q.project || '').slice(0, 60)}) on this host`)
+  if (typeof q.id !== 'string' || !ID_RE.test(q.id)) return bad('bad-id', 'an action names its node by id (16 chars of a-z 2-7)')
+  const node = sess.nodes.get(q.id)
+  if (!node || node.merged_into) return bad('unknown-node', `${q.id} is not on the board${sess.ghosts.has(q.id) ? ' (it was removed)' : node ? ' (it is merged)' : ''}`)
+  const smArg = Number(args.stale_min), sm = Number.isFinite(smArg) && smArg >= 1 && smArg <= 1440 ? smArg : state.config.stale_after_min
+  // #80: what the notice says — read BEFORE the action applies
+  const plan0 = planOf2(sess, node), from0 = stateOf(node), planFrom0 = plan0 ? (planEndAt2(sess, node, plan0) != null ? planEndHow2(sess, node, plan0) : 'open') : null
+  const path0 = pathOf(sess, node), isAgent = node.kind !== 'context'
+  const base = { action, id: node.id, path: path0, ident: { ...sess.ident }, kind: node.kind, type: node.type, key: node.key, scope: node.scope, text: node.current ? node.current.text : null, owner: askerOf(sess, node), by }
+  const t = newTx(state, sess, now, { by, act: action })
+  const fail = r => { rollback(t); return r }
+  const entryOf = () => { for (let i = t.entries.length - 1; i >= 0; i--) if (t.entries[i].n === node.id) return t.entries[i].id; return t.entries.length ? t.entries[t.entries.length - 1].id : null }
+  const alive = () => state.sessions.get(sess.key) === sess && sess.nodes.get(node.id) === node
+  const done = (to, extra = {}) => ({ ok: true, ...base, node: alive() ? nodeView(sess, node) : null, from_state: to.of === 'plan' ? planFrom0 : from0, to_state: to.state, ...(to.of ? { of: to.of } : {}),
+    entry_id: entryOf(), applied: [{ id: node.id, path: path0, state: alive() ? stateOf(node) : null }], ...extra, records: t.records, entries: t.entries, writes: t.writes,
+    ...(t.warnings.length ? { warnings: [...t.warnings] } : {}) })
+  /** a self-contained 2b call (its own transaction) → the action's shape */
+  const wrap = (r, to, extra = {}) => (r.ok === false ? r : { ...base, ...r, ok: true, action, node: r.node || (alive() ? nodeView(sess, node) : null), from_state: from0, to_state: to.state, entry_id: r.entry_id || (r.entries && r.entries.length ? r.entries[r.entries.length - 1].id : null),
+    applied: [{ id: node.id, path: path0, state: stateOf(node) }], ...extra })
+  /** a refused move / merge: the dialog's fresh clash list rides along (it reopens with the tree as it is now) */
+  const clashFail = (r, args2) => { rollback(t); if (r.code !== 'duplicate-label' && r.code !== 'clash-changed') return r; const c = clashes2(state, sess.ident, node.id, args2); return { ...r, clashes: c.ok ? c.clashes : r.clashes || [] } }
+  switch (action) {
+    case 'done': case 'skip': case 'reopen': case 'abandon': {   // a PLAN ITEM (abandon: any context, with its open descendants)
+      if (!node.plan && !(action === 'abandon' && node.kind === 'context')) return bad('not-a-plan-item', `"${path0 || sess.ident.session}" is not a plan item${action === 'abandon' ? ' or a context' : ''}`)
+      const st = ITEM_ACTIONS[action]
+      if (node.current && stateOf(node) === st) return bad('no-change', `"${path0}" is already ${st}`)
+      const r = lineAct(t, node, st, actText(ACTION_LABEL[action], by))
+      if (r.ok === false) return fail(r)
+      const par = sess.nodes.get(node.parent), pp = par ? planOf2(sess, par) : null
+      if (action === 'reopen' && pp && planEndAt2(sess, par, pp) != null) warn(t, { code: 'plan-ended', what: `the plan of "${pathOf(sess, par) || sess.ident.session}" has ended — reopen the plan too` })
+      const casc = (r.cascade || []).map(c => ({ id: c.id, path: c.path, state: 'abandoned', from: c.from, entry_id: c.entry_id }))
+      return done({ state: st }, casc.length ? { applied: [{ id: node.id, path: path0, state: st }, ...casc] } : {})
+    }
+    case 'complete': {   // a PLAN NODE: ends its plan (a context: its line done; an agent / the session: the marker)
+      if (!plan0) return bad('not-a-plan', `"${path0 || sess.ident.session}" holds no plan items`)
+      if (planEndAt2(sess, node, plan0) != null) return bad('already-ended', `the plan of "${path0 || sess.ident.session}" has already ended`)
+      const text = actText(ACTION_LABEL.complete, by)
+      const r = isAgent ? markerAct(t, node, 'done', text) : lineAct(t, node, 'done', text)
+      return r.ok === false ? fail(r) : done({ state: 'done', of: 'plan' })
+    }
+    case 'reopen_plan': {
+      if (!plan0) return bad('not-a-plan', `"${path0 || sess.ident.session}" holds no plan items`)
+      if (planEndAt2(sess, node, plan0) == null) return bad('not-ended', `the plan of "${path0 || sess.ident.session}" is open`)
+      if (plan0.allDoneAt != null) return bad('all-items-done', 'every item of this plan is done — reopen an item instead')
+      const text = actText(ACTION_LABEL.reopen_plan, by)
+      const r = isAgent ? markerAct(t, node, 'open', text) : lineAct(t, node, 'running', text)
+      return r.ok === false ? fail(r) : done({ state: 'open', of: 'plan' })
+    }
+    case 'abandon_plan': {   // a plan node: its open items, then it; an agent / the session: every open plan it holds (it keeps running)
+      if (!isAgent && !plan0) return bad('not-a-plan', `"${path0}" holds no plan items`)
+      const plans = heldPlans2(sess, node)
+      if (!plans.length) return bad('no-open-plan', `"${path0 || sess.ident.session}" holds no open plan`)
+      const d = abandonPlans2(t, plans, actText(ACTION_LABEL.abandon_plan, by))
+      return done({ state: 'abandoned', of: 'plan' }, { applied: d.map(x => ({ id: x.id, path: x.path, state: 'abandoned', item: x.item, from: x.from, entry_id: x.entry_id })) })
+    }
+    case 'finish': {   // an agent / the session that is stale or gone
+      if (!isAgent) return bad('not-an-agent', `"${path0}" is a context — only an agent or the session finishes`)
+      const st = typeof args.state === 'string' ? args.state.trim().toLowerCase() : ''
+      if (st !== 'done' && st !== 'failed') return bad('bad-args', 'finish takes args.state "done" or "failed"')
+      if (node.finished_at) return bad('already-finished', `"${path0 || sess.ident.session}" has already finished`)
+      if (!quiet2(sess, node, now, sm)) return bad('not-stale', `"${path0 || sess.ident.session}" is neither stale nor gone — only a quiet agent can be marked finished`)
+      const r = lineAct(t, node, st, actText(`${ACTION_LABEL.finish} (${st})`, by))
+      return r.ok === false ? fail(r) : done({ state: st })
+    }
+    case 'dismiss': {   // remove an agent / the session (with its subtree) from the board now; the files keep everything
+      if (!isAgent) return bad('not-an-agent', `"${path0}" is a context — dismiss removes an agent or a session`)
+      const sub = subtree2(sess, node)
+      if (!sub.every(x => (x === node ? quiet2(sess, x, now, sm) : x.kind !== 'agent' || x.implicit || quiet2(sess, x, now, sm))))
+        return bad('not-stale', `"${path0 || sess.ident.session}" (or an agent under it) is still active — only a stale, gone or finished agent can be dismissed`)
+      if (openPlanIds(sess).has(node.id)) return bad('has-open-items', `"${path0 || sess.ident.session}" holds part of an OPEN plan — complete or abandon it first (open plan items are never removed)`)
+      let count = 0
+      const walk = n => { count++; for (const id of kidIds(sess, n.id)) { const c = sess.nodes.get(id); if (c) walk(c) } }
+      walk(node)
+      const root = node.parent == null, holder = root ? node : sess.nodes.get(node.parent)
+      // 6d: ONE logged entry — on the PARENT (`dismiss:true`, `of` = the removed id; the session root: on itself) — then the
+      // node and its subtree leave memory (a `remove` record, why "dismiss"; the root: the whole session)
+      const e = writeEntry(t, holder, { type: 'event', text: actText(root ? 'the session dismissed from the board' : `dismissed "${node.label}" from the board`, by), state: stateOf(node), extra: { dismiss: true, of: node.id } })
+      if (!root) removeNode(t, node, 'dismiss')
+      else { record(t, 'remove', node, { why: 'dismiss', was: '' }); mdel(t, state.sessions, sess.key) }
+      return done({ state: 'dismissed' }, { entry_id: e.id, applied: [{ id: node.id, path: path0, state: 'dismissed' }], dismissed: { id: node.id, path: path0, nodes: count, session: root } })
+    }
+    case 'reorder': {   // a new place among its siblings (args.before_id | after_id, or position first | last)
+      const ap = actionPos(args)
+      if (ap.ok === false) return ap
+      if (!ap.pos) return bad('bad-args', 'reorder takes args.before_id / args.after_id (a sibling) or args.position ("first" | "last")')
+      const r = reorderNode(t, node, ap.pos, rootOf(sess))
+      if (r.ok === false) return fail(r)
+      if (r.noop) return bad('no-change', `"${path0}" is already there`)
+      const w = r.placed.where
+      return done({ state: from0 }, { where: w === 'first' ? 'to the top' : w === 'last' ? 'to the end' : w, rank: r.placed.rank })
+    }
+    case 'move': {   // re-parent (args.to_id) + a position; a clash with a same-label sibling → the dialog's answer (label / merges)
+      if (node.parent == null) return bad('bad-move', 'the session root cannot move')
+      if (typeof args.to_id !== 'string') return bad('bad-args', 'move takes args.to_id: the new parent\'s id (+ before_id / after_id / position; label / merges answer a label clash)')
+      const ap = actionPos(args)
+      if (ap.ok === false) return ap
+      const an = parseAnswers(args, node.id)
+      if (an.ok === false) return an
+      const d = byId(t, args.to_id, 'to_id')
+      if (d.ok === false) return d
+      const dest = d.node
+      if (dest.id === node.parent && !an.map.size) {
+        if (!ap.pos) return bad('no-change', `"${path0}" is already there`)
+        const r = reorderNode(t, node, ap.pos, rootOf(sess))
+        if (r.ok === false) return fail(r)
+        if (r.noop) return bad('no-change', `"${path0}" is already there`)
+        return done({ state: from0 }, { where: r.placed.where, rank: r.placed.rank })
+      }
+      const mine = an.map.get(node.id), label = mine && mine.label != null ? mine.label : node.label
+      if (mine) an.used.add(node.id)
+      const sib = clashAt(sess, dest.id, label, node.id)
+      let extra
+      if (mine && mine.into_id != null) {   // "merge them": the moved node merges into its same-label sibling there
+        if (!sib || sib.id !== mine.into_id) return clashFail(bad('clash-changed', `the tree changed: "${node.label}" no longer clashes with that node under "${pathOf(sess, dest) || sess.ident.session}" — look again`), { to_id: dest.id })
+        const m = mergeNode(t, node, sib, an)
+        if (m.ok === false) return clashFail(m, { to_id: dest.id })
+        extra = { into_id: sib.id, into: pathOf(sess, sib), merged: m.merged }
+      } else {
+        if (sib) return clashFail(mine ? bad('clash-changed', `the tree changed: "${label}" is taken under "${pathOf(sess, dest) || sess.ident.session}" too (key ${sib.key})`) : dupLabel(sess, dest.id, label, sib, node.id, `can't move "${node.label}" under "${pathOf(sess, dest) || sess.ident.session}"`), { to_id: dest.id })
+        if (dest.id === node.parent) { const e = renameNode(t, node, label); if (e) return fail(e) }
+        const m = dest.id === node.parent ? (ap.pos ? reorderNode(t, node, ap.pos, rootOf(sess)) : { noop: true }) : moveNode(t, node, dest, label !== node.label ? label : null, ap.pos, rootOf(sess))
+        if (m.ok === false) return clashFail(m, { to_id: dest.id })
+        extra = { moved_from: path0, to: pathOf(sess, dest), to_id: dest.id, ...(m.moved ? { rank: m.moved.rank, ...(m.moved.where ? { where: m.moved.where } : {}) } : m.placed ? { rank: m.placed.rank, where: m.placed.where } : {}),
+          ...(mine ? { label } : {}) }
+      }
+      const unused = [...an.map.keys()].filter(k => !an.used.has(k))
+      if (unused.length) return clashFail(bad('clash-changed', `the tree changed: ${unused.length} answer${unused.length === 1 ? '' : 's'} no longer match${unused.length === 1 ? 'es' : ''} a clash — look again`), { to_id: dest.id })
+      return done({ state: from0 }, extra)
+    }
+    case 'merge': {   // A into B (args.into_id); clashes among the children → the dialog's answer (merges)
+      if (typeof args.into_id !== 'string') return bad('bad-args', 'merge takes args.into_id: the node to merge into (+ merges answering its children\'s label clashes)')
+      if (args.label != null) return bad('bad-args', 'a merged node keeps no label of its own — answer its children\'s clashes in merges')
+      const an = parseAnswers(args, node.id)
+      if (an.ok === false) return an
+      const d = byId(t, args.into_id, 'into_id')
+      if (d.ok === false) return d
+      const m = mergeNode(t, node, d.node, an)
+      if (m.ok === false) return clashFail(m, { into_id: d.node.id })
+      const unused = [...an.map.keys()].filter(k => !an.used.has(k))
+      if (unused.length) return clashFail(bad('clash-changed', `the tree changed: ${unused.length} answer${unused.length === 1 ? '' : 's'} no longer match${unused.length === 1 ? 'es' : ''} a clash — look again`), { into_id: d.node.id })
+      return done({ state: from0 }, { into_id: d.node.id, into: pathOf(sess, d.node), merged: m.merged })
+    }
+    case 'rename': {   // Rename… (label ≤ 60): a sibling's label → duplicate-label with the suggestion (shown inline)
+      const l = normLabel(args.label)
+      if (!l.ok) return bad('bad-args', `rename takes args.label — ${l.what}`)
+      if (l.label === node.label) return bad('no-change', `"${path0}" is already labelled that`)
+      const old = node.label, e = renameNode(t, node, l.label)
+      if (e) return fail(e)
+      return done({ state: from0 }, { from_label: old, label: l.label })
+    }
+    case 'edit_text': {   // #83: set the node's LINE (+ optionally its state) for its session — any node, the session root too
+      if (typeof args.text !== 'string' || !normText(args.text)) return bad('bad-args', 'edit_text takes args.text — the new line (and optionally args.state)')
+      const valid = editStates2(sess, node)
+      const st = typeof args.state === 'string' && args.state.trim() ? args.state.trim().toLowerCase() : null
+      if (st && !valid.includes(st)) return bad('bad-state', `"${path0 || sess.ident.session}" can be ${valid.join('|') || 'nothing (a question\'s line is the question)'} — not ${st}`)
+      const keep = st || (node.current ? stateOf(node) : null)   // no state given: the line keeps its state (a ☐ item is not started by an edit)
+      let text = normText(args.text)
+      if (cpLen(text) > ACTIVITY_LIMITS.text) { text = cpSlice(text, ACTIVITY_LIMITS.text - 1) + '…'; warn(t, { code: 'text-truncated', what: `text cut to ${ACTIVITY_LIMITS.text} characters` }) }
+      if (node.current && node.current.text === text && stateOf(node) === (keep || 'running')) return bad('no-change', `"${path0 || sess.ident.session}" already reads that`)
+      const suffix = ` (edited ${byText(by)})`, room = ACTIVITY_LIMITS.text - cpLen(suffix)   // the LOGGED entry: the text + who edited it (the line keeps the text alone)
+      const et = (cpLen(text) > room ? cpSlice(text, room - 1) + '…' : text) + suffix
+      const c0 = node.current
+      const r = applyReport(t, node, { text, line: true, state: keep, log: true, stale_after_ms: null, details: c0 ? c0.details || null : null, data: c0 && c0.data != null ? c0.data : null }, { entryText: et })
+      if (r.ok === false) return fail(r)
+      const st2 = stateOf(node), casc = (r.cascade || []).map(c => ({ id: c.id, path: c.path, state: 'abandoned', from: c.from, entry_id: c.entry_id }))
+      return done({ state: st2 }, { from_text: base.text, new_text: text, ...(casc.length ? { applied: [{ id: node.id, path: path0, state: st2 }, ...casc] } : {}) })
+    }
+    case 'message': {   // #84: a message to the node's session — LOGGED on the node here; the bridge delivers it (actionNotice2)
+      const full = msgText(args.text)
+      if (!full) return bad('bad-args', 'message takes args.text — what to tell the session')
+      if (cpLen(full) > MESSAGE_LIMITS.text) return bad('message-too-long', `a message is at most ${MESSAGE_LIMITS.text} characters (got ${cpLen(full)}) — shorten it`)
+      let det = full   // the full text in details (≤ 4 KB: a long non-ASCII message is cut there — the delivered message carries all of it)
+      while (utf8(det) > ACTIVITY_LIMITS.detailsBytes) det = cpSlice(det, Math.max(1, cpLen(det) - Math.ceil((utf8(det) - ACTIVITY_LIMITS.detailsBytes) / 4) - 1)) + '…'
+      const r = applyReport(t, node, { text: cut(`${by.user} via dashboard: ${preview(full, MESSAGE_LIMITS.preview)}`), line: false, state: null, log: true, stale_after_ms: null, details: det, data: null })
+      if (r.ok === false) return fail(r)
+      return done({ state: from0 }, { message: full })
+    }
+    case 'answer': case 'change_answer':   // #85 / #90 — 2b's model call
+      return wrap(answerQuestion2(state, sess.ident, node.id, args, now, { by, change: action === 'change_answer' }), { state: 'done' })
+    case 'withdraw':
+      return wrap(withdrawQuestion2(state, sess.ident, node.id, now, { by }), { state: 'abandoned' })
+    case 'show_as_group': case 'show_as_plan': {   // GROUPS: Show as group / Show as plan — 2b's setType2
+      const to = action === 'show_as_group' ? 'group' : 'plan'
+      return wrap(setType2(state, sess.ident, node.id, to, now, { by, act: action }), { state: from0 }, { from_type: base.type, to_type: to })
+    }
+  }
+  return bad('bad-action', action)
+}
+
+/**
+ * The CLASH DIALOG's list (§1.6, Q32; §5.4) — read-only: what moving node `id` under `args.to_id`, or merging it into
+ * `args.into_id`, would clash with, so the dashboard can ask per clash "merge them" or "use a different label". → { ok,
+ * clashes:[{ id, key, label, kind, under_id (where it would land), sibling:{ id, key, label }, suggestion ("Notes (2)"),
+ * can_merge (both contexts and mergeable — never for an agent), nested:[the clashes "merge them" would create one level
+ * down, the same shape] }] } — empty when nothing clashes. The answer goes back as one action (applyAction2 move / merge:
+ * `label` and `merges:[{ id, into_id } | { id, label }]`).
+ * @param {any} state @param {any} ident @param {string} id @param {{ to_id?: string, into_id?: string }} args
+ */
+export function clashes2(state, ident, id, args = {}) {
+  const sess = getSession2(state, ident)
+  if (!sess) return bad('unknown-session', 'no such session on this host')
+  const node = sess.nodes.get(id)
+  if (!node || node.merged_into) return bad('unknown-node', `${id} is not on the board`)
+  const entry = (k, s, under) => { const cm = !canMergeWhy(sess, k, s); return { id: k.id, key: k.key, label: k.label, kind: k.kind, under_id: under.id, sibling: brief(s), suggestion: freeLabel(sess, under.id, k.label, k.id).label, can_merge: cm, nested: cm ? kidClashes(k, s) : [] } }
+  const kidClashes = (a, b) => { const out = []; for (const k of childrenOf2(sess, a)) { const s = clashAt(sess, b.id, k.label, k.id); if (s) out.push(entry(k, s, b)) } return out }
+  if (args.into_id != null) {
+    const b = sess.nodes.get(args.into_id)
+    if (!b || b.merged_into) return bad('unknown-node', `${args.into_id} is not on the board`)
+    return { ok: true, clashes: kidClashes(node, b) }
+  }
+  const d = sess.nodes.get(args.to_id)
+  if (!d || d.merged_into) return bad('unknown-node', `${args.to_id} is not on the board`)
+  if (d.id === node.parent) return { ok: true, clashes: [] }
+  const s = clashAt(sess, d.id, node.label, node.id)
+  return { ok: true, clashes: s ? [entry(node, s, d)] : [] }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2c: NOTICES (#80 / #83 / #84 / #85 / #90 on ids, §5.5) — model output only; the bridge batches and delivers them
+
+const NOTICE_ONE = Object.freeze({ done: 'marked {p} done', skip: 'skipped {p}', reopen: 'reopened {p}', abandon: 'abandoned {p}', complete: 'completed the plan {p}',
+  abandon_plan: 'abandoned the plan {p}', reopen_plan: 'reopened the plan {p}', finish: 'marked {p} finished ({s})', dismiss: 'dismissed {p} from the board', edit_text: 'edited {p}',
+  reorder: 'moved {p} {w}', show_as_group: 'showed {p} as a group', show_as_plan: 'showed {p} as a plan' })
+const NOTICE_MANY = Object.freeze({ done: 'marked {n} done', skip: 'skipped {n}', reopen: 'reopened {n}', abandon: 'abandoned {n}', complete: 'completed {n}', abandon_plan: 'abandoned {n}',
+  reopen_plan: 'reopened {n}', finish: 'finished {n}', dismiss: 'dismissed {n}', move: 'moved {n}', reorder: 'reordered {n}', edit_text: 'edited {n}', rename: 'renamed {n}', merge: 'merged {n}',
+  show_as_group: 'regrouped {n}', show_as_plan: 'regrouped {n}' })
+const NOTICE_NOUN = Object.freeze({ done: 'item', skip: 'item', reopen: 'item', abandon: 'item', complete: 'plan', abandon_plan: 'plan', reopen_plan: 'plan', finish: 'agent', dismiss: 'agent',
+  move: 'node', reorder: 'node', edit_text: 'line', rename: 'node', merge: 'node', show_as_group: 'node', show_as_plan: 'node' })
+const NOTICE_SUBJECT_MAX = 200
+/** A node's display path NOW (§5.5: at SEND time, from the id — a batch is flushed seconds later), else `fallback` (it left). */
+function pathNow(o, ident, id, fallback) {
+  if (o && o.state && id) { const s = getSession2(o.state, ident || {}), n = s ? s.nodes.get(id) : null; if (n && !n.merged_into) return pathOf(s, n) }
+  return fallback == null ? '' : fallback
+}
+/** A path for a SUBJECT: shortened in the middle (Q11b); the session root → the session's name. */
+const subj = (p, session) => (p ? shortPath(p) : String(session || 'the session'))
+const byOf = (b0, host) => { const b = normBy(b0); return b && typeof b === 'object' ? { user: b.user, host: b.host } : { user: typeof b === 'string' ? b : 'dashboard', host: host || '?' } }
+/** Who a notice goes to (§5.5): the node's SESSION (its registered sub-peer; parked when it is offline), with the nearest
+ * AGENT at or above the node named (null = the session itself) so an orchestrator can relay it. */
+const toOf = r => { const i = r.ident || {}; return { realm: i.realm || 'default', project: i.project || null, user: i.user || null, session: i.session || null, host: i.host || null } }
+
+/**
+ * What one applied ACTION notifies (applyAction2's result; expireQuestions2's `expired[]` items) → { verb, subject, body,
+ * to (the node's session), agent (the nearest agent at or above the node, or null), now (send at once — a message, an
+ * answer — else batched per session, notice_batch_sec) }. Verbs: activity_changed (every structural / state action, incl.
+ * 2.0's rename / merge / Show as group / plan), activity_text_edited (edit_text), activity_message (message, at once),
+ * activity_answer (answer / change_answer / withdraw / expire, at once). Subjects are PUBLIC: who, what, the node's path NOW
+ * (opts.state given: computed from the id at send time) shortened in the middle — never a message's or an answer's text.
+ * Bodies gain node_id, key, scope beside path (§5.5). opts = { by (the author), host (the owner), ts, state? }.
+ * @param {any} r @param {{ by?: any, host?: string, ts?: number, state?: any }} [opts]
+ */
+export function actionNotice2(r, opts = {}) {
+  if (r && r.action === 'message') return messageNotice2(r, opts)
+  if (r && ['answer', 'withdraw', 'expire', 'change_answer'].includes(r.action)) return answerNotice2(r, opts)
+  const id = r.ident || {}, action = r.action, by = byOf(opts.by != null ? opts.by : r.by, opts.host)
+  const p = pathNow(opts, id, r.id, r.path)
+  const pp = r.kind !== 'context' && NOTICE_NOUN[action] === 'plan' ? `of ${subj(p, id.session)}` : subj(p, id.session)   // "completed the plan of lead"
+  let said
+  if (action === 'move' && r.into_id) said = `merged ${subj(r.path, id.session)} into ${subj(pathNow(opts, id, r.into_id, r.into), id.session)}`   // "merge them" from the move dialog
+  else if (action === 'move') said = `moved ${subj(r.moved_from != null ? r.moved_from : r.path, id.session)} to ${subj(pathNow(opts, id, r.to_id, r.to), id.session)}${r.label ? ` as "${r.label}"` : ''}`   // names the OLD path
+  else if (action === 'rename') said = `renamed ${subj(r.path, id.session)} to "${r.label}"`
+  else if (action === 'merge') said = `merged ${subj(r.path, id.session)} into ${subj(pathNow(opts, id, r.into_id, r.into), id.session)}`
+  else {
+    const tpl = action === 'abandon_plan' && r.kind !== 'context' ? 'abandoned the open plans {p}' : NOTICE_ONE[action] || `${action} {p}`
+    said = tpl.replace('{p}', pp).replace('{s}', r.to_state || '').replace('{w}', r.where || 'elsewhere')
+  }
+  const st83 = action === 'edit_text' && r.from_state && r.to_state && r.from_state !== r.to_state ? ` (${r.from_state} → ${r.to_state})` : ''   // #83: an edit that changed the state says so
+  const subject = cpSlice(`${by.user} ${said}${st83}`, NOTICE_SUBJECT_MAX)
+  const items = (r.applied || []).filter(a => a.id !== r.id).map(a => compact({ node_id: a.id, path: pathNow(opts, id, a.id, a.path), from_state: a.from || null, to_state: a.state, entry_id: a.entry_id || null }))
+  const body = { action, path: p, node_id: r.id || null, key: r.key != null ? r.key : null, scope: r.scope != null ? r.scope : null, host: opts.host || id.host || null,
+    from_state: r.from_state || null, to_state: r.to_state || null, ...(r.of ? { of: r.of } : {}), by, entry_id: r.entry_id || null, session: id.session || null, project: id.project || null,
+    text: r.text || null, ts: opts.ts || null, ...(items.length ? { items } : {}),
+    ...(action === 'move' ? { moved_from: r.moved_from != null ? r.moved_from : r.path, to: r.to_id ? pathNow(opts, id, r.to_id, r.to) : null, to_id: r.to_id || null } : {}),
+    ...(r.into_id ? { into: pathNow(opts, id, r.into_id, r.into), into_id: r.into_id } : {}), ...(r.where ? { where: r.where } : {}),
+    ...(action === 'rename' ? { from_label: r.from_label || null, label: r.label || null } : {}), ...(action === 'move' && r.label ? { label: r.label } : {}),
+    ...(r.from_type ? { from_type: r.from_type, to_type: r.to_type } : {}), ...(r.dismissed ? { dismissed: r.dismissed } : {}),
+    ...(action === 'edit_text' ? { from_text: r.from_text != null ? r.from_text : null, text: r.new_text != null ? r.new_text : null } : {}) }   // #83: the line before → after
+  return { verb: action === 'edit_text' ? EDIT_NOTICE_VERB : NOTICE_VERB, subject, body, to: toOf(r), agent: r.owner || null, now: false }
+}
+/**
+ * #84: a dashboard viewer's MESSAGE about a node → { verb:"activity_message", subject ("robin about Rel/#83: can you also
+ * cover…" — a few words only), body { action, path, node_id, key, scope, host, text (ALL of it), by, entry_id, session,
+ * project, ts }, to, agent, now:true }.
+ * @param {any} r @param {{ by?: any, host?: string, ts?: number, state?: any }} [opts]
+ */
+export function messageNotice2(r, opts = {}) {
+  const id = r.ident || {}, by = byOf(opts.by != null ? opts.by : r.by, opts.host), text = typeof r.message === 'string' ? r.message : ''
+  const p = pathNow(opts, id, r.id, r.path)
+  return { verb: MESSAGE_NOTICE_VERB, subject: cpSlice(`${by.user} about ${subj(p, id.session)}: ${firstWords(text)}`, NOTICE_SUBJECT_MAX),
+    body: { action: 'message', path: p, node_id: r.id || null, key: r.key != null ? r.key : null, scope: r.scope != null ? r.scope : null, host: opts.host || id.host || null, text, by,
+      entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, ts: opts.ts || null }, to: toOf(r), agent: r.owner || null, now: true }
+}
+/**
+ * #85 / #90: a session's OWN question answered, its answer changed, withdrawn (the dashboard) or expired (the bridge) →
+ * { verb:"activity_answer", subject (who, the path, the question's first words — NEVER the answer), body { action, status
+ * (answered | revised | withdrawn | expired), path, node_id, key, scope, host, question, choices, free, answer?, previous? /
+ * revised?, by, entry_id, session, project, agent (the asking agent, or null = the session), asked_at, ts }, to, agent,
+ * now:true }. r = applyAction2's answer / change_answer / withdraw result, or one of expireQuestions2's `expired[]`.
+ * @param {any} r @param {{ by?: any, host?: string, ts?: number, state?: any }} [opts]
+ */
+export function answerNotice2(r, opts = {}) {
+  const id = r.ident || {}, q = /** @type {any} */ (questionView(r.question)) || { status: r.action === 'withdraw' ? 'withdrawn' : r.action === 'expire' ? 'expired' : 'answered', choices: [], free: true }
+  const b = normBy(opts.by != null ? opts.by : r.by != null ? r.by : q.by), by =b && typeof b === 'object' ? { user: b.user, host: b.host } : typeof b === 'string' ? b : 'dashboard'
+  const who = typeof by === 'object' ? by.user : by, chg = r.action === 'change_answer'
+  const p = pathNow(opts, id, r.id, r.path), fw = firstWords(r.text || '')
+  const subject = cpSlice(r.action === 'expire' ? `question expired ${subj(p, id.session)}: ${fw}` : chg ? `${who} changed the answer to ${subj(p, id.session)}: ${fw}` : `${who} ${r.action === 'withdraw' ? 'withdrew' : 'answered'} ${subj(p, id.session)}: ${fw}`, NOTICE_SUBJECT_MAX)
+  const body = { action: r.action, status: chg ? 'revised' : q.status, path: p, node_id: r.id || null, key: r.key != null ? r.key : null, scope: r.scope != null ? r.scope : null, host: opts.host || id.host || null,
+    question: r.text || null, choices: q.choices, free: q.free, ...(q.answer ? { answer: q.answer } : {}), ...(chg ? { previous: q.previous || r.previous || null, revised: q.revised || 1 } : {}),
+    by, entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, agent: r.agent || null, asked_at: q.asked_at || null, ts: opts.ts || null }
+  return { verb: ANSWER_NOTICE_VERB, subject, body, to: toOf(r), agent: r.agent || r.owner || null, now: true }
+}
+/**
+ * Several notices for ONE session (actionNotice2's) → ONE { subject, body }: "robin skipped 2 items and abandoned 1 in Rel"
+ * — per action in first-seen order, the noun on the first group (and again where it changes), "in" the deepest common
+ * container (a plan item's parent; another node itself), else the session's name. body = { actions, count, session, project,
+ * host }. One notice is returned as it is.
+ * @param {Array<{ subject: string, body: any }>} notices
+ */
+export function combineActionNotices2(notices) {
+  const list = (notices || []).filter(n => n && n.body)
+  if (list.length === 1) return { subject: list[0].subject, body: list[0].body }
+  const acts = list.map(n => n.body), first = acts[0] || {}
+  const users = [...new Set(acts.map(a => (a.by && a.by.user) || 'dashboard'))]
+  const groups = new Map()
+  for (const a of acts) groups.set(a.action, (groups.get(a.action) || 0) + 1)
+  let lastNoun = null
+  const parts = [...groups].map(([action, n]) => {
+    const noun = NOTICE_NOUN[action] || 'change'
+    const what = noun !== lastNoun ? `${n} ${noun}${n === 1 ? '' : 's'}` : String(n)
+    lastNoun = noun
+    return (NOTICE_MANY[action] || `${action} {n}`).replace('{n}', what)
+  })
+  const said = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0] || 'changed nothing'
+  const segs = p => { const r = parsePath2(p || ''); return r.ok ? r.segs : [] }
+  const containers = acts.map(a => { const s = segs(a.path); return NOTICE_NOUN[a.action] === 'item' ? s.slice(0, -1) : s })
+  let common = containers[0] || []
+  for (const c of containers) { let i = 0; while (i < common.length && i < c.length && labelKey(common[i]) === labelKey(c[i])) i++; common = common.slice(0, i) }
+  const subject = cpSlice(`${users.join(', ')} ${said} in ${subj(formatPath2(common), first.session)}`, NOTICE_SUBJECT_MAX)
+  return { subject, body: { actions: acts, count: acts.length, session: first.session || null, project: first.project || null, host: first.host || null } }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
