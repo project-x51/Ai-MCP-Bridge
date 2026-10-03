@@ -651,6 +651,17 @@ layout is conflict-free even under the weakest backend** (Dropbox: no locks, eve
   mailboxes/  <identityKey>/env_<envId>.msg            one IMMUTABLE file per parked message
   claims/     <project>/<topicKey>/<holderKey>.claim   one file per holder (lease-renewed by that holder)
   retained/   <project>/<topicKey>/<publisherKey>.val  one file per publisher (effective value = newest)
+  activity/   <host>/YYYY-MM-DD.jsonl                  the host's activity day file (2.0: format v6 records — node
+                                                       records + entries by node id), appended by that host only
+              <host>/YYYY-MM-DD.idx.json               (2.0) the day's index: node id → entry offsets, written at the
+                                                       rollover, rebuilt at open when missing / stale
+              <host>/format.json                       (2.0) the format marker {v:6, by, at, days, …} — written by the
+                                                       migration (or a fresh host's first start); no marker + day files
+                                                       = 1.7x history → the gateway refuses to start (exit 78)
+  views/      <host>.json                              (2.0) the per-user view state (pins, hidden, open / closed, seen)
+                                                       this host holds, written whole by that host; others read it
+  activity-v5-backup/ <host>/                          (2.0) EXISTS ONLY WHILE aimb-migrate-v2 runs: the pristine 1.7x
+                                                       day files + COMPLETE; a leftover one = an unfinished migration
 ```
 
 The invariants that make it lock-free and conflict-free:
@@ -1202,6 +1213,46 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v2.0.0):** *#88 — stable node identity: the activity board on node ids, a clean cutover.* **Not wire-compatible
+  with 1.7x, by design** (activity format 6; `activity_gossip:6` alone): every host upgrades together with the runbook
+  [`docs/cutover-2.0.md`](cutover-2.0.md). The design and every decision (Q01 – Q77+) are [`docs/spec-88.md`](spec-88.md);
+  each build step has an "as built" paragraph there (§8). **Why:** in 1.7x a node's PATH was its key, so a move or rename
+  rewrote history (re-keying memory, remapping every older record, alias-following log paging) — the source of #76, #82's
+  complexity and a run of bugs. **The model** (`lib/activity2.js`, steps 1 – 2d): every node has a stable INTERNAL ID minted
+  once from (owner host, session, creator, key); label, parent, rank and kind are attributes set by small NODE RECORDS, so a
+  move / rename / merge is one record and nothing is rewritten; a node's log is "the entries whose id is in this subtree
+  now". Keys name nodes (`--key`, `--agent`), labels are unique among siblings (a clashing create becomes `"x (2)"`, a
+  deliberate rename / move is refused `duplicate-label`, the dashboard's clash dialog offers merge or a new label), paths
+  are a shorthand without `@`. A leading `@` in the text sets the line; plain text only logs. TYPED nodes and entries from a
+  built-in registry (`context`, `plan`, `group`, `agent`, `question`, `test-run`; entries `note`, `question`, `answer`,
+  `event`, `test-result` …) with per-type glyphs, rollup and menus (#92). `--move-to` and transient contexts (Q43), TIME per
+  attempt (`took`), ROLLUP (a plan's bar is its items). **Files** (steps 3, 6): v6 day files (node records + entries by id
+  with `n` / `at`), per-day index files (id → offsets) so a log page reads only its spans backwards, the format marker,
+  ghosts for removed nodes ("show removed"), runs and "show earlier runs" by id, the Dropbox conflicted-copy check
+  (`fs_warnings`). **Migration** (steps 4, 5): `lib/activity2-convert.js` converts 1.7x (v5) history in one chronological
+  pass (deterministic; fuzzed against the frozen 1.7x library); `tools/aimb-migrate-v2.mjs` converts a host's own directory
+  in place — refuses while that host's gateway answers on its port (a TCP connect that sends nothing, Q66), backs up to
+  `activity-v5-backup/<host>/` only for the run, verifies (bytes, sha256, index files, a fresh replay = the converter's
+  model) and RESTORES the v5 files on any failure (Q68). A 2.0 gateway REFUSES TO START (exit 78) on unconverted history or
+  a leftover backup; the Windows tray shows it and stops relaunching (Q69). **Gossip v6** (step 7): one unit per node by id,
+  id-addressed `ACTIVITY_REQ` / `ACTIVITY_ACT` (remote log pages and dashboard actions by id), no v5 projection; a host still
+  on 1.7x shares nothing and is listed in the board head's `unshared_hosts` — a RED row on every 2.0 dashboard (Q70).
+  **Per-user view state** (step 8, `lib/view-state.js`): pins, hidden, open / closed, Expand all, seen — a last-writer-wins
+  set with tombstones keyed by node id, owned by the serving gateway's OS login, replicated on v6 links (`VIEW`, `view_v`
+  anti-entropy), persisted in `views/<host>.json`. **Tool, script, guides** (step 9): the `log` tool and `aimb-log.mjs` speak
+  only the 2.0 forms (every 1.7x form refused `legacy-form`, naming the 2.0 form), `--guide agent` is an agent's first
+  report, batches / waits / `resolve` on the 2.0 store, `{log_snippet}` and the guides rewritten; the pre-cutover switch
+  `AI_BRIDGE_ACTIVITY_V2` is gone. **Dashboard** (step 10, `lib/activity2-dash.js`): units by node id (a rename / move keeps
+  every unit id and the selection), the registry's menus, Rename… / Merge into… / Move to… / the clash dialog, group counts,
+  test-run bars, time, show removed, badges ("? N", "N new"), "new since you last looked", Reset view, the one-time import
+  of the browser's 1.7x pins; Q72's local-session behaviours rebuilt on 2.0 (gone, the bell, auto-abandon, the memory
+  budget). **Removed** (step 11): the 1.7x path machinery, the v2 – v5 readers in the bridge, the v5 slice code and the
+  path-addressed requests. **Release** (step 12): 2.0.0, the cutover runbook (`docs/cutover-2.0.md`), this README / spec
+  text; rehearsed on a copy of ROBIN-Z790's real history (5 259 v5 records → 1 451 nodes; a 2.0 gateway started on it, its
+  board, log pages and dashboard checked). **Operator steps at the cutover:** the realm's activity reminders republished
+  from `config.example.json` with a new `updated_at`, and any realm guides rewritten for 2.0 or removed (Q34); phub's
+  systemd unit gains `RestartPreventExitStatus=78`. **There is no rollback** once a host is migrated (Q09 / Q35); the
+  `v1.75.1` tag marks the last 1.7x code.
 - **Built (v1.75.1):** *A plan node's bar is its items only (Robin, 2026-10-03; reverses 6c decision 7).* `rollup` (lib/activity.js)
   and the dashboard's `rollKids`: a node holding any plan item gets "N of M done" over its items (questions still count as items);
   its helper agents and contexts keep their own bars on their own rows; a node with no plan items rolls up its children as before.

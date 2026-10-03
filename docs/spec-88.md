@@ -1922,6 +1922,39 @@ existing checks keep passing while the core is written.
     runbook, the live cutover on EVERY host in one window (dry-run on each first). In `config.json`: the briefing and the
     realm guides rewritten for 2.0 (Robin's step, during the stop).
 
+    **12 as built (prep)** (2026-10-04, overnight; the cutover itself is Robin's): THE RUNBOOK is a document of its own,
+    `docs/cutover-2.0.md` (§7.1 made exact, per host): integration pre-requisites (v2 green and pushed; `BRIDGE_VERSION`
+    = `package.json` = 2.0.0), pre-checks (main fast-forwards to v2, the `v1.75.1` tag, agent work parked, Dropbox up to
+    date, an optional by-hand copy of the v5 history into the git-ignored `persistence.bak-v5-<date>/`), STOP ALL (the
+    Windows tray's Quit → Shut down all — not Restart Bridges…, which relaunches; LITTLE's tray killed first over SSH so it
+    cannot relaunch and Dropbox can replace its exe; the Mac's sessions / LaunchAgent; phub's systemd unit; a check that no
+    `bridge.mjs` is left), UPDATE (the Dropbox pair once on ROBIN: `git merge --ff-only v2` + the tag, the tray rebuilt
+    with `build.cmd`, LITTLE checked read-only after Dropbox syncs — no git on LITTLE; the Mac and phub `git merge --ff-only
+    origin/v2`; no `npm install`: the runtime dependencies are unchanged), the realm block and guides in `config.json`
+    (Q34), MIGRATE (dry run, then the run, on each host; exit codes and expected lines), START in any order (LITTLE only
+    after Dropbox is up to date, its tray on its desktop), POST-CHECKS (2.0.0 everywhere, format 6, one Bridget session, no
+    red / amber rows, questions and history, a 2.0 `aimb-log` report landing on an existing node, one report from each
+    other host seen on ROBIN), what exit 78 / exit 3 / exit 2 mean and where each shows, ABORTING (only before the first real
+    migration: `git reset --hard v1.75.1`; nothing is pushed until the post-checks pass), and the follow-ups (#81's reporter
+    to the test-run pattern, the old failed review run, phub's `RestartPreventExitStatus=78` — added to
+    docs/linux-setup.md's unit). VERSION: `src/package.json` and `package-lock.json` (its own version, stale at 1.21.0)
+    are 2.0.0; `bridge.mjs`'s `BRIDGE_VERSION` is left to the integration with step 11 (a `src/` file); the 2.0 script keeps
+    recognising a 2.0 gateway by the welcome's `activity_format: 6` (§4.1 said `bridge_version ≥ 2.0.0`; Q92). DOCS: the
+    root README's 2.0 sections (upgrading, the 2.0 forms, the removed-forms table), architecture.md §12's v6 layout
+    (`activity/<host>/` day + index files + marker, `views/`, the transient `activity-v5-backup/`) and the §13 "Built
+    (v2.0.0)" entry. THE TRAY: `tray/windows/build.cmd` compiles the v2 source cleanly with the in-box `csc` (the exe is
+    git-ignored; rebuilt on ROBIN at the cutover, Dropbox carries it to LITTLE). REHEARSAL on real data (read-only, a copy):
+    ROBIN-Z790's history as of 2026-10-04 01:42, converted by `aimb-migrate-v2` (5 259 v5 records → 1 451 nodes, verified),
+    served by a 2.0 gateway from this tree on test ports with a temp config: it started (no exit 78; "replayed 8 130
+    record(s) → 1 session(s), 1 451 node(s), 0 ghost(s)" in 78 ms), the board held one Bridget session with every top-level
+    context, Next release → Pending / WIP / Finished, #88's plan bar 17 / 21, 65 questions (2 open: Q72, Q73) and 0 ghosts;
+    log pages by id came from the index files (797 entries under #88 over 3 days); the dashboard rendered the board (no red
+    or amber rows); a 2.0 `aimb-log --path "Deployed releases"` landed on the converted node (`created:false`) and
+    `--guide agent` created an agent under #88. Nothing wrong was found; noted: a session identity includes the REALM (a
+    gateway with another `realm` shows the history as another session — the runbook's "one Bridget session" check), and
+    the old failed "review run" (62 tests) opens expanded at a fresh load — its plan, with a failed item, appears never to
+    end (as 1.7x). Questions Q90 – Q93 (§9).
+
 ---
 
 ## 9. Decisions, holes and questions
@@ -2107,6 +2140,22 @@ Open — raised by build step 11 (decided overnight as recommended, built so; po
   the keys — so pins made on 1.7x survive the cutover; it is the only 1.7x path conversion left in the page.
   *Alternative:* delete it with the store (those pins are lost and pinned again by hand). Recommendation: keep it for
   2.0.0; remove it in a later release.
+
+Open — raised by build step 12's preparation (posted on the board under Questions / "Step 12 (Q90–Q93)"; the runbook
+follows the recommendations):
+- **Q90** (step 12) Realm guides in `config.json` at the cutover. *As written in the runbook:* DELETE any
+  `behaviors.realm.guides` so every host serves the built-in 2.0 guides (rewriting them is the alternative; either way no
+  1.7x form survives). Recommendation: delete; publish realm guides again later only if the built-in text falls short.
+- **Q91** (step 12) A lasting copy of ROBIN's v5 history. *As written:* an optional one-line pre-check copies
+  `persistence/activity/robin-z790` to the git-ignored `persistence.bak-v5-<date>/` (in Dropbox) before the migration
+  (the migration's own backup lives only while it runs, Q35). Recommendation: take it; delete it after a week of 2.0.
+- **Q92** (step 12) How the 2.0 script recognises a 2.0 gateway. *As built (step 9):* the logger welcome's
+  `activity_format: 6`, not §4.1's `bridge_version ≥ 2.0.0`. Recommendation: keep `activity_format` — it names the wire
+  format itself, holds for any 2.x, and needs no version parsing; amend §4.1 (and the step-9 "stand-in" comments).
+- **Q93** (step 12) Old 1.7x test runs with a failed item (the "review run" under Build step 1, 62 tests): an open plan
+  that never ends, so it opens EXPANDED at every load (as in 1.7x). *As written:* the runbook's follow-up abandons it from
+  the dashboard (or a collapse, which the per-user view now remembers). Recommendation: abandon it after the cutover; no
+  code change.
 
 ---
 

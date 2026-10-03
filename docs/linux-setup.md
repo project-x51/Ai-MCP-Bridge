@@ -107,6 +107,9 @@ EnvironmentFile=%h/.aimb/bridge.env
 ExecStart=/usr/bin/node %h/Ai-MCP-Bridge/src/bridge.mjs
 Restart=on-failure
 RestartSec=5
+# 2.0: exit 78 = the gateway REFUSED TO START (unconverted activity history, or an unfinished migration — see
+# docs/cutover-2.0.md); restarting cannot fix that, so don't loop on it
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target
@@ -132,6 +135,9 @@ file and out of `systemctl show` output.
 cd ~/Ai-MCP-Bridge && git pull && cd src && npm install
 systemctl --user restart aimb-bridge.service
 ```
+
+(The 1.7x → 2.0 upgrade is different: every host stops, migrates its activity history, then starts — follow
+[`cutover-2.0.md`](cutover-2.0.md).)
 
 > **"Restart the bridge" is not the same operation on every host — check which owns the process.**
 > Where a lingering `systemd --user` unit owns it (as here), a restart is **invisible to everything else**:
