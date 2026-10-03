@@ -924,8 +924,10 @@ activity with a 1.7x host (§6.2), so there is no "late host" window.
 
 ### 7.2 The script: `src/tools/aimb-migrate-v2.mjs`
 ```
-node src/tools/aimb-migrate-v2.mjs [--dry-run] [--dir <persistence dir>] [--host <name>] [--backup <dir>] [--json]
+node src/tools/aimb-migrate-v2.mjs [--dry-run] [--dir <persistence dir>] [--host <name>] [--port <n>] [--config <file>] [--json]
 ```
+*(As built in step 5 — see "5 as built" in §8: `--backup` is not built (Q67), `--port` / `--config` are; the bridge check
+is a TCP connect that sends nothing (Q66); a FAILED run restores the v5 files and removes the backup (Q68).)*
 - `--dir`: the persistence directory (default: what the bridge would use — `persistence.dir` from the config, via the bridge's
   own config loader, else `<repo>/persistence`). `--host`: the bridge's host name (default: the bridge's `HOSTNAME` rule, the
   same `lslug(host)` function, so the script converts exactly the directory the gateway owns). `--json`: one JSON report line.
@@ -952,7 +954,9 @@ node src/tools/aimb-migrate-v2.mjs [--dry-run] [--dir <persistence dir>] [--host
   5. **Verify.** Re-read every converted day from disk: its size and sha256 equal the marker's, every line is a v6 record,
      every index file parses and matches its day (`size`, entry counts), and a fresh 2.0 replay of the converted days builds
      a tree with the report's node count. Any mismatch → exit 3 "verification failed", the marker removed and the backup
-     KEPT (the next run redoes steps 2 – 5 from it).
+     KEPT (the next run redoes steps 2 – 5 from it). *As built (Q68): the failed run RESTORES instead — the v5 files are put
+     back from the backup (checked against `COMPLETE`), the index files and marker go, then the backup is removed, so the
+     directory is exactly as before the run; only if the restore fails is the backup kept (and named).*
   6. **Delete the backup**, `COMPLETE` LAST. A crash mid-delete: the next run finds files missing from `COMPLETE`'s list —
      the delete had begun, so verification had passed — and just finishes it. Then the report.
 - **`--dry-run`:** runs the preconditions and the whole forward pass in memory and prints the report — days, records, nodes,
@@ -1301,6 +1305,65 @@ existing checks keep passing while the core is written.
    - **shared folder:** two hosts' directories (two `--host` names) converted at once in one persistence dir touch only
      their own; a planted `2026-10-01 (LITTLE-001's conflicted copy 2026-10-03).jsonl` is warned about, left in place, and
      not converted.
+
+   **5 as built** (2026-10-03): `src/tools/aimb-migrate-v2.mjs` (the command line, the bridge's own rules for the config
+   file — `--config` > `AI_BRIDGE_CONFIG` > `src/config.json`, read only —, the persistence dir — `--dir` >
+   `AI_BRIDGE_PERSIST_DIR` > `persistence.dir` > `<repo>/persistence` —, the host — `--host` > `AI_BRIDGE_TEST_HOSTNAME` >
+   the machine name —, the port — `--port` > `AI_BRIDGE_PORT` > `port` > 12317 — and `bind`; the activity block through
+   `resolveConfig` with the environment, as the bridge) + the library `src/lib/activity2-migrate.js` (`migrate`,
+   `probeGateway` / `probePort`, `startCheck2` + `writeFreshMarker` for §7.5, `readMarker`, `readBackup`, `backupDir`,
+   `dumpModel2`), on a persistence DIRECTORY so the tests run it on temp dirs. Exit codes: 0 done / nothing to do, 2
+   refused (nothing written), 3 failed, 64 the command line (78 is the gateway's, §7.5). `--json` = one report line.
+   IS A BRIDGE UP (Q66): the bridge keeps no lock, pid or port file — whoever binds the well-known port IS the host's
+   gateway (`election()`), so the script makes a TCP connect to `127.0.0.1:<port>` (and to `bind` when that is a specific
+   address) and hangs up at once WITHOUT SENDING A BYTE: the gateway's control handler does nothing until a HELLO frame (no
+   state, no log line), so nothing in a running bridge changes. Accepted → refused "a bridge is running on this host (it
+   answers on …) — stop every bridge first"; no answer in time → refused "could not tell". It probes again after the
+   verification: a bridge that started during the run fails it (restored). Plus §7.2's writer check: a `*.tmp` newer than
+   10 s in the host's directory → refused; older ones are deleted before step 2.
+   THE STEPS as §7.2, with these mechanics: the backup copies are read back and compared before `COMPLETE` is written; the
+   conversion reads the BACKUP's files checked against `COMPLETE` (a mismatch = "the backup is damaged": exit 3, nothing
+   restored, the backup kept for a person); each day + its index file is written atomically (retried on Windows'
+   EPERM / EBUSY / EACCES — Dropbox or an indexer holding a file open for a moment; removals likewise); the marker =
+   `{ v:6, by:"aimb-migrate-v2 2.0.0", at, host, days:{ day:{ size, sha256 } }, records, sessions, nodes, ghosts,
+   relabelled }` (`nodes` counts the session roots too, as the converter's report). VERIFY: the directory's day files are
+   exactly the marker's days; each file's size + sha256 = the marker's AND its bytes = the conversion's; every line a v6
+   record; every index file = `buildIndex` of its day; a fresh 2.0 replay of the written days (`from: 0`) = the converter's
+   own model (`dumpModel2`: every node field, the indexes, aliases, ghosts) and its node / ghost counts = the report's; the
+   bridge still down. A FAILED run (an error, a failed verification, a bridge appearing — not a crash) RESTORES (Q68): the
+   marker and the index files go, every v5 file comes back from the backup (checked), then the backup is removed — the
+   directory is byte for byte as before (exit 3, "RESTORED … nothing changed"); if the restore fails, the backup is kept and
+   named. RESUME after a crash: a backup with `COMPLETE` and no marker → convert again from the backup; with the marker →
+   verify, then delete; listed files missing + the marker → the delete had begun, finish it; listed files missing + no
+   marker (a restore's delete cut short) → the directory must hold the original files (checked), the leftover is removed
+   and the run starts fresh; a backup without `COMPLETE` → redone (with the marker: removed if empty, else refused "check
+   by hand"). OTHER CASES: the marker and no backup → "already converted (format v6, <day> by …) — nothing to do", no byte
+   written (dry run too); a marker that is unreadable or not v6 → refused; v6 records but no marker (a deleted marker) →
+   refused, never converted as 1.7x; an empty host directory → the marker is written ("a fresh host"); NO host directory →
+   exit 0 "nothing to convert", nothing created, the other hosts' directories named (a mistyped `--host` shows; the 2.0
+   gateway writes the marker at its first start); conflicted copies and other odd names → WARN lines (report
+   `conflicted` / `unknown`), never read, converted or deleted. `--dry-run` reads the host's files (or, after a crash, the
+   backup — and says a real run would resume), converts in memory, reports days / records / nodes / ghosts / relabelled
+   labels / slugged agent keys / bytes, and writes nothing. NOT BUILT: `--backup <dir>` (Q67: the backup always lives at
+   `persistence/activity-v5-backup/<host>/`, where §7.5's start check looks for it). TEST HOOKS (env, tests only):
+   `AIMB_TEST_MIGRATE_STOP=backup | day:N | marker | delete` exits 9 there, as a crash; `AIMB_TEST_MIGRATE_CORRUPT=1`
+   appends a byte to the first converted day before the verification. Tests: `tests/unit/test_activity5_unit.mjs` — the
+   script as a CHILD PROCESS on temp dirs only (always `--dir`, `--host`, `--port` from the file's port block, a temp
+   `--config`), on 3 days of history written by the FROZEN 1.7x library (`tests/fixtures/activity-v175.js`: plans, a move,
+   a question + answer, a dismissal, cp / rep, the gc pass, a cf at each rollover; not a real `v1.74.0` gateway build as
+   planned above — the frozen library writes the same records): dry run (report = the converter's, every file's sha256
+   unchanged, no backup, no `.tmp`), run (v6 days byte-identical to `convertV5`, index files = `buildIndex`, the marker's
+   sizes + sha256, no backup, `activity-v5-backup/` gone, the files replayed backwards through the files layer = the
+   converter's board, the start check passes), the idempotent re-run (and its dry run) changing no byte, refusals (a fake
+   "bridge" listening on the port, a fresh `.tmp`, v6 records without a marker, a missing dir, a bad argument → 64), a
+   stale `.tmp` deleted, the planted corruption (exit 3, every byte as before, start check still 78, the next run
+   converts), crashes after the backup (byte-identical copies + `COMPLETE`; start check "did not finish"), after 2 of 3 days
+   (the next run converts from the backup: the clean run's bytes), after the marker, mid-delete, a backup without
+   `COMPLETE`, a damaged backup (exit 3, kept), the conflicted copy (warned, unchanged, not converted), two hosts in one
+   persistence dir (one run leaves the other's directory byte for byte; both at once each convert only their own), an
+   empty host directory (marker) and a missing one (nothing created). Left for later: wiring `startCheck2` /
+   `writeFreshMarker` into the gateway's start and the tray message (step 6); a live test with a 2.0 gateway starting on
+   the converted days (needs step 6 / 9); the README / runbook text (step 12). Questions Q66 – Q68 (§9).
 6. **Bridge files** (§2.4, §5). Index files at rollover + rebuild, `prune` deleting `<day>.idx.json` with its day,
    `actLogPage` via the index, the ghost table at startup, "show removed", the conflicted-copy check at start / rollover.
    *Tests:* paging reads only indexed ranges (a counter in the facet), ghost entries appear only with `removed:true`, a ghost
@@ -1355,7 +1418,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3 and Q63 – Q65 those of step 4 (accepted as built); GROUPS, ROLLUP and TYPES are decisions
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built) and Q66 – Q68 those of step 5 (open, below); GROUPS, ROLLUP and TYPES are decisions
 Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
@@ -1497,7 +1560,14 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q65, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). No question is open.
+Q40 – Q65, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). Open — step 5's, each built as described
+(posted on the board under Questions / "Step 5 (Q66–Q68)"):
+- **Q66** How the migration script tells that a bridge is running on this host: there is no lock, pid or port file, so it
+  makes a TCP connect to the gateway's port and hangs up without sending a byte (the gateway ignores such a connection).
+- **Q67** The `--backup <dir>` option of §7.2: not built — the backup always lives at `persistence/activity-v5-backup/<host>/`,
+  where the 2.0 gateway's start check looks for an unfinished migration.
+- **Q68** What a failed migration run leaves: the v5 files restored and the backup removed (the directory exactly as before,
+  exit 3) — §7.2 had the backup kept and the directory half-converted until the next run.
 
 ---
 
