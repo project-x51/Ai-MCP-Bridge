@@ -1298,6 +1298,89 @@ try {   // ================================================================= #86
     && /\.jt \{[^}]*var\(--surface\)/.test(css86) && /\.jt \.j-str \{ color:var\(--ok\); \}/.test(css86) && /\.apnew \{[^}]*var\(--info\)/.test(css86) && /\.ddm \{[^}]*var\(--muted\)/.test(css86) && !/:has\(/.test(css86))
   check('#86 legend: names ¶ / {} and the log order', /¶ = its line has details/.test(doc.getElementById('actlegend').textContent) && /oldest first/.test(doc.getElementById('actlegend').textContent))
 } catch (e) { fail++; console.log('FAIL #86/#87 block crashed:', (e && e.stack) || e) }
+
+try {   // ================================================================= #90 (v1.75.0): CHANGE ANSWER… on an answered question (a 1.75 owner: remote_hosts[].revise),
+  // the facts show the latest answer + that it was changed, and an OPEN question never goes stale or gone (only its host being down greys it)
+  const f90 = (u, o) => Object.fromEntries(X.nodeFacts(u, null, { now: NOW, sm: 15, ...o }).map(f => [f.k, f.v]))
+  const qa = (extra = {}) => ({ nkind: 'context', host: 'HOST-A', current: { id: 'q', ts: NOW - MIN, text: 'Ship?', state: 'done', question: { status: 'answered', choices: ['Yes', 'No'], free: true, asked_at: NOW - 10 * MIN, answer: { choice: 'No', text: 'wait' }, by: { user: 'robin', host: 'HOST-A' }, at: NOW - MIN, ...extra } } })
+  const fr = f90(qa({ revised: 2, previous: { answer: { choice: 'Yes' }, by: { user: 'robin', host: 'HOST-A' }, at: NOW - 5 * MIN } })), f0 = f90(qa())
+  check('#90 nodeFacts: a CHANGED answer — Answer = the LATEST one "(changed)", "Answer changed" by whom / when (+ "changed 2 times"), "Previous answer" with who / when; an unchanged one says "Answered" and has no previous',
+    fr.Answer === 'No — wait (changed)' && /^by robin via dashboard \(HOST-A\) at .+ · changed 2 times$/.test(fr['Answer changed']) && /^Yes — by robin via dashboard \(HOST-A\) at /.test(fr['Previous answer']) && !('Answered' in fr)
+    && f0.Answer === 'No — wait' && /^by robin via dashboard/.test(f0.Answered) && !('Previous answer' in f0) && !('Answer changed' in f0), J([fr, f0]))
+  const q0 = qa().current.question
+  check('#90 checkChange: the current answer → refused ("That is the current answer"); another choice, or the same choice with another note → ok; an invalid one → checkAnswer\'s reason',
+    (c => !c.ok && /current answer/.test(c.why))(X.checkChange('No', 'wait', q0)) && X.checkChange('Yes', 'wait', q0).ok && X.checkChange('No', 'wait longer', q0).ok && X.checkChange(null, 'wait', q0).ok
+    && /Pick one of its choices/.test(X.checkChange('Maybe', '', q0).why) && /Too long/.test(X.checkChange('No', 'x'.repeat(1001), q0).why))
+  const lab90 = m => m.filter(i => !i.sep).map(i => i.label)
+  const mA = X.menuFor({ kind: 'node', nkind: 'context', question: { status: 'answered' }, can_ask: true, can_revise: true, can_msg: true })
+  const mB = X.menuFor({ kind: 'node', nkind: 'context', question: { status: 'answered' }, can_ask: true, can_revise: false, can_msg: true })
+  const mC = X.menuFor({ kind: 'node', nkind: 'context', question: { status: 'asked' }, can_ask: true, can_revise: true, can_msg: true })
+  const mD = X.menuFor({ kind: 'node', nkind: 'context', question: { status: 'withdrawn' }, can_ask: true, can_revise: true, can_msg: true })
+  check('#90 menu (pure): an ANSWERED question on a 1.75 owner → "Change answer…" (dialog, act change_answer); an older owner (no revise) → none; an open one → Answer… (not Change); a withdrawn one → neither',
+    lab90(mA)[0] === 'Change answer…' && mA[0].act === 'change_answer' && mA[0].dlg === 'answer' && !lab90(mA).includes('Answer…') && !lab90(mB).includes('Change answer…') && lab90(mC)[0] === 'Answer…' && !lab90(mC).includes('Change answer…') && !lab90(mD).includes('Change answer…') && !lab90(mD).includes('Answer…'), J([lab90(mA), lab90(mB), lab90(mC)]))
+  check('#90 ACTION_DONE: change_answer → "answer changed"', X.ACTION_DONE.change_answer === 'answer changed')
+  // the pure STALE rule: an open question under a STALE agent (or a GONE one) is neither stale nor gone; its host down greys it (stale + hostDown)
+  const qOpen = (extra = {}) => ({ nkind: 'context', host: 'HOST-A', current: { id: 'o', ts: NOW - 90 * MIN, text: 'Waiting?', state: 'blocked', question: { status: 'asked', choices: [], free: true, asked_at: NOW - 90 * MIN } }, ...extra })
+  const stOwner = run(60), goneOwner = { ...run(60), state: 'gone', gone_at: NOW - 30 * MIN }
+  const e1 = X.effState(qOpen(), stOwner, NOW, 15), e2 = X.effState(qOpen(), goneOwner, NOW, 15), e3 = X.effState(qOpen({ host_down: true }), goneOwner, NOW, 15), eC = X.effState(cx('blocked'), stOwner, NOW, 15)
+  check('#90 an OPEN question never goes stale (its agent quiet 60m) nor gone (its agent left) — an ordinary blocked context under the same agent IS stale; its HOST down → it looks stale (hostDown)',
+    e1.state === 'blocked' && !e1.stale && !e1.gone && e2.state === 'blocked' && !e2.gone && !e2.stale && e3.stale && e3.hostDown && e3.state === 'stale' && eC.stale === true, J([e1, e2, e3, eC]))
+  const eA = X.effState(qa(), stOwner, NOW, 15)
+  check('#90 an ANSWERED question follows the normal rules (a done line: not stale)', eA.state === 'done' && !eA.stale)
+  // ---- the board: Rev90 on HOST-A (lead QUIET for 60m: an answered + changed question, an open one) and HOST-C (an answered one; ask but no revise)
+  const n90 = (p, nk, extra = {}) => node('k-r90', p, nk, extra.host || 'HOST-A', extra)
+  const ql = (id, text, status, q = {}) => ({ id, ts: NOW - 50 * MIN, text, state: status === 'asked' ? 'blocked' : status === 'answered' ? 'done' : 'abandoned', question: { status, choices: ['Yes', 'No'], free: true, asked_at: NOW - 55 * MIN, ...q } })
+  const head90 = { host: 'HOST-A', now: NOW, stale_after_min: 15, finished_plan_open_min: 120, user: 'robin', log_cmd: null, remote_hosts: [{ host: 'HOST-C', plan: true, msg: true, ask: true }] }
+  const u90 = [
+    sess('k-r90', 'Rev90', 'R90', { hosts: ['HOST-A', 'HOST-C'], multi_host: true, self: root('HOST-A'), selves: [root('HOST-A'), root('HOST-C')] }),
+    n90('lead', 'agent', { last_activity: NOW - 60 * MIN, current: { id: 'l', ts: NOW - 60 * MIN, text: 'waiting on Robin', state: 'running' } }),
+    n90('lead/@?1', 'context', { state: 'done', current: ql('q901', 'Ship v1.75 today?', 'answered', { answer: { choice: 'No', text: 'wait for the review' }, by: { user: 'robin', host: 'HOST-A' }, at: NOW - 2 * MIN, revised: 1, previous: { answer: { choice: 'Yes' }, by: { user: 'robin', host: 'HOST-A' }, at: NOW - 20 * MIN } }) }),
+    n90('lead/@?2', 'context', { state: 'blocked', current: ql('q902', 'Which changelog wording?', 'asked') }),
+    n90('lead/@ctx', 'context', { state: 'blocked', current: { id: 'cx', ts: NOW - 60 * MIN, text: 'blocked on CI', state: 'blocked' } }),
+    n90('wc', 'agent', { host: 'HOST-C', current: { id: 'wc', ts: NOW - MIN, text: 'on C', state: 'running' }, log: { remote: true, total: 1 } }),
+    n90('wc/@?1', 'context', { host: 'HOST-C', state: 'done', current: ql('q903', 'Answered on C?', 'answered', { answer: { choice: 'Yes' }, by: { user: 'robin', host: 'HOST-A' }, at: NOW - MIN }) }),
+  ]
+  recv({ type: 'activity_board', full: true, epoch: 'E90', seq: 1, head: head90, upsert: u90 })
+  const in90 = pth => { const rs = rowsT(), i = rs.indexOf(nmRow('Rev90')); if (i < 0) return null; for (let j = i + 1; j < rs.length && dOf(rs[j]) > 1; j++) if (rs[j].querySelector('.nm')?.getAttribute('title') === pth && (rs[j].getAttribute('data-host') || '') === (pth.startsWith('wc') ? 'HOST-C' : 'HOST-A')) return rs[j]; return null }
+  for (const pth of ['lead', 'wc']) if (in90(pth) && in90(pth).getAttribute('aria-expanded') === 'false') tog(in90(pth))
+  const ro = in90('lead/@?2'), rcx = in90('lead/@ctx'), r1 = in90('lead/@?1')
+  check('#90 tree: the OPEN question under a quiet agent is NOT stale ("awaiting answer", no stale pill / class) while the blocked context beside it is',
+    !!ro && !ro.classList.contains('stale') && /awaiting answer/.test(ro.querySelector('.pills')?.textContent || '') && !/stale/.test(ro.querySelector('.pills')?.textContent || '') && !!rcx && rcx.classList.contains('stale'), J([ro?.className, rcx?.className]))
+  check('#90 tree: the changed answer shows the LATEST answer ("→ No — wait for the review"); its tooltip says "answer changed", the old one ("was: Yes") and how to change it',
+    r1?.querySelector('.qa')?.textContent === '→ No — wait for the review' && (() => { const el = r1.querySelector('.ln[data-tip]'); el.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true })); const t = el.getAttribute('title') || ''; return /answer changed by robin/.test(t) && /\(was: Yes\)/.test(t) && /Change answer…/.test(t) })())
+  const mEl90 = () => doc.querySelector('.act-menu'), mLab90 = () => [...(mEl90()?.querySelectorAll('.mi') || [])].map(b => b.textContent)
+  const rc90 = el => el.dispatchEvent(new win.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))
+  const esc90 = () => doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  const pick90 = label => { const b = [...(mEl90()?.querySelectorAll('.mi') || [])].find(x => x.textContent === label); if (b) click(b); return !!b }
+  const dlg90 = () => doc.querySelector('.act-dlg')
+  rc90(in90('lead/@?1')); const lA = mLab90(); esc90()
+  rc90(in90('wc/@?1')); const lC = mLab90(); esc90()
+  check('#90 menu: an answered question on this host → "Change answer…" (no Answer… / Withdraw / Edit text…); on HOST-C (ask, no revise: ≤1.74) → hidden', lA[0] === 'Change answer…' && !lA.includes('Answer…') && !lA.includes('Withdraw question…') && !lA.includes('Edit text…') && !lC.includes('Change answer…'), J([lA, lC]))
+  const n0 = sentOf('activity_action').length
+  rc90(in90('lead/@?1')); pick90('Change answer…')
+  const cd = dlg90(), okC = cd?.querySelector('[data-dlg="ok"]'), cbs = [...(cd?.querySelectorAll('[data-qc]') || [])], cta = cd?.querySelector('textarea#actAnsT')
+  check('#90 Change answer…: the same dialog, titled "Change the answer — lead/@?1", the current answer shown, PREFILLED (choice "No" checked, the note in the text box); "Change answer" disabled — it is the current answer; it says the previous answer stays in the log and the status is revised',
+    !!cd && /^Change the answer — lead\/@\?1$/.test(cd.querySelector('h3').textContent) && /Current answer: No — wait for the review/.test(cd.querySelector('.qcur')?.textContent || '') && cbs.length === 2 && cbs[1].getAttribute('aria-checked') === 'true' && cbs[0].getAttribute('aria-checked') === 'false'
+    && cta?.value === 'wait for the review' && okC.textContent === 'Change answer' && okC.disabled && /current answer/.test(cd.querySelector('.dlg-why').textContent) && /previous answer stays in the log/.test(cd.textContent) && /revised/.test(cd.textContent), cd?.outerHTML.slice(0, 900))
+  click(cbs[0])
+  const en = !okC.disabled
+  click(okC)
+  const sc = sentOf('activity_action').at(-1)
+  check('#90 picking "Yes" enables it; it sends {action:"change_answer", host HOST-A, path, args:{choice:"Yes", text:"wait for the review"}} and closes', en && sentOf('activity_action').length === n0 + 1 && sc.action === 'change_answer' && sc.host === 'HOST-A' && sc.path === 'lead/@?1' && sc.args.choice === 'Yes' && sc.args.text === 'wait for the review' && !dlg90(), J(sc))
+  recv({ type: 'activity_action', ref: sc.ref, result: { ok: true, host: 'HOST-A', action: 'change_answer', path: 'lead/@?1', applied: [{ path: 'lead/@?1', state: 'done' }], delivered: true, delivery: 'live', released: 0, previous: { answer: { choice: 'No', text: 'wait for the review' } } } })
+  check('#90 the result: ✓ answer changed on the row + a toast "Answer changed — Rev90 was told"', /✓ answer changed/.test(in90('lead/@?1')?.querySelector('.fb')?.textContent || '') && [...doc.querySelectorAll('.act-toast')].some(t => t.textContent === 'Answer changed — Rev90 was told'), [...doc.querySelectorAll('.act-toast')].map(t => t.textContent).join(' | '))
+  click(in90('lead/@?1'))
+  const cd2 = dlg90()
+  check('#90 a CLICK on an answered question offers Change answer… (the dialog, prefilled) and selects it', !!cd2 && /^Change the answer/.test(cd2.querySelector('h3').textContent) && V.sel && V.sel.path === 'lead/@?1')
+  esc90(); if (dlg90()) click(dlg90().querySelector('[data-dlg="cancel"]'))
+  click(in90('wc/@?1'))
+  check('#90 a click on an answered question on an older host (no revise) only selects it', !dlg90() && V.sel && V.sel.path === 'wc/@?1')
+  recv({ type: 'activity_delta', epoch: 'E90', seq: 2, base: 1, head: head90, upsert: [n90('lead/@?2', 'context', { state: 'blocked', host_down: true, current: ql('q902', 'Which changelog wording?', 'asked') })], remove: [] })
+  const ro2 = in90('lead/@?2')
+  check('#90 its HOST down: the open question looks stale (greyed) with a "host down" pill — never "gone"', !!ro2 && ro2.classList.contains('stale') && /host down/.test(ro2.querySelector('.pills')?.textContent || '') && !/gone/.test(ro2.querySelector('.pills')?.textContent || ''), ro2?.innerHTML.slice(0, 500))
+  const css90 = [...doc.querySelectorAll('style')].map(s => s.textContent).join('\n')
+  check('#90 CSS: the current answer in the dialog uses theme tokens', /\.act-dlg \.qcur b \{[^}]*var\(--ok\)/.test(css90) && /\.act-dlg \.qcur \.k \{[^}]*var\(--muted\)/.test(css90))
+} catch (e) { fail++; console.log('FAIL #90 block crashed:', (e && e.stack) || e) }
 console.log(`\n${pass} passed, ${fail} failed`)
 dom.window.close()
 process.exit(fail ? 1 : 0)

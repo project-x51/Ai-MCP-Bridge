@@ -1202,6 +1202,31 @@ the exact property whose *absence* (claims with no `user`/`name`) caused the v1.
   (non-reply) send in the same direction is refused, so the cap is demonstrably the only thing letting it
   through. The test was verified to FAIL against the pre-#43 derivation (`project-denied`), so it is a real
   regression guard rather than a tautology. Suite 587 across 26.
+- **Built (v1.75.0):** *#90 — change an answer from the dashboard; a question's status entries carry their own details; open
+  questions never go stale.* **Wire-compatible with 1.66 – 1.74** (format stays v5). **The bug (Robin, 2026-10-03):** expanding a
+  question's "answered by …" entry showed the QUESTION's background — `apply` copied the line's details / data onto a status change's
+  ENTRY (to keep them on the line), and the entry's id WAS the line's id, so `findEntry` answered the entry fetch with the line.
+  Now (`lib/activity.js` `apply`): a question's status change (answer, change, withdraw, expiry, an abandon / cascade that withdraws
+  it) keeps the LINE's id (the ask entry's), details and data, and its ENTRY gets `questionEntryDetails(prev, next, text)` — the
+  answer (choice, note), who + when (`stampText`: local time + UTC offset), a changed answer's previous one, a withdrawal's note or
+  why, an expiry's window, a one-line `Question: …` reminder; ≤ 4 KB; no data. The record carries `line_id` / `line_details` /
+  `line_data` for the replay (`lineOf`); `lookupActivityEntry` strips them from an entry it serves. The entry TEXT names the answer
+  (`answerEntryText`): `answered by robin via dashboard (HOST): "SQLite" — note: smaller to ship` (free text alone quoted).
+  **`change_answer`** {choice?, text?} (`REVISE_ACTIONS`): on an ANSWERED question only (`question-open` / `question-closed`,
+  `no-change` for the same answer, else `answer`'s checks); a new entry `answer changed by …: "…"` (`act:"change_answer"`); the
+  question stays answered with `revised` (count) + `previous` {answer, by, at} (`normQuestion` keeps both, bounded like the answer;
+  boards / gossip / records / the waiter's view carry them). Notice: `activity_answer` at once, `status:"revised"`, `answer` +
+  `previous` + `revised`, subject "robin changed the answer to <path>: <first words>". Waiters: none released (the question never
+  reopens); `--wait-answer` returns the latest answer. **Capability:** PEER_HELLO `activity_revise:1` → `p.act.revise` →
+  `remote_hosts[].revise`; a 1.75 gateway refuses to forward change_answer to an owner without it (`owner-unsupported`, "older
+  than 1.75.0"); `AI_BRIDGE_TEST_NO_ACTIVITY_REVISE=1` (tests). **Stale:** `staleAt` / `effectiveState` treat an OPEN question like
+  a plan item (never stale, never gone); the dashboard's `effState` too, except its host down → stale + "host down". **Dashboard:**
+  Change answer… (menu + a click on an answered row, for `hostRevise`), `actAnswerDlg` in change mode (prefilled, "Current answer:",
+  `checkChange`), facts "Answer … (changed)" / "Answer changed" / "Previous answer" (`byWho`), the row tooltip's "(was: …)".
+  Tests: `test_activity_unit` 879 (+30: the entry details per status, ids, findEntry, the log, change_answer + refusals + notice +
+  waiter view, gossip, replay incl. a 1.74-shaped record set, stale, 2 seeded replay == apply runs with changes),
+  `test_dashboard_activity` 344 (+16), new `test_activity_revise_live` 23 (20 FAIL on 1.74; + 2 mixed against a real 1.74 build:
+  25/25); `test_activity_ask_live` expects the quoted entry text.
 - **Built (v1.74.0):** *#89 part 2 — realm guides, pulled not pushed.* `behaviors.realm` gains an optional `guides`
   `{ agent?: { text, min_bridge? }, session?: { text, min_bridge? } }` (`lib/realm-defaults.js` `checkGuides` / `normGuide`):
   each text a string or an array of lines, ≤ 4096 UTF-8 bytes (separate from the 365-char reminder cap), newline / tab the only

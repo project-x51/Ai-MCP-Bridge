@@ -2670,12 +2670,12 @@ await section(async () => {
   check('#85 ANSWER: the line → state DONE, the question → answered { answer { choice (its canonical spelling) }, by { user, host }, at }; the line keeps the question text, details and data',
     an.ok && n1b.current.state === 'done' && n1b.current.text === 'Postgres or SQLite?' && J(A.questionView(n1b.current.question)) === J({ status: 'answered', choices: ['Postgres', 'SQLite'], free: false, asked_at: T0, expires_at: T0 + HOUR, answer: { choice: 'SQLite' }, by: { user: 'robin', host: 'DASH-HOST' }, at: T0 + 13000 })
     && n1b.current.details === 'ctx' && J(n1b.current.data) === J({ k: 1 }), J(n1b.current))
-  check('#85 the answer entry: "answered by robin via dashboard (DASH-HOST): SQLite" (act answer, by), the line\'s text kept as line_text, the record carries the question; the result says agent + question + answer; no activity',
-    ar.text === 'answered by robin via dashboard (DASH-HOST): SQLite' && ar.act === 'answer' && J(ar.by) === J(BY) && ar.line_text === 'Postgres or SQLite?' && ar.question && ar.question.status === 'answered' && J(ar.question.answer) === J({ choice: 'SQLite' }) && ar.current === true
+  check('#85 the answer entry: "answered by robin via dashboard (DASH-HOST): \"SQLite\"" (#90: the answer quoted) (act answer, by), the line\'s text kept as line_text, the record carries the question; the result says agent + question + answer; no activity',
+    ar.text === 'answered by robin via dashboard (DASH-HOST): "SQLite"' && ar.act === 'answer' && J(ar.by) === J(BY) && ar.line_text === 'Postgres or SQLite?' && ar.question && ar.question.status === 'answered' && J(ar.question.answer) === J({ choice: 'SQLite' }) && ar.current === true
     && an.agent === 'lead' && J(an.answer) === J({ choice: 'SQLite' }) && an.question.status === 'answered' && an.from_state === 'blocked' && an.to_state === 'done' && N(st, I, 'lead').last_activity === lastLead, J([ar, an.agent]))
   check('#85 a closed question: answering / withdrawing again → question-closed', ACT(st, I, 'lead/@?1', 'answer', { choice: 'Postgres' }, T0 + 14000).code === 'question-closed' && ACT(st, I, 'lead/@?1', 'withdraw', {}, T0 + 14000).code === 'question-closed' && sayC(st, I, { path: 'lead/@?1', state: 'withdrawn' }, T0 + 14000).code === 'question-closed')
   const an2 = ACT(st, I, 'lead/@?2', 'answer', { text: '  Yes —\r\nafter the review\u0007 ' }, T0 + 15000)
-  check('#85 a free-text answer: newlines kept (CRLF → LF), control characters out, trimmed; the entry shows it on one line', an2.ok && J(an2.answer) === J({ text: 'Yes —\nafter the review' }) && an2.records[0].text === 'answered by robin via dashboard (DASH-HOST): Yes — after the review', J(an2.answer))
+  check('#85 a free-text answer: newlines kept (CRLF → LF), control characters out, trimmed; the entry shows it on one line', an2.ok && J(an2.answer) === J({ text: 'Yes —\nafter the review' }) && an2.records[0].text === 'answered by robin via dashboard (DASH-HOST): "Yes — after the review"', J(an2.answer))
   const w1 = sayC(st, I, { path: 'lead/@db', state: 'withdrawn', text: 'decided myself' }, T0 + 16000)
   check('#85 WITHDRAW (the asker): state withdrawn → line ABANDONED, question withdrawn (no by: the session itself), entry "withdrawn: decided myself" (line_text = the question)',
     w1.ok && N(st, I, 'lead/@db').current.state === 'abandoned' && N(st, I, 'lead/@db').current.question.status === 'withdrawn' && !N(st, I, 'lead/@db').current.question.by && w1.records[0].text === 'withdrawn: decided myself' && w1.records[0].line_text === 'Which DB?' && w1.question.status === 'withdrawn', J(w1.records && w1.records[0]))
@@ -2802,6 +2802,126 @@ await section(async () => {
     const B = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 6 } })
     A.replayNewestFirst(B, recs.slice().reverse(), now)
     check(`#85 replay == chronological apply with questions (seed ${seed}: ${applied} applied, ${qs} asked, ${closed} closed): the whole state incl. every question`, dump(st) === dump(B) && qs > 10 && closed > 5, firstDiff(dump(st), dump(B)))
+  }
+})
+// ================================================================= #90 (v1.75.0): the ANSWER ENTRY's details (Robin's bug, 2026-10-03: expanding "answered by …"
+// showed the QUESTION's background), change_answer (a revised answer), and open questions never going stale
+const STAMP = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC[+-]\d{2}:\d{2}\)/
+await section(async () => {
+  check('#90 constants: change_answer is an action (REVISE_ACTIONS), labelled "answer changed"', A.ACTIVITY_ACTIONS.includes('change_answer') && J(A.REVISE_ACTIONS) === J(['change_answer']) && J(A.ASK_ACTIONS) === J(['answer', 'withdraw']))
+  check('#90 stampText: local time + its UTC offset', STAMP.test(A.stampText(T0)) && A.stampText(NaN) === '?')
+  check('#90 answerEntryText: a choice quoted + " — note: …"; free text alone quoted; cut to 240 with "…"',
+    A.answerEntryText('answered', BY, { choice: 'Accept', text: 'ship\nit' }) === 'answered by robin via dashboard (DASH-HOST): "Accept" — note: ship it'
+    && A.answerEntryText('answer changed', BY, { text: 'later' }) === 'answer changed by robin via dashboard (DASH-HOST): "later"'
+    && [...A.answerEntryText('answered', BY, { choice: 'A', text: 'x'.repeat(900) })].length === 240 && A.answerEntryText('answered', BY, { choice: 'A', text: 'x'.repeat(900) }).endsWith('…')
+    && [...A.answerEntryText('answered', BY, { text: 'y'.repeat(900) })].length === 240 && A.answerEntryText('answered', BY, { text: 'y'.repeat(900) }).endsWith('…"'))
+  // ---- THE BUG: the answer entry's details = the answer, never the question's background
+  const st = mk(), I = { session: 'Lead', project: 'Q90', user: 'robin' }, recs = []
+  const put = r => { if (r && r.ok) recs.push(...r.records.map(x => JSON.parse(J(x)))); return r }
+  const ask = put(say(st, I, { path: 'lead', ask: 'Postgres or SQLite?', choices: ['Postgres', 'SQLite'], free: true, details: 'BACKGROUND: the cache is 2 GB', data: { size: 2 } }, T0))
+  const askId = ask.records[0].id
+  const an = put(ACT(st, I, 'lead/@?1', 'answer', { choice: 'SQLite', text: 'smaller to ship' }, T0 + 5000)), ar = an.records[0]
+  const q1 = N(st, I, 'lead/@?1')
+  check('#90 the answer entry\'s TEXT names the answer: answered by robin via dashboard (DASH-HOST): "SQLite" — note: smaller to ship', ar.text === 'answered by robin via dashboard (DASH-HOST): "SQLite" — note: smaller to ship', ar.text)
+  check('#90 the answer entry\'s DETAILS hold the answer — the choice, the note, who + when, a one-line reminder of the question — and NOT the question\'s background; no data',
+    typeof ar.details === 'string' && ar.details.startsWith('Answer: SQLite\nNote: smaller to ship\nAnswered by robin via dashboard (DASH-HOST) at ') && STAMP.test(ar.details) && /\nQuestion: Postgres or SQLite\? \(asked /.test(ar.details)
+    && !/BACKGROUND/.test(ar.details) && ar.data === null && ar.has_details === true && !ar.has_data, J(ar.details))
+  check('#90 the background STAYS on the question: its line keeps the details / data AND the ask entry\'s id (so the node\'s details and the ask entry show it); the record says so for the replay (line_id / line_details / line_data)',
+    q1.current.details === 'BACKGROUND: the cache is 2 GB' && J(q1.current.data) === J({ size: 2 }) && q1.current.id === askId && ar.id !== askId
+    && ar.line_id === askId && ar.line_details === 'BACKGROUND: the cache is 2 GB' && J(ar.line_data) === J({ size: 2 }), J([q1.current.id, askId, ar.id]))
+  const fa = A.findEntry(st, ar.id, T0 + 6000), fq = A.findEntry(st, askId, T0 + 6000)
+  check('#90 findEntry: the ANSWER entry is a log entry (its details come from the files — the answer), not the question\'s line; the ASK entry\'s id is the line (the background)',
+    fa && fa.where === 'log' && fa.complete === false && fa.entry.has_details && fq && fq.where === 'current' && fq.entry.details === 'BACKGROUND: the cache is 2 GB', J([fa, fq && fq.entry.details]))
+  const lg = A.logView(st, { ...I, path: 'lead/@?1' }, T0 + 6000)
+  check('#90 the log: the ask entry (¶ — the background) and the answer entry (¶ — the answer), both kept', lg.ok && lg.entries.length === 2 && lg.entries.every(e => e.has_details) && lg.entries[0].id === ar.id && lg.entries[1].id === askId, J(lg.entries))
+  // ---- the same for the other status entries
+  put(say(st, I, { path: 'lead', ask: 'Withdraw me?', details: 'BG2' }, T0 + 7000))
+  const wd = put(ACT(st, I, 'lead/@?2', 'withdraw', {}, T0 + 8000)), wr = wd.records[0]
+  check('#90 the dashboard\'s WITHDRAW entry: details "Withdrawn by robin via dashboard (DASH-HOST) at …" + the question — not its background', /^Withdrawn by robin via dashboard \(DASH-HOST\) at .+\nQuestion: Withdraw me\?/.test(wr.details) && !/BG2/.test(wr.details) && N(st, I, 'lead/@?2').current.details === 'BG2', J(wr.details))
+  put(say(st, I, { path: 'lead', ask: 'Asker withdraws?', details: 'BG3' }, T0 + 9000))
+  const aw = put(sayC(st, I, { path: 'lead/@?3', state: 'withdrawn', text: 'decided myself' }, T0 + 10000)), awr = aw.records[0]
+  check('#90 the ASKER\'s withdrawal: "Withdrawn by its session at …" + "Note: decided myself" + the question', /^Withdrawn by its session at .+\nNote: decided myself\nQuestion: Asker withdraws\?/.test(awr.details) && !/BG3/.test(awr.details), J(awr.details))
+  put(say(st, I, { path: 'lead', ask: 'Expire me?', expires: '10m', details: 'BG4' }, T0 + 11000))
+  const ex = A.expireQuestions(st, T0 + 11000 + 10 * MIN); recs.push(...ex.records.map(x => JSON.parse(J(x))))
+  check('#90 the EXPIRY entry: "Expired at … — nobody answered within 10m" + the question — not its background', ex.records.length === 1 && /^Expired at .+ — nobody answered within 10m\nQuestion: Expire me\?/.test(ex.records[0].details) && !/BG4/.test(ex.records[0].details), J(ex.records[0] && ex.records[0].details))
+  put(say(st, I, { path: '@Cas/@~x', text: 'x' }, T0 + 12 * MIN)); put(say(st, I, { path: '@Cas/@x', ask: 'Cascade me?', details: 'BG5' }, T0 + 12 * MIN))
+  const cs = put(sayC(st, I, { path: '@~Cas', state: 'abandoned' }, T0 + 13 * MIN)), csr = cs.records.find(r => r.path === '@Cas/@x/@?1')
+  check('#90 a CASCADE withdrawal: its entry says why ("abandoned with …") and not the background', csr && /^Withdrawn by its session at .+\(abandoned with @Cas\)\nQuestion: Cascade me\?/.test(csr.details) && !/BG5/.test(csr.details), J(csr && csr.details))
+  check('#90 a long free-text answer (1000 × a 4-byte emoji) still fits the details limit (4 KB, cut with "…")', (() => { const s2 = mk(); say(s2, I, { path: 'w', ask: 'Long?' }, T0); const r = ACT(s2, I, 'w/@?1', 'answer', { text: '😀'.repeat(1000) }, T0 + 1); return r.ok && Buffer.byteLength(r.records[0].details) <= 4096 && /…/.test(r.records[0].details) && /\nQuestion: Long\?/.test(r.records[0].details) })())
+  // ---- #90: CHANGE ANSWER
+  check('#90 change_answer refusals: an OPEN question → question-open; a withdrawn / expired one → question-closed; the same answer → no-change; a choice it lacks → bad-choice; nothing → bad-args; answering an answered one → question-closed (it says change_answer)',
+    (() => { const s2 = mk(); say(s2, I, { path: 'w', ask: 'Open?', choices: ['a', 'b'] }, T0); return ACT(s2, I, 'w/@?1', 'change_answer', { choice: 'a' }, T0 + 1).code === 'question-open' })()
+    && ACT(st, I, 'lead/@?2', 'change_answer', { text: 'x' }, T0 + 14 * MIN).code === 'question-closed' && ACT(st, I, 'lead/@?1', 'change_answer', { choice: 'sqlite', text: 'smaller to ship' }, T0 + 14 * MIN).code === 'no-change'
+    && ACT(st, I, 'lead/@?1', 'change_answer', { choice: 'MySQL' }, T0 + 14 * MIN).code === 'bad-choice' && ACT(st, I, 'lead/@?1', 'change_answer', {}, T0 + 14 * MIN).code === 'bad-args'
+    && /change_answer/.test(ACT(st, I, 'lead/@?1', 'answer', { choice: 'Postgres' }, T0 + 14 * MIN).what))
+  const ch = put(ACT(st, I, 'lead/@?1', 'change_answer', { choice: 'postgres' }, T0 + 15 * MIN)), chr = ch.records[0], q1c = N(st, I, 'lead/@?1')
+  const qv = A.questionView(q1c.current.question)
+  check('#90 CHANGE: the question stays ANSWERED (line done) with the NEW answer, revised 1, previous = the old answer + who + when; the line keeps the question\'s id + background',
+    ch.ok && q1c.current.state === 'done' && qv.status === 'answered' && J(qv.answer) === J({ choice: 'Postgres' }) && qv.revised === 1 && J(qv.previous) === J({ answer: { choice: 'SQLite', text: 'smaller to ship' }, by: { user: 'robin', host: 'DASH-HOST' }, at: T0 + 5000 }) && qv.at === T0 + 15 * MIN
+    && q1c.current.id === askId && q1c.current.details === 'BACKGROUND: the cache is 2 GB', J(qv))
+  check('#90 the CHANGE entry: "answer changed by robin via dashboard (DASH-HOST): \\"Postgres\\"" (act change_answer); its details: the new answer, "Changed by …", "Previous answer: SQLite — smaller to ship — by …", the question',
+    chr.text === 'answer changed by robin via dashboard (DASH-HOST): "Postgres"' && chr.act === 'change_answer' && /^Answer: Postgres\nChanged by robin via dashboard \(DASH-HOST\) at .+\nPrevious answer: SQLite — smaller to ship — by robin via dashboard \(DASH-HOST\) at .+\nQuestion: Postgres or SQLite\?/.test(chr.details) && !/BACKGROUND/.test(chr.details), J(chr))
+  check('#90 the previous answer STAYS in the log (3 entries: ask, answer, change); the result carries previous + the question; from done → done',
+    A.logView(st, { ...I, path: 'lead/@?1' }, T0 + 16 * MIN).entries.map(e => e.act || 'ask').join() === 'change_answer,answer,ask' && J(ch.previous.answer) === J({ choice: 'SQLite', text: 'smaller to ship' }) && ch.question.revised === 1 && ch.from_state === 'done' && ch.to_state === 'done')
+  const nt = A.actionNotice(ch, { by: BY, host: 'HOST-A', ts: 1 })
+  check('#90 the notice: activity_answer, status "revised", the new answer + the previous one (+ who / when), revised 1; the PUBLIC subject "robin changed the answer to lead/@?1: <the question\'s first words>" — no answer in it',
+    nt.verb === 'activity_answer' && nt.body.status === 'revised' && nt.body.action === 'change_answer' && J(nt.body.answer) === J({ choice: 'Postgres' }) && J(nt.body.previous.answer) === J({ choice: 'SQLite', text: 'smaller to ship' }) && J(nt.body.previous.by) === J({ user: 'robin', host: 'DASH-HOST' })
+    && nt.body.revised === 1 && nt.subject === 'robin changed the answer to lead/@?1: Postgres or SQLite?' && !/smaller/.test(nt.subject) && nt.body.entry_id === chr.id && nt.body.agent === 'lead', J(nt))
+  const qo = A.questionOutcome(st, A.getSession(st, I), q1c)
+  check('#90 a waiter (--wait-answer) now: outcome answered (NOT reopened) with the LATEST answer, revised + previous', qo.outcome === 'answered' && J(qo.answer) === J({ choice: 'Postgres' }) && qo.revised === 1 && J(qo.previous.answer) === J({ choice: 'SQLite', text: 'smaller to ship' }))
+  const ch2 = put(ACT(st, I, 'lead/@?1', 'change_answer', { choice: 'SQLite' }, T0 + 17 * MIN))
+  check('#90 a SECOND change: revised 2, previous = the first change (Postgres)', ch2.ok && ch2.question.revised === 2 && J(ch2.question.previous.answer) === J({ choice: 'Postgres' }) && J(ch2.question.answer) === J({ choice: 'SQLite' }))
+  // ---- the board, gossip, the replay
+  const rq = A.boardView(st, T0 + 18 * MIN, { raw: true })[0].nodes.find(n => n.path === 'lead/@?1')
+  check('#90 the boards carry revised + previous (the dashboard\'s facts show them)', rq.current.question.revised === 2 && J(rq.current.question.previous.answer) === J({ choice: 'Postgres' }) && rq.current.id === askId && rq.current.has_details && rq.current.has_data)
+  const rcv = mk({}, 'HOST-B'); A.mergeSnapshot(rcv, 'HOST-A', A.snapshot(st))
+  check('#90 gossip: a receiver holds revised + previous and the question\'s id', J(A.questionView(A.getNode(rcv, I, 'lead/@?1', 'HOST-A').current.question)) === J(A.questionView(N(st, I, 'lead/@?1').current.question)) && A.getNode(rcv, I, 'lead/@?1', 'HOST-A').current.id === askId)
+  const B = mk(); A.replayNewestFirst(B, recs.slice().reverse(), T0 + 20 * MIN)
+  check('#90 replay: the questions come back exactly — the line\'s kept id / details / data, the revised answer and its previous one', dump(st) === dump(B), firstDiff(dump(st), dump(B)))
+  const old = recs.map(r => { const x = { ...r }; delete x.line_id; delete x.line_details; delete x.line_data; if (x.question) { x.question = { ...x.question }; delete x.question.revised; delete x.question.previous } return x }), B2 = mk()
+  A.replayNewestFirst(B2, old.slice().reverse(), T0 + 20 * MIN)
+  check('#90 a 1.74-shaped record set (no line_id / line_details / revised) still replays: the latest answer, done', J(N(B2, I, 'lead/@?1').current.question.answer) === J({ choice: 'SQLite' }) && N(B2, I, 'lead/@?1').current.state === 'done')
+})
+await section(async () => {
+  // ---- #90: an OPEN question never goes stale (nor gone); closed ones follow the normal rules
+  const st = mk(), I = { session: 'Stale', project: 'Q90', user: 'robin' }
+  say(st, I, { path: 'lead', text: 'working' }, T0)
+  const a = say(st, I, { path: 'lead', ask: 'Waiting on Robin?' }, T0 + 1000)
+  say(st, I, { path: 'lead/@~ctx', text: 'blocked on x', state: 'blocked' }, T0 + 2000)
+  const q = N(st, I, 'lead/@?1'), owner = N(st, I, 'lead'), ctx = N(st, I, 'lead/@ctx'), late = T0 + 5 * HOUR
+  check('#90 an OPEN question: the ask\'s result has no stale_at; staleAt null; effectiveState hours later → blocked, not stale (an ordinary blocked context under the same agent IS stale)',
+    a.stale_at === null && A.staleAt(q, 15, owner) === null && (e => e.state === 'blocked' && !e.stale && !e.gone && e.stale_at === null)(A.effectiveState(q, late, 15, owner)) && A.effectiveState(ctx, late, 15, owner).stale === true, J([a.stale_at, A.effectiveState(q, late, 15, owner)]))
+  owner.gone_at = T0 + HOUR
+  check('#90 … nor gone when its agent has left (it still waits for an answer)', (e => !e.gone && e.state === 'blocked')(A.effectiveState(q, late, 15, owner)) && A.effectiveState(ctx, late, 15, owner).gone === true)
+  owner.gone_at = null
+  const bv = A.boardView(st, late, { raw: true })[0].nodes.find(n => n.path === 'lead/@?1')
+  check('#90 the board: an open question shows state blocked, no stale_at, hours later', bv.state === 'blocked' && !bv.stale_at, J(bv))
+  ACT(st, I, 'lead/@?1', 'answer', { text: 'yes' }, late)
+  const e2 = A.effectiveState(N(st, I, 'lead/@?1'), late + 5 * HOUR, 15, owner)
+  check('#90 an ANSWERED question follows the normal rules (a done line: never stale)', e2.state === 'done' && !e2.stale && !A.isOpenQuestion(N(st, I, 'lead/@?1')))
+})
+await section(async () => {
+  // ---- replay == chronological apply with CHANGED answers (seeded)
+  for (const seed of [90, 909]) {
+    const r = rng(seed), pick = a => a[Math.floor(r() * a.length)]
+    const st = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 6 } }), recs = []
+    const id = { session: 'Alpha', project: 'AIMB', user: 'robin' }
+    let t = T0, chg = 0
+    for (let i = 0; i < 300; i++) {
+      t += 1000 + Math.floor(r() * 60000)
+      const s = A.getSession(st, id), nodes = s ? [...s.nodes.values()] : [], open = nodes.filter(n => A.isOpenQuestion(n)), answered = nodes.filter(n => A.isQuestion(n) && n.current.question.status === 'answered')
+      const x = r()
+      let res = null
+      if (x < 0.25) res = sayC(st, id, { path: pick(['w1', '@P', '']), ask: `q${i}?`, ...(r() < 0.5 ? { choices: ['A', 'B', 'C'], free: r() < 0.5 } : {}), ...(r() < 0.5 ? { details: `bg${i}` } : {}) }, t)
+      else if (x < 0.4 && open.length) { const n = pick(open), q = n.current.question; res = A.applyAction(st, { ...id, path: n.path, action: 'answer', args: q.choices.length ? { choice: pick(q.choices) } : { text: `ans ${i}` } }, t, { by: BYF85 }) }
+      else if (x < 0.6 && answered.length) { const n = pick(answered), q = n.current.question; res = A.applyAction(st, { ...id, path: n.path, action: 'change_answer', args: q.choices.length ? { choice: pick(q.choices), ...(q.free && r() < 0.5 ? { text: `n${i}` } : {}) } : { text: `re ${i}` } }, t, { by: BYF85 }); if (res.ok) chg++ }
+      else if (x < 0.65 && open.length) res = A.applyAction(st, { ...id, path: pick(open).path, action: 'withdraw' }, t, { by: BYF85 })
+      else res = sayC(st, id, { path: pick(['w1/@~root', '@P/@~a', '@~root']), text: `m${i}` }, t)
+      if (res && res.ok && res.records) recs.push(...res.records.map(q => JSON.parse(J(q))))
+    }
+    const B = A.createActivity({ origin: 'H1', config: { log_entries_per_agent: 6 } })
+    A.replayNewestFirst(B, recs.slice().reverse(), t + MIN)
+    check(`#90 replay == chronological apply with changed answers (seed ${seed}: ${chg} changes)`, dump(st) === dump(B) && chg > 10, firstDiff(dump(st), dump(B)))
   }
 })
 console.log(`\n${pass} passed, ${fail} failed`)

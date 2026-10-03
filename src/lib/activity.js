@@ -160,6 +160,12 @@
 // skipped) and, under a node holding plan items, as an item of that plan. The question rides the line everywhere `line_by` does:
 // the entry record's `question`, a cp's / cf's `current.question`, gossip `current.question`, the replay (lineOf). A plain report
 // can't overwrite a question's line ('question-node'). Still format v5: `question` is an optional field a 1.70 host ignores.
+//
+// #90 (v1.75.0): a question's STATUS change keeps the LINE's id (the ask entry's), details and data; its logged ENTRY carries its
+// own details (questionEntryDetails: the answer, who + when, the question) and names the answer in its text (answerEntryText) —
+// the record's line_id / line_details / line_data let the replay rebuild the line. `change_answer` (REVISE_ACTIONS) gives an
+// answered question a new answer: still answered, + `revised` (count) and `previous` {answer, by, at}; its notice is
+// activity_answer with status "revised". An OPEN question never goes stale or gone (staleAt / effectiveState, like a plan item).
 import { lc, projKey } from './keys.js'
 
 /** The locked #70 limits (6a: depth/nodes replace "agent path depth 3" + "32 contexts per agent"). text/context in code
@@ -300,7 +306,7 @@ const qAnswerText = s => (typeof s === 'string' ? s.replace(/\r\n?/g, '\n').repl
  * ≤ 8 distinct choices of ≤ 60 code points, an answer only when answered (choice ≤ 60, text ≤ 1000), `by` / `at` only once closed.
  * free = free text is allowed (always, when there are no choices).
  * @param {any} v
- * @returns {{ status:string, choices:string[], free:boolean, asked_at:number, expires_at?:number, answer?:{ choice?:string, text?:string }, by?:any, at?:number }|null}
+ * @returns {{ status:string, choices:string[], free:boolean, asked_at:number, expires_at?:number, answer?:{ choice?:string, text?:string }, by?:any, at?:number, revised?:number, previous?:{ answer:{ choice?:string, text?:string }, by?:any, at?:number } }|null}
  */
 export function normQuestion(v) {
   if (!v || typeof v !== 'object' || !QUESTION_STATUSES.includes(v.status)) return null
@@ -310,26 +316,40 @@ export function normQuestion(v) {
   /** @type {any} */
   const out = { status: v.status, choices, free: v.free === true || !choices.length, asked_at: num(v.asked_at) || 0 }
   if (num(v.expires_at)) out.expires_at = num(v.expires_at)
-  if (v.status === 'answered' && v.answer && typeof v.answer === 'object') {
-    const a = {}, ch = qChoice(v.answer.choice), tx = qAnswerText(v.answer.text)
-    if (ch) a.choice = ch
-    if (tx) a.text = cpLen(tx) > QUESTION_LIMITS.answer ? cpSlice(tx, QUESTION_LIMITS.answer - 1) + '…' : tx
-    if (a.choice || a.text) out.answer = a
-  }
+  if (v.status === 'answered' && v.answer && typeof v.answer === 'object') { const a = qAnswerObj(v.answer); if (a) out.answer = a }
   if (v.status !== 'asked') {
-    const by = normBy(v.by && typeof v.by === 'object' ? { ...v.by, kind: 'dashboard' } : v.by)
+    const by = qBy(v.by)
     if (by) out.by = by
     if (num(v.at)) out.at = num(v.at)
   }
+  // #90 (v1.75.0): a REVISED answer — how many times it was changed and the answer before the latest (a ≤1.74 host drops both)
+  if (out.answer && num(v.revised)) {
+    out.revised = Math.min(num(v.revised), 9999)
+    const p = v.previous && typeof v.previous === 'object' ? v.previous : null, pa = p ? qAnswerObj(p.answer) : null
+    if (pa) { const pb = qBy(p.by); out.previous = { answer: pa, ...(pb ? { by: pb } : {}), ...(num(p.at) ? { at: num(p.at) } : {}) } }
+  }
   return out
 }
+/** An answer object as kept (choice ≤ 60, text ≤ 1000 code points) or null. */
+function qAnswerObj(v) {
+  if (!v || typeof v !== 'object') return null
+  const a = {}, ch = qChoice(v.choice), tx = qAnswerText(v.text)
+  if (ch) a.choice = ch
+  if (tx) a.text = cpLen(tx) > QUESTION_LIMITS.answer ? cpSlice(tx, QUESTION_LIMITS.answer - 1) + '…' : tx
+  return a.choice || a.text ? a : null
+}
+const qBy = v => normBy(v && typeof v === 'object' ? { ...v, kind: 'dashboard' } : v)
+/** #90: two answers are the same (the choice and the text). */
+export const sameAnswer = (a, b) => !!a && !!b && (a.choice || null) === (b.choice || null) && (a.text || null) === (b.text || null)
 /** A question as records / gossip carry it (plain JSON; `by` as { kind, user, host } or "bridge"). */
 const qOut = q => { const n = normQuestion(q); return n ? compact({ ...n, choices: n.choices.length ? n.choices : null, free: n.free || null, by: n.by && typeof n.by === 'object' ? { ...n.by } : n.by }) : null }
-/** A question as the board / the activity tool show it (`by` as { user, host }, or "bridge"). @param {any} q @returns {any} */
+const byView = b => (b && typeof b === 'object' ? { user: b.user, host: b.host } : b || null)
+/** A question as the board / the activity tool show it (`by` as { user, host }, or "bridge"). #90: + revised / previous. @param {any} q @returns {any} */
 export const questionView = q => {
   const n = normQuestion(q)
   return n ? { status: n.status, choices: n.choices, free: n.free, ...compact({ asked_at: n.asked_at || null, expires_at: n.expires_at || null, answer: n.answer || null,
-    by: n.by && typeof n.by === 'object' ? { user: n.by.user, host: n.by.host } : n.by || null, at: n.at || null }) } : null
+    by: byView(n.by), at: n.at || null, revised: n.revised || null,
+    previous: n.previous ? compact({ answer: n.previous.answer, by: byView(n.previous.by), at: n.previous.at || null }) : null }) } : null
 }
 /** The answer as one line for people: "Postgres — because the rest of the stack uses it" / just the choice / just the text. */
 export function answerText(a, max = 160) {
@@ -338,6 +358,68 @@ export function answerText(a, max = 160) {
   if (a && a.text) parts.push(normText(a.text))
   const s = parts.join(' — ')
   return cpLen(s) > max ? cpSlice(s, max - 1).trimEnd() + '…' : s
+}
+const cutTo = (s, n) => (cpLen(s) > n ? cpSlice(s, Math.max(0, n - 1)).trimEnd() + '…' : s)
+/**
+ * #90 (v1.75.0): the LOG TEXT of an answer entry (≤ 240) — the answer is named in it: `answered by robin via dashboard (HOST):
+ * "Accept" — note: ship it today` (a choice, quoted, + the free-text note), `…: "ship it today"` (free text only). verb =
+ * "answered" | "answer changed".
+ */
+export function answerEntryText(verb, by, a) {
+  const head = `${verb}${byText(by) ? ' ' + byText(by) : ''}: `, L = ACTIVITY_LIMITS.text
+  const tx = a && a.text ? normText(a.text) : ''
+  if (a && a.choice) { const s = `${head}"${a.choice}"`; return tx ? s + cutTo(` — note: ${tx}`, L - cpLen(s)) : cutTo(s, L) }
+  return head + '"' + cutTo(tx, L - cpLen(head) - 2) + '"'
+}
+const p2t = n => String(n).padStart(2, '0')
+/** #90: a time for people in an entry's details — the owner's local time with its UTC offset: "2026-10-03 14:05:09 (UTC+13:00)". */
+export function stampText(ts) {
+  const d = new Date(ts)
+  if (!Number.isFinite(d.getTime())) return '?'
+  const off = -d.getTimezoneOffset(), sg = off >= 0 ? '+' : '-', ao = Math.abs(off)
+  return `${d.getFullYear()}-${p2t(d.getMonth() + 1)}-${p2t(d.getDate())} ${p2t(d.getHours())}:${p2t(d.getMinutes())}:${p2t(d.getSeconds())} (UTC${sg}${p2t(Math.floor(ao / 60))}:${p2t(ao % 60)})`
+}
+const whoText = by => byText(by) || 'by its session'
+/** A text cut to at most `max` UTF-8 bytes ("…" when cut). */
+function fitBytes(s, max) {
+  if (utf8(s) <= max) return s
+  let t = s
+  while (t && utf8(t) > max - 3) t = cpSlice(t, Math.max(0, cpLen(t) - Math.max(1, Math.ceil((utf8(t) - max + 3) / 4))))
+  return t + '…'
+}
+/**
+ * #90 (v1.75.0) — the fix for Robin's 2026-10-03 bug: a question's STATUS entries (answered, answer changed, withdrawn, expired)
+ * carry their OWN details — what happened — never the question's background (that stays on the question's line and its ask
+ * entry). prev / next = the question before / after; text = the question; o = { now, note (the asker's withdrawal note), why (an
+ * abandon that withdrew it) }. Plain text, ≤ 4 KB (a long answer / note is cut to fit):
+ *   Answer: Accept
+ *   Note: ship it today
+ *   Answered by robin via dashboard (ROBIN-Z790) at 2026-10-03 14:05:09 (UTC+13:00)
+ *   Previous answer: Reject — by robin via dashboard (ROBIN-Z790) at …   (a change only)
+ *   Question: Ship v1.75 today? (asked 2026-10-03 13:58:00 (UTC+13:00))
+ */
+export function questionEntryDetails(prev, next, text, o = {}) {
+  const q = normQuestion(next), p = normQuestion(prev)
+  if (!q) return null
+  const now = o.now, qline = `Question: ${preview(text || '', 120)}${q.asked_at ? ` (asked ${stampText(q.asked_at)})` : ''}`
+  const head = [], tail = []
+  let body = ''
+  if (q.status === 'answered' && q.answer) {
+    const changed = !!(p && p.status === 'answered' && p.answer)
+    if (q.answer.choice) head.push(`Answer: ${q.answer.choice}`)
+    tail.push(`${changed ? 'Changed' : 'Answered'} ${whoText(q.by)} at ${stampText(q.at || now)}`)
+    if (changed) tail.push(`Previous answer: ${answerText(p.answer, 300)} — ${whoText(p.by)}${p.at ? ' at ' + stampText(p.at) : ''}`)
+    body = q.answer.text ? (q.answer.choice ? 'Note: ' : 'Answer: ') + q.answer.text : ''
+  } else if (q.status === 'withdrawn') {
+    head.push(`Withdrawn ${whoText(q.by)} at ${stampText(q.at || now)}${o.why ? ` (${normText(String(o.why))})` : ''}`)
+    body = o.note ? `Note: ${o.note}` : ''
+  } else if (q.status === 'expired') {
+    head.push(`Expired at ${stampText(q.at || now)} — nobody answered${q.asked_at && q.expires_at ? ` within ${fmtEta(q.expires_at - q.asked_at).replace(/^~/, '')}` : ''}`)
+  } else return null
+  tail.push(qline)
+  const fixed = [...head, ...tail].join('\n')
+  if (body) body = fitBytes(body, ACTIVITY_LIMITS.detailsBytes - utf8(fixed) - 2)
+  return fitBytes([...head, ...(body ? [body] : []), ...tail].join('\n'), ACTIVITY_LIMITS.detailsBytes)
 }
 /** Is this node a question (its current line carries one)? */
 export const isQuestion = n => !!(n && n.kind !== 'agent' && n.current && n.current.question)
@@ -1345,7 +1427,10 @@ export function apply(state, ident, msg, now, opts = {}) {
   // withdrawal, or any abandon / cascade of an OPEN question, withdraws it; any other line on a question node is refused
   const q0 = tgt0 && tgt0.current && tgt0.current.question ? tgt0.current.question : null
   const qIn = opts && opts.question ? normQuestion(opts.question) : null
-  let qLine = null, qEntry = null
+  let qLine = null, qEntry = null, qWhy = null
+  /** #90: a question's STATUS change (answer, change, withdraw, expiry, an abandon) — the line keeps the question (its text, details,
+   * data AND its id: the ask entry's), the logged entry gets details of its own (qKeep = { id, details, data } of the line kept) */
+  let qKeep = null, qDet = null
   if (!planOnly && !posOnly && msg.current) {
     if (qIn) qLine = qIn
     else if (msg.withdraw) {
@@ -1354,11 +1439,16 @@ export function apply(state, ident, msg, now, opts = {}) {
       qLine = { ...q0, status: 'withdrawn', at: now, ...(by ? { by } : {}) }
       qEntry = cpSlice(`withdrawn${by ? ' ' + byText(by) : ''}${msg.withdraw.note ? ': ' + msg.withdraw.note : ''}`, L.text)
     } else if (q0) {
-      if (msg.keepText && msg.state === 'abandoned' && q0.status === 'asked') qLine = { ...q0, status: 'withdrawn', at: now, ...(by ? { by } : {}) }   // abandoned / cascaded: an open question is withdrawn
+      if (msg.keepText && msg.state === 'abandoned' && q0.status === 'asked') { qLine = { ...q0, status: 'withdrawn', at: now, ...(by ? { by } : {}) }; qWhy = entryText }   // abandoned / cascaded: an open question is withdrawn
       else return bad('question-node', `"${msg.path}" is a question — its line is the question: it is answered on the dashboard${q0.status === 'asked' ? ', or withdraw it (state withdrawn)' : '; ask again on it (ask) for a new one'}`)
     }
     if (qLine) qLine = normQuestion(qLine)
-    if (qLine && msg.keepText && tgt0 && tgt0.current) msg = { ...msg, details: tgt0.current.details || null, data: tgt0.current.data != null ? tgt0.current.data : null }   // a status change keeps the question's details / data
+    if (qLine && msg.keepText && tgt0 && tgt0.current) {   // a status change keeps the question's details / data (on the LINE only)
+      const c = tgt0.current
+      qKeep = { id: c.id, details: c.details || null, data: c.data != null ? c.data : null }
+      qDet = questionEntryDetails(q0, qLine, c.text, { now, note: msg.withdraw ? msg.withdraw.note : null, why: qWhy })
+      msg = { ...msg, details: qKeep.details, data: qKeep.data }
+    }
   }
   // 6b: the plan's items under the target: new (create), an ordinary context with no line of its own (adopt), an item (keep)
   const items = []
@@ -1447,7 +1537,7 @@ export function apply(state, ident, msg, now, opts = {}) {
       const same = !logged && c0 && c0.text === text && c0.state === entryState && (c0.details || null) === (msg.details || null)
         && JSON.stringify(c0.data != null ? c0.data : null) === JSON.stringify(msg.data != null ? msg.data : null) && (c0.by || null) === lineBy   // #83: the session re-sending an edited text takes the line back
       if (same) lineId = c0.id
-      else tgt.current = { id, ts: now, text, state: entryState, details: msg.details || null, data: msg.data != null ? msg.data : null,
+      else tgt.current = { id: qKeep ? qKeep.id : id, ts: now, text, state: entryState, details: msg.details || null, data: msg.data != null ? msg.data : null,   // #90: a question's status change keeps the line's id (its ask entry's)
         data_bytes: msg.data != null ? utf8(JSON.stringify(msg.data)) : 0, ...(lineBy ? { by: lineBy } : {}), ...(qLine ? { question: qLine } : {}) }   // #85: a question line
       if (tgt.kind === 'agent') {
         if (DONE_OR_FAILED.has(entryState)) { if (!tgt.finished_at) tgt.finished_at = now }
@@ -1468,9 +1558,10 @@ export function apply(state, ident, msg, now, opts = {}) {
       tgt.cp_dirty = (tgt.cp_dirty || 0) | bits
       state.cpLive.set(cpId(sKey, tKey), [sKey, tKey])
     } else {
+      const eDet = qKeep && cur ? qDet : msg.details || null, eData = qKeep && cur ? null : msg.data != null ? msg.data : null   // #90: a question's status entry: its own details (never the question's background)
       const small = smallOf({ id, ts: now, current: cur, text: entryText || qEntry || text, state: entryState,
         progress: 'progress' in msg ? msg.progress : undefined, eta_at: 'eta_at' in msg ? msg.eta_at : undefined, stale_after_ms: msg.stale_after_ms,
-        has_details: !!msg.details, has_data: msg.data != null, by, act })
+        has_details: !!eDet, has_data: eData != null, by, act })
       logInsert(tgt, small)
       while (tgt.log.length > cap) logDropOldest(tgt)
       // this entry persists what it carries: the line (+ its state, and a done/failed line's dropped ETA), the bar, the ETA
@@ -1478,7 +1569,8 @@ export function apply(state, ident, msg, now, opts = {}) {
       if (tgt.cp_dirty) tgt.cp_dirty &= ~((cur ? CP_CUR : 0) | (etaW ? CP_ETA : 0) | ('progress' in msg ? CP_PROG : 0))
       notePersisted(by ? [] : chain.slice(oi), tgt, { line: cur, prog: 'progress' in msg, eta: etaW, rank: rankSet }, now)
       res.entry = { v: ACTIVITY_FORMAT, ...small, current: cur, path: tgt.path, origin: state.origin, realm: sess.realm, session: sess.session, project: sess.project, user: sess.user, host: sess.host, s0: sess.created_at,
-        details: msg.details || null, data: msg.data != null ? msg.data : null, ...planFields(tgt), ...persistMarks(chain),
+        details: eDet, data: eData, ...planFields(tgt), ...persistMarks(chain),
+        ...(qKeep && cur ? { line_id: qKeep.id, line_details: qKeep.details, line_data: qKeep.data } : {}),   // #90: the LINE kept the question's id / details / data (the replay reads these; a ≤1.74 host ignores them)
         ...(cur && tgt.kind === 'agent' ? { finished_at: tgt.finished_at } : {}),
         ...(cur && (entryText || qEntry) && (entryText || qEntry) !== text ? { line_text: text } : {}),   // 6d: the LINE kept its text; the entry says what was done (+ by whom)
         ...(cur && tgt.current && tgt.current.by ? { line_by: tgt.current.by } : {}),   // #83: who wrote the line's text (a dashboard edit; kept by a tick)
@@ -1891,19 +1983,21 @@ export function autoAbandon(state, now, opts = {}) {
 
 /** The actions (wire names). Plan items: done / skip / reopen (→ todo) / abandon; plan nodes: complete / abandon_plan /
  * reopen_plan (the table's "Reopen" on a plan); agents and the session: abandon_plan / finish (args.state done|failed) / dismiss. */
-export const ACTIVITY_ACTIONS = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss', 'move', 'reorder', 'edit_text', 'message', 'answer', 'withdraw'])   // #82: + move (args.to, + a position) and reorder (args.before | after | position); abandon on ANY context; #83 / #84: + edit_text (args.text, state?) and message (args.text)
+export const ACTIVITY_ACTIONS = Object.freeze(['done', 'skip', 'reopen', 'abandon', 'complete', 'abandon_plan', 'reopen_plan', 'finish', 'dismiss', 'move', 'reorder', 'edit_text', 'message', 'answer', 'withdraw', 'change_answer'])   // #82: + move (args.to, + a position) and reorder (args.before | after | position); abandon on ANY context; #83 / #84: + edit_text (args.text, state?) and message (args.text); #90: + change_answer (args.choice / text)
 /** #82: the actions a ≤1.68 owner doesn't know (its dashboard path answers bad-action) — a 1.69 gateway forwards them only to a 1.69 owner. */
 export const PLAN82_ACTIONS = Object.freeze(['move', 'reorder'])
 /** #83 / #84 (v1.70.0): the actions a ≤1.69 owner doesn't know — a 1.70 gateway forwards them only to an owner that declared activity_msg. */
 export const MSG_ACTIONS = Object.freeze(['edit_text', 'message'])
 /** #85 (v1.71.0): the actions a ≤1.70 owner doesn't know — a 1.71 gateway forwards them only to an owner that declared activity_ask. */
 export const ASK_ACTIONS = Object.freeze(['answer', 'withdraw'])
+/** #90 (v1.75.0): the actions a ≤1.74 owner doesn't know — a 1.75 gateway forwards them only to an owner that declared activity_revise. */
+export const REVISE_ACTIONS = Object.freeze(['change_answer'])
 /** #84: a dashboard message's limits — its full text (code points), and the preview logged as the entry's text. */
 export const MESSAGE_LIMITS = Object.freeze({ text: 2000, preview: 120 })
 const ITEM_ACTIONS = Object.freeze({ done: 'done', skip: 'skipped', reopen: 'todo', abandon: 'abandoned' })
 const ACTION_LABEL = Object.freeze({ done: 'marked done', skip: 'skipped', reopen: 'reopened (back to to do)', abandon: 'abandoned', complete: 'plan marked complete',
   abandon_plan: 'plan abandoned', reopen_plan: 'plan reopened', finish: 'marked finished', dismiss: 'dismissed from the board', move: 'moved', reorder: 'moved', edit_text: 'edited', message: 'message',
-  answer: 'answered', withdraw: 'withdrawn' })
+  answer: 'answered', withdraw: 'withdrawn', change_answer: 'answer changed' })
 /**
  * #83: the states the dashboard's Edit text… may set on a node — what a report could set there: a plan item any state; another
  * context any but todo / skipped (plan states); an agent / the session running | blocked | idle | done | failed, + abandoned only
@@ -2109,10 +2203,12 @@ export function applyAction(state, q, now, opts = {}) {
       const st2 = stateOf(node)
       return { ...done(r.records, { state: st2 }), from_state: st2, message: full }
     }
-    case 'answer': {   // ---- #85: answer an OPEN question — args.choice (one of its choices) and / or args.text (when free text is allowed)
+    case 'answer': case 'change_answer': {   // ---- #85: answer an OPEN question — args.choice (one of its choices) and / or args.text (when free text is allowed); #90: change_answer = a new answer to an ANSWERED one
       const q = isQuestion(node) ? node.current.question : null
       if (!q) return bad('not-a-question', `"${node.path || '@root'}" is not a question`)
-      if (q.status !== 'asked') return bad('question-closed', `the question "${node.path}" is already ${q.status}`)
+      const chg = action === 'change_answer'
+      if (!chg && q.status !== 'asked') return bad('question-closed', `the question "${node.path}" is already ${q.status}${q.status === 'answered' ? ' — change its answer (change_answer) instead' : ''}`)
+      if (chg && q.status !== 'answered') return bad(q.status === 'asked' ? 'question-open' : 'question-closed', q.status === 'asked' ? `the question "${node.path}" has no answer yet — answer it (answer)` : `the question "${node.path}" is ${q.status} — only an answered question's answer can be changed`)
       const ans = {}
       if (args.choice != null && String(args.choice).trim()) {
         if (!q.choices.length) return bad('bad-args', 'this question has no choices — answer it with args.text')
@@ -2127,13 +2223,15 @@ export function applyAction(state, q, now, opts = {}) {
         if (cpLen(t) > QUESTION_LIMITS.answer) return bad('answer-too-long', `an answer is at most ${QUESTION_LIMITS.answer} characters (got ${cpLen(t)})`)
         ans.text = t
       }
-      if (!ans.choice && !ans.text) return bad('bad-args', q.choices.length ? `answer takes args.choice (${q.choices.join(' | ')})${q.free ? ' and / or args.text' : ''}` : 'answer takes args.text — the answer')
+      if (!ans.choice && !ans.text) return bad('bad-args', q.choices.length ? `${action} takes args.choice (${q.choices.join(' | ')})${q.free ? ' and / or args.text' : ''}` : `${action} takes args.text — the answer`)
+      if (chg && sameAnswer(ans, q.answer)) return bad('no-change', `that is already the answer of "${node.path}"`)
       const pm = parseMessage({ path: lineAddr(node), state: 'done' }, { now })
       if (!pm.ok) return pm
-      const qa = { ...q, status: 'answered', answer: ans, by, at: now }
-      const r = apply(state, identOf(sess), pm.msg, now, { by, act: action, entryText: cpSlice(`answered ${byText(by)}: ${answerText(ans, 200)}`, ACTIVITY_LIMITS.text), question: qa, cascade: false })
+      const prev = chg ? { answer: q.answer, ...(q.by ? { by: q.by } : {}), ...(q.at ? { at: q.at } : {}) } : null
+      const qa = { ...q, status: 'answered', answer: ans, by, at: now, ...(chg ? { revised: (q.revised || 0) + 1, previous: prev } : {}) }
+      const r = apply(state, identOf(sess), pm.msg, now, { by, act: action, entryText: answerEntryText(chg ? 'answer changed' : 'answered', by, ans), question: qa, cascade: false })
       if (!r.ok) return r
-      return { ...done(r.records, { state: 'done' }), question: questionView(node.current.question), answer: ans, agent: ownerPath(sess, node) }
+      return { ...done(r.records, { state: 'done' }), question: questionView(node.current.question), answer: ans, agent: ownerPath(sess, node), ...(chg ? { previous: questionView(qa).previous || null } : {}) }
     }
     case 'withdraw': {   // ---- #85: withdraw an OPEN question from the dashboard (it won't be answered)
       const q = isQuestion(node) ? node.current.question : null
@@ -2236,7 +2334,7 @@ export function displayPath(path, session) { return path ? String(path).replace(
  */
 export function actionNotice(r, opts = {}) {
   if (r && r.action === 'message') return messageNotice(r, opts)   // #84
-  if (r && (r.action === 'answer' || r.action === 'withdraw' || r.action === 'expire')) return answerNotice(r, opts)   // #85
+  if (r && (r.action === 'answer' || r.action === 'withdraw' || r.action === 'expire' || r.action === 'change_answer')) return answerNotice(r, opts)   // #85; #90
   const b = normBy(opts.by), by = b && typeof b === 'object' ? { user: b.user, host: b.host } : { user: typeof b === 'string' ? b : 'dashboard', host: opts.host || '?' }
   const id = r.ident || {}, action = r.action
   const p = displayPath(action === 'move' && r.moved_from != null ? r.moved_from : r.path, id.session)   // #82: "moved @A/@x to @B" names the OLD path
@@ -2275,13 +2373,15 @@ export function messageNotice(r, opts = {}) {
  * @param {any} r @param {{ by?: any, host?: string, ts?: number }} [opts]
  */
 export function answerNotice(r, opts = {}) {
-  const id = r.ident || {}, q = /** @type {any} */ (questionView(r.question)) || { status: r.action === 'answer' ? 'answered' : r.action === 'withdraw' ? 'withdrawn' : 'expired', choices: [], free: true }
+  const id = r.ident || {}, q = /** @type {any} */ (questionView(r.question)) || { status: r.action === 'answer' || r.action === 'change_answer' ? 'answered' : r.action === 'withdraw' ? 'withdrawn' : 'expired', choices: [], free: true }
   const b = normBy(opts.by != null ? opts.by : q.by), by = b && typeof b === 'object' ? { user: b.user, host: b.host } : (typeof b === 'string' ? b : 'dashboard')
   const who = typeof by === 'object' ? by.user : by
+  const chg = r.action === 'change_answer'   // #90: a REVISED answer — status "revised", the new answer + the previous one
   const p = displayPath(r.path, id.session), fw = firstWords(r.text || '')
-  const subject = cpSlice(r.action === 'expire' ? `question expired ${p}: ${fw}` : `${who} ${r.action === 'withdraw' ? 'withdrew' : 'answered'} ${p}: ${fw}`, NOTICE_SUBJECT_MAX)
-  const body = { action: r.action, status: q.status, path: r.path || '', host: opts.host || null, question: r.text || null, choices: q.choices, free: q.free,
-    ...(q.answer ? { answer: q.answer } : {}), by, entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, agent: r.agent != null ? r.agent : null,
+  const subject = cpSlice(r.action === 'expire' ? `question expired ${p}: ${fw}` : chg ? `${who} changed the answer to ${p}: ${fw}` : `${who} ${r.action === 'withdraw' ? 'withdrew' : 'answered'} ${p}: ${fw}`, NOTICE_SUBJECT_MAX)
+  const body = { action: r.action, status: chg ? 'revised' : q.status, path: r.path || '', host: opts.host || null, question: r.text || null, choices: q.choices, free: q.free,
+    ...(q.answer ? { answer: q.answer } : {}), ...(chg ? { previous: q.previous || r.previous || null, revised: q.revised || 1 } : {}),
+    by, entry_id: r.entry_id || null, session: id.session || null, project: id.project || null, agent: r.agent != null ? r.agent : null,
     asked_at: q.asked_at || null, ts: opts.ts || null }
   return { verb: ANSWER_NOTICE_VERB, subject, body }
 }
@@ -2328,7 +2428,8 @@ export function questionOutcome(state, sess, node) {
   if (!alive || !isQuestion(node)) return { outcome: 'gone', path: node ? node.path : null }
   const q = questionView(node.current.question)
   return { outcome: q.status === 'asked' ? 'open' : q.status, status: q.status, path: node.path, question: node.current.text, choices: q.choices, free: q.free,
-    ...(q.answer ? { answer: q.answer } : {}), ...(q.by ? { by: q.by } : {}), ...(q.at ? { at: q.at } : {}), asked_at: q.asked_at, ...(q.expires_at ? { expires_at: q.expires_at } : {}), entry_id: node.current.id }
+    ...(q.answer ? { answer: q.answer } : {}), ...(q.by ? { by: q.by } : {}), ...(q.at ? { at: q.at } : {}), ...(q.revised ? { revised: q.revised, previous: q.previous || null } : {}),   // #90: a changed answer (the latest + the one before)
+    asked_at: q.asked_at, ...(q.expires_at ? { expires_at: q.expires_at } : {}), entry_id: node.current.id }
 }
 /**
  * Several notices for ONE session (bodies from actionNotice) → ONE { subject, body }: "robin skipped 2 items and abandoned 1 in
@@ -2399,6 +2500,7 @@ const isContext = n => !!n && n.kind === 'context'
  */
 export function staleAt(item, staleMin, owner) {
   if (!item || item.plan) return null   // 6b: a plan item never goes stale, in any state (its owner agent's row shows that agent's)
+  if (isOpenQuestion(item)) return null   // #90 (v1.75.0): an OPEN question waits for a person — never stale (an answered / closed one follows the rules)
   if (isContext(item)) return item.current && LIVE.has(item.current.state) && owner && !isContext(owner) ? staleAt(owner, staleMin) : null
   if (item.finished_at || item.implicit) return null
   if (!LIVE.has(stateOf(item))) return null
@@ -2413,7 +2515,7 @@ export function staleAt(item, staleMin, owner) {
  */
 export function effectiveState(item, now, staleMin, owner) {
   const was = stateOf(item)
-  if (item && item.plan) return { state: was, was, stale: false, gone: false, stale_at: null }   // 6b: a plan item shows its own state only (never stale, never gone)
+  if (item && (item.plan || isOpenQuestion(item))) return { state: was, was, stale: false, gone: false, stale_at: null }   // 6b: a plan item shows its own state only (never stale, never gone); #90: so does an OPEN question
   const agent = isContext(item) ? owner : item
   const finished = !!(agent && agent.finished_at)
   const gone = !!(agent && agent.gone_at) && !finished && !DONE_OR_FAILED.has(was)
@@ -2802,11 +2904,13 @@ export function createReplay(state, { now }) {
     }
   }
   function lineOf(r) {
-    const data = r.data != null && typeof r.data === 'object' ? r.data : null
+    const kept = 'line_id' in r   // #90: a question's status entry — the LINE kept the question's id / details / data (the entry's own are what happened)
+    const d0 = kept ? r.line_details : r.details, x0 = kept ? r.line_data : r.data
+    const data = x0 != null && typeof x0 === 'object' ? x0 : null
     const lb = r.line_by && typeof r.line_by === 'object' ? normBy(r.line_by) : null   // #83: who wrote its text (an entry's / a cp's current line_by; never the entry's own `by`)
     const qn = normQuestion(r.question)   // #85: the line's question (an entry's / a cp's / a cf's current.question)
-    return { id: String(r.id || ''), ts: finite(r.ts) ? r.ts : 0, text: typeof r.line_text === 'string' && r.line_text ? r.line_text : String(r.text), state: ACTIVITY_STATES.includes(r.state) ? r.state : 'running',   // 6d: line_text = the line's own text (the entry's says what a dashboard did)
-      details: typeof r.details === 'string' && r.details ? r.details : null, data, data_bytes: data != null ? utf8(JSON.stringify(data)) : 0, ...(lb && typeof lb === 'object' ? { by: lb } : {}), ...(qn ? { question: qn } : {}) }
+    return { id: String((kept && typeof r.line_id === 'string' && r.line_id) || r.id || ''), ts: finite(r.ts) ? r.ts : 0, text: typeof r.line_text === 'string' && r.line_text ? r.line_text : String(r.text), state: ACTIVITY_STATES.includes(r.state) ? r.state : 'running',   // 6d: line_text = the line's own text (the entry's says what a dashboard did)
+      details: typeof d0 === 'string' && d0 ? d0 : null, data, data_bytes: data != null ? utf8(JSON.stringify(data)) : 0, ...(lb && typeof lb === 'object' ? { by: lb } : {}), ...(qn ? { question: qn } : {}) }
   }
   /** Nodes seen so far whose phase-1 fields are not all resolved yet. */
   function pending() { let n = 0; for (const s of sessions.values()) for (const x of s.nodes.values()) if (!nodeDone(x)) n++; return n }
@@ -3699,7 +3803,7 @@ const OBJ = 64, MAPE = 48, NUMS = 48
 const sB = s => (typeof s === 'string' ? 16 + 2 * s.length : 0)
 const progB = p => (p ? OBJ + sB(p.unit) + 16 : 0)
 const lineB = l => (l ? OBJ + sB(l.id) + sB(l.text) + sB(l.state) + 16 + (l.details ? sB(l.details) : 0) + (l.data != null ? OBJ + 2 * (l.data_bytes || 0) : 0) + (l.question ? qB(l.question) : 0) : 0)
-const qB = q => OBJ * 2 + NUMS + (q.choices || []).reduce((n, c) => n + sB(c), 0) + (q.answer ? sB(q.answer.choice) + sB(q.answer.text) : 0)   // #85
+const qB = q => OBJ * 2 + NUMS + (q.choices || []).reduce((n, c) => n + sB(c), 0) + (q.answer ? sB(q.answer.choice) + sB(q.answer.text) : 0) + (q.previous && q.previous.answer ? OBJ * 2 + sB(q.previous.answer.choice) + sB(q.previous.answer.text) : 0)   // #85; #90: + the previous answer
 const entryB = e => 16 + OBJ + sB(e.id) + sB(e.text) + sB(e.state) + NUMS + progB(e.progress)
 function nodeB(n) {
   let b = OBJ + 2 * MAPE + sB(n.path) + sB(n.key) + sB(n.name) + sB(n.parent) + NUMS + lineB(n.current) + progB(n.progress)

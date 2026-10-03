@@ -217,6 +217,7 @@
   .qbadge { flex:none; font-size:10.5px; font-weight:700; line-height:15px; border-radius:9px; padding:0 6px; color:var(--bg); background:var(--ask); white-space:nowrap; cursor:default; }
   .ar.proj .qbadge, .ar .cnt .qbadge { margin-left:6px; }
   .act-dlg .qtext { font-size:13.5px; color:var(--fg-strong); font-weight:600; margin:0 0 6px; white-space:pre-wrap; }
+  .act-dlg .qcur { margin:0 0 8px; font-size:12.5px; white-space:pre-wrap; } .act-dlg .qcur b { color:var(--ok); font-weight:600; } .act-dlg .qcur .k { color:var(--muted); }   /* #90: Change answer…'s current answer */
   .act-dlg .qch { display:flex; flex-wrap:wrap; gap:6px; margin:2px 0 4px; }
   .act-dlg .act-btn.qc { font-size:12.5px; padding:4px 12px; }
   .act-dlg .act-btn.qc[aria-checked="true"] { color:var(--bg); background:var(--ask); border-color:var(--ask); font-weight:600; }
@@ -961,6 +962,7 @@
       item=item||{}; var ctx=isCtx(item), ag=ctx?(owner||{}):item, st=ctx?((item.current&&item.current.state)||'running'):(item.state||'running');
       var hostDown=!!(item.host_down||(owner&&owner.host_down));
       if(item.plan_item) return { state:st, was:st, gone:false, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null, noLine:!item.current, plan:true };   // 6b: a plan item never goes stale or gone (its agent's row shows that)
+      var oq=qOf(item); if(oq&&oq.status==='asked') return { state:hostDown?'stale':st, was:st, gone:false, hostDown:hostDown, stale:hostDown, live:false, staleAt:null, win:null, noLine:false };   // #90 (v1.75.0): an OPEN question waits for a person — never stale or gone; it looks stale only while its host is down
       var agGone=ag.state==='gone';
       if(!ctx&&agGone) return { state:'gone', was:item.was||'running', gone:true, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null, noLine:false };
       if(ctx&&!item.current) return { state:'none', was:'running', gone:false, hostDown:hostDown, stale:false, live:false, staleAt:null, win:null, noLine:true };
@@ -1076,6 +1078,10 @@
       if(choice!=null&&choice!==''&&(q.choices||[]).indexOf(choice)<0) return {ok:false,n:n,why:'Pick one of its choices.'};
       if(!t&&(choice==null||choice==='')) return {ok:false,n:n,why:(q.choices||[]).length?(q.free?'Pick a choice or write an answer.':'Pick a choice.'):'Write an answer.'};
       return {ok:true,n:n,why:''}; }
+    // #90: Change answer…'s check — a valid answer (checkAnswer) that differs from the current one
+    function checkChange(choice,text,q){ q=q||{}; var c=checkAnswer(choice,text,q); if(!c.ok) return c; var a=q.answer||{}, t=String(text||'').replace(/\r\n?/g,'\n').trim();
+      if((choice==null||choice===''?null:choice)===(a.choice||null)&&(t||null)===(a.text||null)) return {ok:false,n:c.n,why:'That is the current answer — change the choice or the text.'};
+      return c; }
     // the "? N" ATTENTION count: open questions at or under t (the tree before filtering — so a filter never hides one)
     function openQuestionsIn(t){ var n=0; (function w(x){ if(isOpenQuestion(x.u)) n++; x.kids.forEach(w); })(t); return n; }
     var OPEN_ITEM={todo:1,running:1,blocked:1};
@@ -1254,7 +1260,8 @@
         if(st!=='abandoned') out.push({id:'abandon',label:'Abandon item',act:'abandon'}); }
       // #82: abandon ANY context (with its open contexts / items below — the bridge cascades), asked first
       // #85: a QUESTION — Answer… / Withdraw question… while it is open (its host must run 1.71+); no Abandon / Edit text on it
-      if(m.question){ if(m.question.status==='asked'&&m.can_ask){ out.push({id:'answer',label:'Answer…',act:'answer',dlg:'answer'}); out.push({id:'withdraw',label:'Withdraw question…',act:'withdraw',confirm:true}); } }
+      if(m.question){ if(m.question.status==='asked'&&m.can_ask){ out.push({id:'answer',label:'Answer…',act:'answer',dlg:'answer'}); out.push({id:'withdraw',label:'Withdraw question…',act:'withdraw',confirm:true}); }
+        else if(m.question.status==='answered'&&m.can_revise) out.push({id:'change-answer',label:'Change answer…',act:'change_answer',dlg:'answer'}); }   // #90: a 1.75+ owner
       else if(m.kind==='node'&&m.nkind==='context'&&!m.plan_item&&!m.plan_node&&m.can_plan&&m.own_state!=='abandoned') out.push({id:'abandon-ctx',label:'Abandon…',act:'abandon',confirm:true});
       var ab=false;
       if(m.plan_node){ sep();
@@ -1361,12 +1368,13 @@
     // #86 (v1.72.0): the DETAILS of a node (or a session's own line on one host) as { k, v } pairs of PLAIN text — the view sets them
     // with textContent, never as HTML. u = its board unit; owner = its nearest agent (staleness follows it); o = { now, sm, kind
     // ('session' = a root), session, project, user, n (its subtree's entry count), partial }
+    function byWho(b){ return b&&typeof b==='object'?(b.user||'dashboard')+' via dashboard ('+(b.host||'?')+')':b?String(b):''; }   // a question's answerer
     function nodeFacts(u,owner,o){ u=u||{}; o=o||{}; var now=o.now||Date.now(), out=[], cur=u.current||null, q=qOf(u), e=effState(u,owner,now,o.sm||15), bar=barOf(u);
       function add(k,v){ if(v!=null&&v!=='') out.push({k:k,v:String(v)}); }
       var kind=o.kind==='session'?'session — its own line on '+(u.host||'?'):q?'question':u.plan_item?'plan item':u.nkind==='agent'?'agent':'context';
       if(u.implicit&&!cur) kind+=' (implicit: named by a path below it, never reported)';
       add('Kind',kind);
-      if(q) add('State',q.status==='asked'?'awaiting an answer':q.status);
+      if(q) add('State',(q.status==='asked'?'awaiting an answer':q.status)+(e.hostDown?' · its host is down':''));   // #90: an open question never goes stale
       else { var st=e.noLine||e.state==='none'?'no current line':e.state; if((e.stale||e.gone)&&e.was) st+=' (was '+e.was+')'; if(e.hostDown) st+=' · its host is down';
         if(u.plan_item) st+=' · item '+itemState(u); add('State',st); }
       add('Progress',bar?barTip(bar):'');
@@ -1380,9 +1388,10 @@
       if(q){ add('Choices',(q.choices&&q.choices.length?q.choices.join(' · ')+(q.free?' (or free text)':''):'free text'));
         add('Asked',q.asked_at?fmtClock(q.asked_at,now):'');
         add('Expires',q.expires_at&&q.status==='asked'?fmtClock(q.expires_at,now):'');
-        if(q.answer) add('Answer',answerText(q.answer,1000));
-        var qby=q.by&&typeof q.by==='object'?(q.by.user||'dashboard')+' via dashboard ('+(q.by.host||'?')+')':q.by?String(q.by):'';
-        if(q.status!=='asked'&&(qby||q.at)) add(q.status==='answered'?'Answered':q.status==='expired'?'Expired':'Closed',(qby?'by '+qby:'')+(q.at?(qby?' at ':'at ')+fmtClock(q.at,now):'')); }
+        if(q.answer) add('Answer',answerText(q.answer,1000)+(q.revised?' (changed)':''));   // #90: always the LATEST answer; marked when it was changed
+        var qby=byWho(q.by), rv=q.status==='answered'&&q.revised>0;
+        if(q.status!=='asked'&&(qby||q.at)) add(rv?'Answer changed':q.status==='answered'?'Answered':q.status==='expired'?'Expired':'Closed',(qby?'by '+qby:'')+(q.at?(qby?' at ':'at ')+fmtClock(q.at,now):'')+(rv&&q.revised>1?' · changed '+q.revised+' times':''));
+        if(rv&&q.previous&&q.previous.answer){ var pby=byWho(q.previous.by); add('Previous answer',answerText(q.previous.answer,300)+(pby||q.previous.at?' — '+(pby?'by '+pby:'')+(q.previous.at?(pby?' at ':'at ')+fmtClock(q.previous.at,now):''):'')); } }
       if(o.n!=null) add('Log',o.n+(o.partial?'+':'')+' entr'+(o.n===1&&!o.partial?'y':'ies')+(o.kind==='session'?' (the session on this host)':' (this node and below)'));
       return out; }
     // #86: DATA as a collapsible JSON TREE, built from DOM nodes and textContent only (keys and values are user-supplied: no HTML is
@@ -1407,7 +1416,7 @@
     // the details / data MARKER after a line or on a log entry: ¶ = it has details (text), {} = it has data (JSON)
     function ddWhat(o){ return o?(o.has_details?'details':'')+(o.has_details&&o.has_data?' and ':'')+(o.has_data?'data':''):''; }
     function ddGlyph(o){ return o?(o.has_details?'¶':'')+(o.has_data?'{}':''):''; }
-    var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed',move:'moved',reorder:'moved',edit_text:'edited',message:'sent',answer:'answered',withdraw:'withdrawn'};
+    var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed',move:'moved',reorder:'moved',edit_text:'edited',message:'sent',answer:'answered',withdraw:'withdrawn',change_answer:'answer changed'};
     return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg, sessGlyph:sessGlyph, sessKind:sessKind,   // #79: sessGlyph
       applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, entryTag:entryTag, subtreeCount:subtreeCount, barOf:barOf,
       fmtDur:fmtDur, fmtClock:fmtClock, pct:pct, planGlyph:planGlyph, isOpenItem:isOpenItem, planEnded:planEnded, hostTagOn:hostTagOn, itemState:itemState, barText:barText,
@@ -1417,7 +1426,8 @@
       rankOf:rankOf, rankGroup:rankGroup, cmpRank:cmpRank, sibRef:sibRef, moveSteps:moveSteps, canMoveInto:canMoveInto, moveTargets:moveTargets, dropPlan:dropPlan, workingAgent:workingAgent,   // #82
       editStates:editStates, checkEdit:checkEdit, checkMsg:checkMsg, editedBy:editedBy, dispPath:dispPath, EDIT_MAX:EDIT_MAX, MSG_MAX:MSG_MAX,   // #83 / #84
       logRows:logRows, mergeNewest:mergeNewest, edgeDist:edgeDist, atEdge:atEdge, EDGE_PX:EDGE_PX, nodeFacts:nodeFacts, jsonTree:jsonTree, ddWhat:ddWhat, ddGlyph:ddGlyph,   // #86 / #87
-      questionGlyph:questionGlyph, qOf:qOf, isQuestion:isQuestion, isOpenQuestion:isOpenQuestion, answerText:answerText, checkAnswer:checkAnswer, ANSWER_MAX:ANSWER_MAX, openQuestionsIn:openQuestionsIn };   // #85
+      questionGlyph:questionGlyph, qOf:qOf, isQuestion:isQuestion, isOpenQuestion:isOpenQuestion, answerText:answerText, checkAnswer:checkAnswer, ANSWER_MAX:ANSWER_MAX, openQuestionsIn:openQuestionsIn,   // #85
+      checkChange:checkChange, byWho:byWho };   // #90
   })();
   window.AimbAct=AimbAct;
 
@@ -1539,6 +1549,9 @@
   // #85 (v1.71.0): does the node's host apply Answer… / Withdraw question…? This gateway does; another host when the board head says
   // so (remote_hosts[].ask — a ≤1.70 owner would refuse them: the menu leaves them out, and a click opens no dialog)
   function hostAsk(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return true; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return !!(r&&r.ask); }
+  // #90 (v1.75.0): does the node's host apply Change answer…? This gateway does; another host when remote_hosts[].revise says so
+  // (a ≤1.74 owner would refuse it: the menu leaves it out, and a click on an answered question opens nothing)
+  function hostRevise(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return true; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return !!(r&&r.revise); }
   // #85: the "? N" attention badge — N open questions below a collapsed row (and on the session / project headers)
   function qBadge(n,tip){ return n>0?'<span class="qbadge" data-tip="'+tip+'" aria-label="'+n+' open question'+(n===1?'':'s')+'">? '+n+'</span>':''; }
   // #83: the line's ✎ marker — its text was written from the dashboard (until its session reports again)
@@ -1610,7 +1623,7 @@
         name:(ag?'agent ':'')+u.path, why:e.gone?'gone':e.stale?'stale':u.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(ft), nNodes:AimbAct.countNodes(ft), host:u.host,
         own_state:(u.current&&u.current.state)||null, can_plan:hostPlan(u.host), sid:s.id, session:s.session, nid:u.id,   // #82: Move up / down / to…, Abandon… (a 1.69+ owner)
         can_msg:hostMsg(u.host), cur:u.current?{text:u.current.text,state:u.current.state}:null, edit_states:AimbAct.editStates({nkind:u.nkind,plan_item:!!u.plan_item,holds_plan:!!ft.planNode}),   // #83 / #84 (a 1.70+ owner)
-        question:AimbAct.qOf(u), qtext:u.current?u.current.text:'', can_ask:hostAsk(u.host),   // #85 (a 1.71+ owner)
+        question:AimbAct.qOf(u), qtext:u.current?u.current.text:'', can_ask:hostAsk(u.host), can_revise:hostRevise(u.host),   // #85 (a 1.71+ owner); #90: Change answer… (a 1.75+ owner)
         up:steps(ft).up, down:steps(ft).down }; }; }
     function steps(ft){ var par=ACT.fullPar[ft.u.id]; return AimbAct.moveSteps(ft,par?par.kids:[]); }   // its siblings: the parent's (or the session's top-level) children
     // … of a SESSION row (one host's root): a multi-host session's row offers only copies + pin / hide; its actions sit on each
@@ -1650,7 +1663,7 @@
       var qp='';
       if(q){   // #85: the question, then its answer (answered) — the pills say awaiting answer / expired / withdrawn
         var qby=q.by&&typeof q.by==='object'?(q.by.user||'dashboard')+' via dashboard ('+(q.by.host||'?')+')':q.by?String(q.by):'';
-        line='<span class="ln" data-tip="'+tipK(id+'qt',function(){ return 'Question ('+q.status+')'+(q.choices&&q.choices.length?' — choices: '+q.choices.join(' · '):'')+(q.free&&q.choices&&q.choices.length?' (or free text)':'')+(q.asked_at?'\nasked '+AimbAct.fmtClock(q.asked_at,anow()):'')+(q.expires_at&&q.status==='asked'?' · expires '+AimbAct.fmtClock(q.expires_at,anow()):'')+(q.answer?'\nanswered '+(qby?'by '+qby:'')+(q.at?' at '+AimbAct.fmtClock(q.at,anow()):'')+':\n'+AimbAct.answerText(q.answer,1000):q.status!=='asked'&&q.at?'\n'+q.status+(qby?' by '+qby:'')+' at '+AimbAct.fmtClock(q.at,anow()):'')+(qOpen&&hostAsk(u.host)?'\nclick (or right-click → Answer…) to answer it':''); })+'">'+esc(u.current.text)+(q.answer?' <span class="qa">→ '+esc(AimbAct.answerText(q.answer))+'</span>':'')+'</span>';
+        line='<span class="ln" data-tip="'+tipK(id+'qt',function(){ return 'Question ('+q.status+')'+(q.choices&&q.choices.length?' — choices: '+q.choices.join(' · '):'')+(q.free&&q.choices&&q.choices.length?' (or free text)':'')+(q.asked_at?'\nasked '+AimbAct.fmtClock(q.asked_at,anow()):'')+(q.expires_at&&q.status==='asked'?' · expires '+AimbAct.fmtClock(q.expires_at,anow()):'')+(q.answer?'\n'+(q.revised?'answer changed ':'answered ')+(qby?'by '+qby:'')+(q.at?' at '+AimbAct.fmtClock(q.at,anow()):'')+':\n'+AimbAct.answerText(q.answer,1000)+(q.revised&&q.previous&&q.previous.answer?'\n(was: '+AimbAct.answerText(q.previous.answer,200)+')':''):q.status!=='asked'&&q.at?'\n'+q.status+(qby?' by '+qby:'')+' at '+AimbAct.fmtClock(q.at,anow()):'')+(qOpen&&hostAsk(u.host)?'\nclick (or right-click → Answer…) to answer it':q.status==='answered'&&hostRevise(u.host)?'\nclick (or right-click → Change answer…) to change the answer':''); })+'">'+esc(u.current.text)+(q.answer?' <span class="qa">→ '+esc(AimbAct.answerText(q.answer))+'</span>':'')+'</span>';
         if(ddm) line=lnMark(line,ddm);
         qp=qOpen?'<span class="pill ask">awaiting answer</span>':q.status==='expired'?'<span class="pill qx">expired</span>':q.status==='withdrawn'?'<span class="pill qx">withdrawn</span>':''; }
       var glyph=q?AimbAct.glyphSvg(e,now,'question'):pi?AimbAct.glyphSvg(e,now,'plan'):AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':ctx?'ctx':null);
@@ -1658,10 +1671,11 @@
       ACT.rowNode[kOf(id)]=id;
       row(id,'ar click'+(ctx?' cx':'')+(q?' q'+(qOpen?' qopen':''):'')+(pi?' pi'+(ist==='skipped'?' skipped':ist==='done'?' pdone':''):'')+(ab?' abandoned':'')+(inAb&&!ab?' abd':'')+(e.stale?' stale':'')+(e.gone?' gone':'')+(sel?' sel':'')+(t.hid?' hid':'')+(t.pinned?' pinned':''),d,'<span class="chv">'+(can?(open?'▾':'▸'):'')+'</span>'+
         '<span data-tip="'+tipK(id+'g',function(){ return q?'Question — '+(qOpen?'awaiting an answer':q.status):AimbAct.statusTip(u,t.owner,anow(),actStaleMin(),u.host); })+'">'+glyph+'</span>'+
-        nm+(t.pinned?'<span class="pin" title="pinned (this browser)">📌</span>':'')+(AimbAct.hostTagOn(t,multi)?hostTags([u.host],u.host_down?[u.host]:[]):'')+(q?'<span class="pills">'+qp+(e.stale?'<span class="pill stale">stale</span>':'')+(e.gone?'<span class="pill gone">gone</span>':'')+'</span>':pillsHtml(e,noLine,false))+line+fbHtml(id)+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
+        nm+(t.pinned?'<span class="pin" title="pinned (this browser)">📌</span>':'')+(AimbAct.hostTagOn(t,multi)?hostTags([u.host],u.host_down?[u.host]:[]):'')+(q?'<span class="pills">'+qp+(e.hostDown?'<span class="pill hostdown" data-tip="hd">host down</span>':e.stale?'<span class="pill stale">stale</span>':'')+(e.gone&&!e.hostDown?'<span class="pill gone">gone</span>':'')+'</span>':pillsHtml(e,noLine,false))+line+fbHtml(id)+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
         (u.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(u.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+'<span class="ic nil"></span>',
         function(){ actSelect({kind:'node',gk:s.key,sid:s.id,id:id,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',nkind:u.nkind});
-          if(qOpen&&hostAsk(u.host)){ var mm=nodeMenu(t,s)(); actAnswerDlg(info,mm); } },info,   // #85: a click on an OPEN question opens the Answer… dialog
+          if(qOpen&&hostAsk(u.host)){ var mm=nodeMenu(t,s)(); actAnswerDlg(info,mm); }   // #85: a click on an OPEN question opens the Answer… dialog
+          else if(q&&q.status==='answered'&&hostRevise(u.host)){ var mm2=nodeMenu(t,s)(); actAnswerDlg(info,mm2); } },info,   // #90: … on an ANSWERED one, Change answer… (prefilled)
         {menu:nodeMenu(t,s),tog:can?function(){ ACT.open[id]=!open; actRender(); }:null,open:can?open:null,sel:sel});
       if(!open) return;
       t.kids.forEach(function(c){ nodeRows(c,s,d+1,multi,inAb||ab); });
@@ -1748,7 +1762,7 @@
     // an entry about a PLAN ITEM (or a question) draws the tree's own glyph (☐ ■ ☑ …), not a state dot (Robin, 2026-10-03)
     var byPath={}; (function w(t){ if(!t) return; if(t.u&&t.u.path!=null) byPath[t.u.path]=t.u; (t.kids||[]).forEach(w); })(ft||(fx?{kids:fx.top||fx.kids}:null));
     function entDot(x,ek){ var st=x.state||'running', nu=x.path!=null?byPath[x.path]:null, tip=' data-tip="'+tipK(ek+'s',st+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"';
-      var gl=!x.state||!nu?null:AimbAct.qOf(nu)?AimbAct.glyphSvg({state:st},now,'question'):nu.plan_item?AimbAct.planGlyph(st):null;
+      var gl=!x.state||!nu?null:AimbAct.qOf(nu)?AimbAct.glyphSvg({state:st,qstatus:st==='done'?'answered':st==='abandoned'?'withdrawn':'asked'},now,'question'):nu.plan_item?AimbAct.planGlyph(st):null;
       return gl?'<span class="edg"'+tip+'>'+gl+'</span>':'<span class="dot bg-'+esc(st)+'"'+tip+'></span>'; }
     function entryRow(x){
       var ek=key+'|e|'+x.id, can=!!(x.has_details||x.has_data), eo=can&&!!ACT.open[ek], by=x.by&&typeof x.by==='string'?x.by:null;
@@ -1969,15 +1983,21 @@
   // #85 (v1.71.0): ANSWER… — the question, its CHOICES as buttons (one is picked: a radio group) and a text box when free text is
   // allowed; sends answer { choice?, text? }; the owner logs it "answered by <user> via dashboard (<host>): …", releases a waiting
   // script and tells the session at once (activity_answer — the answer travels in the encrypted body, never the subject)
+  // #90 (v1.75.0): the same dialog CHANGES the answer of an ANSWERED question (Change answer…, or a click on it): prefilled with the
+  // current answer, Change answer disabled until it differs; sends change_answer { choice?, text? } — logged "answer changed by …",
+  // the previous answer stays in the log, the session hears it at once (activity_answer, status revised)
   function actAnswerDlg(info,model){
-    var q=model.question||{}, ch=q.choices||[], sess=model.session||info.session, picked=null;
+    var q=model.question||{}, ch=q.choices||[], sess=model.session||info.session, chg=q.status==='answered', cur=chg&&q.answer?q.answer:{}, picked=chg&&cur.choice!=null&&ch.indexOf(cur.choice)>=0?cur.choice:null;
+    var who=((ACT.st.head||{}).user||'dashboard')+' via dashboard', qby=AimbAct.byWho(q.by);
     var body='<p class="qtext">'+esc(model.qtext||'')+'</p>'+
-      (ch.length?'<div class="dlg-l" id="actAnsL">'+(q.free?'Pick one — or write below':'Pick one')+'</div><div class="qch" role="radiogroup" aria-labelledby="actAnsL">'+ch.map(function(c,i){ return '<button type="button" class="act-btn qc" role="radio" aria-checked="false" data-qc="'+i+'">'+esc(c)+'</button>'; }).join('')+'</div>':'')+
-      (q.free?'<label class="dlg-l" for="actAnsT">'+(ch.length?'Or / and in your own words':'Your answer')+'</label><textarea id="actAnsT" class="act-in" rows="4" spellcheck="true" placeholder="'+(ch.length?'Optional — a note beside the choice, or your own answer':'Write the answer')+'"></textarea>':'');
-    var d=actFormDlg({ title:'Answer '+sess+' — '+AimbAct.dispPath(info.path), max:AimbAct.ANSWER_MAX, ok:'Answer', body:body,
-      note:'Logged on the question as "answered by '+((ACT.st.head||{}).user||'dashboard')+' via dashboard: …" and sent to the session at once (a script waiting on it gets it too). The subject (not encrypted) names only the path and the question\'s first words; your answer travels in the encrypted body.'+(q.expires_at?' It expires '+AimbAct.fmtClock(q.expires_at,anow())+'.':''),
-      check:function(dd){ var ta=dd.querySelector('#actAnsT'); return AimbAct.checkAnswer(picked,ta?ta.value:'',q); },
-      send:function(dd){ var ta=dd.querySelector('#actAnsT'), a={}; if(picked!=null) a.choice=picked; var tv=ta?ta.value.replace(/\r\n?/g,'\n').trim():''; if(tv) a.text=tv; actDo(info,model,{act:'answer',args:a}); } });
+      (chg?'<p class="qcur">Current answer: <b>'+esc(AimbAct.answerText(q.answer,300))+'</b>'+(qby||q.at?' <span class="k">— '+esc((qby?'by '+qby:'')+(q.at?(qby?' at ':'at ')+AimbAct.fmtClock(q.at,anow()):''))+'</span>':'')+'</p>':'')+
+      (ch.length?'<div class="dlg-l" id="actAnsL">'+(q.free?'Pick one — or write below':'Pick one')+'</div><div class="qch" role="radiogroup" aria-labelledby="actAnsL">'+ch.map(function(c,i){ return '<button type="button" class="act-btn qc" role="radio" aria-checked="'+(picked===c)+'" data-qc="'+i+'">'+esc(c)+'</button>'; }).join('')+'</div>':'')+
+      (q.free?'<label class="dlg-l" for="actAnsT">'+(ch.length?'Or / and in your own words':'Your answer')+'</label><textarea id="actAnsT" class="act-in" rows="4" spellcheck="true" placeholder="'+(ch.length?'Optional — a note beside the choice, or your own answer':'Write the answer')+'">'+esc(chg&&cur.text?cur.text:'')+'</textarea>':'');
+    var d=actFormDlg({ title:(chg?'Change the answer — ':'Answer '+sess+' — ')+AimbAct.dispPath(info.path), max:AimbAct.ANSWER_MAX, ok:chg?'Change answer':'Answer', body:body,
+      note:chg?'Logged on the question as "answer changed by '+who+': …" — the previous answer stays in the log — and sent to '+sess+' at once (status revised, with the previous answer). A script that already got the first answer is not told again; the question stays answered. The subject (not encrypted) names only the path and the question\'s first words.'
+        :'Logged on the question as "answered by '+who+': …" and sent to the session at once (a script waiting on it gets it too). The subject (not encrypted) names only the path and the question\'s first words; your answer travels in the encrypted body.'+(q.expires_at?' It expires '+AimbAct.fmtClock(q.expires_at,anow())+'.':''),
+      check:function(dd){ var ta=dd.querySelector('#actAnsT'); return chg?AimbAct.checkChange(picked,ta?ta.value:'',q):AimbAct.checkAnswer(picked,ta?ta.value:'',q); },
+      send:function(dd){ var ta=dd.querySelector('#actAnsT'), a={}; if(picked!=null) a.choice=picked; var tv=ta?ta.value.replace(/\r\n?/g,'\n').trim():''; if(tv) a.text=tv; actDo(info,model,{act:chg?'change_answer':'answer',args:a}); } });
     d.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-qc]'):null; if(!b) return; ev.preventDefault();
       var i=Number(b.getAttribute('data-qc')), was=picked===ch[i]; picked=was?null:ch[i];
       var bs=d.querySelectorAll('[data-qc]'); for(var j=0;j<bs.length;j++) bs[j].setAttribute('aria-checked',String(!was&&j===i));
@@ -2037,6 +2057,9 @@
         if(it.act==='answer'||it.act==='withdraw'){ var sn2=model.session||info.session, wd=it.act==='withdraw';   // #85: who heard it
           if(r.delivered===false&&!r.released){ ACT.fb[fid]={st:'ok',label:wd?'withdrawn':'answered',warn:'nobody was waiting',warnOnly:true,at:Date.now()}; actToast((wd?'Withdrawn':'Answered')+' — '+sn2+' has no inbox and nothing was waiting: the answer is on the board'); }
           else actToast((wd?'Question withdrawn — ':'Answer sent — ')+(r.released?'a waiting script got it'+(r.delivered?' and ':''):'')+(r.delivered?(r.delivery==='parked'?sn2+' gets it when it registers again':sn2+' was told'):'')); }
+        if(it.act==='change_answer'){ var sn3=model.session||info.session;   // #90: the session hears the new answer (status revised); nothing waits on it any more
+          if(r.delivered===false){ ACT.fb[fid]={st:'ok',label:'answer changed',warn:'not delivered: the session has no inbox',warnOnly:true,at:Date.now()}; actToast('Answer changed — '+sn3+' has no inbox: the new answer is on the board'); }
+          else actToast('Answer changed — '+(r.delivery==='parked'?sn3+' gets it when it registers again':sn3+' was told')); }
         actPollSel(); }   // #87: the action's entry is merged in (the reader keeps their place; 6d re-read the whole log)
       else ACT.fb[fid]={st:'err',code:(r&&r.code)||'error',what:(r&&r.what)||'',at:Date.now()};
       actRender();

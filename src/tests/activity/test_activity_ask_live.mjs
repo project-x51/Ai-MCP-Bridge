@@ -127,8 +127,8 @@ check('notice: the body (encrypted) has { action answer, status answered, answer
   nb.action === 'answer' && nb.status === 'answered' && J(nb.answer) === J({ choice: 'SQLite' }) && nb.question === 'Postgres or SQLite for the cache?' && J(nb.choices) === J(['Postgres', 'SQLite']) && nb.agent === 'lead-agent' && nb.path === 'lead-agent/@?1' && nb.host === HB && J(nb.by) === J({ user: 'robin', host: HB }) && nb.session === 'Lead' && nb.project === 'ASKS' && !!nb.entry_id, J(nb))
 check('notice: sent by the owning gateway as a system message (from = B\'s bridge)', String(ni[0]?.from?.session || ni[0]?.from || '').startsWith(HB + '/'), J(ni[0]?.from))
 const la2 = nodeOf(await board(B), 'Lead', 'lead-agent/@?1'), le = (await logOf(B, { session: 'Lead', path: 'lead-agent/@?1', own: true })).entries[0] || {}
-check('board + log: the line is DONE with question {status answered, answer, by}; the entry "answered by robin via dashboard (NOT-B): SQLite" (act answer); the activity tool shows the answer', la2?.state === 'done' && la2.current.text === 'Postgres or SQLite for the cache?' && J(la2.current.question.answer) === J({ choice: 'SQLite' }) && J(la2.current.question.by) === J({ user: 'robin', host: HB })
-  && le.text === 'answered by robin via dashboard (NOT-B): SQLite' && le.act === 'answer', J([la2?.current, le]))
+check('board + log: the line is DONE with question {status answered, answer, by}; the entry "answered by robin via dashboard (NOT-B): \\"SQLite\\"" (act answer; #90: the answer quoted); the activity tool shows the answer', la2?.state === 'done' && la2.current.text === 'Postgres or SQLite for the cache?' && J(la2.current.question.answer) === J({ choice: 'SQLite' }) && J(la2.current.question.by) === J({ user: 'robin', host: HB })
+  && le.text === 'answered by robin via dashboard (NOT-B): "SQLite"' && le.act === 'answer', J([la2?.current, le]))
 const again = await dashB.action(Q('Lead', 'lead-agent/@?1', 'answer', { choice: 'Postgres' }))
 check('a closed question: answering again → question-closed', again.code === 'question-closed', J(again))
 

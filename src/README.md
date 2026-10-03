@@ -552,7 +552,7 @@ It is **counts-only** — no roster, traces, persistence or sender identities �
 (the realm token gates the socket, and these integers already go to every dashboard). Behaviour reminders are unaffected: they still ride along on
 the messages when the woken session polls its inbox.
 
-## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82; v1.70.0 #83 / #84; v1.71.0 #85; v1.72.0 #86 / #87)
+## Log / activity (#70) — what every agent is doing (v1.58.0 step 2, v1.59.0 step 3, v1.60.0 step 4, v1.61.0 step 5, v1.62.0 step 6a, v1.63.0 step 6b, v1.64.0 step 6c, v1.65.0 step 6d; v1.66.0 #79; v1.68.0 #80; v1.69.0 #82; v1.70.0 #83 / #84; v1.71.0 #85; v1.72.0 #86 / #87; v1.75.0 #90)
 Sessions orchestrate, agents do the work. The **activity board** shows each session's agents and their progress across
 the whole mesh: the `log` + `activity` tools, the gateway-owned state and the daily log files (step 2),
 `tools/aimb-log.mjs` for agents and scripts that don't register (step 3, below), and the mesh-wide gossip plus on-demand
@@ -958,6 +958,7 @@ carry `plan_end_how`: `all-done`, `done` (marked complete) or `abandoned`.
 | Agent / session that is stale, gone or finished | Dismiss from the board… (`dismiss`) — never when its subtree holds part of an open plan (`has-open-items`) |
 | Any node / a session's own line (v1.70.0, a 1.70+ owner) | Edit text… (`edit_text`) · Message session… (`message`) — see "Edit a line, message the session" below (not on a question: its line is the question) |
 | An OPEN question (v1.71.0, a 1.71+ owner) | Answer… (`answer`, args `{choice?, text?}`) · Withdraw question… (`withdraw`) — see "Questions" below; a click on the row opens Answer… too |
+| An ANSWERED question (v1.75.0, a 1.75+ owner) | Change answer… (`change_answer`, args `{choice?, text?}`) — the same dialog, prefilled; see "Change an answer" below; a click on the row opens it too |
 | Any node / session | Copy path (a session: Copy session name) · Copy its aimb-log command · Pin / Unpin · Hide / Unhide |
 | A log entry (in the log panel) | Copy entry id · Copy path |
 
@@ -1301,7 +1302,8 @@ line goes (records, checkpoints, the carry-forward, gossip, the restart replay),
   choices as buttons (a radio group), a text box when free text is allowed, Answer disabled until something is picked / typed.
   **Withdraw question…** asks first. Neither offers Edit text… or Abandon… on a question.
 - **The owner applies it** (the 6d path, `ACTIVITY_ACT` for another host's node): an entry `answered by robin via dashboard
-  (ROBIN-Z790): SQLite — smaller to ship` (`act:"answer"`), the line → done with the answer on it, then (1) every script
+  (ROBIN-Z790): "SQLite" — note: smaller to ship` (`act:"answer"`; v1.75.0: the choice quoted, the free text as a note; free text
+  alone is quoted: `…: "after the review"`), the line → done with the answer on it, then (1) every script
   WAITING on it is released and (2) the session is told AT ONCE (`now:true`), verb **`activity_answer`**:
   subject (PUBLIC) `robin answered @Next release/@#85/ask-85/@?1: Postgres or SQLite for the cache?` — who, the path and the
   question's first words, **never the answer**; body (encrypted):
@@ -1334,6 +1336,50 @@ forwards `answer` / `withdraw` only to an owner that declared it (else `owner-un
 dashboard offers Answer… / Withdraw only for such hosts (`remote_hosts[].ask`). A 1.70 dashboard's Abandon… on a 1.71 question
 withdraws it. A 1.71 follower or script refuses `ask` / `choices` / `free` / `expires` / `state withdrawn` / `--wait` against a
 ≤1.70 gateway (`gateway-unsupported`; it would drop them). `AI_BRIDGE_TEST_NO_ACTIVITY_ASK=1` (tests only) leaves the flag out.
+
+### Change an answer; what a question's log entries hold (v1.75.0, #90)
+**The entries' details (a fix).** Before v1.75.0, expanding a question's "answered by …" entry showed the QUESTION's background
+(the asker's `--details`): the answer entry copied the line's details, and shared its id with the line. Now every STATUS entry of a
+question carries details of its own — what happened — and the background stays with the question:
+
+```
+Answer: SQLite
+Note: smaller to ship
+Answered by robin via dashboard (ROBIN-Z790) at 2026-10-03 14:05:09 (UTC+13:00)
+Question: Postgres or SQLite for the cache? (asked 2026-10-03 13:58:00 (UTC+13:00))
+```
+(free text alone: `Answer: <text>`; a change adds `Changed by …` + `Previous answer: SQLite — smaller to ship — by … at …`; a
+withdrawal says `Withdrawn by robin via dashboard (HOST) | by its session at …` + the asker's `Note: …` or why — `(abandoned with
+@X)`; an expiry `Expired at … — nobody answered within 2h`; always the one-line `Question: …` reminder; ≤ 4 KB, a long answer is
+cut with "…"; no data.) The question's LINE keeps the ask entry's id, its details and data — so the node's DETAILS section and
+the ask entry still show the background, and the answer entry (fetched by its own id from the owner's day file) shows the answer.
+The records say so for the restart replay (`line_id` / `line_details` / `line_data` on a status entry; a ≤1.74 host ignores them).
+
+**Change answer…** On an ANSWERED question (a 1.75+ owner), right-click → **Change answer…** — or just click the row — opens the
+Answer dialog PREFILLED with the current answer (shown as "Current answer: …"); **Change answer** stays disabled until the choice
+or the note differs. The owner applies `change_answer` `{choice?, text?}` (the same checks as `answer`; `no-change` for the same
+answer, `question-open` on an unanswered one, `question-closed` on an expired / withdrawn one):
+- a new attributed entry `answer changed by robin via dashboard (ROBIN-Z790): "Postgres" — note: it is already in the stack`
+  (`act:"change_answer"`); the earlier answer entries stay in the log;
+- the question stays **answered** (line done) with the NEW answer, `revised` (how many times it was changed) and `previous`
+  `{answer, by, at}` (the answer it replaced). The DETAILS facts show **Answer** "<latest> (changed)", **Answer changed** by whom /
+  when (· "changed N times"), **Previous answer**; the row shows the latest answer, its tooltip the old one;
+- the session hears it AT ONCE: `activity_answer`, subject (public) `robin changed the answer to @…/@?1: <the question's first
+  words>`, body `{action:"change_answer", status:"revised", answer:{…the new one}, previous:{answer, by, at}, revised:1, by,
+  entry_id, path, host, question, choices, free, agent, session, project, asked_at, ts}`;
+- **waiting scripts:** a `--wait` that already returned is not told again, and a revision does not reopen the question — a new
+  `--wait-answer` returns at once with the LATEST answer (+ `revised`, `previous`).
+
+**An open question never goes stale** (v1.75.0): it waits for a person, so — like a plan item — it has no `stale_at` and is never
+shown stale or gone, even under a quiet or departed agent; only its host being down greys it (stale + "host down"). Answered,
+expired and withdrawn questions follow the normal rules.
+
+**Compatibility (1.66 – 1.74 hosts).** Still format v5: `revised` / `previous` on a question and `line_id` / `line_details` /
+`line_data` on a record are optional fields a ≤1.74 host drops (it shows the latest answer). A 1.75 hub declares
+**`activity_revise:1`** in PEER_HELLO; a 1.75 gateway forwards `change_answer` only to such an owner (else `owner-unsupported`,
+"… older than 1.75.0 …") and its dashboard offers Change answer… only there (`remote_hosts[].revise`).
+`AI_BRIDGE_TEST_NO_ACTIVITY_REVISE=1` (tests only) leaves the flag out. (Downgrading a host to ≤1.74 after a status change: its
+replay reads the status entry's own details as the question's line details — the background shows again only on the ask entry.)
 
 ### Details, data and the log order — the log panel (v1.72.0, #86 / #87)
 A line's `details` (≤ 4 KB text) and `data` (≤ 16 KB JSON) were only reachable by expanding a log entry. Now the dashboard shows

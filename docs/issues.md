@@ -6,8 +6,16 @@ project's `#NN` sequence.
 
 ---
 
-## RESUME STATE (updated 2026-10-03, v1.72.0) — read this first after a compact
-**Current version: v1.72.0** (#86 + #87: the dashboard's log panel opens with the selected node's DETAILS — its line, state,
+## RESUME STATE (updated 2026-10-03, v1.75.0) — read this first after a compact
+**Current version: v1.75.0** (#90: **Change answer…** on an answered question from the dashboard — `change_answer` {choice?,
+text?}, a new attributed entry "answer changed by …", the question stays answered with `revised` + `previous`, the session hears
+`activity_answer` status `revised` at once, waiting scripts are not reopened; PEER_HELLO `activity_revise:1` → `remote_hosts[].revise`,
+older owners `owner-unsupported`. **Fixes:** a question's answer / withdraw / expiry entries now carry their OWN details (the
+answer, who, when, the question) instead of the question's background, and name the answer in their text (`answered by robin via
+dashboard (HOST): "SQLite" — note: …`); the line keeps the ask entry's id + background (records: `line_id` / `line_details` /
+`line_data`); an OPEN question never goes stale or gone. Code done in a worktree for review, NOT committed, NOT deployed;
+**wire-compatible with 1.66 – 1.74** — format stays v5. See "#90 as built".) Before that v1.74.0 / v1.73.0 (#89: the agent and
+session guides from the script, realm guides pulled on request). Before that **v1.72.0** (#86 + #87: the dashboard's log panel opens with the selected node's DETAILS — its line, state,
 three-part progress, ETA, who / when, the ✎ attribution, a question's answer, its `details` text and `data` as a collapsible JSON
 tree with Copy, fetched on demand by the line's entry id — and ¶ / {} markers on lines and entries; the log runs OLDEST FIRST,
 follows the newest end, "N new ↓" when scrolled up, load older keeps the place, a per-viewer toggle for newest first; code done
@@ -41,6 +49,12 @@ tags only where they differ; record / slice format v3; code done, NOT yet deploy
 (#70 step 6a) is committed (`2d78a21`); v1.63.0 is in the working tree for review. The rebuilt tray (`PrepareShutdown()`
 before the kill) is NOT installed: only a scratch build proved it compiles; Robin runs `tray/windows/build.cmd`.
 Everything below is durable; nothing important is only in chat.
+
+**2026-10-03 (v1.75.0):** Built **#90** (see "#90 as built" and architecture.md §13 "Built (v1.75.0)"): Change answer… (`change_answer`,
+`activity_revise:1`), the question status entries' own details (the bug Robin saw), open questions never stale. Tests:
+`test_activity_unit` 879 (+30), `test_dashboard_activity` 344 (+16), new `test_activity_revise_live` 23 (+2 mixed against a real 1.74
+build: 25/25; 20 of 23 FAIL on 1.74). Full parallel `npm test` (typecheck included): 2843 checks in 61 files; one #74 flake
+(`federation/test_federation_heal_live` exited at start with 0 checks; green alone 19/19). **Deploy:** any order; nothing to publish.
 
 **2026-10-03 (v1.72.0):** Built **#86 + #87** (see "#86 as built", "#87 as built" and architecture.md §13 "Built (v1.72.0)"). PAGE
 ONLY (`dashboard.html`) + `BRIDGE_VERSION` / package.json 1.72.0. The log panel is a column: header (+ the "⇅ oldest first" toggle),
@@ -404,6 +418,71 @@ whenever a send returns `unknown-subpeer`.
 
 ---
 
+## #90 — revise an answer (dashboard)  ·  **DONE (v1.75.0)**
+Robin, 2026-10-03.
+- **Proposal:** on an ANSWERED question, right-click → **Change answer…** (and a click on it) opens the Answer dialog prefilled
+  with the current answer; it applies as a new attributed answer ("answer changed by robin via dashboard: …"), the previous one
+  stays in the log; the session gets `activity_answer` with `status:"revised"` (the new answer and the previous one); a `--wait`
+  that already returned is unaffected and the question is not reopened; an older owner refuses it (`owner-unsupported`, a
+  capability flag; the menu hides it there). The DETAILS facts show the latest answer and that it was changed.
+- **With it, a bug (Robin, 2026-10-03, with a screenshot):** expanding a question's "answered by robin via dashboard (ROBIN-Z790):
+  …" log entry showed, under "details", the QUESTION's background (the asker's `--details`), not the answer.
+- **Added mid-build (Bridget):** an OPEN question was posted with line state `blocked` and so got a `stale_at` 15 minutes out — it
+  showed as stale on the board while it waited for Robin. Open questions must never go stale (like plan items).
+
+**#90 as built (v1.75.0, 2026-10-03)** — see README "Change an answer; what a question's log entries hold" and architecture.md §13
+"Built (v1.75.0)".
+- **The bug's cause:** a question's status change (answer / withdraw / expiry / an abandon that withdraws it) is a `@~` tick that
+  keeps the line's text; #85 copied the line's details / data into the MESSAGE so the line kept them — and the logged ENTRY was
+  built from the same message, so it carried the background. Worse, the entry's id WAS the new line's id, so `findEntry` answered
+  "fetch this entry" with the current LINE (its details = the background) — the file record was never read.
+- **The fix (chosen: the line keeps the ask entry's id):** on such a status change the question's LINE keeps its id (the ask
+  entry's), its details and its data; the ENTRY gets its own id and details made by `questionEntryDetails` — `Answer: <choice>` /
+  `Note: <text>` (or `Answer: <text>`), `Answered by <who> at <local time (UTC±hh:mm)>` (a change: `Changed by …` + `Previous
+  answer: … — by … at …`; a withdrawal: `Withdrawn by <who | its session> at …` + the asker's `Note:` or why `(abandoned with
+  @X)`; an expiry: `Expired at … — nobody answered within 2h`), always `Question: <first 120 chars> (asked …)`; ≤ 4 KB (a long
+  note is cut with "…"); no data. So the node's DETAILS section and the ask entry show the background, and the answer entry
+  (fetched by its own id, from the owner's day file) the answer. The record carries `line_id` / `line_details` / `line_data` so the
+  restart replay rebuilds the line exactly (`lineOf`); the entry served to a page drops them. Why not "the line's details become
+  the answer": Robin's ask was that the background stays on the question node. Why not a separate line id scheme: keeping the ask
+  entry's id needs no new id and makes "the question's details" = "the ask entry's details" by construction.
+- **The entry TEXT names the answer** (`answerEntryText`, ≤ 240): `answered by robin via dashboard (ROBIN-Z790): "SQLite" — note:
+  smaller to ship`; free text alone `…: "after the review"`; a change `answer changed by robin via dashboard (ROBIN-Z790):
+  "Postgres" — note: …`. (#85's `…: SQLite — smaller to ship` → the choice is quoted now; `test_activity_ask_live` updated.)
+- **`change_answer`** {choice?, text?} — a dashboard action (`REVISE_ACTIONS`), the same checks as `answer`; only on an
+  `answered` question (`question-open` on an open one, `question-closed` on an expired / withdrawn one), `no-change` for the same
+  answer; `answer` on an answered question still says `question-closed` and now names change_answer. The question stays answered
+  (line done) with the new answer, `revised` (how many changes) and `previous` {answer, by, at} — the answer it replaced (only
+  the last one is kept on the line; every earlier one stays in the log). The result carries `previous` + the question.
+- **Notice:** `activity_answer` at once, subject (public) `robin changed the answer to <path>: <the question's first words>`,
+  body `{action:"change_answer", status:"revised", answer, previous:{answer, by, at}, revised, by, entry_id, path, host, question,
+  choices, free, agent, session, project, asked_at, ts}`. Server instructions + the `log` tool: "status revised = the viewer
+  CHANGED an earlier answer (body.previous)".
+- **Waiting scripts:** a revision releases nobody (`released` 0) and never reopens the question; `--wait-answer` returns the latest
+  answer with `revised` / `previous` (`questionOutcome`).
+- **Dashboard:** **Change answer…** in the menu of an answered question (for `hostRevise`: this gateway, or `remote_hosts[].revise`)
+  and on a click on its row; the Answer dialog in change mode — "Change the answer — <path>", "Current answer: … — by … at …",
+  the choice / note prefilled, **Change answer** disabled while it equals the current answer (`checkChange`); toast "Answer
+  changed — <session> was told" (or "not delivered" for a script-only session). Facts: **Answer** "<latest> (changed)", **Answer
+  changed** by / at (· "changed N times"), **Previous answer**; the row's tooltip "answer changed by … (was: …)". The log panel's
+  entries of a question now draw the bubble of THEIR state (answered ✓ / withdrawn / asked ?) — before, every entry showed "?".
+- **Screenshots** (light + dark, scratchpad `shot90-*.png`): the answer entry expanded, the Change answer… dialog, after a change.
+- **Open questions never go stale:** `staleAt` returns null and `effectiveState` shows the reported state (never stale, never
+  gone) for an OPEN question, as for a plan item; the dashboard's `effState` likewise, except that its host being down greys it
+  (stale + a "host down" pill). Answered / expired / withdrawn questions follow the normal rules (their done / abandoned lines are
+  never stale anyway).
+- **Capability / compatibility:** PEER_HELLO `activity_revise:1` → `remote_hosts[].revise`; change_answer is forwarded only to
+  such an owner (`owner-unsupported`, "… older than 1.75.0 …"). Format stays v5; `revised` / `previous` / `line_*` are optional
+  fields a ≤1.74 host drops (it shows the latest answer). `AI_BRIDGE_TEST_NO_ACTIVITY_REVISE=1` (tests only).
+- **Tests:** `test_activity_unit` 879 (+30), `test_dashboard_activity` 344 (+16), new `test_activity_revise_live` 23 — 20 of them
+  FAIL against 1.74 (`AIMB_TEST_BRIDGE`), incl. "THE BUG" check; mixed against a real 1.74 build (`AIMB_TEST_OLD_BRIDGE`): 25/25.
+
+**Questions after #90 (not decided):**
+- **Only the last previous answer rides the line** (the log has every one). Enough, or keep a short history (≤ 3) on the question?
+- **Downgrade:** a ≤1.74 replay of a status entry takes the entry's own details as the line's (the background then shows only
+  on the ask entry). Acceptable, as for #82's moves?
+- **Change after expiry / withdrawal** is refused. Should Robin be able to answer an expired question late (reopen it)?
+
 ## #89 — agent and session guides from the script: `aimb-log --guide agent|session`  ·  **DONE (v1.73.0; part 2, realm guides: v1.74.0)**
 Robin, 2026-10-03: the logging rules pasted into every agent brief are noise in the orchestrator's context, and a copy in a
 brief can drift from the script. The rules now come from the script itself.
@@ -700,6 +779,11 @@ Robin, 2026-10-03.
   an agent's question to its session, federated answers incl. a script waiting on the other host, expiry, withdraw (asker +
   dashboard), timeout, gone, script usage, an older owner refused, the trust wording; mixed vs a real 1.70 build: 41/41; review fix: `--choice` one per flag).
   Full parallel `npm test` (typecheck included): 2684 checks in 58 files, all green, 5m04s (an earlier run had one load failure in `mesh/test_mesh` — "Connection closed" from a bridge child; 22/22 alone three times).
+
+**Fixed in v1.75.0 (#90):** the answer / withdraw / expiry entries carried the QUESTION's background as their details (and shared
+the line's id, so expanding them fetched the line) — they now carry their own details (the answer, who, when, the question) and
+name the answer in their text; the line keeps the ask entry's id + background. An open question no longer goes stale. An answer
+can be changed (`change_answer`, status revised). See "#90 as built".
 
 **Questions after #85 (not decided):**
 - **Several askers, one question?** Each ask is its own node; two agents asking the same thing make two rows. Fine, or
