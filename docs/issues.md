@@ -488,25 +488,37 @@ replay rewriting older records through later moves, re-keying day files). Agreed
 **Plan:** spec first (record formats, the key/path/alias resolution rules, migration, wire projection, the API and
 snippet, the dashboard changes, a build in steps), reviewed by Robin; then build step by step as v2.0.0.
 
-### #88 spec (draft for Robin)
-The full draft is **[docs/spec-88.md](spec-88.md)** (2026-10-03; nothing built). In short:
+### #88 spec (revised with Robin's answers)
+The full spec is **[docs/spec-88.md](spec-88.md)** (2026-10-03; nothing built). Robin answered all 28 questions (spec §9
+"Decisions"); **2.0 is a clean cutover**. In short:
 - **Ids:** 16 base32 chars of sha256(host, session, creator chain, key) — minted once, stored; migrated nodes get
   sha256(host, session, final path). Keys: today's agent-name charset minus `:`, ≤ 48, case-insensitive, unique per creator.
+- **Labels and lines:** *label* = the node's name, *current line* = its status text. Sibling labels are UNIQUE: a create,
+  rename, move, merge or unmerge that would duplicate one is refused `duplicate-label`.
+- **Text:** plain `--text` only logs; a LEADING `@` also sets the node's line (`@@` = a literal `@`). `@~` is gone.
 - **Records v6:** `kind:"node"` records (create / label / move / rank / item / merge / unmerge / remove) carry ALL structure;
-  entries, cp and cf name the node by `n` (+ `at`, the path at the time); `cf` also carries structure; a per-day sidecar
-  `YYYY-MM-DD.idx.json` (id → offsets + that day's node records) drives paging and a GHOST table (removed nodes) that keeps
-  parent logs whole (fixes #76).
+  entries, cp and cf name the node by `n` (+ `at`, the full path at the time); `cf` also carries structure; a per-day index
+  file `YYYY-MM-DD.idx.json` (id → offsets + that day's node records) drives paging and a GHOST table (removed nodes) that
+  keeps parent logs whole (fixes #76). Removed children's entries sit behind a "show removed" toggle (off by default); a ghost
+  lives until retention drops its last entry.
 - **Resolution:** `--key` = your own scope (create if new; location / label only at creation); references look in your
-  scope, then your creator's, up to the session's (`chain:key` to be exact); `--path` = current tree → aliases → create.
-- **Compat:** PEER_HELLO keeps `activity_gossip:5` (1.7x checks it by equality) and adds `activity_ids:1`; v5 slices are
-  projected for old hosts; their path-based requests and actions resolve on a v2 owner.
-- **Migration (Dropbox-safe, spec §7 + §10):** each host converts only its own `activity/<host>/`, by one chronological
-  forward pass, and writes ALONGSIDE: v6 day files in `activity/<host>/v6/`, a per-day map (v5 record offset → node id), a
-  baseline of the converted board, `format.json` last. The v5 files stay byte-identical (a 1.7x bridge never lists `v6/`), so
-  rollback is free; every output is a pure function of the host's own v5 files (two hosts converting at once can't collide);
-  nothing writes `config.json`; Dropbox conflicted copies are never read (exact-name patterns) and are WARNed. ~250 MB/s read in
-  a prototype; only ~12 bytes a record are written.
-- **Holes found:** H1 – H13 in the spec §9. **Open questions:** 27, numbered, each with a recommendation (spec §9).
+  scope, then your creator's, up to the session's (`chain:key` to be exact); `--path` (no `@`; segments are labels) = current
+  tree → aliases → create (contexts only). `--path` stays after 2.0 as a shorthand.
+- **No legacy in the API:** positional text, `--plan`, `--move … --to`, `@` in paths and `@~` are removed; each is refused
+  `legacy-form` with a message naming the 2.0 form. Agents create their own node: `--agent <key> --under <item> --guide agent`
+  prints the guide AND registers the agent ("reading the guide").
+- **Per-user view state:** pins, hidden rows, open / closed, the log selection, the DETAILS fold and "last seen" are stored per
+  user on the bridge and replicated realm-wide (#62's LWW set + tombstones, a `VIEW` frame, one `views/<host>.json` per host).
+  Explicit open / close beats defaults; new activity never reopens a closed node ("? N" / "N new" badges); Reset view; choices
+  are pruned with their node.
+- **Cutover (spec §7):** stop every bridge on every host → run `src/tools/aimb-migrate-v2.mjs` (`--dry-run` first) on each
+  host: it converts only that host's `activity/<host>/` in place, from a one-off backup in `activity-v5-backup/<host>/`, writes
+  index files, then `format.json` last → start the bridges in any order. A 2.0 bridge refuses to start on unconverted history
+  and names the script. No rollback, no side-by-side `v6/`, no maps, no legacy reader. Still kept (spec §10): per-host writes
+  only, conflicted copies WARNed and never read or deleted, nothing writes `config.json`.
+- **Compat:** only the v5 network projection stays, for the cutover window (a host upgraded late): PEER_HELLO keeps
+  `activity_gossip:5` and adds `activity_ids:1` + `view_state:1`; deleted in 2.1.
+- **Holes:** H1 – H18 in the spec §9. **New questions:** Q29 – Q39, each with a recommendation (spec §9).
 
 ## #87 — log panel order: oldest first, auto-scroll to the bottom  ·  **DONE (v1.72.0)**
 Robin, 2026-10-03, asking whether the log panel should run the other way.
