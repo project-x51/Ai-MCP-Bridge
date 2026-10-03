@@ -344,7 +344,7 @@ await section(() => {
   check('Q45: a BARE destination is refused bad-path, suggesting "../X" and "/…/X"; nothing written', bare.code === 'bad-path' && bare.what.includes('"../Passed"') && bare.what.includes('"/…/Passed"') && snap(s) === snap0, bare.what)
   check('Q45: ../A/B (more segments than ..) and ../../X (fewer) are refused too (not retry-safe)', w.call({ key: 't1', move_to: '../A/B' }).code === 'bad-path' && w.call({ key: 't1', move_to: '../../X' }).code === 'bad-path')
   check('Q45: "..", "../.." alone and "./X" are refused', ['..', '../..', './X'].every(p => w.call({ key: 't1', move_to: p }).code === 'bad-path'))
-  check('move-to: ../../R/X (as many segments as ..) is allowed', M.parseMoveTo('../../R/X').ok && M.parseMoveTo('../../R/X').up === 2)
+  check('Q46 FINAL: ../../R/X is refused too — only "/…" and single-step "../X" (the refusal keeps rel for the suggest)', M.parseMoveTo('../../R/X').code === 'bad-path' && M.parseMoveTo('../../R/X').rel.up === 2 && M.parseMoveTo('../X').ok && M.parseMoveTo('/A/X').ok)
   check('move-to: a quoted ".." is a LABEL, not navigation', (() => { const p = M.parseMoveTo('../".."'); return p.ok && p.up === 1 && J(p.segs) === J(['..']) })())
   check('move-to: going above the session root → bad-path', w.call({ key: 'tests', move_to: '../X' }).code === 'bad-path' && snap(s) === snap0)
   w.call({ key: 'clash', label: 'T1', under: 'Tests/Failed' })

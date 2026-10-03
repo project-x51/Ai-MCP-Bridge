@@ -616,14 +616,35 @@ follow-ups (spec §9 "Decisions"); **2.0 is a clean, no-legacy cutover**. In sho
   projection, no dual handshake, no 2.1 cleanup step, no stray-v5 handling. **Every host is upgraded together** with the
   stop-all runbook; a host left on 1.7x shares no activity until it is upgraded.
 - **Holes:** H1 – H21 in the spec §9. **Q40 / Q41 decided as recommended** (spec §9): agents need a label too (the snippet
-  fills it in); the view follows the serving gateway's OS login, the board head shows "view: <login>". Build step 1 (the
-  identity primitives) is done; step 2a (the id-keyed structure + resolution, beside the 1.7x model) is in progress.
+  fills it in); the view follows the serving gateway's OS login, the board head shows "view: <login>". (Build status:
+  below.)
 - **Q43 `--move-to` + transient contexts** (spec §3.8, step 2c). One call reports, then moves (`--move-to "../Passed"`), and
   missing buckets are created TRANSIENT. They vanish into ghosts when empty, and are resurrected with the same id and a new
   run. **Q44 / Q45 decided (Robin):** a grace period is an OPTIONAL parameter of `--transient` (default none: it vanishes
   the moment it empties; `--transient=30s`, tool `transient: true | "30s"`; with `--move-to` it also covers the contexts it
   auto-creates; an arrival during the grace keeps it). A bare `--move-to "X"` is refused `bad-path` — only `../X` and `/X`,
-  the error suggesting both (2a also refuses `../A/B` / `../../X`, not retry-safe either: Q46 asks).
+  the error suggesting both. **Q46 FINAL (Robin):** only `/absolute` and single-step `../X`; a refused deeper relative move
+  (`../A/B`, `../../X`, `../../R/X`) answers `suggest:"/…"`, the absolute path it would have resolved to; and a RESOLVE
+  helper `aimb-log --resolve "<relative path>" [--key X | --path P]` (tool `resolve`) returns the absolute path + id a
+  relative path resolves to now, changing nothing.
+- **GROUPS (Robin, 2026-10-03):** a context can be a GROUP — a list, not a plan: no bar, no plan-end, no contribution to its
+  parent's rollup; in place of the bar an optional count ("4 items" / "3 open · 1 done"; abandoned and hidden items not
+  counted). Set at creation (now `--context-type=group`, see TYPES) or toggled from the dashboard (Show as group / Show as
+  plan); its items keep their states. Candidates: Potential changes, Planned changes, Deployed releases, Questions (spec §5.7).
+- **TYPES (Robin, 2026-10-03, "typed nodes and entries"):** every node has a `type` from a small built-in registry held as
+  data (per type: allowed fields, display — glyph and what shows in place of a bar —, rollup behaviour, allowed children,
+  menu actions: the slot #92's context-aware menu folds into). Types `context` (default, plan-capable), `plan`, `group`,
+  `agent`, `question`, `test-run` (reserved). Flag `--context-type=<type>` (tool `context_type`) replaces `--group`; a
+  question is a node of type `question`. Entries are typed too: `--message-type=<type>` (tool `message_type`, default `note`)
+  with validated typed fields the bridge can count; `--data` stays free-form; answers are `answer` entries. A new step 2d
+  builds `test-run` + `test-result` (#81's test reporter is the first user). Questions read naturally: the question, its
+  options listed below it as answers — never restated in the text; choices stay structured (spec §1.7, §5.8).
+- **ROLLUP (Robin, 2026-10-03) — reverses 6c decision 7:** a node holding plan items rolls up ONLY its items ("N of M");
+  helper agents and contexts keep their own bars on their own rows; a node with no plan items rolls up as before. v1.75.1
+  ships the same rule for 1.7x now; 2.0 ports it (step 2b).
+- **Build status:** steps 1 (identity primitives) and 2a (structure + resolution) done; **2b** (lines + entries, plans + the
+  ROLLUP rule, questions, the type registries + groups, resolve + Q46) built in `lib/activity2.js` beside the 1.7x model;
+  2c (positions, actions on ids, eviction, notices) next, then 2d (test-run + test-result).
 - **Depth in 2.0 (Q11b, revises Q11; 1.7x stays at 6):** HARD limit 32 — a create or move putting any node deeper is
   refused `depth` (a move counts the whole subtree; the error names the deepest node and the depth it would reach; the
   Move-to picker greys such targets). SOFT warning past 20: the call succeeds with `deep-tree` (depth N); the Move-to dialog

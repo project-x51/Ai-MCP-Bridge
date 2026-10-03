@@ -2,8 +2,12 @@
 
 Status: FINAL, 2026-10-03. Robin has answered Q01 – Q41 and confirmed two follow-ups (no v5 network projection; how
 duplicate labels behave). He then added `--move-to` and transient contexts (Q43, §3.8), answered its two follow-ups (Q44 grace period,
-Q45 no bare names in `--move-to`) and revised the depth limit for 2.0 (Q11b: hard 32, warning past 20). All his decisions
-are in §9 "Decisions". The build (§8) has started (step 1 done; step 2a in progress). The agreed design is in
+Q45 no bare names in `--move-to`) and revised the depth limit for 2.0 (Q11b: hard 32, warning past 20). During the build he
+answered Q46 (only `/…` and single-step `../X` for `--move-to`, plus a resolve helper), added GROUPS (a context shown as a
+list, not a plan), reversed 6c decision 7 for bars (ROLLUP: a plan node's bar is its items only) and made nodes and entries
+TYPED (§1.7: a built-in registry of node types — a group is `--context-type=group`, a question a node of type `question` —
+and of message types — an answer is an `answer` entry). All his decisions
+are in §9 "Decisions". The build (§8) has started (steps 1 and 2a done; 2b built, see §8). The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
 
@@ -72,7 +76,8 @@ is no v5 projection and no support for a 1.7x host, so **every host is upgraded 
 | `rank` | #82's fractional base-36 rank, unchanged (`rankBetween`, `placeRanks`, `derivedRank`, `siblingCmp`): stored only when placed, else derived from created_at + plan_ix. |
 | `kind` | fixed at creation: `agent` or `context`. Never changes. |
 | `plan` | a context becomes a PLAN ITEM for good (6b) — the one kind change, its own record (`op:"item"`). |
-| question | unchanged from #85: a property of the current line (`line.question`), not a kind. |
+| `type` | (TYPES, §1.7) the node's TYPE from the built-in registry: a context's is `context` (the default), `plan`, `group` or `question`; an agent's `agent`, the root's `session`. Given at creation (`--context-type=<type>`, on the create record); changed only by the dashboard (Show as group / Show as plan: an `op:"type"` record) or by `--ask` (a line-less context becomes a `question`). A GROUP (§5.7) is a context of type `group`. |
+| question | a node of TYPE `question` (§1.7, §5.8); its current line carries the question object (`line.question`, #85). |
 | `merged_into` | §3.6. |
 
 **Depth (Q11b — revises Q11 for 2.0; 1.7x keeps its limit of 6).** A node's depth is its number of steps below the session
@@ -95,8 +100,8 @@ node's log. A report LOGS an entry; it SETS the line only when asked to (§4.0).
 - **session** — the root node of a (session, host); id = mint(host, session, "", ""). Agent-like lifecycle, as today.
 - **agent** — an actor (start / finish / stale / gone). An agent is created by its creator (the session, or another agent) and
   is ALSO a creator: its key chain is how a script names it (`--agent spec-88`). Agents create their own node (Q17, §4.4).
-- **context** — a piece of work (line, bar, ETA). **Plan item** = a context with `plan` (6b). **Question** = a context whose
-  line carries `question` (#85).
+- **context** — a piece of work (line, bar, ETA). **Plan item** = a context with `plan` (6b). Every node also has a TYPE
+  (§1.7): a context's is `context`, `plan`, `group` or `question` (**Question** = a context of type `question`, #85).
 - Ownership (who goes stale for whom) stays TREE-derived: `ownerOf` = the nearest agent at or above (6a, Q04). The creator is a
   namespace, not an owner: `spec-88:docs` placed under the session's `:88` is owned by the session for staleness. Activity
   from a call refreshes target..owner as today PLUS the calling agent (§4.1 `--agent`), which today's path-only model can't name.
@@ -142,6 +147,51 @@ node's log. A report LOGS an entry; it SETS the line only when asked to (§4.0).
 - The migration makes existing trees conform (§7.3): the one case v5 allowed — an agent `x` and a context `@x` under one
   parent — gets the younger node relabelled `x (2)`.
 
+### 1.7 Types: typed nodes and typed entries (TYPES — Robin, 2026-10-03)
+Two small built-in REGISTRIES, held as DATA (`lib/activity2.js` `NODE_TYPES`, `MESSAGE_TYPES`): the code asks the registry
+what a type allows and how it shows, instead of special-casing groups or questions.
+
+**Node types.** Every node has a `type`. Per type the registry declares: the `kind` it belongs to (context / agent /
+session — the kind never changes), whether a caller may give it (`settable`), the report FIELDS a node of that type takes
+(others are refused `bad-field`), its DISPLAY (`glyph`, and what `show`s where a bar would: `bar` | `count` | `status`), its
+ROLLUP behaviour (`bar`: its own bar — `auto` / `items` / `none`; `counts_as`: what it adds to its parent's rollup — `bar` /
+`item` / `none`), whether it can hold a plan that ENDS (`plan_end`), the node types allowed under it (`children`), and its
+MENU actions — the context-aware menu of #92 folds into this slot (empty until #92).
+| Type | Kind | Set by | Bar / display | Adds to its parent | Notes |
+|---|---|---|---|---|---|
+| `context` | context | default; `--context-type=context` | `auto`: its plan items only when it holds any (ROLLUP), else its children's bars | its bar | plan-capable (an `--item` makes it a plan node) |
+| `plan` | context | `--context-type=plan`; Show as plan | `items`: always "N of M" over its items | its bar | "Next release" is a plan |
+| `group` | context | `--context-type=group`; Show as group | `none` — a COUNT instead (§5.7) | nothing | no plan end; takes no `progress` |
+| `question` | context | `--ask` (§5.8) | `status` (asked / answered / …) | one ITEM | holds no children; takes no `plan` / `progress` |
+| `agent` | agent | `--agent` | `auto` | its bar | |
+| `session` | session | the bridge (the root) | `auto` | — | |
+| `test-run` | context | (reserved — build step 2d) | `items` | its bar | #81's dashboard test reporter is its first user |
+- **The flag** is `--context-type=<type>` (the tool's `context_type`), lower-case kebab-case flag style, values
+  case-insensitive. It gives a NEW context its type (on an existing node it is ignored with `exists`, §3.5); only the
+  settable context types are taken (`bad-type` otherwise; `question` only with `--ask`); a reserved one → `type-reserved`.
+  It REPLACES the first draft's `--group` / `group:true`. A type changes later only by the dashboard's Show as group /
+  Show as plan (an `op:"type"` record; a plan item can't become a group; a question stays a question) or by `--ask` on a
+  line-less context (it becomes a `question`).
+- A plan item is still an ATTRIBUTE (`plan`, §1.3), not a type: it counts as an item of its parent's plan whatever its type.
+
+**Message (entry) types.** Every entry has a `type` (`--message-type=<type>`, the tool's `message_type`; default `note`)
+and, when its type declares any, typed `fields` — VALIDATED against the registry (unknown fields refused `bad-fields`,
+values normalised: a duration → ms …), so the bridge can count them. `--data` stays the free-form extra the bridge does
+not interpret.
+| Type | Written by | Typed fields |
+|---|---|---|
+| `note` | any report (the default) | — |
+| `question` | the bridge, for an `--ask` | `choices`, `free`, `expires_at` |
+| `answer` | the bridge, for an answer / a changed answer | `choice`, `text`, `revised` |
+| `withdrawal` | the bridge, for a withdrawn question | `note` |
+| `expiry` | the bridge, for an expired question | `after_ms` |
+| `event` | the bridge, for a structural change (moved, renamed, merged, unmerged, emptied, a type change) | — |
+| `test-result` | (reserved — build step 2d) | `result` (pass / fail / skip), `checks`, `duration` |
+- A caller may give only the settable types (`note` now; `test-result` from step 2d: `--message-type=test-result --result
+  pass --checks 22 --duration 4.1s`); a bridge type → `bad-message-type`, a reserved one → `type-reserved`. The tool takes
+  the typed fields as `fields:{…}`; the script maps a type's field flags (`--result`, `--checks`, …) onto them (step 9).
+- Answers are entries of type `answer`; the node's STATE (done / failed …) still drives plans and progress.
+
 ---
 
 ## 2. Record formats (day files, format v6)
@@ -177,7 +227,9 @@ path BEFORE the change (it seeds the alias table, §3.3, and lets a log say "mov
   `rank` (null = derived), `plan_item` / `plan_ix` when born a plan item, `run:true` (it BEGINS a run — replaces `new_from`;
   §5.3), and `asked` when the label was auto-renamed (§1.6: `"label":"notes (2)","asked":"notes"`). A create for a key whose
   node is a GHOST (§5.1) re-uses its id and starts a new run. `transient:true` marks a transient context (§3.8), with
-  `grace_ms` when it was created with a grace period (Q44).
+  `grace_ms` when it was created with a grace period (Q44). It also carries the node's `type` (§1.7; `nk` stays the kind).
+- `type`: `{"op":"type","n":…,"type":"group"}` — the dashboard's Show as group / Show as plan, or `--ask` turning a
+  line-less context into a `question` (§1.7); nothing else changes (its children keep their states).
 - `move`: new `p` (+ the rank it got there). `label`, `rank`, `item`: the one attribute. `keep`: a transient context becomes
   permanent (§3.8), with no other field.
 - `merge`: A (`n`) into B (`into`); `from` = A's parent then (for an unmerge); `kids` = A's children at that moment, which
@@ -191,12 +243,14 @@ path BEFORE the change (it seeds the alias table, §3.3, and lets a log say "mov
 {"v":6,"id":"act_9164_murlfkk7-3gk","ts":1790984100000,"n":"rtam3yvgwkzx5zbp","current":true,"text":"Writing the README section","state":"running","at":"Next release/#88/Write the docs",…ident,"details":null,"data":null}
 ```
 - Today's entry fields (`apply` → `res.entry`) MINUS `path`, `new_from`, `evicted`, `moved_from`, `plan_item` / `plan_ix`
-  (structure moved to node records) PLUS `n` (the node id) and `at`.
+  (structure moved to node records) PLUS `n` (the node id), `at`, and (TYPES, §1.7) `type` — the MESSAGE type (`note`
+  by default) — with its validated typed `fields` when it has any (`{"type":"answer","fields":{"choice":"Postgres"}}`).
 - **`at` = the node's full display path when written** (Q08). The log panel shows it on hover when it differs from the node's
   path now ("logged as #88/Docs"); it stays greppable. ~60 – 150 bytes per entry. **Capped at 1 024 UTF-8 bytes** (Q11b: a
   32-deep path of 60-code-point labels could reach ~8 KB): a longer path keeps its head and tail and is cut in the MIDDLE with
   `…` (on code-point boundaries), so both the top of the tree and the node's own label survive.
-- `current:true` marks an entry that SET the line (§4.0); `false` = logged only. Kept: `current text state progress eta_at
+- `current:true` marks an entry that CHANGED the line (§4.0) — its text (a leading `@`) or its state (`line_text` then names
+  the line's text when the entry's own text differs, as 6d's ticks); `false` = logged only. Kept: `current text state progress eta_at
   stale_after_ms details data by act line_text line_by question plan_end finished_at`, and `dismiss:true` on the parent-log
   dismissal entry (`n` = the PARENT, `of` = the removed id). `rank` leaves entries: a placement writes a `rank` node record
   plus its "placed before Build" entry.
@@ -331,16 +385,24 @@ target.
 - **Order and atomicity.** The report's state, line and log entry are applied first, then the node moves. It is ONE
   all-or-nothing change: the destination is resolved and every check below passes BEFORE anything is written. A refused move
   refuses the whole call, including the report.
-- **The path** is a §3.3 path (labels, quoting per Q37, no `@`) in one of two forms (Q45):
+- **The path** is a §3.3 path (labels, quoting per Q37, no `@`) in one of two forms (Q45, Q46):
   - A LEADING `/` makes it absolute from the session root, even with `--agent`.
-  - A LEADING `..` makes it RELATIVE to the node's CURRENT parent. Each leading `..` segment goes up one level, so `../X` is
-    a sibling of the parent; EXACTLY as many segments must follow as there are `..` (`../X`, `../../R/X`), so a retry lands
-    in the same place (below). `..` is navigation only as a leading segment. A label that is literally `..` is written quoted
-    (`".."`), and going above the session root → `bad-path`.
-  - **Anything else is refused `bad-path`** (Q45): a bare destination (`X`, `X/Y`) would be resolved one level DOWN from the
-    parent and is not retry-safe. The error suggests both forms: `use "../X" (beside the node's parent) or "/…/X" (from the
-    session root)`. So is a path of only `..` segments with nothing after them (`..`, `../..`): there is no destination
-    label. (`../..` alone would be "the grandparent itself"; write it absolutely.)
+  - `../X` — exactly ONE leading `..` and ONE label — is RELATIVE to the node's CURRENT parent: the `..` goes up one level,
+    so `../X` is a sibling of the parent. `..` is navigation only as a leading segment. A label that is literally `..` is
+    written quoted (`".."`), and going above the session root → `bad-path`.
+  - **Anything else is refused `bad-path`** (Q45, Q46 FINAL): a bare destination (`X`, `X/Y`) would be resolved one level
+    DOWN from the parent, and a deeper relative path (`../A/B`, `../../X`, `../../R/X`) resolves differently from the NEW
+    parent on a retry; none is retry-safe. The error suggests both forms (`use "../X" (beside the node's parent) or "/…/X"
+    (from the session root)`) and, when the path could be resolved now, carries **`suggest: "/…"`** — the ABSOLUTE path it
+    would have resolved to from the node's current parent (live labels as spelt on the board, the missing tail as given) — so
+    the caller retries with that retry-safe form. So is a path of only `..` segments with nothing after them (`..`, `../..`):
+    there is no destination label (no `suggest`). (`../..` alone would be "the grandparent itself"; write it absolutely.)
+  - **The resolve helper (Q46):** `aimb-log --resolve "<relative path>" [--key X | --id I | --path P]` (the tool `resolve`)
+    answers the absolute path (and id) a relative path resolves to NOW, from the named node's current parent (the same base
+    as `--move-to`; with no `--key` / `--id` / `--path`, the `--agent` node, and the session root is refused as having no
+    parent), and CHANGES NOTHING. It takes any relative form (bare `X`, `../A/B`, `../../X`) and the absolute form, walks the
+    tree as `--move-to` would (a live child, else this parent's same-label ghost, else "would be created"), and answers
+    `{ path:"/…", id, state:"live"|"ghost"|"new", node?, create:[labels a move there would create], from:{ id, path } }`.
 - **Resolution, segment by segment, from that base:**
   1. a LIVE child with that label (§3.3 step 1: by label, else an agent by key), whoever created it;
   2. else a GHOST (§5.1) whose last parent is this node and whose label matches (labelKey), the newest if there are several.
@@ -361,12 +423,12 @@ target.
   per call). `--move-to` is not the removed `--to` (§4.5): it is a path, and it travels with a report.
 - **Idempotent on retry.** When the node's current parent already IS the resolved destination, the move part is a no-op: no
   `move` record and no rank change. The report applies again as a normal report (a logged retry logs twice, §3.5). Absolute
-  paths, and relative ones with as many leading `..` as segments after them (`../Passed`, `../../Run 2/Passed`), resolve to the
-  same place on a retry. A bare `X` (one level DOWN) would not — a retry after a lost response would move it again, into
-  `X/X` — which is why it is refused (Q45). By the same reasoning a relative path whose segment count after the leading `..`
-  differs from its number of `..` is refused `bad-path` too, naming the absolute form: `../A/B` (a retry from the new parent
-  `B` would land in `A/A/B`) and `../../X` (a retry would climb one level higher). Build 2a's reading of Q45; confirmation
-  asked as Q46. The guide teaches `../X` and `/…`.
+  paths and `../X` resolve to the same place on a retry. A bare `X` (one level DOWN) would not — a retry after a lost response
+  would move it again, into `X/X` — which is why it is refused (Q45). By the same reasoning every deeper relative path is
+  refused `bad-path` with the absolute form as `suggest` (Q46 FINAL, option 1): `../A/B` (a retry from the new parent `B`
+  would land in `A/A/B`), `../../X` (a retry would climb one level higher) and `../../R/X` (it lands in the same place only
+  while the tree around it doesn't change; the absolute form says exactly where). The guide teaches `../X` and `/…`, and
+  `--resolve` for turning any relative path into the absolute one first.
 - **Records:** the report's entry; any `create` records for created or resurrected contexts (`transient:true`, `c` = the
   caller); the `move` record plus its move entry (§2.2); then any `remove` records for transient contexts that emptied (below).
   All belong to one call, in that order.
@@ -444,7 +506,10 @@ Q19 FINAL).
 | `--move <ref>` | move the TARGET under `<ref>` (+ a position); a label clash → `duplicate-label` (§1.6) |
 | `--rename "<label>"` | the target's new label; a clash → `duplicate-label`; with `--move`, one checked change (§1.6) |
 | `--merge <ref>` / `--unmerge` | §3.6 |
-| `--move-to "<path>"` | after the report is applied, move the target there (relative: `../X`, as many segments as `..`; absolute: `/…`; a bare `X` → `bad-path`, Q45), creating missing transient contexts; one all-or-nothing change (§3.8) |
+| `--move-to "<path>"` | after the report is applied, move the target there (relative: `../X` only, one step; absolute: `/…`; a bare `X` or a deeper relative path → `bad-path` with `suggest:"/…"`, Q45 / Q46), creating missing transient contexts; one all-or-nothing change (§3.8) |
+| `--resolve "<path>"` | (Q46) print the absolute path + id a relative (or absolute) path resolves to NOW from the target's current parent (`--key` / `--id` / `--path`, else the `--agent` node); changes nothing (§3.8) |
+| `--context-type=<type>` | (TYPES, §1.7) a NEW context's type: `context` (default) \| `plan` \| `group` (a list, not a plan, §5.7); case-insensitive; on an existing node ignored with `exists`; replaces the draft's `--group` |
+| `--message-type=<type>` | (TYPES, §1.7) the entry's message type (default `note`); a type's typed fields as flags of their own (`--result pass --checks 22 --duration 4.1s` for `test-result`, step 2d), validated; `--data` stays free-form |
 | `--transient[=<dur>]` / `--keep` | a NEW context is transient (it vanishes when its last child leaves; `=30s` = after a grace period with no child, Q44 — with `--move-to` it applies to the contexts that call creates) / make a transient context permanent (§3.8) |
 | `--text "<text>"` | log an entry; a leading `@` also sets the line (§4.0) |
 | `--guide agent\|session` | print the guide; with `--agent` it is also the agent's first report (§4.4) |
@@ -458,16 +523,18 @@ Q19 FINAL).
 ### 4.2 The `log` and `activity` tools
 - `log` takes `agent` (the chain), `key`, `id`, `path`, `under` / `under_id`, `label`, `plan:[ "label" | { key, label } ]`,
   `before` / `after` / `*_id`, `move` / `move_id`, `move_to`, `transient` (`true | "30s"`, Q44), `keep` (§3.8), `rename`, `merge` / `merge_id`,
-  `unmerge`, `text` (§4.0), `guide`. Batch
+  `unmerge`, `text` (§4.0), `context_type`, `message_type` + `fields` (§1.7), `guide`. A separate read-only tool `resolve` takes `agent`, `key` | `id` |
+  `path` and `resolve` (the path) and answers as `--resolve` (§3.8, Q46). Batch
   items take the same; `agent` is a batch default. The tool's `plan` field is the `--item` list, kept (it is the tool's only
   form for items).
 - **Results always name the node:** `{ ok, id:<ENTRY id, as today>, ts, node:{ id, key, scope:"spec-88", label, path, kind,
   created? }, state, current, line:<true when the line was set>, logged, stale_at, … }`; `plan:[{ key, id, label, path,
   created, plan_item, state, warning? }]`; `moved:{ from, to, parent_id }`, `merged:{ into_id, path }`, `warnings` (`exists`,
   `exists-elsewhere`, `alias`, `merged`, `relabelled` — §1.6: `node.label` / `plan[].label` is the label the node GOT;
-  `deep-tree` `{depth}` — §1.3, Q11b). The
+  `deep-tree` `{depth}` — §1.3, Q11b). A refused relative `--move-to` carries `suggest:"/…"` (Q46). The
   top-level `id` stays the entry id (hole H10) — the node id is `node.id`. A create without a label → `label-required`.
-- `activity` board nodes gain `id`, `parent_id`, `key`, `scope`, `label`; `path` (computed now, no `@`), `parent` (path) and
+- An ask whose question text repeats two or more of its choices succeeds with warning `choices-in-question` (§5.8).
+- `activity` board nodes gain `id`, `parent_id`, `key`, `scope`, `label`, `type` (+ the registry's glyph / show); `path` (computed now, no `@`), `parent` (path) and
   `kind` stay; `log:{ id | path …, earlier?, removed? }`; `entry:{ id }` unchanged. The logger WS `wait_answer` takes `node_id`
   (its `path` form is the 2.0 path).
 
@@ -488,6 +555,7 @@ Q19 FINAL).
 - Finish with --state done --text "@<summary>" (or failed): the @ makes the summary your line.
 - Never put secrets in status text.
 - Need a decision? --ask "…" --choice "A" --choice "B" --wait 30m waits for the answer (exit 0 = answered).
+- Ask the question only, then one --choice per option: don't list the choices in the question.
 ```
   `sessionGuide` gets the session's version (its own `--key` items; "give each agent `--agent <key> --under <item key>`");
   `{log_tool_hint}` the same rules in tool form (`key:"…"`, `plan:[{key, label}]`, `text:"@…"`). The realm reminders'
@@ -573,6 +641,11 @@ an old prompt pasted into a tool call).
   hover); a target that would take it past 20 shows the `deep-tree` warning in the dialog before the user confirms. Long
   paths (row tooltips, the log's `at`, dialogs, notices) are shortened in the middle (`Next release/…/Docs`), the full path on
   hover.
+- **The Answer dialog** (#85 / #90, §5.8) reads like a question in Claude Desktop: the question text on its own, then its
+  options listed BELOW it as the answers to pick (the `choices`, one each), then the free-text field when the question
+  allows one. The dialog never parses options out of the text; the choices are structured fields.
+- Rows show their TYPE's glyph and, where a bar would be, what the type `show`s (a bar, a group's count, a question's
+  status — §1.7); the right-click menu comes from the registry's `menu` slot once #92 fills it.
 - Log entries show `at` on hover when it differs from the node's path now. Copy command = `--agent <scope> --key <key>` (or
   `--id <id>` when the node has no key path).
 - The view state (pins, hidden, open / closed, selection, DETAILS fold, last seen) is per USER on the bridge (§5.6), no longer
@@ -655,6 +728,65 @@ it beats what the host knows even under clock skew. New `lib/view-state.js` hold
 - **Trust:** any realm member can gossip view records — the level of today's unsigned roster gossip. They name node ids and
   hold no text, so nothing private leaks; a far-future `ts` would win until a later one beats it (as #62).
 - **Size:** a busy user: a few hundred pins / hidden / open records + one `seen:` per node read ≈ 50 – 200 KB.
+
+### 5.7 Bars, plans and groups (ROLLUP, GROUPS — Robin, 2026-10-03)
+- **A node's bar** is its REPORTED progress, else rolled up from its children (#79's three parts — done, skipped, total — and
+  `forceBar`: a done node is 100% done, an abandoned one has its remainder skipped), with ONE change (ROLLUP, reversing 6c
+  decision 7 "ordinary children win"):
+  - **A node holding plan items rolls up ONLY its items: "N of M"** (M = every item; done → done; skipped and abandoned →
+    skipped; todo / running / blocked / idle / failed → remaining; a question under it counts as an item: open = remaining,
+    answered = done, withdrawn / expired = skipped). Its helper agents and other contexts keep their own bars on their own
+    rows and never mix into it — so an OPEN plan whose helper agents have finished no longer shows a full bar (the #88 case,
+    seen live). v1.75.1 ships the same rule for 1.7x (`rollup` + the dashboard's `rollKids`).
+  - A node with NO plan items rolls up as before: the SUM of its ordinary children's bars when they share a unit, else their
+    MEAN %, else "N of M" over its questions.
+  - The TYPE registry (§1.7) carries this: a `context` / agent / session rolls up `auto` as above, a `plan` always by its
+    items, a `group` and a `question` have no bar; a child adds its bar, one ITEM (a plan item or a question) or — a
+    group — nothing.
+- **Plans** (6b / 6c / 6d, on ids): `--item` makes plan items under the target (§4.1; labels required, Q31); "N of M" as above;
+  a plan ENDS when every item is done, when a CONTEXT plan node's own line is set done / abandoned, or by the plan-end marker
+  of an agent / the session (the dashboard's complete / abandon plan, or an `abandoned` line on it); abandoning a node
+  CASCADES to the open contexts and open plans under it (not crossing another agent), each with an "abandoned with …" entry;
+  an open question in the cascade is withdrawn. Items created by one call get DERIVED ranks (creation order, then their
+  position in the call); a stored rank only where a derived one would sort before an existing item (positions are step 2c).
+- **Groups:** a context can be a GROUP — a list, not a plan: a context of TYPE `group` (§1.7; candidates: Potential
+  changes, Planned changes, Deployed releases, Questions; Next release stays a plan — type `plan`). A group:
+  - has **no bar** (whatever it holds, and even with reported progress) and **no plan-end**;
+  - **adds nothing to its parent's rollup** (it is neither one of the parent's bars nor one of its items);
+  - shows, where the bar would be, an optional **COUNT** of its visible children: "4 items" when none is resolved, else the
+    non-zero parts of "3 open · 1 done" (+ "· 1 skipped"). ABANDONED children (incl. withdrawn / expired questions) and the
+    viewer's HIDDEN rows (§5.6) are not counted; done = done (an answered question too), skipped = skipped, everything else
+    is open;
+  - is set at creation (`--context-type=group`, the tool's `context_type:"group"`; contexts only) or toggled from the
+    dashboard (right-click **Show as group** / **Show as plan**: an `op:"type"` record, §2.1, to type `group` / `plan`).
+    Its children keep their states either way (plan items stay plan items; under a plan again they count in its "N of M").
+    A plan item can't be a group (`bad-type`): it counts in its own parent's plan. A group takes no `progress`
+    (`bad-field`: it has no bar).
+
+### 5.8 Questions (#85 / #90 on ids; TYPES)
+- **Ask:** `--ask "<question>" --choice "A" --choice "B" [--free] [--expires 2h] [--details …]`. The question goes on the
+  addressed node itself when that is already a question (a CLOSED one starts a new question there; an OPEN one →
+  `question-open`) or a plain line-less, childless `context` that is not a plan item (it BECOMES type `question`: an
+  `op:"type"` record; a context the same call creates is created as one); otherwise on a new child of type `question`,
+  keyed `?<n>` in the ASKER's scope (n = 1 + the highest `?<digits>` key that scope holds, live or ghost) and labelled `?<n>`
+  by the bridge. Its line: text = the question, state blocked, `question` = { status:"asked", choices, free, asked_at,
+  expires_at? }; its entry is a `question` entry (§1.7) with those typed fields.
+- **How a question reads (Robin, 2026-10-03):** like a question in Claude Desktop — state the question; its options are
+  listed below it as the answers. The question text must NOT restate the options ("Which database should the cache use?",
+  not "Postgres or SQLite?"), and choices stay STRUCTURED fields (`--choice`, the tool's `choices`), never formatting
+  embedded in the text. An ask whose text repeats two or more of its choices succeeds with warning `choices-in-question`.
+  The 2.0 agent guide says it: "don't list the choices in the question" (§4.3); the Answer dialog shows it (§5.4).
+- **The question's line is the question:** a plain report may LOG on it; a `@` line or a state on it is refused
+  `question-node`; abandoned on an OPEN one (the asker's state, or a cascade) withdraws it. It holds no children (type
+  `question`, `children: []`) and takes no plan or progress.
+- **Status changes** keep the line's id, text, details and data; each writes its own typed entry with details of its own
+  (#90): the asker's `state withdrawn` (+ a note) → a `withdrawal` entry; the dashboard's Answer / Change answer → an
+  `answer` entry (`choice`, `text`, `revised`; state done — the STATE still drives plans and bars); the dashboard's
+  Withdraw → `withdrawal`; the bridge's expiry → `expiry` (`after_ms`). Answer / withdraw / expiry are SYSTEM messages (no
+  activity).
+- **Never stale while open:** an open question has no stale time (its agent may go stale); closed, it follows the context
+  rules. In a plan node it counts as one item (open = remaining, answered = done, withdrawn / expired = skipped); in a group
+  it counts in the group's count (withdrawn / expired = abandoned: not counted).
 
 ---
 
@@ -826,7 +958,7 @@ existing checks keep passing while the core is written.
    on a tool / script rename / move / merge / unmerge, move + rename as one checked change, the dashboard's clash answer
    (`merges` / `label`) applied as one all-or-nothing action; `cross-session` / `unknown-agent` refusals; plans, questions,
    cascade, ranks, plan-end, eviction, expiry, `applyAction` on ids. 2a structure + resolution, 2b lines (§4.0) / plans /
-   questions, 2c actions + notices + moves. 2c includes **`--move-to` and transient contexts (§3.8, Q43)**:
+   questions / the type registries (§1.7), 2c actions + notices + moves, 2d the first user types (test-run, test-result). 2c includes **`--move-to` and transient contexts (§3.8, Q43)**:
    - the `move_to` field (message, batch and stream items);
    - its path parser (a leading `/`, leading `..`; `formatPath2` also quotes a `..` label);
    - report-then-move as one checked change, with the no-op move on a retry;
@@ -840,6 +972,26 @@ existing checks keep passing while the core is written.
      capped at ~1 KB);
    - permanence: the `keep` record on `--keep` / `keep:true`, a rename, or a line of its own (the PIN trigger lands with
      step 8's view state).
+
+   **2b as built** (2026-10-03): in `src/lib/activity2.js`, still beside the 1.7x model. Lines and entries (§4.0: the
+   leading-`@` rule through `parseText`, `@@`, no implied line — a state / bar / ETA change keeps the line's text, Q33; a
+   context's own line makes a transient context permanent); v6 entries with `n`, `at` (capped at 1 KB) and `current` = the
+   entry changed the line (its text OR its state; `line_text` names the line's text when the entry's differs), the
+   structural verbs' entries (moved / renamed / merged / unmerged / emptied) as real entries, and `writes` = every record and
+   entry of a call in order; plans (`plan:[ "label" | { key, label } ]`: keep / adopt / create / `exists-elsewhere`,
+   label-required, auto-rename, derived ranks + a stored one where needed, the `item` record); the ROLLUP rule (`bar2`), the
+   plan end (`planOf2` / `planEndAt2` / `planEndHow2`, the agent's plan-end marker), the cascade; questions (ask with the
+   `?N` key in the asker's scope, the asker's withdrawal, `answerQuestion2` incl. change answer, `withdrawQuestion2`,
+   `expireQuestions2`, `questionOutcome2`, never stale while open: `staleAt2` / `effectiveState2`); TYPES (§1.7: the
+   `NODE_TYPES` and `MESSAGE_TYPES` registries, `parseContextType`, `validateEntryFields`, `context_type` on create,
+   `message_type` + `fields` on a report, `setType2` = Show as group / plan, `displayOf2`; a question is type `question`, an
+   answer an `answer` entry; GROUPS = type `group`: `groupCount2`, no bar / plan end / rollup contribution); Q46
+   (`parseMoveTo` refuses every deeper relative form, the call answers `suggest`; `resolveCall` = the `resolve` tool). Left
+   for 2c: positions (`before` / `after` / `first` / `last`), `applyAction` on ids (the dashboard actions incl. Show as
+   group / plan wired to `setType2`, answer / withdraw wired to `answerQuestion2` / `withdrawQuestion2`, edit text,
+   message, complete / reopen plan, finish, dismiss with its parent entry), eviction + node limits, notices, `log:false`
+   checkpoints (step 3: the entry is just not written; `cp_dirty` marks the node). Tests:
+   `tests/unit/test_activity2b_unit.mjs`.
 
    **2a as built** (2026-10-03): `src/lib/activity2.js` (beside `lib/activity.js`, used by nothing but its tests yet) —
    `applyCall` (target resolution + the structural verbs, all-or-nothing through an undo journal), `parseCall`,
@@ -861,6 +1013,19 @@ existing checks keep passing while the core is written.
    - a non-transient empty context never vanishes.
 
    Plus the existing `test_activity_unit` behaviours, re-expressed in 2.0 forms.
+
+   **2d — Types: test-run + message types** (TYPES, Robin 2026-10-03; after 2c, before the dashboard step; pure library
+   work like 2a – 2c). The registries and the mechanism are built in 2b (§1.7); 2d builds the first USER types on them:
+   - the `test-run` node type (reserved until now): a run's buckets and items (§3.8's `Tests` / `Pending` / `In progress` /
+     `Passed` / `Failed`), its bar = its items, what it shows in place of a bar (passed / failed / total) and its menu slot;
+   - the `test-result` message type: `--message-type=test-result --result pass --checks 22 --duration 4.1s` (the typed
+     fields validated by the registry — `result` pass / fail / skip, `checks`, `duration`), and the counts the bridge keeps
+     from them (passed / failed / checks per run);
+   - the script's field flags for typed messages (wired with step 9's 2.0 flags);
+   - **#81's dashboard test reporter** (`tests/reporters/aimb-dashboard.mjs`) is the first user of `test-run` (after the
+     cutover); **#92 (the context-aware menu) folds into the registry's `menu` slot**.
+   *Tests:* unit — a test-run's bar and counts across its buckets, `test-result` field validation (good, bad enum, negative
+   count, duration forms), the reserved names now accepted.
 3. **v6 records + replay.** `recordKind` v6 only; `createReplay` folds node records (newest wins per field, `create` seals
    the run) and attaches entries by `n` — no remapping. cp / cf / rep v6; `planCarryForward` carries structure. *Tests:* a
    seeded REPLAY FUZZ like #82's (400 random sequences of reports, plans, moves, `--move-to` with transient vanish /
@@ -942,7 +1107,8 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups; C1 / C2 are the two follow-ups Robin
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised; GROUPS, ROLLUP and TYPES are decisions
+Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
 
@@ -992,7 +1158,11 @@ answer overrides an earlier one (noted in the earlier row).
 | 41 | Hosts whose OS logins differ | **Accepted for 2.0** — the view state follows the serving gateway's OS login (Q29); the board head shows "view: <login>" so a mismatch is visible. A realm-level login alias map only if it bites; no per-host `view_user` setting now (§5.6). |
 | 43 | (Robin, 2026-10-03, new) Report + move in one call; transient contexts | **Accepted into 2.0:** `--move-to "<path>"` / `move_to` (also per batch / stream item) applies the report, then moves the node, as one all-or-nothing change that is idempotent on retry. The path is relative to the node's current parent (`../X`, `X`) or absolute (`/…`). Missing contexts are created on the way (creator = the caller, label = the segment, key = its slug), and the node arrives LAST. The `--move` checks apply (`duplicate-label`, no cross-session, depth — ≤ 6 then, 32 since Q11b). TRANSIENT contexts (auto-created by `--move-to`, or `--transient` / `transient:true`) vanish into ghosts when their last live child leaves. They become permanent for good on a pin, a rename, their own line, or `--keep` / `keep:true`; every other context is permanent. **Correction (same day):** a move into a path whose transient context has vanished RESURRECTS that ghost (same id, key and creator, still transient) as a NEW RUN, so its log shows the current run and earlier uses sit behind "show earlier runs". It leaves the ghost table, and each bucket keeps one id for its whole life (§3.8, §3.7). |
 | 44 | Grace period for emptied transient contexts? | **Changed (Robin):** an OPTIONAL parameter of `--transient`, default none — the context vanishes the moment it empties. `--transient=30s` (the `=` form, no positional ambiguity); the tool's `transient: true \| "30s"`. With `--move-to`, `--transient=30s` also applies to every destination context it auto-creates. Something arriving during the grace period keeps the context (§3.8). |
-| 45 | `--move-to "X"` (one level down) is not retry-safe | **Changed (Robin):** no bare names — a bare destination is refused `bad-path`; only `../X` (from the node's current parent) and `/X` (absolute). The error suggests both forms (§3.8). Build 2a also refuses relative paths whose segment count differs from their `..` count (`../A/B`, `../../X`) for the same retry reason — to be confirmed (Q46). |
+| 45 | `--move-to "X"` (one level down) is not retry-safe | **Changed (Robin):** no bare names — a bare destination is refused `bad-path`; only `../X` (from the node's current parent) and `/X` (absolute). The error suggests both forms (§3.8). Build 2a also refused relative paths whose segment count differs from their `..` count (`../A/B`, `../../X`) for the same retry reason — settled by Q46. |
+| 46 | Relative `--move-to` paths other than `../X` | **FINAL (Robin), option 1:** only `/absolute` and single-step `../X` are accepted (so `../../R/X` is refused too). A refused deeper relative move (`bad-path`) answers with `suggest:"/…"`, the absolute path it would have resolved to, so the caller retries with that retry-safe form. PLUS a RESOLVE helper: `aimb-log --resolve "<relative path>" [--key X \| --path P]` (the tool `resolve`) returns the absolute path and id a relative path resolves to NOW, and changes nothing (§3.8, §4.1, §4.2). |
+| GROUPS | (Robin, 2026-10-03, new) Lists that are not plans | **Accepted into 2.0 (step 2b):** a context can be a GROUP — a list, not a plan: no bar, no plan-end, nothing added to its parent's rollup; where the bar would be, an optional COUNT ("4 items" / "3 open · 1 done"; abandoned and hidden items not counted). Set at creation (`--group` / `group:true`) or toggled from the dashboard (Show as group / Show as plan); its items keep their states. Candidates: Potential changes, Planned changes, Deployed releases, Questions; Next release stays a plan (§1.3, §2.1, §5.7). *The flag was then folded into TYPES: a group is `--context-type=group`.* |
+| TYPES | (Robin, 2026-10-03, "typed nodes and entries") | **Accepted into 2.0:** every node has a `type` from a small built-in REGISTRY held as data — per type its allowed fields, display (glyph, what shows in place of a bar), rollup behaviour, allowed children and menu actions (the slot the context-aware menu, #92, folds into). Types: `context` (the default, plan-capable), `plan`, `group`, `agent`, `question`, and `test-run` (reserved; built in step 2d). The flag is `--context-type=<type>` (tool `context_type`; kebab-case flag, values case-insensitive); it REPLACES `--group` / `group:true`; a question is a node of type `question`. ENTRIES are typed too: `--message-type=<type>` (tool `message_type`; default `note`), each type declaring typed fields that are validated so the bridge can count them (later: `--message-type=test-result --result pass --checks 22 --duration 4.1s`); `--data` stays free-form. Answers are `answer` entries; the node state still drives plans and progress. 2b builds the registries, the mechanism and the types questions need (`note`, `question`, `answer`, `withdrawal`, `expiry`, + `event` for structural entries); a new step 2d builds `test-run` + `test-result`; #81's test reporter is the first user of `test-run`. QUESTIONS read naturally: state the question, its options listed below it as the answers; the text never restates the options; choices stay structured (`--choice`) — in §5.8, the Answer dialog (§5.4) and the agent guide (§4.3) (§1.7, §2, §4, §5.7, §5.8, §8). |
+| ROLLUP | (Robin, 2026-10-03) A plan node's bar beside finished helpers | **Changed — reverses 6c decision 7 ("ordinary children win"):** a node holding plan items rolls up ONLY its items ("N of M"); helper agents and contexts keep their own bars on their own rows; a node with no plan items rolls up as before. Shipped for 1.7x as v1.75.1 (`rollup` + the dashboard's `rollKids`); 2.0 ports the same rule in step 2b (§5.7). |
 | C1 | (confirmation) Drop the v5 network projection? | **Yes** — 2.0 speaks only 2.0; no `activity_gossip:5` / `activity_ids:1` dual handshake, no 2.1 cleanup step; every host is upgraded together with the stop-all runbook (§6, §7.1). |
 | C2 | (confirmation) Duplicate labels, all cases | **Yes** — auto-rename on CREATE; refuse a deliberate rename / move through the tool or script (`duplicate-label`); the dashboard's clash dialog offers merge or a suggested label — "see how it plays out" (§1.6). |
 
@@ -1059,13 +1229,17 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q45 and Q11b are decided (Decisions above). Build step 2a raised the questions below, posted to the board; the build
-follows the recommendation for each until Robin answers.
+Q40 – Q46, Q11b, GROUPS, ROLLUP and TYPES are decided (Decisions above). Build step 2b raised the questions below, posted to
+the board; the build follows the recommendation for each until Robin answers.
 
-46. **Relative `--move-to` paths other than `../X`** (§3.8). Q45 refuses a bare `X`. `../A/B` and `../../X` are not
-    retry-safe either (a retry resolves from the NEW parent: `A/A/B`, one level higher). *Recommend: refuse any relative
-    path whose segment count differs from its `..` count* (`bad-path`, naming the absolute form); `../X` and `../../R/X`
-    stay allowed. Alternative: allow them (only the bare form is refused).
+47. **Type `plan` vs a plan-capable `context`** (§1.7). *Recommend (built):* a `plan`'s bar is ALWAYS its items ("N of M";
+    ordinary children never mix in, even before it has items); a `context` rolls up its items only once it holds any, else
+    its children's bars; Show as plan sets type `plan`. Alternative: `plan` is display only (the same rollup as `context`).
+48. **A question whose text repeats its choices** (§5.8). *Recommend (built):* the ask succeeds with warning
+    `choices-in-question`. Alternative: refuse it (`bad-ask`).
+49. **A `@` line with no `--state` on a FINISHED agent** (§4.0). *Recommend (built, as 1.7x):* it keeps the node's state
+    (still done); reviving takes `--state running`. Alternative: a `@` line with no state on a done / failed agent sets it
+    running.
 
 ---
 

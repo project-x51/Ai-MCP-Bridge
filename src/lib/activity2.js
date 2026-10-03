@@ -28,32 +28,75 @@
 // - Alias lifetime (expireAliases) and ghost lifetime (pruneGhosts); capAt (the ~1 KB cap on an entry's `at`, Q11b) and
 //   shortPath (the middle-cut display form).
 //
+// BUILD STEP 2b (docs/spec-88.md §4.0, §5.7, §3.8 Q46) adds, still beside the 1.7x model:
+// - LINES and ENTRIES (§4.0): a report's text goes through parseText — plain text only LOGS, a leading `@` also SETS the
+//   line (`@@` = a literal `@`); `--state` / `--progress` / `--eta` change the node whatever the text, and a state change
+//   with plain text keeps the line's TEXT (one rule, no implied line: Q33). Every entry is a v6 entry { v:6, id, ts, n,
+//   current, text, state, at, … } — `current` = the entry changed the line (its text or its state; `line_text` holds the
+//   line's text when the entry's differs), `at` = the node's display path then, capped at ~1 KB (capAt). The structural
+//   verbs' entries (moved / renamed / merged / unmerged / emptied) are real entries too. A call returns `records` (node
+//   records), `entries` and `writes` (both, in the order written — what the bridge persists). Activity: a report refreshes
+//   target..owner and the calling agent (§1.4); a system call (opts.by) refreshes nothing. A context's own line (a leading
+//   `@`, or a question) makes a transient context permanent (§3.8).
+// - PLANS (§4.1, §5.7): `plan:[ "label" | { key, label } ]` — keep / adopt / create (label-required, Q31; a sibling label
+//   clash auto-renamed) / `exists-elsewhere`; each new or adopted item gets a ☐ line + entry; derived ranks, and a stored
+//   rank only where a derived one would sort before an existing item. ROLLUP (bar2): a node holding plan items rolls up ONLY
+//   its items ("N of M"; reverses 6c decision 7), a node without rolls up as before. The plan END (planOf2 / planEndAt2 /
+//   planEndHow2 + the agent's plan-end marker) and the abandon CASCADE.
+// - QUESTIONS (#85 / #90 on ids): ask (the node itself, or a new `?N` child keyed in the asker's scope), the asker's
+//   withdrawal (state "withdrawn"), answerQuestion2 (answer + change answer), withdrawQuestion2, expireQuestions2,
+//   questionOutcome2, nextQuestionExpiry2; an OPEN question never goes stale (staleAt2 / effectiveState2).
+// - TYPES (Robin, 2026-10-03, "typed nodes and entries"; §1.7): two small built-in registries — NODE_TYPES (context, plan,
+//   group, question, agent, session; test-run reserved) declare per type its fields, display, rollup, children and the #92
+//   menu slot; MESSAGE_TYPES (note, question, answer, withdrawal, expiry, event; test-result reserved) declare each entry
+//   type's typed fields (validateEntryFields). `context_type` gives a NEW context its type, `message_type` + `fields` an
+//   entry's; setType2 is the dashboard's Show as group / plan. GROUPS (§5.7) are type group: no bar (groupCount2 instead),
+//   no plan end, nothing added to the parent's rollup. A question is type question; an answer an `answer` entry.
+// - Q46: parseMoveTo accepts only `/…` and `../X`; a refused relative form answers `suggest:"/…"`; resolveCall = the
+//   read-only `resolve` tool.
+//
 // STUBS LEFT FOR LATER STEPS (said where they bite):
-// - 2b (lines / plans / questions): there are no lines, no entries and no plans here. A node carries `current: null`; the
-//   only question test (isOpenQuestion2: merge refuses a node holding an OPEN question) reads `current.question`, which 2b
-//   fills. The ENTRIES a structural change also writes (§2.2: "moved by … from … to …", the transient vanish's "emptied —
-//   removed from the board (transient)") are returned as `entries` STUBS { n, act, text } for 2b to turn into v6 entries.
-//   `--item` (and `exists-elsewhere`) is 2b. A keep-on-own-line trigger is 2b's to call (keepNode).
 // - 2c (actions / notices / positions): positions (--before / --after / --first / --last) are not parsed; a move / merge /
 //   unmerge places the node LAST in its group (a stored rank after the last sibling). The dashboard clash answer
-//   (`merges` / `label`), applyAction on ids, eviction and the per-session node limits are 2c.
+//   (`merges` / `label`), applyAction on ids (done / skip / reopen / abandon, complete / reopen / abandon plan, finish,
+//   dismiss + its parent entry, edit text, message, and the Show as group / plan toggle — the model calls are here:
+//   setType2, answerQuestion2, withdrawQuestion2), the #80 – #85 notices, eviction and the per-session node limits are 2c.
+// - 2d (types): the reserved `test-run` node type and `test-result` message type are named in the registries but refused
+//   `type-reserved`; the registry's `menu` slots are empty until #92.
 // - Step 3 (records + replay): records are produced here (v:6, kind:"node") but not replayed; the session ROOT writes no
-//   record (its id is mintId(session, "", "") — derivable). Step 6 rebuilds the ghost table at startup.
+//   record (its id is mintId(session, "", "") — derivable). `log:false` writes no entry and only marks the node `cp_dirty`
+//   (checkpoints are step 3). Step 6 rebuilds the ghost table at startup.
 import { lc } from './keys.js'
-import { DEPTH2, ACTIVITY_LIMITS, mintId, validKey, slugKey, uniqueKey, normLabel, labelKey, parsePath2, parseRef, formatPath2,
-  parseDuration, sessionKey, rankOf, rankGroup, rankBetween, derivedRank } from './activity.js'
+import { DEPTH2, ACTIVITY_LIMITS, ACTIVITY_STATES, mintId, validKey, slugKey, uniqueKey, normLabel, labelKey, parsePath2, parseRef, formatPath2,
+  parseDuration, parseProgress, parseEta, parseText, sessionKey, rankOf, rankGroup, rankBetween, derivedRank, resolveConfig, normBy, byText,
+  normQuestion, questionView, questionEntryDetails, answerEntryText, sameAnswer, QUESTION_LIMITS, fmtEta, progressPct, forceBar, stateOf } from './activity.js'
 
 /** The v6 record format this model writes (spec §2). */
 export const ACTIVITY2_FORMAT = 6
 /** 2a's limits: depth (Q11b), the label length (§1.3), the `at` cap (Q11b), aliases per node (§3.3), the longest grace. */
 export const LIMITS2 = Object.freeze({ depthMax: DEPTH2.max, depthWarn: DEPTH2.warn, label: ACTIVITY_LIMITS.context, atBytes: 1024, aliasesPerNode: 16, graceMaxMs: 24 * 3600000 })
-const DAY = 86400000
+const DAY = 86400000, MIN = 60000
 const ID_RE = /^[a-z2-7]{16}$/
+const LIVE = new Set(['running', 'blocked'])                     // the states that can go stale
+const FINAL = new Set(['done', 'failed', 'abandoned'])           // an agent's line in one of them finishes it; the ETA is dropped
+const OPEN_ITEM = new Set(['todo', 'running', 'blocked'])        // an OPEN plan item (what a cascade abandons)
+const PLAN_END = new Set(['done', 'abandoned'])                  // a context plan node's line in one of them ends its plan
+const PLAN_STATES = new Set(['todo', 'skipped'])                 // contexts only (skipped: plan items only)
+const QSTATE = Object.freeze({ asked: 'blocked', answered: 'done', expired: 'abandoned', withdrawn: 'abandoned' })
 
 // ---------------------------------------------------------------------------------------------------------------
 // small helpers
 const cpLen = s => { let n = 0; for (const _ of s) n++; return n }
 const cpSlice = (s, n) => Array.from(s).slice(0, n).join('')
+const utf8 = s => Buffer.byteLength(s, 'utf8')
+// eslint-disable-next-line no-control-regex
+const normText = s => s.replace(/\s*[\r\n\t\f\v]+\s*/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '').trim()
+const cut = (s, n = ACTIVITY_LIMITS.text) => (cpLen(s) > n ? cpSlice(s, n - 1).trimEnd() + '…' : s)
+// eslint-disable-next-line no-control-regex
+const answerTextOf = s => (typeof s === 'string' ? s.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim() : '')
+const boolOf = v => (v === true || v === false ? v : v === 'true' ? true : v === 'false' ? false : null)
+/** A plain JSON object (no undefined / null / false fields). */
+function compact(o) { const r = {}; for (const k of Object.keys(o)) { const v = o[k]; if (v !== null && v !== undefined && v !== false) r[k] = v } return r }
 /** @returns {any} */
 const bad = (code, what, extra = {}) => ({ ok: false, code, what, ...extra })
 const scopeKey = (creatorId, key) => creatorId + '\n' + lc(key)
@@ -62,13 +105,15 @@ const brief = n => ({ id: n.id, key: n.key, label: n.label })
 const has = (o, k) => o && o[k] !== undefined && o[k] !== null && o[k] !== false && o[k] !== ''
 
 /**
- * A fresh 2.0 model: { v:6, origin, retentionMs, sessions: Map<sessionKey, Session2> }. `origin` is this host (every local
- * node's owner host, §1.2). `log_retention_days` (default 7) bounds alias lifetime (§3.3).
- * @param {{ origin?: string, config?: { log_retention_days?: number } }} [o]
+ * A fresh 2.0 model: { v:6, origin, config, retentionMs, idPrefix, seq, sessions: Map<sessionKey, Session2> }. `origin` is
+ * this host (every local node's owner host, §1.2). `config` = the resolved `activity` block (resolveConfig: log_retention_days
+ * bounds alias lifetime (§3.3), log_entries_per_agent each node's in-memory log, stale_after_min the stale window). Entry
+ * ids are `<idPrefix><ts36>-<seq36>` as in 1.7x.
+ * @param {{ origin?: string, config?: any, idPrefix?: string }} [o]
  */
-export function createModel({ origin = 'local', config = {} } = {}) {
-  const days = Number(config && config.log_retention_days) > 0 ? Number(config.log_retention_days) : 7
-  return { v: ACTIVITY2_FORMAT, origin: String(origin || 'local'), retentionMs: days * DAY, sessions: new Map() }
+export function createModel({ origin = 'local', config = {}, idPrefix = 'act_' } = {}) {
+  const cfg = resolveConfig(config || {}, {})
+  return { v: ACTIVITY2_FORMAT, origin: String(origin || 'local'), config: cfg, retentionMs: cfg.log_retention_days * DAY, idPrefix: String(idPrefix), seq: 0, sessions: new Map() }
 }
 
 /**
@@ -85,8 +130,9 @@ export function getSession2(state, ident, now) {
   let s = state.sessions.get(key)
   if (!s && Number.isFinite(now)) {
     const rootId = mintId(id, '', '')
-    s = { key, ident: id, created_at: now, rootId, nodes: new Map(), kids: new Map(), scope: new Map(), labels: new Map(), aliases: new Map(), ghosts: new Map(), gkids: new Map() }
-    s.nodes.set(rootId, newNode({ id: rootId, key: '', creator: null, chain: '', scope: '', kind: 'session', label: name, parent: null, now }))
+    s = { key, ident: id, created_at: now, last_activity: now, rootId, nodes: new Map(), kids: new Map(), scope: new Map(), labels: new Map(), aliases: new Map(), ghosts: new Map(), gkids: new Map() }
+    // the root is IMPLICIT until a report is owned by the session itself (an agents-only session never goes stale), as 1.7x
+    s.nodes.set(rootId, newNode({ id: rootId, key: '', creator: null, chain: '', scope: '', kind: 'session', label: name, parent: null, now, implicit: true }))
     state.sessions.set(key, s)
   }
   return s || null
@@ -94,10 +140,120 @@ export function getSession2(state, ident, now) {
 /** The session's root node. */
 export const rootOf = sess => sess.nodes.get(sess.rootId)
 
-function newNode({ id, key, creator, chain, scope, kind, label, parent, now, asked = null, transient = false, grace_ms = null, implicit = false, runs = 1 }) {
-  return { id, key, creator, chain, scope, kind, label, asked, parent, rank: null, created_at: now, run_at: now, runs, last_activity: now,
+// 2b: the node TYPE (NODE_TYPES: context | plan | group | question for a context, agent, session), the LINE (`current` =
+// { id, ts, text, state, details, data, by?, question? }), the bar (`progress`), `eta_at`, `stale_after_ms`, `finished_at`
+// (agents / the root), the plan-end marker (`plan_end`, agents / the root), and the node's own bounded in-memory log (`log`,
+// oldest dropped → `log_dropped`). `cp_dirty`: a log:false report changed it (step 3's checkpoint).
+function newNode({ id, key, creator, chain, scope, kind, label, parent, now, asked = null, transient = false, grace_ms = null, implicit = false, runs = 1,
+  plan_ix = null, rank = null, type = null }) {
+  return { id, key, creator, chain, scope, kind, type: type || (kind === 'context' ? 'context' : kind), label, asked, parent, rank, created_at: now, run_at: now, runs, last_activity: now,
     transient: !!transient, grace_ms: transient && grace_ms ? grace_ms : null, empty_since: null, merged_into: null, merged_from: null,
-    implicit: !!implicit, plan: false, plan_ix: null, current: null }
+    implicit: !!implicit, plan: plan_ix != null, plan_ix, current: null, progress: null, eta_at: null, stale_after_ms: null, finished_at: null,
+    gone_at: null, plan_end: null, log: [], log_dropped: 0, cp_dirty: false }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// TYPES (Robin, 2026-10-03, "typed nodes and entries"): two small built-in REGISTRIES — data, not code paths
+
+const REPORT_FIELDS = Object.freeze(['text', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan', 'ask', 'message_type', 'fields'])
+const deep = o => Object.freeze(Object.fromEntries(Object.entries(o).map(([k, v]) => [k, Object.freeze({ ...v, fields: Object.freeze(v.fields),
+  ...(v.kind ? { children: v.children ? Object.freeze(v.children) : null, menu: Object.freeze(v.menu || []) } : {}) })])))
+/**
+ * The NODE TYPE registry. Every node has a `type`; a context's is given at creation (`--context-type=<type>`, the tool's
+ * `context_type`, case-insensitive; default `context`) and changed only by the dashboard (Show as group / plan: setType2) or
+ * by --ask (a question). Per type:
+ * - `kind`      the node kind it belongs to (context | agent | session; the kind never changes, §1.4)
+ * - `settable`  a caller may give it as --context-type (agent, session and question are the bridge's: --agent / --ask)
+ * - `reserved`  named, not built yet (test-run: build step 2d) — refused `type-reserved`
+ * - `fields`    the report fields a node of this type takes (a group takes no progress: it has no bar; a question no plan)
+ * - `glyph`, `show`  display: the row's glyph and what shows where a bar would ('bar' | 'count' | 'status')
+ * - `bar`       its own bar: 'auto' (its plan items only when it holds any — ROLLUP — else its children's bars), 'items'
+ *               (always "N of M" over its items), 'none'
+ * - `counts_as` what it adds to its PARENT's rollup: 'bar' (its bar), 'item' (one of "N of M"), 'none' (a plan item
+ *               counts as an item whatever its type)
+ * - `plan_end`  it can hold a plan that ENDS (§5.7)
+ * - `children`  the node types allowed under it (null = any; [] = none)
+ * - `menu`      the context-aware menu's actions — the slot #92 fills (the dashboard reads it)
+ */
+export const NODE_TYPES = deep({
+  context: { kind: 'context', settable: true, fields: REPORT_FIELDS, glyph: '•', show: 'bar', bar: 'auto', counts_as: 'bar', plan_end: true, children: null },
+  plan: { kind: 'context', settable: true, fields: REPORT_FIELDS, glyph: '☰', show: 'bar', bar: 'items', counts_as: 'bar', plan_end: true, children: null },
+  group: { kind: 'context', settable: true, fields: REPORT_FIELDS.filter(f => f !== 'progress'), glyph: '▤', show: 'count', bar: 'none', counts_as: 'none', plan_end: false, children: null },
+  question: { kind: 'context', settable: false, fields: ['text', 'state', 'stale_after', 'details', 'data', 'log', 'ask'], glyph: '?', show: 'status', bar: 'none', counts_as: 'item', plan_end: false, children: [] },
+  'test-run': { kind: 'context', settable: true, reserved: true, fields: REPORT_FIELDS, glyph: '⚑', show: 'bar', bar: 'items', counts_as: 'bar', plan_end: true, children: null },
+  agent: { kind: 'agent', settable: false, fields: REPORT_FIELDS, glyph: '◆', show: 'bar', bar: 'auto', counts_as: 'bar', plan_end: true, children: null },
+  session: { kind: 'session', settable: false, fields: REPORT_FIELDS, glyph: '◎', show: 'bar', bar: 'auto', counts_as: 'bar', plan_end: true, children: null },
+})
+/** A node's registry entry (an unknown type reads as `context`). */
+export const typeOf = n => NODE_TYPES[n && n.type] || NODE_TYPES.context
+/** What a child adds to its parent's rollup: a plan item is an ITEM whatever its type; else its type says. */
+const countsAs = c => (c.plan ? 'item' : typeOf(c).counts_as)
+/**
+ * Parse a `--context-type` / `context_type` value (case-insensitive): a SETTABLE context type → { ok, type }; `question` only
+ * with --ask (`opts.ask`); a reserved one → `type-reserved`; anything else → `bad-type`.
+ * @param {any} raw @param {{ ask?: boolean }} [o]
+ */
+export function parseContextType(raw, o = {}) {
+  const v = typeof raw === 'string' ? lc(raw.trim()) : ''
+  const T = NODE_TYPES[v]
+  if (T && T.reserved) return bad('type-reserved', `context type "${v}" is reserved — it arrives in a later 2.0 step`)
+  if (v === 'question') return o.ask ? { ok: true, type: v } : bad('bad-type', 'a question is made by --ask (the node gets the type question)')
+  if (!T || T.kind !== 'context' || !T.settable) return bad('bad-type', `context type must be one of ${Object.keys(NODE_TYPES).filter(k => NODE_TYPES[k].kind === 'context' && NODE_TYPES[k].settable && !NODE_TYPES[k].reserved).join('|')}${T ? ` ("${v}" is the bridge's)` : ''}`)
+  return { ok: true, type: v }
+}
+
+/**
+ * The MESSAGE (entry) TYPE registry. Every entry has a `type` (`--message-type=<type>`, the tool's `message_type`; default
+ * `note`) and, when its type declares any, typed `fields` — validated, so the bridge can count them. `--data` stays the
+ * free-form extra the bridge does not interpret. `settable`: a caller may give it (the others are written by the bridge:
+ * an ask is a `question` entry, an answer an `answer` entry, …); `reserved`: named, not built yet (test-result: step 2d).
+ * Field specs: { type: 'string' | 'text' | 'int' | 'bool' | 'enum' | 'duration' | 'time' | 'list', max?, min?, values?, item? }.
+ */
+export const MESSAGE_TYPES = deep({
+  note: { settable: true, fields: {} },   // a plain report (the default)
+  question: { settable: false, fields: { choices: { type: 'list', max: QUESTION_LIMITS.choices, item: QUESTION_LIMITS.choice }, free: { type: 'bool' }, expires_at: { type: 'time' } } },
+  answer: { settable: false, fields: { choice: { type: 'string', max: QUESTION_LIMITS.choice }, text: { type: 'text', max: QUESTION_LIMITS.answer }, revised: { type: 'int', min: 1 } } },
+  withdrawal: { settable: false, fields: { note: { type: 'string', max: ACTIVITY_LIMITS.text } } },
+  expiry: { settable: false, fields: { after_ms: { type: 'int', min: 0 } } },
+  event: { settable: false, fields: {} },   // a structural change the bridge logs: moved, renamed, merged, unmerged, emptied, a type change
+  'test-result': { settable: true, reserved: true, fields: { result: { type: 'enum', values: ['pass', 'fail', 'skip'] }, checks: { type: 'int', min: 0 }, duration: { type: 'duration' } } },
+})
+/**
+ * Validate an entry's typed FIELDS against its message type (the registry): unknown fields are refused, each value is
+ * checked and normalised (a duration → ms, an int from a numeric string …). → { ok, fields } (only the fields given) or
+ * `bad-fields`.
+ * @param {string} type @param {any} fields
+ */
+export function validateEntryFields(type, fields) {
+  const T = MESSAGE_TYPES[type]
+  if (!T) return bad('bad-message-type', `message type "${type}" is not one of ${Object.keys(MESSAGE_TYPES).join('|')}`)
+  if (fields == null) return { ok: true, fields: {} }
+  if (typeof fields !== 'object' || Array.isArray(fields)) return bad('bad-fields', 'fields must be an object of the message type\'s typed fields')
+  const out = {}
+  for (const [k, v] of Object.entries(fields)) {
+    const s = T.fields[k]
+    if (!s) return bad('bad-fields', Object.keys(T.fields).length ? `${type} has no field "${k}" (it takes ${Object.keys(T.fields).join(', ')}; free-form extras go in data)` : `${type} takes no typed fields (free-form extras go in data)`)
+    if (v === undefined || v === null) continue
+    const no = what => bad('bad-fields', `${type}.${k} ${what}`)
+    if (s.type === 'string' || s.type === 'text') {
+      if (typeof v !== 'string') return no('must be a string')
+      const x = s.type === 'string' ? normText(v) : answerTextOf(v)
+      if (!x) return no('is empty')
+      if (s.max && cpLen(x) > s.max) return no(`is longer than ${s.max} characters`)
+      out[k] = x
+    } else if (s.type === 'int' || s.type === 'time') {
+      const n = typeof v === 'number' ? v : typeof v === 'string' && /^\s*-?\d+\s*$/.test(v) ? Number(v) : NaN
+      if (!Number.isInteger(n) || n < (s.type === 'time' ? 1 : s.min != null ? s.min : -Infinity)) return no(`must be ${s.type === 'time' ? 'a ms time' : `an integer${s.min != null ? ` ≥ ${s.min}` : ''}`}`)
+      out[k] = n
+    } else if (s.type === 'bool') { const b = boolOf(v); if (b === null) return no('must be true or false'); out[k] = b }
+    else if (s.type === 'enum') { const x = typeof v === 'string' ? lc(v.trim()) : ''; if (!s.values.includes(x)) return no(`must be one of ${s.values.join('|')}`); out[k] = x }
+    else if (s.type === 'duration') { const ms = typeof v === 'string' && /^\s*[\d.]+\s*$/.test(v) ? NaN : parseDuration(v); if (!Number.isFinite(ms) || ms < 0) return no('must be a duration like "4.1s" or "2m"'); out[k] = ms }
+    else if (s.type === 'list') {
+      if (!Array.isArray(v) || (s.max && v.length > s.max) || v.some(x => typeof x !== 'string' || !normText(x) || (s.item && cpLen(normText(x)) > s.item))) return no(`must be a list of at most ${s.max} strings of ≤ ${s.item} characters`)
+      out[k] = v.map(x => normText(x))
+    }
+  }
+  return { ok: true, fields: out }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -149,14 +305,17 @@ export function findPath(sess, path) {
   for (const seg of p.segs) { n = childBySeg(sess, n, seg); if (!n) return null }
   return n
 }
-/** 2b fills a node's line; until then nothing holds a question. */
-export const isOpenQuestion2 = n => !!(n && n.current && n.current.question && n.current.question.status === 'asked')
+/** Is this node a QUESTION (a node of type question, #85 — made by --ask)? */
+export const isQuestion2 = n => !!(n && n.type === 'question')
+/** Is it an OPEN question (asked, awaiting an answer)? */
+export const isOpenQuestion2 = n => !!(isQuestion2(n) && n.current && n.current.question && n.current.question.status === 'asked')
 
-/** A node as results name it (§4.2): { id, key, scope, label, path, kind } (+ transient / merged_into when set). */
+/** A node as results name it (§4.2): { id, key, scope, label, path, kind, type } (+ transient / merged_into / plan_item when set). */
 export function nodeView(sess, n) {
   if (!n) return null
-  return { id: n.id, key: n.key, scope: n.scope, label: n.label, path: pathOf(sess, n), kind: n.kind,
-    ...(n.transient ? { transient: true, ...(n.grace_ms ? { grace_ms: n.grace_ms } : {}) } : {}), ...(n.merged_into ? { merged_into: n.merged_into } : {}) }
+  return { id: n.id, key: n.key, scope: n.scope, label: n.label, path: pathOf(sess, n), kind: n.kind, type: n.type,
+    ...(n.transient ? { transient: true, ...(n.grace_ms ? { grace_ms: n.grace_ms } : {}) } : {}), ...(n.merged_into ? { merged_into: n.merged_into } : {}),
+    ...(n.plan ? { plan_item: true } : {}) }
 }
 /** The visible tree below a node, for tests and debugging: { label, key, id, kids:[…] }. */
 export function treeOf(sess, node = rootOf(sess)) {
@@ -205,7 +364,7 @@ export function shortPath(path, max = 80) {
 // transactions: every mutation is journalled, so a refused call is undone exactly (all-or-nothing, §3.8 / §1.6)
 
 function newTx(state, sess, now, o = {}) {
-  return { state, sess, now, by: o.by || null, act: o.act || null, undo: [], records: [], entries: [], warnings: [], deepest: 0 }
+  return { state, sess, now, by: normBy(o.by) || null, act: typeof o.act === 'string' && o.act ? o.act : null, undo: [], records: [], entries: [], writes: [], warnings: [], deepest: 0 }
 }
 function mset(t, map, k, v) { const had = map.has(k), old = map.get(k); map.set(k, v); t.undo.push(() => { if (had) map.set(k, old); else map.delete(k) }) }
 function mdel(t, map, k) { if (!map.has(k)) return; const old = map.get(k); map.delete(k); t.undo.push(() => map.set(k, old)) }
@@ -227,11 +386,44 @@ const identOf = sess => ({ realm: sess.ident.realm, session: sess.ident.session,
 /** One NODE RECORD (§2.1): { v:6, kind:"node", op, ts, n, …fields, …ident } (+ by / act when a dashboard did it). */
 function record(t, op, n, fields = {}) {
   const r = { v: ACTIVITY2_FORMAT, kind: 'node', op, ts: t.now, n: n.id, ...fields, ...(t.by ? { by: t.by } : {}), ...(t.act ? { act: t.act } : {}), ...identOf(t.sess) }
-  t.records.push(r)
+  t.records.push(r); t.writes.push(r)
   return r
 }
-/** An ENTRY STUB (2b turns it into a v6 entry: §2.2's "moved by …", the transient vanish's line). */
-const entryStub = (t, n, act, text) => t.entries.push({ n: n.id, act, text })
+const newEntryId = (state, now) => `${state.idPrefix}${now.toString(36)}-${(++state.seq).toString(36)}`
+/** The small form a node's in-memory log keeps (no details / data, no identity). */
+const smallOf = e => compact({ id: e.id, ts: e.ts, type: e.type, fields: e.fields, current: !!e.current, text: e.text, state: e.state, progress: e.progress, eta_at: e.eta_at,
+  stale_after_ms: e.stale_after_ms, has_details: e.details ? true : undefined, has_data: e.data != null ? true : undefined, by: e.by, act: e.act })
+/**
+ * Write one v6 ENTRY on `node` (§2.2): { v:6, id, ts, n, type, fields?, current, text, state, at, …f.extra, by?, act?, …ident,
+ * details, data }. `type` = its MESSAGE TYPE (default note) and `fields` its typed fields (MESSAGE_TYPES; omitted when none).
+ * `at` = the node's display path NOW (or f.at), capped at ~1 KB. It joins `entries` and `writes`, and the node's own bounded log.
+ * @param {any} t @param {any} node @param {{ id?: string, type?: string, fields?: any, current?: boolean, text: string, state?: string, at?: string, details?: any, data?: any, extra?: any, by?: any, act?: any }} f
+ */
+function writeEntry(t, node, f) {
+  const { state, sess } = t
+  const by = f.by !== undefined ? f.by : t.by, act = f.act !== undefined ? f.act : t.act
+  const fields = f.fields && Object.keys(f.fields).length ? f.fields : null
+  const e = /** @type {any} */ ({ v: ACTIVITY2_FORMAT, id: f.id || newEntryId(state, t.now), ts: t.now, n: node.id, type: f.type || 'note', ...(fields ? { fields } : {}), current: !!f.current, text: f.text, state: f.state || stateOf(node),
+    at: capAt(f.at != null ? f.at : pathOf(sess, node)), ...compact(f.extra || {}), ...(by ? { by } : {}), ...(act ? { act } : {}), ...identOf(sess),
+    details: f.details != null ? f.details : null, data: f.data != null ? f.data : null })
+  if (f.extra && f.extra.progress === null) e.progress = null   // an explicit "none" is recorded (the replay must see the clear)
+  if (f.extra && f.extra.eta_at === null) e.eta_at = null
+  t.entries.push(e); t.writes.push(e)
+  const cap = state.config.log_entries_per_agent, log = [...node.log, smallOf(e)]
+  const drop = Math.max(0, log.length - cap)
+  fset(t, node, 'log', drop ? log.slice(drop) : log)
+  if (drop) fset(t, node, 'log_dropped', node.log_dropped + drop)
+  return e
+}
+/**
+ * The ENTRY a structural change writes on the node (§2.2: "moved by robin via dashboard (ROBIN-Z790) from … to …", the
+ * transient vanish's "emptied — removed from the board (transient)"): logged only, attributed when a dashboard (or the
+ * bridge) did it — the attribution goes after the verb.
+ */
+function entryStub(t, n, act, text, at) {
+  const said = t.by && act !== 'transient' ? text.replace(/^(\S+)/, `$1 ${byText(t.by)}`) : text
+  return writeEntry(t, n, { type: 'event', text: cut(said), act: act === 'transient' ? act : t.act || act, at, by: act === 'transient' ? null : t.by })
+}
 const warn = (t, w) => t.warnings.push(w)
 function noteDepth(t, d) { if (d > t.deepest) t.deepest = d }
 
@@ -312,11 +504,16 @@ function checkDepth(t, node) {
  * sibling clash, `asked` + warning `relabelled`, §1.6), check the depth, write the record.
  * @returns {any} the node, or a refusal
  */
-function createNode(t, { creator, key, kind, label, parent, transient = false, grace_ms = null, implicit = false, ghost = null }) {
+function createNode(t, { creator, key, kind, label, parent, transient = false, grace_ms = null, implicit = false, ghost = null, plan_ix = null, rank = null, type = null }) {
   const { sess } = t
   // a GHOST comes back as itself: its id, key, kind and creator (the key's namespace — even if that agent is gone too)
   const cId = ghost ? ghost.creator : creator.id, cChain = ghost ? ghost.scope : creator.chain
   if (ghost) { key = ghost.key; kind = ghost.kind }
+  // its TYPE: the one asked for, else a ghost's own (a group comes back a group), else its kind's; a plan item is never a group
+  type = kind !== 'context' ? kind : type || (ghost && ghost.type) || 'context'
+  if (plan_ix != null && typeOf({ type }).counts_as === 'none') type = 'context'
+  const allowed = typeOf(parent).children
+  if (allowed && !allowed.includes(type)) return bad('bad-child', `"${pathOf(sess, parent) || sess.ident.session}" is a ${parent.type} — it holds ${allowed.length ? allowed.join(' / ') + ' nodes only' : 'nothing'}`)
   const id = ghost ? ghost.id : mintId(sess.ident, cChain, key)
   const other = sess.nodes.get(id) || (!ghost && sess.ghosts.get(id))
   if (other && (other.creator !== cId || lc(other.key) !== lc(key))) return bad('id-collision', `the id ${id} minted for ${cChain}:${key} is already held by another node (${other.scope}:${other.key}) — nothing was merged; use another key`)
@@ -327,11 +524,13 @@ function createNode(t, { creator, key, kind, label, parent, transient = false, g
   const fl = freeLabel(sess, parent.id, label)
   const chain = kind === 'agent' ? (cChain ? cChain + '/' : '') + key : null
   const node = newNode({ id, key, creator: cId, chain, scope: cChain, kind, label: fl.label, parent: parent.id, now: t.now,
-    asked: fl.sibling ? label : null, transient: kind === 'context' && transient, grace_ms, implicit, runs: ghost ? (ghost.runs || 1) + 1 : 1 })
+    asked: fl.sibling ? label : null, transient: kind === 'context' && transient, grace_ms, implicit, runs: ghost ? (ghost.runs || 1) + 1 : 1,
+    plan_ix: kind === 'context' ? plan_ix : null, rank, type })
   addLive(t, node)
   if (fl.sibling) warn(t, { code: 'relabelled', asked: label, got: fl.label, sibling: brief(fl.sibling), what: `"${label}" is taken under "${pathOf(sess, sess.nodes.get(parent.id)) || sess.ident.session}": created as "${fl.label}"` })
-  record(t, 'create', node, { c: cId, key: node.key, nk: kind, label: node.label, p: parent.id, rank: null, run: true,
-    ...(node.asked ? { asked: node.asked } : {}), ...(node.transient ? { transient: true, ...(node.grace_ms ? { grace_ms: node.grace_ms } : {}) } : {}) })
+  record(t, 'create', node, { c: cId, key: node.key, nk: kind, type: node.type, label: node.label, p: parent.id, rank: node.rank, run: true,
+    ...(node.asked ? { asked: node.asked } : {}), ...(node.transient ? { transient: true, ...(node.grace_ms ? { grace_ms: node.grace_ms } : {}) } : {}),
+    ...(node.plan ? { plan_item: true, plan_ix: node.plan_ix } : {}) })
   return node
 }
 
@@ -378,7 +577,7 @@ export function removeNode(t, node, why) {
     mdel(t, sess.kids, id)
     mdel(t, sess.nodes, id)
     mset(t, sess.ghosts, id, { id, key: n.key, creator: n.creator, chain: n.chain, scope: n.scope, kind: n.kind, label: n.label, parent: n.parent,
-      removed_at: t.now, last_ts: t.now, why: id === node.id ? why : 'parent', transient: n.transient, grace_ms: n.grace_ms, runs: n.runs })
+      removed_at: t.now, last_ts: t.now, why: id === node.id ? why : 'parent', transient: n.transient, grace_ms: n.grace_ms, runs: n.runs, type: n.type })
     sadd(t, sess.gkids, n.parent, id)
   }
   dropAliases(t, ids)
@@ -428,6 +627,8 @@ function moveNode(t, node, dest, rename = null) {
   if (node.merged_into) return bad('bad-move', `"${node.label}" is merged — unmerge it first`)
   if (atOrUnder(sess, dest, node)) return bad('bad-move', `can't move "${node.label}" under itself`)
   if (dest.merged_into) return bad('bad-move', `"${dest.label}" is merged into another node`)
+  const allowed = typeOf(dest).children
+  if (allowed && !allowed.includes(node.type)) return bad('bad-child', `"${pathOf(sess, dest) || sess.ident.session}" is a ${dest.type} — it holds ${allowed.length ? allowed.join(' / ') + ' nodes only' : 'nothing'}`)
   const label = rename != null ? rename : node.label
   if (node.parent === dest.id) {
     if (rename != null) { const e = renameNode(t, node, rename); if (e) return e }
@@ -464,6 +665,7 @@ function mergeNode(t, a, b) {
   if (a.merged_into) return bad('bad-merge', `"${a.label}" is already merged`)
   if (atOrUnder(sess, b, a)) return bad('bad-merge', `can't merge "${a.label}" into its own descendant "${b.label}"`)
   if (isOpenQuestion2(a)) return bad('bad-merge', `"${a.label}" holds an open question — answer or withdraw it first`)
+  if (typeOf(b).children && !typeOf(b).children.length) return bad('bad-merge', `"${b.label}" is a ${b.type} — nothing merges into it`)
   const kids = childrenOf2(sess, a)
   const clashes = []
   for (const k of kids) { const s = clashAt(sess, b.id, k.label); if (s) clashes.push({ label: k.label, key: k.key, id: k.id, sibling: brief(s), suggestion: freeLabel(sess, b.id, k.label).label }) }
@@ -480,7 +682,7 @@ function mergeNode(t, a, b) {
   const e = checkDepth(t, a); if (e) return e
   record(t, 'merge', a, { into: b.id, from, was, kids: kids.map(k => k.id) })
   addAlias(t, was, a.id)
-  entryStub(t, a, 'merge', `merged into ${pathOf(sess, b)}`)
+  entryStub(t, a, 'merge', `merged into ${pathOf(sess, b)}`, was)
   left(t, from)
   return { merged: { into_id: b.id, path: pathOf(sess, b), kids: kids.map(k => k.id) } }
 }
@@ -600,8 +802,8 @@ function walkPath(t, base, segs, create, o = {}) {
     const last = i === segs.length - 1
     const ghost = ghostUnder(sess, n, segs[i])
     const c = ghost
-      ? createNode(t, { ghost, creator: null, key: null, kind: null, label: segs[i], parent: n, implicit: !last, transient: last && !!o.transient, grace_ms: o.grace_ms })
-      : createNode(t, { creator: ownerOf2(sess, n), key: freeKey(sess, ownerOf2(sess, n), segs[i]), kind: 'context', label: segs[i], parent: n, implicit: !last, transient: last && !!o.transient, grace_ms: o.grace_ms })
+      ? createNode(t, { ghost, creator: null, key: null, kind: null, label: segs[i], parent: n, implicit: !last, transient: last && !!o.transient, grace_ms: o.grace_ms, type: last ? o.type : null })
+      : createNode(t, { creator: ownerOf2(sess, n), key: freeKey(sess, ownerOf2(sess, n), segs[i]), kind: 'context', label: segs[i], parent: n, implicit: !last, transient: last && !!o.transient, grace_ms: o.grace_ms, type: last ? o.type : null })
     if (c.ok === false) return c
     n = c
   }
@@ -619,30 +821,38 @@ function ghostUnder(sess, parent, label) {
 }
 
 /**
- * Parse a `--move-to` path (§3.8, Q45): `/…` = absolute from the session root; otherwise it must START with `..` segments
- * (relative to the node's current parent, each going up one level) followed by EXACTLY as many label segments, so a
- * retry lands in the same place (`../X`, `../../R/X`). A bare `X` — and `../A/B`, `../../X`, `..` alone — is refused
- * `bad-path`, suggesting `../X` and the absolute form. A label that is literally `..` is written quoted (`".."`).
- * @param {any} raw @returns {any} { ok:true, abs, up, segs } or { ok:false, code, what }
+ * Split a path that may be RELATIVE (§3.8): `/…` = absolute from the session root; otherwise any run of leading `..`
+ * segments (`up`, each one level up from the node's current parent) and the label segments after them (a bare `X` has
+ * up = 0). A label that is literally `..` is written quoted (`".."`). Syntax only — what is ALLOWED is the caller's rule.
+ * @param {any} raw @param {string} [what] @returns {any} { ok:true, abs, up, segs } or { ok:false, code, what }
  */
-export function parseMoveTo(raw) {
-  if (typeof raw !== 'string' || !raw.trim()) return bad('bad-path', 'move_to must be a path: "../X" (beside the node\'s parent) or "/A/X" (from the session root)')
+function splitRel(raw, what = 'move_to') {
+  if (typeof raw !== 'string' || !raw.trim()) return bad('bad-path', `${what} must be a path: "../X" (beside the node's parent) or "/A/X" (from the session root)`)
   let s = raw.trim()
-  if (s.startsWith('/')) {
-    const p = parsePath2(s)
-    if (!p.ok) return p
-    if (!p.segs.length) return bad('bad-path', 'move_to "/" names the session root: give the destination, e.g. "/Later"')
-    return { ok: true, abs: true, up: 0, segs: p.segs }
-  }
+  if (s.startsWith('/')) { const p = parsePath2(s); return p.ok ? { ok: true, abs: true, up: 0, segs: p.segs } : p }
   let up = 0, m
   while ((m = /^\.\.[ ]*(?:\/[ ]*|$)/.exec(s))) { up++; s = s.slice(m[0].length) }
   const p = parsePath2(s)
-  if (!p.ok) return p
-  const dest = p.segs.length ? formatPath2(p.segs) : null
-  if (!up) return bad('bad-path', `move_to "${raw.trim()}" is a bare name — not allowed (a retry would move the node again, one level down): use "../${dest}" (beside the node's parent) or "/…/${dest}" (from the session root)`)
-  if (!p.segs.length) return bad('bad-path', `move_to "${raw.trim()}" has no destination after the ".." — name it, e.g. "../Done", or give an absolute path "/…"`)
-  if (p.segs.length !== up) return bad('bad-path', `move_to "${raw.trim()}" is not retry-safe (${up} ".." but ${p.segs.length} segment${p.segs.length > 1 ? 's' : ''} after them: a retry would resolve from the new parent and land elsewhere) — use as many ".." as segments ("../X", "../../R/X"), or the absolute form "/…"`)
-  return { ok: true, abs: false, up, segs: p.segs }
+  return p.ok ? { ok: true, abs: false, up, segs: p.segs } : p
+}
+/**
+ * Parse a `--move-to` path (§3.8, Q45, Q46 FINAL): only `/…` (absolute from the session root) and `../X` (exactly ONE
+ * leading `..` and ONE label: beside the node's current parent) — the two forms a retry resolves to the same place. A bare
+ * `X`, and every deeper relative form (`../A/B`, `../../X`, `../../R/X`), is refused `bad-path`; such a refusal carries
+ * `rel: { up, segs }` so the call can answer `suggest: "/…"` — the absolute path it would have resolved to (applyCall). `..`
+ * alone (no destination) is refused without one.
+ * @param {any} raw @returns {any} { ok:true, abs, up, segs } or { ok:false, code, what, rel? }
+ */
+export function parseMoveTo(raw) {
+  const r = splitRel(raw)
+  if (!r.ok) return r
+  const shown = raw.trim()
+  if (r.abs) return r.segs.length ? r : bad('bad-path', 'move_to "/" names the session root: give the destination, e.g. "/Later"')
+  const dest = r.segs.length ? formatPath2(r.segs) : null, rel = { up: r.up, segs: r.segs }
+  if (!r.up) return bad('bad-path', `move_to "${shown}" is a bare name — not allowed (a retry would move the node again, one level down): use "../${dest}" (beside the node's parent) or "/…/${dest}" (from the session root)`, { rel })
+  if (!r.segs.length) return bad('bad-path', `move_to "${shown}" has no destination after the ".." — name it, e.g. "../Done", or give an absolute path "/…"`)
+  if (r.up !== 1 || r.segs.length !== 1) return bad('bad-path', `move_to "${shown}" is not retry-safe (a retry resolves a relative path from the NEW parent): only one step up is allowed — "../X", beside the node's parent — or the absolute form "/…" (aimb-log --resolve prints it)`, { rel })
+  return r
 }
 
 /**
@@ -677,18 +887,776 @@ function moveToPath(t, node, mt, caller, grace_ms) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// the call
-
-const CALL_FIELDS = ['agent', 'key', 'id', 'path', 'under', 'under_id', 'label', 'move', 'move_id', 'move_to', 'rename', 'merge', 'merge_id', 'unmerge', 'transient', 'keep']
+// 2b: reading a path without changing anything (Q46: the refused move's `suggest`, the resolve tool)
 
 /**
- * Validate a call's STRUCTURAL fields (the 2.0 `log` tool's names, §4.2). Line / plan / position fields are ignored here
- * (2b / 2c). `transient`: true, or a grace duration ("30s" — the `--transient=30s` form, Q44).
+ * Walk `segs` from `base` the way --move-to would (§3.8) WITHOUT creating or resurrecting anything: a live child (label,
+ * else an agent / question by key) → this parent's same-label GHOST → "new" (that segment and every one after it would be
+ * created). → { node (the last live or ghost node reached), state:'live'|'ghost'|'new', labels (as spelt on the board; the
+ * new tail as given), create:[labels] }
+ */
+function walkRead(sess, base, segs) {
+  let n = base, state = 'live'
+  const labels = [], create = []
+  for (const seg of segs) {
+    if (state !== 'new') {
+      const c = state === 'live' ? childBySeg(sess, n, seg) : null
+      if (c) { n = c; labels.push(c.label); continue }
+      const g = ghostUnder(sess, n, seg)
+      if (g) { n = g; state = 'ghost'; labels.push(g.label); continue }
+      state = 'new'
+    }
+    labels.push(seg); create.push(seg)
+  }
+  return { node: n, state, labels, create }
+}
+/** The base a path starts from (§3.8): the root for an absolute one; else the node's current PARENT, one level up per "..". */
+function relBase(sess, node, abs, up) {
+  if (abs) return { base: rootOf(sess) }
+  if (node.parent == null) return bad('bad-path', 'the session root has no parent: a relative path needs a node (--key / --id / --path), or give an absolute path "/…"')
+  let base = sess.nodes.get(node.parent)
+  for (let k = 0; k < up; k++) {
+    if (base.parent == null) return bad('bad-path', `the path goes above the session root (${up} ".." from ${pathOf(sess, node)})`)
+    base = sess.nodes.get(base.parent)
+  }
+  return { base }
+}
+const absPath = (sess, base, labels) => '/' + formatPath2([...labelsOf(sess, base), ...labels])
+
+/**
+ * The RESOLVE helper (Q46 — `aimb-log --resolve "<path>" [--key X | --id I | --path P]`, the tool `resolve`): the absolute
+ * path and id a path resolves to NOW, from the named node's current parent (the --move-to base; no key / id / path = the
+ * --agent node; the session root has no parent, so only an absolute path works from it), walked as --move-to would (a live
+ * child → a same-label ghost → would be created). Takes ANY relative form (a bare X, ../A/B, ../../X) and the absolute one.
+ * CHANGES NOTHING: no create, no resurrection, no alias refresh.
+ * @param {any} state @param {{ session: string, project?: string, user?: string, realm?: string }} ident
+ * @param {{ resolve: string, agent?: string, key?: string, id?: string, path?: string }} input
+ * @returns {any} { ok:true, path:"/…", id (null when it would be created), state:"live"|"ghost"|"new", node (live only),
+ *   create:[labels a move there would create], from (the node it is relative to), warnings } or a refusal
+ */
+export function resolveCall(state, ident, input) {
+  if (!state || !(state.sessions instanceof Map)) return bad('bad-state-object', 'pass a createModel() state')
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return bad('bad-input', 'expected { resolve: "<path>", agent?, key? | id? | path? }')
+  const extra = Object.keys(input).filter(k => !['resolve', 'agent', 'key', 'id', 'path'].includes(k) && input[k] !== undefined)
+  if (extra.length) return bad('bad-input', `resolve takes agent, key | id | path and resolve — not ${extra.join(', ')}`)
+  const sp = splitRel(input.resolve, 'resolve')
+  if (!sp.ok) return sp
+  const pc = parseCall({ agent: input.agent, key: input.key, id: input.id, path: input.path })
+  if (!pc.ok) return pc
+  const q = pc.q, sess = getSession2(state, ident)
+  if (!sess) return bad('unknown-session', `no activity from a session "${String(ident && ident.session).slice(0, 80)}" on this host`)
+  const t = newTx(state, sess, 0)
+  try {
+    let scope = rootOf(sess)
+    if (q.agent) { scope = creatorByChain(t, q.agent); if (!scope) return bad('unknown-agent', `--agent ${q.agent.join('/')} is not on the board`) }
+    let node = scope
+    if (q.key != null) {
+      const id = sess.scope.get(scopeKey(scope.id, q.key)), n = id && sess.nodes.get(id)
+      if (!n) return bad('unknown-node', `no node has the key ${q.key} in your scope${id ? ' (it was removed)' : ''}`)
+      node = n
+    } else if (q.id != null) { const r = byId(t, q.id, 'id'); if (r.ok === false) return r; node = r.node }
+    else if (q.segs) { const w = walkPath(t, scope, q.segs, false); if (w.ok === false) return w; node = w.node }
+    node = redirect(t, node)
+    const b = relBase(sess, node, sp.abs, sp.up)
+    if (b.ok === false) return b
+    const w = walkRead(sess, b.base, sp.segs)
+    return { ok: true, path: absPath(sess, b.base, w.labels), id: w.state === 'new' ? null : w.node.id, state: w.state, node: w.state === 'live' ? nodeView(sess, w.node) : null,
+      create: w.create, from: nodeView(sess, node), warnings: [...t.warnings] }
+  } finally { rollback(t) }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2b: lines and entries (§4.0)
+
+/** Does a node hold plan items (a PLAN node)? */
+const holdsItems = (sess, n) => childrenOf2(sess, n).some(c => c.plan)
+/**
+ * A report's ACTIVITY (§1.4): target..owner (the nearest agent at or above it, else the root) and the calling agent get
+ * last_activity = now and stale_after until their next report; the owner stops being implicit; the session header moves.
+ * A system call (t.by: the bridge, a dashboard) touches nothing (6c).
+ */
+function touch(t, node, staleMs, caller) {
+  const { sess } = t
+  const owner = ownerOf2(sess, node)
+  const bump = n => { fset(t, n, 'last_activity', Math.max(n.last_activity, t.now)); fset(t, n, 'stale_after_ms', staleMs || null); fset(t, n, 'gone_at', null) }
+  for (let n = node; n; n = n.parent != null ? sess.nodes.get(n.parent) : null) { bump(n); if (n === owner) break }
+  if (caller && caller.kind === 'agent' && caller !== owner) bump(caller)
+  fset(t, owner, 'implicit', false)
+  fset(t, sess, 'last_activity', Math.max(sess.last_activity, t.now))
+}
+
+/**
+ * Apply one REPORT to `node` (§4.0) inside the call's transaction — every check first, then the changes. m = parseReport's
+ * { text, line, state, progress?, eta_at?, stale_after_ms, details, data, log, ask?, withdraw? }; o = { question (a status
+ * change's new question: an answer, the dashboard's withdraw, the expiry), entryText (the LOG text; the line keeps its
+ * own), planEnd ('done' | 'abandoned' | 'open'), cascade:false, caller (the calling agent, for activity) }.
+ * - The LINE changes when the text has a leading `@` (m.line), a state is given, or a question is asked / changes status
+ *   (`changes` — the entry's `current`). Only a leading `@` (or a question) sets its TEXT: a state change keeps it (one rule,
+ *   no implied line: Q33). details / data go on the entry, and on the line when its text is set (a state change keeps the
+ *   line's).
+ * - States (6b / 6c / #82): todo / skipped only on contexts; todo as a line-less context's first state makes it a plan item
+ *   (an `item` record); skipped only on a plan item; abandoned on any context, on an agent / the root only while it holds
+ *   plan items (it then also ENDS its plan: the plan-end marker, 6d); a `@` line on a ☐ item starts it. done / failed /
+ *   abandoned finish an agent or the root, a live state revives it; the ETA is dropped on those.
+ * - Questions (#85 / #90): a question's line is the question — a plain report may LOG on it, but a line / state on it is
+ *   refused (`question-node`), except abandoned on an OPEN one, which withdraws it. A status change keeps the line's id,
+ *   details and data; its entry gets details of its own (questionEntryDetails).
+ * - Its own line (a leading `@`, or a question) makes a transient context PERMANENT (§3.8).
+ * - log:false writes no entry (the node is marked cp_dirty for step 3's checkpoint).
+ * - Abandoned CASCADES to the open contexts / plans under it (not crossing an agent), unless o.cascade === false.
+ * @returns {any} { entry, changes, line, state, cascade? } or a refusal (nothing changed)
+ */
+function applyReport(t, node, m, o = {}) {
+  const { sess } = t
+  const by = t.by, ctx = node.kind === 'context', c0 = node.current, q0 = c0 && c0.question ? c0.question : null
+  const where = () => pathOf(sess, node) || sess.ident.session
+  let st = m.state || null, qLine = null, qEntry = null, qWhy = null, keepQ = false
+  // the entry's MESSAGE TYPE (MESSAGE_TYPES): the caller's (default note), or the bridge's for a question's lifecycle
+  let mtype = m.mtype || 'note', mfields = m.fields || null
+  if (m.ask) {
+    qLine = { status: 'asked', choices: m.ask.choices, free: m.ask.free, asked_at: t.now, ...(m.ask.expires_at ? { expires_at: m.ask.expires_at } : {}) }
+    mtype = 'question'; mfields = { ...(m.ask.choices.length ? { choices: m.ask.choices } : {}), free: m.ask.free, ...(m.ask.expires_at ? { expires_at: m.ask.expires_at } : {}) }
+  } else if (o.question) { qLine = o.question; keepQ = true; mtype = o.mtype || 'note'; mfields = o.mfields || null }
+  else if (m.withdraw) {
+    if (!q0) return bad('not-a-question', `"${where()}" is not a question — state withdrawn withdraws a question you asked`)
+    if (q0.status !== 'asked') return bad('question-closed', `the question "${where()}" is already ${q0.status}`)
+    qLine = { ...q0, status: 'withdrawn', at: t.now, ...(by ? { by } : {}) }; keepQ = true; st = QSTATE.withdrawn
+    qEntry = cut(`withdrawn${by ? ' ' + byText(by) : ''}${m.withdraw.note ? ': ' + m.withdraw.note : ''}`)
+    mtype = 'withdrawal'; mfields = m.withdraw.note ? { note: m.withdraw.note } : null
+  }
+  const changes = !!(m.line || st || qLine)
+  if (q0 && changes && !qLine) {
+    if (st === 'abandoned' && !m.line && q0.status === 'asked') { qLine = { ...q0, status: 'withdrawn', at: t.now, ...(by ? { by } : {}) }; keepQ = true; qWhy = o.entryText || null; mtype = 'withdrawal'; mfields = null }   // abandoned / cascaded: an open question is withdrawn
+    else return bad('question-node', `"${where()}" is a question — its line is the question: it is answered on the dashboard${q0.status === 'asked' ? ', or withdraw it (state withdrawn)' : '; ask again on it for a new one'} (plain text only logs on it)`)
+  }
+  if (st && PLAN_STATES.has(st)) {
+    if (!ctx) return bad('bad-agent-state', `${st} is a plan state — only a context (a plan item) can be ${st}; an agent or the session reports running|blocked|failed|done|idle`)
+    if (!node.plan && (st === 'skipped' || c0)) return bad('not-a-plan-item', `"${where()}" is ${c0 ? 'an ordinary context (it already has a line of its own)' : 'not a plan item'} — ${st} is for plan items: make them with --item`)
+    if (!node.plan && typeOf(node).counts_as === 'none') return bad('bad-type', `"${where()}" is a ${node.type} — a ${node.type} can't be a plan item`)
+  }
+  if (st === 'abandoned' && !ctx && !holdsItems(sess, node)) return bad('not-a-plan', `"${where()}" is ${node.parent == null ? 'the session' : 'an agent'} holding no plan — abandoned is for contexts, plan items and plans (an agent or the session that holds plan items)`)
+  // ---- every check passed: apply
+  if (qLine) qLine = normQuestion(qLine)
+  let entryState = st || (c0 ? c0.state : null) || 'running'
+  if (m.ask) entryState = QSTATE.asked
+  else if (m.line && !st && node.plan && c0 && c0.state === 'todo') entryState = 'running'   // a line on a ☐ item starts it
+  const setText = !!(m.line || m.ask)
+  const lineText = m.ask ? m.ask.question : m.line ? m.text : c0 ? c0.text : node.label
+  if (st === 'todo' && ctx && !node.plan && !c0) { fset(t, node, 'plan', true); record(t, 'item', node, {}) }   // 6b: a first line of todo makes a plan item
+  const entryId = newEntryId(t.state, t.now)
+  if (changes) {
+    const keep = keepQ && c0
+    const lineBy = setText ? (t.act === 'edit_text' && by && typeof by === 'object' ? by : null) : (c0 && c0.by) || null   // #83: who wrote the line's text (2c's edit text)
+    const fresh = setText && !keep
+    fset(t, node, 'current', { id: keep ? c0.id : entryId, ts: t.now, text: lineText, state: entryState,
+      details: fresh ? m.details || null : c0 ? c0.details || null : null, data: fresh ? (m.data != null ? m.data : null) : c0 && c0.data != null ? c0.data : null,
+      ...(lineBy ? { by: lineBy } : {}), ...(qLine ? { question: qLine } : {}) })
+    if (!ctx) fset(t, node, 'finished_at', FINAL.has(entryState) ? node.finished_at || t.now : null)
+  }
+  let planEnd = o.planEnd || null
+  if (changes && !ctx && entryState === 'abandoned' && !planEnd) planEnd = 'abandoned'   // 6d: the tool's abandoned on an agent / the root ends the plan it holds
+  if (planEnd) fset(t, node, 'plan_end', planEnd === 'open' ? null : { state: planEnd, ts: t.now })
+  if ('progress' in m) fset(t, node, 'progress', m.progress ? { ...m.progress } : null)
+  if ('eta_at' in m) fset(t, node, 'eta_at', m.eta_at || null)
+  if (FINAL.has(stateOf(node))) fset(t, node, 'eta_at', null)
+  fset(t, node, 'implicit', false)
+  if (!by) touch(t, node, m.stale_after_ms, o.caller)
+  if (setText && node.transient) keepNode(t, node)   // its OWN line makes a transient context permanent (§3.8)
+  let entry = null
+  if (m.log !== false) {
+    const text = cut(o.entryText || qEntry || m.text || ('progress' in m && m.progress ? '{progress}' : 'eta_at' in m && m.eta_at ? '{eta}' : null) || lineText)
+    const eDet = keepQ ? questionEntryDetails(q0, qLine, c0 ? c0.text : lineText, { now: t.now, note: m.withdraw ? m.withdraw.note : null, why: qWhy }) : m.details || null
+    entry = writeEntry(t, node, { id: entryId, type: mtype, fields: mfields, current: changes, text, state: entryState, details: eDet, data: keepQ ? null : m.data,
+      extra: { progress: 'progress' in m ? m.progress : undefined, eta_at: 'eta_at' in m ? m.eta_at : undefined, stale_after_ms: m.stale_after_ms || undefined,
+        line_text: changes && lineText !== text ? lineText : undefined, line_by: changes && node.current.by ? node.current.by : undefined,
+        question: changes && qLine ? qLine : undefined, plan_end: planEnd || undefined,
+        ...(keepQ && c0 ? { line_id: c0.id, line_details: c0.details || undefined, line_data: c0.data != null ? c0.data : undefined } : {}) } })
+    if (changes && !ctx) entry.finished_at = node.finished_at   // an agent's line carries its resulting finished_at (null = revived)
+  } else fset(t, node, 'cp_dirty', true)
+  const cascade = changes && entryState === 'abandoned' && o.cascade !== false ? cascadeAbandon2(t, node) : []
+  return { entry, changes, line: setText, state: entryState, ...(cascade.length ? { cascade } : {}) }
+}
+
+/**
+ * The CASCADE of an abandoned node (#82 part 5): every CONTEXT under it (not crossing an agent: an agent's work is its own),
+ * deepest first, that is OPEN (its line todo / running / blocked) or holds an open plan gets an abandoned line; the entry says
+ * why ("abandoned with <path>" + the attribution). An open question there is withdrawn. → [{ id, path, from, entry_id }]
+ */
+function cascadeAbandon2(t, top) {
+  const { sess } = t
+  const list = []
+  const walk = (n, d) => { for (const c of childrenOf2(sess, n)) if (c.kind === 'context') { list.push({ c, d }); walk(c, d + 1) } }
+  walk(top, 1)
+  list.sort((a, b) => b.d - a.d || (a.c.id < b.c.id ? -1 : a.c.id > b.c.id ? 1 : 0))
+  const why = cut(`abandoned with ${pathOf(sess, top) || sess.ident.session}${t.by ? ' ' + byText(t.by) : ''}`)
+  const out = []
+  for (const { c } of list) {
+    if (!sess.nodes.has(c.id)) continue
+    const p = planOf2(sess, c)
+    if (!((c.current && OPEN_ITEM.has(c.current.state)) || (p && planEndAt2(sess, c, p) == null))) continue
+    const from = c.current ? c.current.state : 'open'
+    const r = applyReport(t, c, { state: 'abandoned', text: null, line: false, log: true, stale_after_ms: null }, { entryText: why, cascade: false })
+    if (r.ok === false) continue
+    out.push({ id: c.id, path: pathOf(sess, c), from, entry_id: r.entry ? r.entry.id : null })
+  }
+  return out
+}
+
+/**
+ * Parse a call's REPORT fields (§4.0, §4.2): text (parseText: plain = log only, a leading `@` = also set the line, `@@` = a
+ * literal `@`; `@~` refused legacy-form), state, progress / eta ("none" clears), stale_after, details, data, log — or a
+ * QUESTION (ask + choices / free / expires) or the asker's withdrawal (state "withdrawn", text = a note). The 1.7x `to` and
+ * `note` are refused legacy-form. → { ok, rep } (rep null: the call reports nothing)
+ */
+function parseReport(input, o, warnings) {
+  const given = k => input[k] !== undefined && input[k] !== null
+  if (given('to')) return bad('legacy-form', '--move … --to was removed in 2.0: use --key <node> --move <parent> (or --path … --move …)')
+  if (given('note')) return bad('legacy-form', 'note was removed in 2.0: plain text only logs — use text "…" (a leading @ also sets the line)')
+  let log = true
+  if (given('log')) { log = boolOf(input.log); if (log === null) return bad('bad-log', 'log must be true (append to the log; the default) or false (update the board only)') }
+  const common = { stale_after_ms: null, details: null, data: null }
+  if (given('stale_after')) {
+    let ms = parseDuration(input.stale_after)
+    if (!Number.isFinite(ms) || ms <= 0) return bad('bad-stale-after', 'stale_after must be a duration > 0 like "60m" or "2h" (max 24h)')
+    if (ms > ACTIVITY_LIMITS.staleAfterMaxMs) { ms = ACTIVITY_LIMITS.staleAfterMaxMs; warnings.push({ code: 'stale-after-capped', what: 'stale_after capped at 24h' }) }
+    common.stale_after_ms = ms
+  }
+  if (given('details')) {
+    if (typeof input.details !== 'string') return bad('bad-details', 'details must be a string')
+    if (utf8(input.details) > ACTIVITY_LIMITS.detailsBytes) return bad('details-too-large', `details is ${utf8(input.details)} bytes; the limit is ${ACTIVITY_LIMITS.detailsBytes} — keep it short`)
+    common.details = input.details
+  }
+  if (given('data')) {
+    let d = input.data
+    if (typeof d === 'string') { try { d = JSON.parse(d) } catch { return bad('bad-data', 'data is a string but not valid JSON') } }
+    const plain = Array.isArray(d) || (d && typeof d === 'object' && (Object.getPrototypeOf(d) === Object.prototype || Object.getPrototypeOf(d) === null))
+    if (!plain) return bad('bad-data', 'data must be a JSON object or array')
+    let json
+    try { json = JSON.stringify(d) } catch (e) { return bad('bad-data', `data is not JSON-serialisable (${e && e.message})`) }
+    if (utf8(json) > ACTIVITY_LIMITS.dataBytes) return bad('data-too-large', `data is ${utf8(json)} bytes serialised; the limit is ${ACTIVITY_LIMITS.dataBytes} — keep it small`)
+    common.data = JSON.parse(json)
+  }
+  // ---- the entry's MESSAGE TYPE (MESSAGE_TYPES; default note) and its typed fields (validated — --data stays free-form)
+  let mtype = null, mfields = null
+  if (given('message_type')) {
+    const v = typeof input.message_type === 'string' ? lc(input.message_type.trim()) : '', T = MESSAGE_TYPES[v]
+    if (!T) return bad('bad-message-type', `message_type must be one of ${Object.keys(MESSAGE_TYPES).filter(k => MESSAGE_TYPES[k].settable && !MESSAGE_TYPES[k].reserved).join('|')}`)
+    if (T.reserved) return bad('type-reserved', `message type "${v}" is reserved — it arrives in a later 2.0 step`)
+    if (!T.settable) return bad('bad-message-type', `"${v}" entries are written by the bridge (${v === 'question' ? 'ask a question with ask' : v === 'answer' ? 'answers come from the dashboard' : 'not by a report'})`)
+    mtype = v
+  }
+  if (given('fields')) { const f = validateEntryFields(mtype || 'note', input.fields); if (!f.ok) return f; mfields = f.fields }
+  const typed = mtype != null || mfields != null
+  // ---- a QUESTION (#85): ask (+ choices / free / expires); it always sets the line, always logs
+  if (['ask', 'choices', 'free', 'expires'].some(given)) {
+    if (!given('ask')) return bad('bad-ask', 'choices / free / expires belong to a question — give ask (the question) too')
+    if (typed) return bad('bad-ask', 'an ask is a question entry: message_type / fields can\'t go with it')
+    if (typeof input.ask !== 'string') return bad('bad-ask', 'ask must be a string: the question')
+    const question = normText(input.ask)
+    if (!question) return bad('bad-ask', 'the question (ask) is empty')
+    if (cpLen(question) > ACTIVITY_LIMITS.text) return bad('question-too-long', `a question is at most ${ACTIVITY_LIMITS.text} characters (got ${cpLen(question)}) — shorten it (put background in details)`)
+    const extra = ['state', 'progress', 'eta', 'plan'].filter(given)
+    if (given('text') && !(typeof input.text === 'string' && !input.text.trim())) extra.unshift('text')
+    if (extra.length) return bad('bad-ask', `a question takes ask, choices, free, expires, details, data and stale_after — not ${extra.join(', ')} (the question goes in ask)`)
+    if (log === false) return bad('bad-ask', 'a question is always logged (log:false can\'t go with ask)')
+    const choices = [], seen = new Set()
+    if (given('choices')) {
+      if (!Array.isArray(input.choices)) return bad('bad-choices', 'choices must be an array of strings, e.g. ["Postgres", "SQLite"]')
+      if (input.choices.length > QUESTION_LIMITS.choices) return bad('bad-choices', `a question has at most ${QUESTION_LIMITS.choices} choices (got ${input.choices.length})`)
+      for (const c of input.choices) {
+        const s = typeof c === 'string' ? normText(c) : ''
+        if (!s) return bad('bad-choices', 'each choice must be a non-empty string')
+        if (cpLen(s) > QUESTION_LIMITS.choice) return bad('bad-choices', `choice "${cpSlice(s, 30)}…" is longer than ${QUESTION_LIMITS.choice} characters`)
+        if (seen.has(lc(s))) return bad('bad-choices', `choice "${cpSlice(s, 40)}" is given twice`)
+        seen.add(lc(s)); choices.push(s)
+      }
+    }
+    let free = !choices.length
+    if (given('free')) { const b = boolOf(input.free); if (b === null) return bad('bad-ask', 'free must be true (free text allowed) or false'); free = b }
+    if (!choices.length && !free) return bad('bad-ask', 'a question needs choices, free text, or both (free:false with no choices can\'t be answered)')
+    let expires_at = null
+    if (given('expires')) {
+      const ms = parseDuration(input.expires)
+      if (!Number.isFinite(ms) || ms <= 0 || ms > QUESTION_LIMITS.expiresMaxMs) return bad('bad-expires', 'expires must be a duration > 0 and ≤ 7 days, e.g. "2h" or "30m"')
+      if (!Number.isFinite(o.now)) return bad('bad-expires', 'expires needs the current time')
+      expires_at = o.now + ms
+    }
+    // Robin (2026-10-03): a question reads naturally — the question, then its options as the answers; the text never restates
+    // the choices (they are structured fields). Two or more choices spelt out in the text → a warning, not a refusal.
+    const inText = choices.filter(c => lc(question).includes(lc(c)))
+    if (choices.length > 1 && inText.length > 1) warnings.push({ code: 'choices-in-question', choices: inText, what: `the question repeats its choices (${inText.join(', ')}) — state the question only; the choices are listed below it as the answers` })
+    return { ok: true, rep: { ask: { question, choices, free, expires_at }, text: null, line: true, state: null, log: true, ...common } }
+  }
+  let state = null
+  if (given('state')) {
+    state = typeof input.state === 'string' ? input.state.trim().toLowerCase() : ''
+    if (state !== 'withdrawn' && !ACTIVITY_STATES.includes(state)) return bad('bad-state', `state must be one of ${ACTIVITY_STATES.join('|')} (or withdrawn: a question you asked)`)
+  }
+  if (given('text') && typeof input.text !== 'string') return bad('bad-text', 'text must be a string')
+  const pt = given('text') ? parseText(input.text) : { ok: true, text: '', line: false }
+  if (!pt.ok) return pt
+  let text = normText(pt.text), line = pt.line
+  if (text && cpLen(text) > ACTIVITY_LIMITS.text) { text = cpSlice(text, ACTIVITY_LIMITS.text - 1) + '…'; warnings.push({ code: 'text-truncated', what: `text cut to ${ACTIVITY_LIMITS.text} characters` }) }
+  // ---- the asker WITHDRAWS its question (#85): the text is a note for the log
+  if (state === 'withdrawn') {
+    const extra = ['progress', 'eta', 'plan'].filter(given)
+    if (extra.length) return bad('bad-state', `withdrawn (a question) takes an optional text note — not ${extra.join(', ')}`)
+    if (log === false) return bad('bad-state', 'withdrawing a question is always logged (log:false can\'t go with state withdrawn)')
+    if (typed) return bad('bad-state', 'a withdrawal is a withdrawal entry: message_type / fields can\'t go with it')
+    return { ok: true, rep: { withdraw: { note: text || null }, text: null, line: false, state: null, log: true, ...common } }
+  }
+  if (!text) {
+    if (line && !state) return bad('text-empty', 'a leading "@" sets the line to the text after it — that text is empty')
+    line = false
+  }
+  /** @type {any} */
+  const rep = { text: text || null, line, state, log, ...common, ...(mtype ? { mtype } : {}), ...(mfields && Object.keys(mfields).length ? { fields: mfields } : {}) }
+  if (given('progress')) {
+    if (typeof input.progress === 'string' && input.progress.trim().toLowerCase() === 'none') rep.progress = null
+    else { const p = parseProgress(input.progress); if (!p.ok) return bad('bad-progress', p.what); rep.progress = p.value; if (p.warning) warnings.push({ code: p.warning, what: 'progress clamped to its total' }) }
+  }
+  if (given('eta')) {
+    if (typeof input.eta === 'string' && input.eta.trim().toLowerCase() === 'none') rep.eta_at = null
+    else {
+      if (!Number.isFinite(o.now)) return bad('bad-eta', 'an eta needs the current time')
+      const at = parseEta(input.eta, o.now, o.tzOffsetMin)
+      if (!Number.isFinite(at)) return bad('bad-eta', 'eta must be a duration ("15m", "1h25m", "90s"; > 0, ≤ 7 days) or a local clock time "HH:MM"')
+      rep.eta_at = at
+    }
+  }
+  if (!rep.text && !state && !('progress' in rep) && !('eta_at' in rep)) {
+    if (common.details != null || common.data != null || common.stale_after_ms || typed) return bad('bad-input', 'details / data / stale_after / message_type / fields ride on a report: give text, a state, progress or eta too')
+    return { ok: true, rep: null }
+  }
+  return { ok: true, rep }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2b: plans (§4.1, §5.7)
+
+/**
+ * Parse the tool's `plan` (the script's --item list, §4.1, Q31): 1 – 64 entries, each a "label" (its key is the label's
+ * slug; matched by LABEL under the target first — the re-plan rule) or { key, label? } (the label is REQUIRED when the item
+ * is created, never the key). An item given twice (same key / same label) is kept once, warning plan-duplicates.
+ */
+function parsePlan2(v, warnings) {
+  if (!Array.isArray(v) || !v.length) return bad('bad-plan', 'plan must be a non-empty array: ["Spec", "Build"] or [{ key:"spec", label:"Write the spec" }]')
+  if (v.length > ACTIVITY_LIMITS.planItems) return bad('bad-plan', `a plan holds at most ${ACTIVITY_LIMITS.planItems} items (got ${v.length}) — split it`)
+  const out = [], seen = new Set()
+  let dup = false
+  for (const raw of v) {
+    let it
+    if (typeof raw === 'string') { const l = normLabel(raw); if (!l.ok) return bad('bad-plan', `plan item "${cpSlice(String(raw), 40)}": ${l.what}`); it = { key: null, label: l.label } }
+    else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const k = validKey(raw.key)
+      if (!k.ok) return bad('bad-plan', `plan item key: ${k.what}`)
+      let label = null
+      if (raw.label != null) { const l = normLabel(raw.label); if (!l.ok) return bad('bad-plan', `plan item ${k.key}: ${l.what}`); label = l.label }
+      it = { key: k.key, label }
+    } else return bad('bad-plan', 'each plan item is a label ("Write the docs") or { key, label }')
+    const dk = it.key ? 'k\n' + lc(it.key) : 'l\n' + labelKey(it.label)
+    if (seen.has(dk)) { dup = true; continue }
+    seen.add(dk); out.push(it)
+  }
+  if (dup) warnings.push({ code: 'plan-duplicates', what: 'an item given twice is kept once' })
+  return { ok: true, items: out }
+}
+
+/**
+ * The plan's ITEMS under `target`, in order (6b on ids): an existing child that is already an item is KEPT as it is; an
+ * ordinary line-less context (type context or plan) is ADOPTED (an `item` record); one with a line of its own is left alone
+ * (plan_item:false); a key held elsewhere in the scope makes nothing (`exists-elsewhere`, §3.5); a ghost key (or, for a
+ * label-only item, a same-label ghost of this target) comes back as a new run; anything else is CREATED in the caller's
+ * scope (born a plan item: `plan_item` / `plan_ix` on the create record). Each new or adopted item gets a ☐ line (its label,
+ * todo) and a logged entry. Ranks: derived (creation time + plan position) — a stored one only where the derived one would
+ * sort before an item already there (positions are 2c).
+ * @returns {any} { items:[{ key, id, label, path, created, adopted?, plan_item, state, warning? }] } or a refusal
+ */
+function applyPlan2(t, target, items, scope) {
+  const { sess } = t
+  if (isQuestion2(target)) return bad('bad-plan', 'a question holds no plan')
+  const out = []
+  const itemsHi = () => { let hi = null; for (const c of childrenOf2(sess, target)) if (c.plan) { const r = rankOf(c); if (hi === null || r > hi) hi = r } return hi }
+  const make = (ix, spec) => {
+    const hi = itemsHi(), rank = hi !== null && hi >= derivedRank(t.now, ix) ? rankBetween(hi, derivedRank(t.now + 1, null)) : null   // a rank only where needed
+    return spec.ghost ? createNode(t, { ghost: spec.ghost, creator: null, key: null, kind: null, label: spec.label || spec.ghost.label, parent: target, plan_ix: ix, rank })
+      : createNode(t, { creator: scope, key: spec.key, kind: 'context', label: spec.label, parent: target, plan_ix: ix, rank })
+  }
+  const itemLine = (n, ix, adopt) => {
+    if (adopt) { fset(t, n, 'plan', true); fset(t, n, 'plan_ix', ix); record(t, 'item', n, { plan_ix: ix }) }
+    const id = newEntryId(t.state, t.now)
+    fset(t, n, 'current', { id, ts: t.now, text: n.label, state: 'todo', details: null, data: null })
+    fset(t, n, 'implicit', false)
+    if (!t.by) touch(t, n, null, null)
+    writeEntry(t, n, { id, current: true, text: cut(n.label), state: 'todo' })
+  }
+  const classify = c => (c.plan ? 'keep' : c.kind === 'context' && !c.current && countsAs(c) === 'bar' ? 'adopt' : 'other')   // a group / question is never adopted
+  for (let ix = 0; ix < items.length; ix++) {
+    const it = items[ix]
+    let n, how = 'create', warning = null
+    if (it.key) {
+      const id = sess.scope.get(scopeKey(scope.id, it.key)), live = id ? sess.nodes.get(id) : null, ghost = id && !live ? sess.ghosts.get(id) : null
+      if (live && (live.parent !== target.id || live.merged_into)) {
+        warn(t, { code: 'exists-elsewhere', key: live.key, id: live.id, what: `${live.scope}:${live.key} exists elsewhere (${pathOf(sess, live)}) — no new item was made` })
+        out.push({ key: live.key, id: live.id, label: live.label, path: pathOf(sess, live), created: false, plan_item: !!live.plan, state: stateOf(live), warning: 'exists-elsewhere' })
+        continue
+      }
+      if (live) {
+        n = live; how = classify(live)
+        if (it.label && labelKey(it.label) !== labelKey(live.label) && !(live.asked && labelKey(it.label) === labelKey(live.asked))) warning = 'exists'
+      } else if (ghost) {
+        if (ghost.kind !== 'context') return bad('bad-plan', `${it.key} was an agent — a plan item is a context: give it another key`)
+        n = make(ix, { ghost, label: it.label })
+      } else {
+        if (!it.label) return bad('label-required', `the plan item ${it.key} is new: give its label ({ key:"${it.key}", label:"…" }; a label never defaults to the key)`)
+        n = make(ix, { key: it.key, label: it.label })
+      }
+    } else {
+      const sib = clashAt(sess, target.id, it.label)
+      if (sib) { n = sib; how = classify(sib) }
+      else { const g = ghostUnder(sess, target, it.label); n = g && g.kind === 'context' ? make(ix, { ghost: g, label: it.label }) : make(ix, { key: freeKey(sess, scope, it.label), label: it.label }) }
+    }
+    if (n.ok === false) return n
+    if (how === 'create' || how === 'adopt') itemLine(n, ix, how === 'adopt')
+    if (warning) warn(t, { code: 'exists', ignored: ['label'], what: `${n.scope}:${n.key} exists — its label is set only at creation (use --rename)` })
+    out.push({ key: n.key, id: n.id, label: n.label, path: pathOf(sess, n), created: how === 'create', ...(how === 'adopt' ? { adopted: true } : {}), plan_item: !!n.plan, state: stateOf(n), ...(warning ? { warning } : {}) })
+  }
+  return { items: out }
+}
+
+/**
+ * A node's PLAN = its plan-item children (null when it has none, and always for a type without a plan end — a GROUP, a
+ * question): { items (+ the questions under it, #85), open (todo / running / blocked), done, skipped (skipped + abandoned),
+ * total, allDoneAt (when the last item became done, once EVERY item is done; else null) }.
+ */
+export function planOf2(sess, node) {
+  if (!sess || !node || !typeOf(node).plan_end) return null
+  const kids = childrenOf2(sess, node), items = kids.filter(c => c.plan)
+  if (!items.length) return null
+  for (const c of kids) if (!c.plan && countsAs(c) === 'item') items.push(c)
+  let open = 0, done = 0, skipped = 0, doneAt = 0, all = true
+  for (const it of items) {
+    const s = stateOf(it)
+    if (OPEN_ITEM.has(s)) open++
+    if (s === 'done') { done++; doneAt = Math.max(doneAt, it.current ? it.current.ts : 0) } else { all = false; if (s === 'skipped' || s === 'abandoned') skipped++ }
+  }
+  return { items, open, done, skipped, total: items.length, allDoneAt: all ? doneAt : null }
+}
+/**
+ * When a plan ENDED, or null while it is open (6c / 6d): every item done (the last one's time), a CONTEXT plan node's own
+ * line set done / abandoned, or the plan-end marker of an agent / the root — whichever came first. Skipped, failed, idle,
+ * todo, running and blocked items keep it open; a group has no plan end.
+ */
+export function planEndAt2(sess, node, p = planOf2(sess, node)) {
+  if (!p) return null
+  const ends = []
+  if (p.allDoneAt != null) ends.push(p.allDoneAt)
+  if (node.kind === 'context' && node.current && PLAN_END.has(node.current.state)) ends.push(node.current.ts || 0)
+  if (node.plan_end && PLAN_END.has(node.plan_end.state)) ends.push(node.plan_end.ts || 0)
+  return ends.length ? Math.min(...ends) : null
+}
+/** HOW a plan ended: 'all-done' | 'done' (marked complete) | 'abandoned' — or null while it is open. */
+export function planEndHow2(sess, node, p = planOf2(sess, node)) {
+  if (!p || planEndAt2(sess, node, p) == null) return null
+  if (p.allDoneAt != null) return 'all-done'
+  if (node.kind === 'context' && node.current && PLAN_END.has(node.current.state)) return node.current.state
+  return node.plan_end ? node.plan_end.state : null
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2b: bars (§5.7, ROLLUP) and groups
+
+const skOf = p => (p && p.skipped > 0 ? p.skipped : 0)
+/** The SUM of the children's bars when they all share a unit (case-insensitive; '' counts, '%' doesn't sum). */
+function sumBar(bars) {
+  if (!bars.length) return null
+  const u = lc(bars[0].unit)
+  if (u === '%' || !bars.every(p => lc(p.unit) === u)) return null
+  const done = bars.reduce((s, p) => s + p.done, 0), skipped = bars.reduce((s, p) => s + skOf(p), 0), total = bars.reduce((s, p) => s + p.total, 0)
+  return { done, skipped, total, unit: bars[0].unit, pct: progressPct({ done, total }), rollup: true, n: bars.length, ...(bars.every(p => p.todos) ? { todos: true } : {}) }
+}
+/** The MEAN of the children's done % and skipped % (each child weighted 1). */
+function meanBar(bars) {
+  if (!bars.length) return null
+  const r1 = x => Math.round(x * 10) / 10
+  const mean = r1(bars.reduce((s, p) => s + progressPct(p), 0) / bars.length)
+  const skipped = Math.min(r1(bars.reduce((s, p) => s + (p.total > 0 ? Math.min(100, (skOf(p) / p.total) * 100) : 0), 0) / bars.length), r1(100 - mean))
+  return { done: mean, skipped, total: 100, unit: '%', pct: mean, rollup: true, n: bars.length }
+}
+/** "N of M done" over items (#79: M = every item; skipped + abandoned → skipped; failed / idle / open → remaining). */
+function itemsBar(items) {
+  if (!items.length) return null
+  let done = 0, skipped = 0, abandoned = 0
+  for (const it of items) { const s = stateOf(it); if (s === 'done') done++; else if (s === 'skipped') skipped++; else if (s === 'abandoned') { skipped++; abandoned++ } }
+  return { done, skipped, total: items.length, unit: 'done', pct: progressPct({ done, total: items.length }), rollup: true, todos: true, items: true, n: items.length, ...(abandoned ? { abandoned } : {}) }
+}
+/**
+ * A node's BAR (§5.7), by its TYPE (NODE_TYPES `bar`): none for a GROUP or a question (whatever it holds); else its REPORTED
+ * progress; else rolled up from its children by what each adds (`counts_as`: a group adds nothing; a plan item or a
+ * question is an ITEM; anything else adds its bar): a node holding PLAN ITEMS — or a `plan` — rolls up ONLY its items
+ * ("N of M") — ROLLUP, reversing 6c decision 7: its helper agents / contexts show their bars on their own rows; a node with
+ * no plan items rolls up as before — the SUM of its children's bars when they share a unit, else their MEAN %, else "N of M"
+ * over its questions. A done / abandoned node's own state overrides the bar (forceBar). `memo` (a Map) caches per call.
+ * @param {any} sess @param {any} node @param {Map<string, any>} [memo] @returns {any}
+ */
+export function bar2(sess, node, memo) {
+  if (!sess || !node) return null
+  if (memo && memo.has(node.id)) return memo.get(node.id)
+  const T = typeOf(node)
+  let r = null
+  if (T.bar !== 'none') {
+    if (node.progress) r = { ...node.progress, skipped: skOf(node.progress), pct: progressPct(node.progress), rollup: false, n: 1 }
+    else {
+      const kids = childrenOf2(sess, node).filter(c => countsAs(c) !== 'none').sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      const items = kids.filter(c => countsAs(c) === 'item')
+      if (T.bar === 'items' || items.some(c => c.plan)) r = itemsBar(items)
+      else {
+        const bars = kids.filter(c => countsAs(c) === 'bar').map(c => bar2(sess, c, memo)).filter(Boolean)
+        r = sumBar(bars) || meanBar(bars) || itemsBar(items)
+      }
+    }
+    r = forceBar(node, r)
+  }
+  if (memo) memo.set(node.id, r)
+  return r
+}
+/** What a row shows for its type (NODE_TYPES): { type, glyph, show:'bar'|'count'|'status', bar?, count? } — the dashboard's input. */
+export function displayOf2(sess, node, o = {}) {
+  const T = typeOf(node)
+  return { type: node.type, glyph: T.glyph, show: T.show, ...(T.show === 'bar' ? { bar: bar2(sess, node, o.memo) } : {}), ...(T.show === 'count' ? { count: groupCount2(sess, node, o) } : {}) }
+}
+
+/**
+ * A GROUP's count (§5.7), where its bar would be (a type whose `show` is 'count') — null for any other node, or a group
+ * with nothing to count.
+ * Its visible children, minus ABANDONED ones (withdrawn / expired questions too) and the viewer's HIDDEN rows (`hidden`: a
+ * Set of ids, §5.6): done = done, skipped = skipped, everything else open. text = "4 items" while none is resolved, else
+ * the non-zero parts of "3 open · 1 done · 1 skipped".
+ * @param {any} sess @param {any} node @param {{ hidden?: Set<string> }} [o]
+ * @returns {null | { n: number, open: number, done: number, skipped: number, text: string }}
+ */
+export function groupCount2(sess, node, o = {}) {
+  if (!sess || !node || typeOf(node).show !== 'count') return null
+  let open = 0, done = 0, skipped = 0
+  for (const c of childrenOf2(sess, node)) {
+    if (o.hidden && o.hidden.has(c.id)) continue
+    const s = stateOf(c)
+    if (s === 'abandoned') continue
+    if (s === 'done') done++; else if (s === 'skipped') skipped++; else open++
+  }
+  const n = open + done + skipped
+  if (!n) return null
+  const text = !done && !skipped ? `${n} item${n === 1 ? '' : 's'}` : [open && `${open} open`, done && `${done} done`, skipped && `${skipped} skipped`].filter(Boolean).join(' · ')
+  return { n, open, done, skipped, text }
+}
+
+/**
+ * Change a context's TYPE (§5.7 — the dashboard's Show as group / Show as plan; 2c's action calls this): one `type` node
+ * record + a logged `event` entry ("shown as a group by robin via dashboard (…)"); its children keep their states. Only
+ * between the SETTABLE context types (context | plan | group); a question stays a question, an agent / the session have
+ * theirs (`bad-type`); a plan item can't become a type that adds nothing to its plan (a group: `bad-type`); a reserved type
+ * → `type-reserved`; the same type again → `no-change`.
+ * @param {any} state @param {{ session: string, project?: string, user?: string, realm?: string }} ident @param {string} id
+ * @param {string} type @param {number} now @param {{ by?: any, act?: string }} [opts]
+ */
+export function setType2(state, ident, id, type, now, opts = {}) {
+  const sess = getSession2(state, ident)
+  if (!sess) return bad('unknown-session', 'no such session on this host')
+  const n = sess.nodes.get(id)
+  if (!n || n.merged_into) return bad('unknown-node', `${id} is not on the board`)
+  const where = pathOf(sess, n) || sess.ident.session
+  if (n.kind !== 'context') return bad('bad-type', `"${where}" is ${n.kind === 'agent' ? 'an agent' : 'the session'} — only a context's type changes`)
+  if (n.type === 'question') return bad('bad-type', `"${where}" is a question — it stays one`)
+  const p = parseContextType(type)
+  if (!p.ok) return p
+  if (n.plan && typeOf({ type: p.type }).counts_as === 'none') return bad('bad-type', `"${where}" is a plan item — it counts in its plan, so it can't be a ${p.type}`)
+  if (n.type === p.type) return bad('no-change', `"${where}" is already a ${p.type}`)
+  const t = newTx(state, sess, now, { by: opts.by, act: opts.act || `show_as_${p.type}` })
+  fset(t, n, 'type', p.type)
+  record(t, 'type', n, { type: p.type })
+  entryStub(t, n, 'type', `shown as a ${p.type}`)
+  return { ok: true, node: nodeView(sess, n), records: t.records, entries: t.entries, writes: t.writes }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2b: staleness (an open question and a plan item never go stale)
+
+/**
+ * When `node` goes stale (6a / 6b / #90 on ids): a plan item and an OPEN question never do; a context shows its owner's
+ * (the nearest agent at or above, not the root's when the root is implicit) only while it has a live line of its own; an
+ * agent / the root: last_activity + its stale_after, else staleMin minutes — null when finished, implicit or not live.
+ * @param {any} sess @param {any} node @param {number} staleMin
+ */
+export function staleAt2(sess, node, staleMin) {
+  if (!node || node.plan || isOpenQuestion2(node)) return null
+  if (node.kind === 'context') return node.current && LIVE.has(node.current.state) ? staleAt2(sess, ownerOf2(sess, node), staleMin) : null
+  if (node.finished_at || node.implicit || !LIVE.has(stateOf(node))) return null
+  const win = node.stale_after_ms > 0 ? node.stale_after_ms : (Number.isFinite(staleMin) && staleMin > 0 ? staleMin : 15) * MIN
+  return node.last_activity + win
+}
+/** The state to SHOW: { state, was, stale, stale_at } — a plan item / an open question shows its own state only. */
+export function effectiveState2(sess, node, now, staleMin) {
+  const was = stateOf(node)
+  if (node.plan || isOpenQuestion2(node)) return { state: was, was, stale: false, stale_at: null }
+  const at = staleAt2(sess, node, staleMin)
+  const stale = at !== null && now > at
+  return { state: stale ? 'stale' : was, was, stale, stale_at: at }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2b: questions (#85 / #90 on ids)
+
+/**
+ * Where a question goes (#85): the addressed node itself when it is a question already (a CLOSED one starts a new question
+ * there; an OPEN one → question-open) or is a plain `context` that is line-less, childless and not a plan item (it BECOMES
+ * a question: a `type` record); otherwise a new child of type question keyed `?<n>` in the ASKER's scope (n = 1 + the
+ * highest `?<digits>` key that scope holds, live or ghost, so the key names one node for good), labelled `?<n>` by the bridge.
+ */
+function askNode(t, node, scope) {
+  const { sess } = t
+  const self = isQuestion2(node) || (node.kind === 'context' && node.type === 'context' && !node.current && !node.plan && !childrenOf2(sess, node).length)
+  if (self) {
+    if (isOpenQuestion2(node)) return bad('question-open', `"${pathOf(sess, node)}" is still waiting for an answer — withdraw it first (state withdrawn), or ask on another node`)
+    if (node.type !== 'question') { fset(t, node, 'type', 'question'); record(t, 'type', node, { type: 'question' }) }   // it BECOMES a question
+    return node
+  }
+  let n = 0
+  for (const k of sess.scope.keys()) if (k.startsWith(scope.id + '\n')) { const m = /^\?(\d{1,9})$/.exec(k.slice(scope.id.length + 1)); if (m) n = Math.max(n, Number(m[1])) }
+  return createNode(t, { creator: scope, key: `?${n + 1}`, kind: 'context', label: `?${n + 1}`, parent: node, type: 'question' })
+}
+const findQuestion = (state, ident, id) => {
+  const sess = getSession2(state, ident)
+  if (!sess) return { err: bad('unknown-session', 'no such session on this host') }
+  const node = sess.nodes.get(id)
+  if (!node || node.merged_into) return { err: bad('unknown-node', `${id} is not on the board`) }
+  if (!isQuestion2(node)) return { err: bad('not-a-question', `"${pathOf(sess, node) || sess.ident.session}" is not a question`) }
+  return { sess, node, q: node.current.question }
+}
+const askerOf = (sess, node) => { const o = ownerOf2(sess, node); return o.parent == null ? null : nodeView(sess, o) }
+
+/**
+ * ANSWER an open question — or, with opts.change, CHANGE the answer of an answered one (#85 / #90; the dashboard's answer /
+ * change_answer, wired by 2c): args.choice (one of its choices) and / or args.text (when free text is allowed). The line
+ * keeps its id, text, details and data; status answered (state done), `by` / `at`, a change adds `revised` + `previous`; the
+ * entry names the answer ("answered by robin via dashboard (…): "Postgres"") and carries details of its own. A system
+ * message (no activity). → { ok, node, question, answer, previous?, entry_id, agent, records, entries, writes }
+ * @param {any} state @param {any} ident @param {string} id @param {{ choice?: string, text?: string }} args @param {number} now
+ * @param {{ by: any, change?: boolean }} opts
+ */
+export function answerQuestion2(state, ident, id, args, now, opts = /** @type {any} */ ({})) {
+  const by = normBy(opts.by)
+  if (!by || typeof by === 'string') return bad('bad-by', 'an answer needs its author ({ kind:"dashboard", user, host })')
+  const f = findQuestion(state, ident, id)
+  if (f.err) return f.err
+  const { sess, node, q } = f, chg = !!opts.change, a = args && typeof args === 'object' ? args : {}
+  if (!chg && q.status !== 'asked') return bad('question-closed', `the question "${pathOf(sess, node)}" is already ${q.status}${q.status === 'answered' ? ' — change its answer instead' : ''}`)
+  if (chg && q.status !== 'answered') return bad(q.status === 'asked' ? 'question-open' : 'question-closed', q.status === 'asked' ? `the question "${pathOf(sess, node)}" has no answer yet — answer it` : `the question "${pathOf(sess, node)}" is ${q.status} — only an answered question's answer can be changed`)
+  const ans = /** @type {any} */ ({})
+  if (a.choice != null && String(a.choice).trim()) {
+    if (!q.choices.length) return bad('bad-args', 'this question has no choices — answer it with text')
+    const hit = q.choices.find(c => lc(c) === lc(normText(String(a.choice))))
+    if (!hit) return bad('bad-choice', `"${cpSlice(String(a.choice), 60)}" is not one of its choices: ${q.choices.join(' | ')}`)
+    ans.choice = hit
+  }
+  const tx = answerTextOf(a.text)
+  if (tx) {
+    if (!q.free) return bad('bad-args', 'this question takes one of its choices, not free text')
+    if (cpLen(tx) > QUESTION_LIMITS.answer) return bad('answer-too-long', `an answer is at most ${QUESTION_LIMITS.answer} characters (got ${cpLen(tx)})`)
+    ans.text = tx
+  }
+  if (!ans.choice && !ans.text) return bad('bad-args', q.choices.length ? `answer with a choice (${q.choices.join(' | ')})${q.free ? ' and / or text' : ''}` : 'answer with text')
+  if (chg && sameAnswer(ans, q.answer)) return bad('no-change', `that is already the answer of "${pathOf(sess, node)}"`)
+  const action = chg ? 'change_answer' : 'answer'
+  const t = newTx(state, sess, now, { by, act: action })
+  const prev = chg ? { answer: q.answer, ...(q.by ? { by: q.by } : {}), ...(q.at ? { at: q.at } : {}) } : null
+  const qa = { ...q, status: 'answered', answer: ans, by, at: now, ...(chg ? { revised: (q.revised || 0) + 1, previous: prev } : {}) }
+  const r = applyReport(t, node, { state: QSTATE.answered, text: null, line: false, log: true, stale_after_ms: null }, { question: qa, entryText: answerEntryText(chg ? 'answer changed' : 'answered', by, ans), cascade: false,
+    mtype: 'answer', mfields: { ...ans, ...(chg ? { revised: qa.revised } : {}) } })   // an answer is an `answer` entry; the node's state (done) drives plans and bars
+  if (r.ok === false) { rollback(t); return r }
+  const qv = /** @type {any} */ (questionView(node.current.question))
+  return { ok: true, action, node: nodeView(sess, node), question: qv, answer: ans, ...(chg ? { previous: qv.previous || null } : {}), entry_id: r.entry ? r.entry.id : null,
+    agent: askerOf(sess, node), records: t.records, entries: t.entries, writes: t.writes }
+}
+
+/**
+ * WITHDRAW an open question from the dashboard (#85; 2c's action): status withdrawn (state abandoned), attributed; the line
+ * keeps the question. (The ASKER withdraws its own with a report: state "withdrawn".)
+ * @param {any} state @param {any} ident @param {string} id @param {number} now @param {{ by: any }} opts
+ */
+export function withdrawQuestion2(state, ident, id, now, opts = /** @type {any} */ ({})) {
+  const by = normBy(opts.by)
+  if (!by || typeof by === 'string') return bad('bad-by', 'a withdrawal needs its author ({ kind:"dashboard", user, host })')
+  const f = findQuestion(state, ident, id)
+  if (f.err) return f.err
+  const { sess, node, q } = f
+  if (q.status !== 'asked') return bad('question-closed', `the question "${pathOf(sess, node)}" is already ${q.status}`)
+  const t = newTx(state, sess, now, { by, act: 'withdraw' })
+  const r = applyReport(t, node, { state: QSTATE.withdrawn, text: null, line: false, log: true, stale_after_ms: null }, { question: { ...q, status: 'withdrawn', by, at: now }, entryText: cut(`withdrawn ${byText(by)}`), cascade: false, mtype: 'withdrawal' })
+  if (r.ok === false) { rollback(t); return r }
+  return { ok: true, action: 'withdraw', node: nodeView(sess, node), question: questionView(node.current.question), entry_id: r.entry ? r.entry.id : null, agent: askerOf(sess, node),
+    records: t.records, entries: t.entries, writes: t.writes }
+}
+
+/**
+ * EXPIRY (#85): every open question whose expires_at has passed becomes expired, unanswered — a SYSTEM line by the bridge
+ * (state abandoned; no activity), logged "expired — nobody answered within <dur>". → { records, entries, writes,
+ * expired:[{ action:"expire", ident, id, key, path, text, question, entry_id, agent }] }
+ * @param {any} state @param {number} now
+ */
+export function expireQuestions2(state, now) {
+  const out = { records: [], entries: [], writes: [], expired: [] }
+  for (const sess of state.sessions.values()) {
+    for (const n of [...sess.nodes.values()].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+      if (!sess.nodes.has(n.id) || !isOpenQuestion2(n)) continue
+      const q = n.current.question
+      if (!(q.expires_at > 0) || now < q.expires_at) continue
+      const t = newTx(state, sess, now, { by: 'bridge' })
+      const dur = q.asked_at ? ` within ${fmtEta(q.expires_at - q.asked_at).replace(/^~/, '')}` : ''
+      const r = applyReport(t, n, { state: QSTATE.expired, text: null, line: false, log: true, stale_after_ms: null }, { question: { ...q, status: 'expired', by: 'bridge', at: now }, entryText: `expired — nobody answered${dur}`, cascade: false,
+        mtype: 'expiry', mfields: q.asked_at ? { after_ms: q.expires_at - q.asked_at } : null })
+      if (r.ok === false) { rollback(t); continue }
+      out.records.push(...t.records); out.entries.push(...t.entries); out.writes.push(...t.writes)
+      out.expired.push({ action: 'expire', ident: { ...sess.ident }, id: n.id, key: n.key, path: pathOf(sess, n), text: n.current.text, question: questionView(n.current.question), entry_id: r.entry ? r.entry.id : null, agent: askerOf(sess, n) })
+    }
+  }
+  return out
+}
+/** When the next open question expires (ms), or null — the gateway's expiry timer. @param {any} state */
+export function nextQuestionExpiry2(state) {
+  let at = null
+  for (const s of state.sessions.values()) for (const n of s.nodes.values()) if (isOpenQuestion2(n) && n.current.question.expires_at > 0 && (at === null || n.current.question.expires_at < at)) at = n.current.question.expires_at
+  return at
+}
+/**
+ * A WAITER's view of a question (the script's --wait): { outcome ("open" while asked, else its status; "gone" when it left
+ * the board or is no longer a question), status, id, key, path, question, choices, free, answer?, by?, at?, revised?,
+ * previous?, asked_at, expires_at?, entry_id }.
+ * @param {any} state @param {any} ident @param {string} id
+ */
+export function questionOutcome2(state, ident, id) {
+  const sess = getSession2(state, ident), node = sess ? sess.nodes.get(id) : null
+  if (!node || !isQuestion2(node)) return { outcome: 'gone', id }
+  const q = /** @type {any} */ (questionView(node.current.question))
+  return { outcome: q.status === 'asked' ? 'open' : q.status, status: q.status, id, key: node.key, path: pathOf(sess, node), question: node.current.text, choices: q.choices, free: q.free,
+    ...(q.answer ? { answer: q.answer } : {}), ...(q.by ? { by: q.by } : {}), ...(q.at ? { at: q.at } : {}), ...(q.revised ? { revised: q.revised, previous: q.previous || null } : {}),
+    asked_at: q.asked_at, ...(q.expires_at ? { expires_at: q.expires_at } : {}), entry_id: node.current.id }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// the call
+
+/**
+ * Validate a call (the 2.0 `log` tool's fields, §4.2): the structure (2a) — agent, key | id | path, label, under, move |
+ * move_to | merge | unmerge, rename, transient ("30s" = a grace, Q44), keep — plus 2b's context_type (a NEW context's type,
+ * NODE_TYPES), plan and the REPORT (parseReport: text / state / progress / eta / stale_after / details / data / log /
+ * message_type + fields, or ask … / state withdrawn). A refused
+ * relative move_to that could be resolved is kept (`move_to_refused`) so the call answers its `suggest` (Q46). Positions
+ * are 2c. o = { now, tzOffsetMin } for an eta / expires.
  * @returns {any} { ok:true, q } or a refusal
  */
-export function parseCall(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return bad('bad-input', 'expected an object { agent?, key? | id? | path?, label?, under?, move? | move_to?, rename?, merge?, unmerge?, transient?, keep? }')
-  const q = /** @type {any} */ ({})
+export function parseCall(input, o = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return bad('bad-input', 'expected an object { agent?, key? | id? | path?, label?, under?, text?, state?, plan?, move? | move_to?, rename?, merge?, unmerge?, transient?, keep?, context_type?, message_type?, fields? }')
+  const q = /** @type {any} */ ({ warnings: [] })
   if (has(input, 'agent')) {
     if (typeof input.agent !== 'string') return bad('bad-agent', 'agent must be a key chain like "spec-88" or "spec-88/research"')
     const steps = input.agent.trim().replace(/^\/+|\/+$/g, '').split('/').map(s => validKey(s))
@@ -708,7 +1676,7 @@ export function parseCall(input) {
     if (has(input, f)) { if (typeof input[f] !== 'string') return bad('bad-ref', `${f} must be a reference: a key, chain:key or a path`); q[f] = input[f] }
     if (has(input, f + '_id')) q[f + '_id'] = input[f + '_id']
   }
-  if (has(input, 'move_to')) { const m = parseMoveTo(input.move_to); if (!m.ok) return m; q.move_to = m }
+  if (has(input, 'move_to')) { const m = parseMoveTo(input.move_to); if (m.ok) q.move_to = m; else if (m.rel) q.move_to_refused = m; else return m }
   q.unmerge = input.unmerge === true
   q.keep = input.keep === true
   if (has(input, 'transient')) {
@@ -719,10 +1687,17 @@ export function parseCall(input) {
       q.transient = { grace_ms: ms }
     } else return bad('bad-input', 'transient must be true or a grace period like "30s"')
   }
-  const verbs = ['move', 'move_to', 'merge', 'unmerge'].filter(v => v === 'move' ? q.move != null || q.move_id != null : v === 'merge' ? q.merge != null || q.merge_id != null : v === 'unmerge' ? q.unmerge : !!q.move_to)
+  const verbs = ['move', 'move_to', 'merge', 'unmerge'].filter(v => v === 'move' ? q.move != null || q.move_id != null : v === 'merge' ? q.merge != null || q.merge_id != null : v === 'unmerge' ? q.unmerge : !!(q.move_to || q.move_to_refused))
   if (verbs.length > 1) return bad('bad-input', `one structural change per call: ${verbs.join(' + ')} (--move-to with --move: one destination per call)`)
-  if (q.rename != null && (q.merge != null || q.merge_id != null || q.unmerge || q.move_to)) return bad('bad-input', '--rename goes alone or with --move (one checked change)')
+  if (q.rename != null && (q.merge != null || q.merge_id != null || q.unmerge || q.move_to || q.move_to_refused)) return bad('bad-input', '--rename goes alone or with --move (one checked change)')
   if (q.keep && q.transient) return bad('bad-input', '--keep with --transient: pick one')
+  const rp = parseReport(input, o, q.warnings)
+  if (!rp.ok) return rp
+  q.report = rp.rep
+  if (input.plan !== undefined && input.plan !== null) { const pl = parsePlan2(input.plan, q.warnings); if (!pl.ok) return pl; q.plan = pl.items }
+  if (q.report && q.report.ask && (verbs.length || q.rename != null || q.plan)) return bad('bad-ask', 'a question goes alone: no move / move_to / merge / unmerge / rename / plan with ask')
+  if (has(input, 'context_type')) { const ct = parseContextType(input.context_type, { ask: !!(q.report && q.report.ask) }); if (!ct.ok) return ct; q.context_type = ct.type }
+  q.given = REPORT_FIELDS.filter(f => input[f] !== undefined && input[f] !== null && !(f === 'text' && input.text === ''))   // checked against the target's type (NODE_TYPES fields)
   return { ok: true, q }
 }
 
@@ -753,7 +1728,7 @@ function resolveAgent(t, steps, q, targetsAgent) {
   return { agent: creator, created }
 }
 
-/** `exists` (§3.5): a create's location / label / transient flag given for a node that already exists is ignored. */
+/** `exists` (§3.5): a create's location / label / transient flag / context type given for a node that already exists is ignored. */
 function existsCheck(t, node, q, scopeNode) {
   const ignored = []
   if (q.label != null && labelKey(q.label) !== labelKey(node.label) && !(node.asked && labelKey(q.label) === labelKey(node.asked))) ignored.push('label')
@@ -762,24 +1737,30 @@ function existsCheck(t, node, q, scopeNode) {
     if (r.ok === false || r.node.id !== node.parent) ignored.push('under')
   }
   if (q.transient && !q.move_to) ignored.push('transient')
-  if (ignored.length) warn(t, { code: 'exists', ignored, what: `${node.scope}:${node.key} exists — ${ignored.map(f => '--' + f).join(', ')} ignored (location and label are set only at creation; use --move / --rename)` })
+  if (q.context_type && q.context_type !== node.type && !(q.context_type === 'question' && q.report && q.report.ask)) ignored.push('context_type')
+  if (ignored.length) warn(t, { code: 'exists', ignored, what: `${node.scope}:${node.key} exists — ${ignored.map(f => '--' + f.replace('_', '-')).join(', ')} ignored (location, label and type are set only at creation; use --move / --rename)` })
 }
 
 /**
- * Apply one call's STRUCTURE (2a): resolve the session, the agent (§1.5) and the TARGET (§3: key → id → path → the agent →
- * the session root), creating what the rules create, then the structural verb (--move [+ --rename], --rename, --move-to,
- * --merge, --unmerge, --keep). ALL-OR-NOTHING: a refusal undoes every change of the call and writes no record.
+ * Apply one CALL (2a's structure + 2b's report): resolve the session, the agent (§1.5) and the TARGET (§3: key → id → path
+ * → the agent → the session root), creating what the rules create (a new context gets its --context-type); then — on the
+ * target — the REPORT (§4.0; an ask goes to the question node, askNode), the PLAN's items, and the structural verb
+ * (--move [+ --rename], --rename, --move-to, --merge; --unmerge goes BEFORE the report, so the report lands on the
+ * unmerged node), then --keep. ALL-OR-NOTHING: a refusal undoes every change of the call and writes nothing.
  * @param {any} state  createModel()
  * @param {{ session: string, project?: string, user?: string, realm?: string }} ident  the reporting session
- * @param {any} input  parseCall()'s input (the 2.0 `log` tool's structural fields)
+ * @param {any} input  the 2.0 `log` tool's fields (parseCall)
  * @param {number} now
- * @param {{ by?: any, act?: string }} [opts]  by / act (6d) on the records when a dashboard did it
- * @returns {any} { ok:true, node, created, agent?, records, entries, warnings, moved?, merged?, unmerged? } or a refusal
+ * @param {{ by?: any, act?: string, tzOffsetMin?: number }} [opts]  by / act (6d) when a dashboard (or the bridge) did it: a
+ *   SYSTEM call — attributed, refreshing no activity
+ * @returns {any} { ok:true, id (the ENTRY id, H10), ts, node:{ …, created }, created, agent?, state, current (the line
+ *   changed), line (its text was set), logged, stale_at, question?, plan?, cascade?, moved? / merged? / unmerged?,
+ *   records, entries, writes, warnings } or a refusal
  */
 export function applyCall(state, ident, input, now, opts = {}) {
   if (!state || !(state.sessions instanceof Map)) return bad('bad-state-object', 'pass a createModel() state')
   if (!Number.isFinite(now)) return bad('bad-now', 'now must be a ms epoch')
-  const pc = parseCall(input)
+  const pc = parseCall(input, { now, tzOffsetMin: opts.tzOffsetMin })
   if (!pc.ok) return pc
   const q = pc.q
   const fresh = !getSession2(state, ident)
@@ -789,13 +1770,14 @@ export function applyCall(state, ident, input, now, opts = {}) {
   const r = run(t, q)
   if (r.ok === false) { rollback(t); if (fresh) state.sessions.delete(sess.key); return r }
   if (t.deepest > LIMITS2.depthWarn) warn(t, { code: 'deep-tree', depth: t.deepest, what: `the tree is ${t.deepest} deep here (over ${LIMITS2.depthWarn}; the limit is ${LIMITS2.depthMax})` })
-  return { ok: true, ...r, records: t.records, entries: t.entries, warnings: t.warnings }
+  return { ok: true, ...r, records: t.records, entries: t.entries, writes: t.writes, warnings: [...q.warnings, ...t.warnings] }
 }
 
 function run(t, q) {
   const { sess } = t
   let scopeNode = rootOf(sess), agentCreated = false
   const targetsAgent = q.key == null && q.id == null && !q.segs
+  if (q.context_type && targetsAgent) return bad('bad-input', 'only a context takes a --context-type (an agent is type agent): give the --key / --path of the context it creates')
   if (q.agent) {
     const a = resolveAgent(t, q.agent, q, targetsAgent)
     if (a.ok === false) return a
@@ -803,6 +1785,8 @@ function run(t, q) {
   }
   let node, created = false
   const grace = q.transient ? q.transient.grace_ms : null
+  const asks = !!(q.report && q.report.ask)
+  const newType = q.context_type || (asks ? 'question' : null)   // a context this call creates and asks on IS the question
   if (q.key != null) {
     const id = sess.scope.get(scopeKey(scopeNode.id, q.key)), live = id && sess.nodes.get(id), ghost = id && !live ? sess.ghosts.get(id) : null
     if (live) { node = q.unmerge ? live : redirect(t, live); if (!q.unmerge) existsCheck(t, live, q, scopeNode) }   // existsCheck ignores --transient with --move-to (it is for the destinations)
@@ -812,8 +1796,8 @@ function run(t, q) {
       let parent = scopeNode
       if (q.under != null || q.under_id != null) { const r = resolveRef(t, q.under, q.under_id, scopeNode, 'under'); if (r.ok === false) return r; parent = r.node }
       if (q.transient && ghost && ghost.kind !== 'context') return bad('bad-input', 'only a context can be transient, not an agent')
-      const n = createNode(t, ghost ? { ghost, creator: scopeNode, key: q.key, kind: 'context', label: q.label || ghost.label, parent, transient: !!q.transient, grace_ms: grace }
-        : { creator: scopeNode, key: q.key, kind: 'context', label: q.label, parent, transient: !!q.transient, grace_ms: grace })
+      const n = createNode(t, ghost ? { ghost, creator: scopeNode, key: q.key, kind: 'context', label: q.label || ghost.label, parent, transient: !!q.transient, grace_ms: grace, type: newType }
+        : { creator: scopeNode, key: q.key, kind: 'context', label: q.label, parent, transient: !!q.transient, grace_ms: grace, type: newType })
       if (n.ok === false) return n
       node = n; created = true
     }
@@ -823,16 +1807,41 @@ function run(t, q) {
     node = q.unmerge ? r.node : redirect(t, r.node)
     if (!q.unmerge) existsCheck(t, r.node, q, scopeNode)
   } else if (q.segs) {
-    const w = walkPath(t, scopeNode, q.segs, true, { transient: !!q.transient, grace_ms: grace })
+    const w = walkPath(t, scopeNode, q.segs, true, { transient: !!q.transient, grace_ms: grace, type: newType })
     if (w.ok === false) return w
     node = q.unmerge ? w.node : redirect(t, w.node); created = w.created
-    if (!created && q.transient) existsCheck(t, node, { transient: q.transient, move_to: q.move_to }, scopeNode)
+    if (!created && (q.transient || q.context_type)) existsCheck(t, node, { transient: q.transient, move_to: q.move_to, context_type: q.context_type, report: q.report }, scopeNode)
   } else {
     node = scopeNode; created = agentCreated
     if (q.agent && !agentCreated) existsCheck(t, node, q, sess.nodes.get(node.creator) || rootOf(sess))
     else if (!q.agent && q.transient && !q.move_to) return bad('bad-input', '--transient needs a node the call creates (--key, --path, or with --move-to)')
   }
-  const out = /** @type {any} */ ({ node: null, created })
+  // Q46: a refused relative --move-to answers the absolute path it would have resolved to (from the node's parent NOW)
+  if (q.move_to_refused) {
+    const mr = q.move_to_refused, b = relBase(sess, node, false, mr.rel.up)
+    if (b.ok === false) return bad('bad-path', `${mr.what} (${b.what})`)
+    const suggest = absPath(sess, b.base, walkRead(sess, b.base, mr.rel.segs).labels)
+    return bad('bad-path', `${mr.what} — it resolves now to "${suggest}": retry with move_to "${suggest}"`, { suggest })
+  }
+  // the TYPE's fields (NODE_TYPES): a group takes no progress (it has no bar), a question no plan …
+  const T = typeOf(node), off = (q.given || []).filter(f => !T.fields.includes(f))
+  if (off.length) return bad('bad-field', `"${pathOf(sess, node) || sess.ident.session}" is a ${node.type} — it takes no ${off.join(', ')}`)
+  const out = /** @type {any} */ ({ node: null, created, id: null, ts: t.now, logged: false, current: false, line: false })
+  if (q.unmerge) {
+    const m = unmergeNode(t, node, q.label != null ? q.label : null)
+    if (m.ok === false) return m
+    out.unmerged = m.unmerged
+  }
+  let rnode = node
+  if (q.report) {
+    if (asks) { const a = askNode(t, node, scopeNode); if (a.ok === false) return a; rnode = a }
+    const r = applyReport(t, rnode, q.report, { caller: scopeNode })
+    if (r.ok === false) return r
+    Object.assign(out, { id: r.entry ? r.entry.id : null, logged: !!r.entry, current: r.changes, line: r.line })
+    if (r.cascade) out.cascade = r.cascade
+    if (asks) out.question = questionView(rnode.current.question)
+  }
+  if (q.plan) { const p = applyPlan2(t, node, q.plan, scopeNode); if (p.ok === false) return p; out.plan = p.items }
   const hasMove = q.move != null || q.move_id != null
   if (hasMove) {
     const d = resolveRef(t, q.move, q.move_id, scopeNode, 'move')
@@ -852,13 +1861,11 @@ function run(t, q) {
     const m = mergeNode(t, node, d.node)
     if (m.ok === false) return m
     out.merged = m.merged
-  } else if (q.unmerge) {
-    const m = unmergeNode(t, node, q.label != null ? q.label : null)
-    if (m.ok === false) return m
-    out.unmerged = m.unmerged
   }
   if (q.keep) { if (node.kind !== 'context') return bad('bad-input', '--keep applies to a transient context'); keepNode(t, node) }
-  out.node = nodeView(sess, node)
+  out.node = { ...nodeView(sess, rnode), created: rnode === node ? created : true }
+  out.state = stateOf(rnode)
+  out.stale_at = staleAt2(sess, rnode, t.state.config.stale_after_min)
   if (q.agent) out.agent = nodeView(sess, scopeNode)
   return out
 }
@@ -873,17 +1880,17 @@ function run(t, q) {
  * @param {any} state @param {number} now
  */
 export function sweepTransients(state, now) {
-  const records = [], entries = []
+  const records = [], entries = [], writes = []
   for (const sess of state.sessions.values()) {
     const due = [...sess.nodes.values()].filter(n => n.transient && n.empty_since != null && n.grace_ms && now - n.empty_since >= n.grace_ms)
     for (const n of due) {
       if (!sess.nodes.has(n.id) || n.empty_since == null || childrenOf2(sess, n).length) continue
       const t = newTx(state, sess, now)
       removeNode(t, n, 'transient')
-      records.push(...t.records); entries.push(...t.entries)
+      records.push(...t.records); entries.push(...t.entries); writes.push(...t.writes)
     }
   }
-  return { records, entries }
+  return { records, entries, writes }
 }
 
 /**
@@ -940,5 +1947,5 @@ export function removeById(state, sess, id, why, now) {
   if (n.parent == null) return bad('bad-remove', 'the session root cannot be removed')
   const t = newTx(state, sess, now)
   removeNode(t, n, why)
-  return { ok: true, records: t.records, entries: t.entries }
+  return { ok: true, records: t.records, entries: t.entries, writes: t.writes }
 }
