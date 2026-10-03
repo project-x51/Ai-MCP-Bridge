@@ -217,7 +217,7 @@ export function createStore2(o) {
         if (str(q.project) && projKey(q.project) !== projKey(id.project)) continue
         if (str(q.user) && lc(q.user) !== lc(id.user)) continue
         const memo = new Map(), nodes = []
-        const walk = (n, depth) => { nodes.push(nodeRow(sess, n, depth, now, memo, state.config.stale_after_min)); for (const c of A2.childrenOf2(sess, n)) walk(c, depth + 1) }
+        const walk = (n, depth) => { nodes.push(nodeRow2(sess, n, depth, now, memo, state.config.stale_after_min)); for (const c of A2.childrenOf2(sess, n)) walk(c, depth + 1) }
         walk(A2.rootOf(sess), 0)
         out.push({ session: id.session, project: id.project, user: id.user, realm: id.realm, host: id.host, created_at: sess.created_at, last_activity: sess.last_activity, root_id: sess.rootId,
           ghosts: sess.ghosts.size, nodes })
@@ -358,11 +358,13 @@ export function createStore2(o) {
   return store
 }
 
-/** One board row (§5.4's input until step 10 designs the units): the node as results name it + its line, state, display. */
-function nodeRow(sess, n, depth, now, memo, staleMin) {
+/** One board row (§5.4's input until step 10 designs the units): the node as results name it + its line, state, display.
+ * Step 7: exported — the held REMOTE boards (lib/activity2-gossip.js remoteBoard2) are rows of the same shape (a remote
+ * line carries has_details / has_data flags, never the details / data). */
+export function nodeRow2(sess, n, depth, now, memo, staleMin) {
   const l = n.current
   return { ...A2.nodeView(sess, n), parent: n.parent, depth, rank: n.rank || null, created_at: n.created_at, run_at: n.run_at, runs: n.runs, last_activity: n.last_activity,
-    ...(es => ({ state: es.state, ...(es.stale ? { stale: true, was: es.was } : {}), stale_at: es.stale_at }))(A2.effectiveState2(sess, n, now, staleMin)), current: l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!l.details, has_data: l.data != null, ...(l.by ? { by: l.by } : {}), ...(l.question ? { question: l.question } : {}) } : null,
+    ...(es => ({ state: es.state, ...(es.stale ? { stale: true, was: es.was } : {}), stale_at: es.stale_at }))(A2.effectiveState2(sess, n, now, staleMin)), current: l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: l.data != null || !!l.has_data, ...(l.by ? { by: l.by } : {}), ...(l.question ? { question: l.question } : {}) } : null,
     progress: n.progress || null, eta_at: n.eta_at || null, finished_at: n.finished_at || null, implicit: !!n.implicit, log_n: n.log.length + n.log_dropped, ...(n.log_floor ? { log_floor: n.log_floor } : {}),
     display: A2.displayOf2(sess, n, { now, memo }) }
 }

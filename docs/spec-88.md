@@ -12,7 +12,8 @@ are in §9 "Decisions". The build (§8) has started (steps 1, 2a and 2b done; 2c
 tests bar) and Q57 (with Q61 / Q62: state is progress, result is outcome — a test-result sets the state to done) and added
 TIME in the logs (§5.7); step 3 built the v6 records + replay, the day / index files and the time; step 4 built the
 conversion library — Robin accepted its Q63 – Q65 as built; step 5 the migration script — Robin accepted its Q66 – Q68 as built; step 6 wired
-the bridge files into the gateway behind the pre-cutover switch `AI_BRIDGE_ACTIVITY_V2` — Robin accepted its Q69 as built; no question is open).
+the bridge files into the gateway behind the pre-cutover switch `AI_BRIDGE_ACTIVITY_V2` — Robin accepted its Q69 as built; step 7
+built gossip v6 behind the same switch — its Q70 is open).
 The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
@@ -1444,6 +1445,79 @@ existing checks keep passing while the core is written.
    translation, no mixed-version code. *Tests:* unit (slice deltas by id: a rename / move changes one unit); live between
    2.0 gateways only — boards both ways, a move / rename / merge on one host seen as one changed unit on the other, a
    dashboard's skip / move / rename / merge on a remote node, remote log pages both ways.
+
+   **7 as built** (2026-10-03): THE STAGING — still behind step 6's pre-cutover switch `AI_BRIDGE_ACTIVITY_V2=1`: with it
+   on, a 2.0 gateway speaks gossip v6; without it (the default, and every live bridge) the 1.7x gossip v5 serves exactly as
+   before, so the live 1.7x bridges are untouched and main's suite stays green. Step 9 removes the switch; step 11 deletes
+   the v5 gossip code. No version bump (step 7 names none; 2.0.0 is step 12). No new config key.
+   NEW `src/lib/activity2-gossip.js` (pure; the bridge keeps the links, timers and frames). THE SENDER: `snapNode2` — one
+   UNIT per node, by id: `id`, `p` (none for the root, which has `root:true`), `c`, `key`, `scope`, `label`, `nk`, `type`,
+   then the node's own state as v5 sent it (the line without details / data — `has_details` / `has_data` —, progress, eta,
+   a stored rank, `plan_item` / `plan_ix`, `log_n`, `plan_end`, `finished_at`, `gone_at`, `stale_after_ms`, `implicit`) and
+   what 2.0 added (`transient` + `grace_ms`, the kept `test`, `timing`, `run_at` / `runs`); merged nodes are not sent;
+   `gossipUnits2`, `createPub2`, `planSlice2` (v5's deltas, epochs, byte cap, newest-active first). A session record's
+   header names its root's id (`root_id`) and its ghost count (`ghosts`). REMOVALS (mechanics decided here): a delta lists
+   only the TOPMOST of the nodes gone since the link's last frame (`{…session, id}`: its subtree goes with it on the
+   receiver; no id = the whole session), and the link FORGETS the whole published subtree of each — so a node that moved
+   out of it meanwhile (a merge's children) is sent again in full and the receiver never keeps a stale copy. THE RECEIVER:
+   `createRemote2` + `applySlice2` (per-origin ownership as v5: a full slice replaces the link host's board and clears its
+   down mark; a delta applies only on top of the held (epoch, seq), else `out-of-sync` → a resync; our own origin refused;
+   any `v` but 6 → `bad-version`, never misread). Each remote session is held MODEL-SHAPED (nodes by id, kids by parent id),
+   so the 2.0 view functions and the store's board rows (`nodeRow2`, now exported from `lib/activity2-store.js`) work on it
+   unchanged: a remote row IS the owner's row (same id, path, type, state, line, bar, display). Re-validated: 16-char ids;
+   a parent cycle, a second root, a context claiming the session kind, an empty label and a session record without
+   `root_id` are dropped; the model's limits (4 096 nodes / 128 agents per session, 1 024 sessions per origin); a unit
+   whose parent is not held yet (a truncated frame) is kept but hidden until its parent arrives; the root is a placeholder
+   until its own unit does. `markOriginDown2` (the host's agents and session show GONE, and a context's live line its
+   owner's; plan items keep their state), `expireRemote2` (a host down past `finished_visible_hours` leaves the board),
+   `remoteBoard2`, `locateRemote2`, `findRemoteLine2`, `knownHost2`, `remoteInfo2`, `actionQuery2` (an action's
+   id-valued fields, bounded; 1.7x's path args dropped).
+   THE GATEWAY (`bridge.mjs`, the switch on): PEER_HELLO announces `activity_gossip:6` ALONE (the 1.7x flags are neither
+   sent nor read) and a link shares activity only when its peer announces 6 too (§6.2). The v6 frames ride the 1.7x link
+   machinery unchanged (one timer per link, ≤ 1 frame/s, the #63 heartbeat, resync, ACTIVITY_DOWN / a lost link → gone,
+   the owner's per-link token bucket, the requester's queue, `log_cmd` in a full slice). A 1.7x PEER (it announces 5):
+   the equality check fails both ways, so nothing is sent to it or taken from it, its sessions are unknown to a 2.0 read or
+   action (`unknown-session`, `unknown-host`, an empty board for its host) and the message mesh is untouched; the 2.0
+   gateway LOGS one line per link ("<host> declares activity_gossip:5 — a 2.0 gateway shares activity only with 2.0 hosts
+   …; nothing is shared with it until it is upgraded (docs/spec-88.md §6.2)") — nothing more is built for it (Q39; Q70).
+   READS (`activity`): the board = this host's sessions + every held remote session (tagged `host`, `remote:true`,
+   `down_at` while down; `host` narrows to one host), the head `remote_hosts` (+ `linked`, `log_cmd`); a remote
+   session's LOG PAGE goes to its OWNER as `ACTIVITY_REQ {op:"log", q}` with the same query (`id` | `path`, `own`,
+   `removed`, `earlier`, `limit`, `cursor`) — the owner pages by id through its index files (§5.2, page size and rate its
+   own), its `f2.` cursors travel unchanged, "show removed" uses the owner's ghost table; a session name held on several
+   hosts is narrowed by `id` (a node id names its host), else `ambiguous-session` with each host; an ENTRY: `entry:{id,
+   host}` → its owner (`op:"entry"`), or a remote CURRENT line found by id alone. ACTIONS (§6.3): `activity_action` by
+   id (`id`, `args.to_id` / `before_id` / `after_id` / `into_id` / `position` / `label` / `merges` / `state` / `text` /
+   `choice` / `stale_min`) — this host's node → `actApplyAction2` (the store's `action` = applyAction2), another 2.0 host's
+   → `ACTIVITY_ACT {rid, q, by}` to its OWNER, which applies it, gossips it and answers with the model's result or refusal
+   (`duplicate-label` with the dialog's `clashes`, `clash-changed`, `bad-id` …); the owner also tells the session
+   (`actionNotice2`: a message / an answer at once — the result says `delivery` —, the rest batched, combined by
+   `combineActionNotices2`). The clash dialog's answer is `label` + `merges` on the move / merge action — nothing new on
+   the wire. Unmerge has no cross-host form (tool / script only, Q06: applied by the gateway the session reports to). The
+   dashboard PAGE is still 1.7x's (its board pushes answer `not-in-2.0-yet` until step 10): the transport and the owner's
+   apply are built here, the page's units / menus / dialogs by id are step 10. The gc pass also expires down remote hosts,
+   and the owner's own expiry removals are gossiped. Test tap: a v6 frame's `units` (id, label) and `removed`; a
+   `format-mismatch` record per 1.7x link.
+   Tests: `tests/unit/test_activity7_unit.mjs` — the unit (by id, no path, no details / data, merged not sent, `root_id`);
+   a full slice = the SAME board (every row of a plan, a group, a test-run with buckets and a test-result, a question, a
+   finished helper, took); deltas by id (a rename and a move = one unit with the descendants' paths following, a report =
+   the node + its activity chain, a dismissed subtree = one removal, a merge = the removal + the children re-sent, an
+   unmerge, a session leaving); the wire rules (out-of-sync before a full slice / on a wrong base or epoch, v5 / v1 →
+   bad-version, own origin, junk units, a cycle, an orphan shown once its parent arrives, the byte cap newest first then
+   the rest); down / gone / a full slice clearing it / expiry; the reads and `actionQuery2`; and a seeded GOSSIP FUZZ —
+   150 random histories (reports, plans, ticks, renames, moves, merges, unmerges, `--move-to` buckets that vanish,
+   questions, test-results, dashboard actions incl. dismissals, expiry) gossiped as deltas under random byte caps: the
+   receiver's board equals the owner's AND a fresh full slice's. `tests/activity/test_activity2_gossip_live.mjs` — three
+   2.0 gateways + a 1.7x one (the same bridge without the switch) on loopback addresses, temp dirs, this file's port block:
+   boards replicate both ways and to a third host with the SAME ids (every row equal to the owner's), a rename / a move as
+   ONE unit and a merge as the removal (the tap), remote log pages by id both ways over ≥ 3 owner pages, "show removed"
+   across hosts, a remote entry's details, dashboard actions on a remote node by id (skip, rename, move, merge, a refused
+   bad id, the clash answered with a label after an unanswered `duplicate-label`), a host RESTART (gone on the others,
+   `owner-unreachable`, then the same ids back, gone cleared, catch-up both ways) and the 1.7x peer (nothing shared either
+   way, the logged mismatch, no frames, unknown to reads / actions, still federated). No existing test changed. Left for
+   later: the `VIEW` frame and `view_v` on these links (8), the 2.0 script / batches / waits and removing the switch (9),
+   the dashboard's units / pushes of the merged board / Rename… / Merge into… / the clash dialog (10), deleting the v5
+   gossip code (11). Question Q70 (§9).
 8. **Per-user view state** (§5.6). `lib/view-state.js` (LWW set, max register for `seen:`, `reset`, `all`, GC, budget),
    `view_set` / `view` WS messages, the `VIEW` frame + `view_v`, the user = the serving gateway's OS login (Q29; the
    `AIMB_TEST_VIEW_USER` hook for tests), `views/<host>.json` persistence + rehydrate, pruning on remove, a pin making a
@@ -1489,7 +1563,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built) and Q69 that of step 6 (accepted as built); GROUPS, ROLLUP and TYPES are decisions
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built) and Q69 that of step 6 (accepted as built) — step 7's Q70 is under "Open questions"; GROUPS, ROLLUP and TYPES are decisions
 Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
@@ -1635,7 +1709,14 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q69, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). No question is open.
+Q40 – Q69, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). Open — raised by build step 7 (posted on
+the board under Questions / "Step 7 (Q70)"):
+- **Q70** (build step 7) A host left on 1.7x by mistake, as a 2.0 gateway sees it. *As built:* nothing is shared either
+  way (§6.2) and the 2.0 gateway writes ONE log line per link naming the host and the reason; the board shows nothing of
+  it — the host is simply missing from it, as Q39 decided ("nothing is built for it"). *The alternative:* also list such
+  hosts in the board head (`unshared_hosts: [{ host, activity_gossip }]`), so the dashboard (step 10) can show "LITTLE-001
+  runs 1.7x — not on this board" instead of a silently missing host. Recommendation: accept as built (the runbook stops
+  and upgrades every host together, and the log line names the culprit).
 
 ---
 
