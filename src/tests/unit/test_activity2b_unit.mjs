@@ -205,9 +205,9 @@ await section(() => {
 
 // ================================================================= TYPES: nodes (registry), groups, plans
 await section(() => {
-  check('registry: node types context | plan | group | question | agent | session, test-run reserved; each with fields, glyph, show, bar, counts_as, children and a #92 menu slot',
-    J(Object.keys(M.NODE_TYPES).sort()) === J(['agent', 'context', 'group', 'plan', 'question', 'session', 'test-run']) && M.NODE_TYPES['test-run'].reserved === true && Object.values(M.NODE_TYPES).every(T => Array.isArray(T.fields) && T.glyph && T.show && T.bar && T.counts_as && Array.isArray(T.menu)) && Object.isFrozen(M.NODE_TYPES.group))
-  check('parseContextType: case-insensitive; test-run → type-reserved; agent → bad-type; question only with --ask', M.parseContextType('GROUP').type === 'group' && M.parseContextType('test-run').code === 'type-reserved' && M.parseContextType('agent').code === 'bad-type' && M.parseContextType('question').code === 'bad-type' && M.parseContextType('question', { ask: true }).ok && M.parseContextType('nope').code === 'bad-type')
+  check('registry: node types context | plan | group | question | agent | session | test-run (reserved until 2d); each with fields, glyph, show, bar, counts_as, children and a #92 menu slot',
+    J(Object.keys(M.NODE_TYPES).sort()) === J(['agent', 'context', 'group', 'plan', 'question', 'session', 'test-run']) && !M.NODE_TYPES['test-run'].reserved && Object.values(M.NODE_TYPES).every(T => Array.isArray(T.fields) && T.glyph && T.show && T.bar && T.counts_as && Array.isArray(T.menu)) && Object.isFrozen(M.NODE_TYPES.group))
+  check('parseContextType: case-insensitive; test-run accepted (2d); agent → bad-type; question only with --ask', M.parseContextType('GROUP').type === 'group' && M.parseContextType('Test-Run').type === 'test-run' && M.parseContextType('agent').code === 'bad-type' && M.parseContextType('question').code === 'bad-type' && M.parseContextType('question', { ask: true }).ok && M.parseContextType('nope').code === 'bad-type')
   const w = world()
   w.call({ key: 'rel', label: 'Next release', context_type: 'plan', plan: ['A', 'B'] })
   const g = w.call({ key: 'qs', label: 'Questions', under: 'rel', context_type: 'Group' })
@@ -226,7 +226,7 @@ await section(() => {
   check('group: its items keep their states, but it has NO plan end (planOf2 null) and no bar', M.planOf2(s, w.get('gp')) === null && M.planEndAt2(s, w.get('gp')) === null && w.bar('gp') === null && M.groupCount2(s, w.get('gp')).text === '2 done')
   check('group: it takes no progress (it has no bar) → bad-field', w.call({ key: 'qs', progress: '1/2' }).code === 'bad-field')
   check('group: --context-type on an EXISTING node is ignored with warning exists', (r => r.ok && codes(r).includes('exists') && J(r.warnings.find(x => x.code === 'exists').ignored) === J(['context_type']) && w.get('qs').type === 'group')(w.call({ key: 'qs', context_type: 'plan' })))
-  check('types: an agent takes no --context-type; test-run is reserved', w.call({ agent: 'a1', label: 'A1', context_type: 'group' }).code === 'bad-input' && w.call({ key: 'tr', label: 'TR', context_type: 'test-run' }).code === 'type-reserved')
+  check('types: an agent takes no --context-type; test-run is accepted since 2d', w.call({ agent: 'a1', label: 'A1', context_type: 'group' }).code === 'bad-input' && w.call({ key: 'tr', label: 'TR', context_type: 'test-run' }).node.type === 'test-run')
   // toggle (the dashboard's Show as group / Show as plan)
   const t1 = M.setType2(w.st, BRIDGET, qs.id, 'plan', w.tick(1), { by: DASH })
   check('toggle: Show as plan — one `type` record + an `event` entry ("shown by robin via dashboard (…) as a plan"), act show_as_plan', t1.ok && t1.records[0].op === 'type' && t1.records[0].type === 'plan' && t1.records[0].act === 'show_as_plan' && t1.entries[0].type === 'event' && /^shown by robin via dashboard \(ROBIN-Z790\) as a plan$/.test(t1.entries[0].text) && qs.type === 'plan', J(t1))
@@ -252,8 +252,8 @@ await section(() => {
 
 // ================================================================= TYPES: entries (message types)
 await section(() => {
-  check('registry: message types note (default) | question | answer | withdrawal | expiry | event, test-result reserved',
-    J(Object.keys(M.MESSAGE_TYPES).sort()) === J(['answer', 'event', 'expiry', 'note', 'question', 'test-result', 'withdrawal']) && M.MESSAGE_TYPES.note.settable && !M.MESSAGE_TYPES.answer.settable && M.MESSAGE_TYPES['test-result'].reserved)
+  check('registry: message types note (default) | question | answer | withdrawal | expiry | event | test-result (reserved until 2d)',
+    J(Object.keys(M.MESSAGE_TYPES).sort()) === J(['answer', 'event', 'expiry', 'note', 'question', 'test-result', 'withdrawal']) && M.MESSAGE_TYPES.note.settable && !M.MESSAGE_TYPES.answer.settable && M.MESSAGE_TYPES['test-result'].settable && !M.MESSAGE_TYPES['test-result'].reserved)
   const v = M.validateEntryFields('test-result', { result: 'PASS', checks: '22', duration: '4.1s' })
   check('typed fields are VALIDATED and normalised (test-result: result pass, checks 22, duration 4.1s → 4100 ms)', v.ok && v.fields.result === 'pass' && v.fields.checks === 22 && v.fields.duration === 4100, J(v))
   check('typed fields: an unknown field, a bad enum or a negative int is refused bad-fields', M.validateEntryFields('test-result', { nope: 1 }).code === 'bad-fields' && M.validateEntryFields('test-result', { result: 'maybe' }).code === 'bad-fields' && M.validateEntryFields('test-result', { checks: -1 }).code === 'bad-fields')
@@ -261,7 +261,7 @@ await section(() => {
   const w = world()
   w.call({ key: 'k', label: 'K' })
   check('message_type: note is the default; given explicitly it is the same', (r => r.entries[0].type === 'note' && !('fields' in r.entries[0]))(w.call({ key: 'k', text: 'x', message_type: 'NOTE' })))
-  check('message_type: a bridge type from a caller → bad-message-type; a reserved one → type-reserved; an unknown one → bad-message-type', w.call({ key: 'k', text: 'x', message_type: 'answer' }).code === 'bad-message-type' && w.call({ key: 'k', text: 'x', message_type: 'test-result' }).code === 'type-reserved' && w.call({ key: 'k', text: 'x', message_type: 'chat' }).code === 'bad-message-type')
+  check('message_type: a bridge type from a caller → bad-message-type; test-result is accepted since 2d (it needs its result); an unknown one → bad-message-type', w.call({ key: 'k', text: 'x', message_type: 'answer' }).code === 'bad-message-type' && w.call({ key: 'k', text: 'x', message_type: 'test-result' }).code === 'bad-fields' && w.call({ key: 'k', text: 'x', message_type: 'test-result', fields: { result: 'pass' } }).ok && w.call({ key: 'k', text: 'x', message_type: 'chat' }).code === 'bad-message-type')
   check('message_type / fields without a report → bad-input; fields on a note → bad-fields', w.call({ key: 'k', message_type: 'note' }).code === 'bad-input' && w.call({ key: 'k', text: 'x', fields: { a: 1 } }).code === 'bad-fields')
 })
 

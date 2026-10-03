@@ -47,8 +47,8 @@
 //   withdrawal (state "withdrawn"), answerQuestion2 (answer + change answer), withdrawQuestion2, expireQuestions2,
 //   questionOutcome2, nextQuestionExpiry2; an OPEN question never goes stale (staleAt2 / effectiveState2).
 // - TYPES (Robin, 2026-10-03, "typed nodes and entries"; §1.7): two small built-in registries — NODE_TYPES (context, plan,
-//   group, question, agent, session; test-run reserved) declare per type its fields, display, rollup, children and the #92
-//   menu slot; MESSAGE_TYPES (note, question, answer, withdrawal, expiry, event; test-result reserved) declare each entry
+//   group, question, agent, session; test-run reserved until 2d) declare per type its fields, display, rollup, children and
+//   the #92 menu slot; MESSAGE_TYPES (note, question, answer, withdrawal, expiry, event; test-result reserved until 2d) declare each entry
 //   type's typed fields (validateEntryFields). `context_type` gives a NEW context its type, `message_type` + `fields` an
 //   entry's; setType2 is the dashboard's Show as group / plan. GROUPS (§5.7) are type group: no bar (groupCount2 instead),
 //   no plan end, nothing added to the parent's rollup. A question is type question; an answer an `answer` entry.
@@ -74,12 +74,25 @@
 //   an action notifies, to whom (the node's session + its nearest agent) and when (batched / at once); subjects name the
 //   node's path at SEND time, from its id.
 //
+// BUILD STEP 2d (docs/spec-88.md §1.7, §3.8, §8 step 2d) — the first USER types on 2b's registries:
+// - the `test-run` node type (context-settable: --context-type=test-run): its bar is its ITEMS across its BUCKETS
+//   (`items: 'tree'`, runItems2 — §3.8's Pending / In progress / Passed / Failed), and its row shows that bar AND its
+//   counts (`show: 'tests'`, testCounts2: passed / failed / skipped / to go of N, + checks); its plan also ends on a FAILED
+//   line (`ends`); planRemoval2 takes a run whole when only buckets and items are below it.
+// - the `test-result` message type (--message-type=test-result + fields result (required) / checks / failed (≤ checks) /
+//   duration (ms; "4.1s", "250ms")): the node KEEPS its latest one (`keep: 'test'` → node.test, with the state it left), so
+//   the bridge counts them; the result stands while that state does (testOutcome2) — a later state change wins, a restart
+//   (todo / running / blocked) clears it; a result that contradicts the call's own state → warning `result-state`.
+// - #92 folded in: every type's context-aware MENU as data (`menu`: { action, label, group, when }), menuOf2 = the entries
+//   that apply to a node now (WHEN2 mirrors applyAction2's checks).
+//
 // STUBS LEFT FOR LATER STEPS (said where they bite):
-// - 2d (types): the reserved `test-run` node type and `test-result` message type are named in the registries but refused
-//   `type-reserved`; the registry's `menu` slots are empty until #92.
 // - Step 3 (records + replay): records are produced here (v:6, kind:"node") but not replayed; the session ROOT writes no
 //   record (its id is mintId(session, "", "") — derivable). `log:false` writes no entry and only marks the node `cp_dirty`
-//   (checkpoints are step 3). Step 6 rebuilds the ghost table at startup.
+//   (checkpoints are step 3 — they must carry `test`, 2d, as a log:false test-result keeps it with no entry). Step 6
+//   rebuilds the ghost table at startup.
+// - Step 9 wires the script's typed-field flags (--result / --checks / --failed / --duration → `fields`); step 10 the
+//   dashboard's use of displayOf2 (`tests`) and menuOf2.
 import { lc } from './keys.js'
 import { DEPTH2, ACTIVITY_LIMITS, ACTIVITY_STATES, mintId, validKey, slugKey, uniqueKey, normLabel, labelKey, parsePath2, parseRef, formatPath2,
   parseDuration, parseProgress, parseEta, parseText, sessionKey, rankOf, rankGroup, rankBetween, derivedRank, resolveConfig, normBy, byText,
@@ -95,9 +108,10 @@ const ID_RE = /^[a-z2-7]{16}$/
 const LIVE = new Set(['running', 'blocked'])                     // the states that can go stale
 const FINAL = new Set(['done', 'failed', 'abandoned'])           // an agent's line in one of them finishes it; the ETA is dropped
 const OPEN_ITEM = new Set(['todo', 'running', 'blocked'])        // an OPEN plan item (what a cascade abandons)
-const PLAN_END = new Set(['done', 'abandoned'])                  // a context plan node's line in one of them ends its plan
+const PLAN_END = new Set(['done', 'abandoned'])                  // the plan-end MARKER's states (a context's own line: its type's `ends`)
 const PLAN_STATES = new Set(['todo', 'skipped'])                 // contexts only (skipped: plan items only)
 const QSTATE = Object.freeze({ asked: 'blocked', answered: 'done', expired: 'abandoned', withdrawn: 'abandoned' })
+const STATE_OUTCOME = Object.freeze({ done: 'pass', failed: 'fail', skipped: 'skip', abandoned: 'skip' })   // 2d: a test's outcome by its state
 
 // ---------------------------------------------------------------------------------------------------------------
 // small helpers
@@ -162,13 +176,14 @@ export const rootOf = sess => sess.nodes.get(sess.rootId)
 // 2b: the node TYPE (NODE_TYPES: context | plan | group | question for a context, agent, session), the LINE (`current` =
 // { id, ts, text, state, details, data, by?, question? }), the bar (`progress`), `eta_at`, `stale_after_ms`, `finished_at`
 // (agents / the root), the plan-end marker (`plan_end`, agents / the root), and the node's own bounded in-memory log (`log`,
-// oldest dropped → `log_dropped`). `cp_dirty`: a log:false report changed it (step 3's checkpoint).
+// oldest dropped → `log_dropped`). `cp_dirty`: a log:false report changed it (step 3's checkpoint). 2d: `test` = its latest
+// test-result's fields { result, checks?, failed?, duration?, ts, entry, state } (MESSAGE_TYPES `keep`; testOutcome2).
 function newNode({ id, key, creator, chain, scope, kind, label, parent, now, asked = null, transient = false, grace_ms = null, implicit = false, runs = 1,
   plan_ix = null, rank = null, type = null }) {
   return { id, key, creator, chain, scope, kind, type: type || (kind === 'context' ? 'context' : kind), label, asked, parent, rank, created_at: now, run_at: now, runs, last_activity: now,
     transient: !!transient, grace_ms: transient && grace_ms ? grace_ms : null, empty_since: null, merged_into: null, merged_from: null,
     implicit: !!implicit, plan: plan_ix != null, plan_ix, current: null, progress: null, eta_at: null, stale_after_ms: null, finished_at: null,
-    gone_at: null, plan_end: null, log: [], log_dropped: 0, cp_dirty: false }
+    gone_at: null, plan_end: null, log: [], log_dropped: 0, cp_dirty: false, test: null }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -176,32 +191,74 @@ function newNode({ id, key, creator, chain, scope, kind, label, parent, now, ask
 
 const REPORT_FIELDS = Object.freeze(['text', 'state', 'progress', 'eta', 'stale_after', 'details', 'data', 'log', 'plan', 'ask', 'message_type', 'fields'])
 const deep = o => Object.freeze(Object.fromEntries(Object.entries(o).map(([k, v]) => [k, Object.freeze({ ...v, fields: Object.freeze(v.fields),
-  ...(v.kind ? { children: v.children ? Object.freeze(v.children) : null, menu: Object.freeze(v.menu || []) } : {}) })])))
+  ...(v.kind ? { items: v.items || 'children', ends: Object.freeze(v.ends || ['done', 'abandoned']), children: v.children ? Object.freeze(v.children) : null,
+    menu: Object.freeze((v.menu || []).map(m => Object.freeze({ ...m }))) } : {}) })])))
+
+// 2d (#92 folded in): the context-aware MENU of each node type, as DATA — entries in display order, each { action (an
+// ACTIONS2 wire name), label, group (the dashboard draws a separator between groups), when (a WHEN2 predicate: shown only
+// while it holds) }. menuOf2 answers the entries that apply to a node now.
+const M_ITEM = [
+  { action: 'done', label: 'Mark done', group: 'item', when: 'item-not-done' },
+  { action: 'skip', label: 'Skip', group: 'item', when: 'item-not-skipped' },
+  { action: 'reopen', label: 'Reopen (to do)', group: 'item', when: 'item-not-todo' },
+  { action: 'abandon', label: 'Abandon', group: 'item', when: 'context-not-abandoned' },
+]
+const M_PLAN = (noun = 'the plan') => [
+  { action: 'complete', label: `Complete ${noun}`, group: 'plan', when: 'plan-open' },
+  { action: 'reopen_plan', label: `Reopen ${noun}`, group: 'plan', when: 'plan-ended' },
+  { action: 'abandon_plan', label: `Abandon ${noun}`, group: 'plan', when: 'holds-open-plan' },
+]
+const M_NODE = [
+  { action: 'move', label: 'Move to…', group: 'node', when: 'not-root' },
+  { action: 'rename', label: 'Rename…', group: 'node', when: 'not-root' },
+  { action: 'edit_text', label: 'Edit text…', group: 'node' },
+  { action: 'message', label: 'Message the session…', group: 'node' },
+]
+const M_MERGE = { action: 'merge', label: 'Merge into…', group: 'node' }
+const M_AS_GROUP = { action: 'show_as_group', label: 'Show as group', group: 'type', when: 'not-item' }
+const M_AS_PLAN = { action: 'show_as_plan', label: 'Show as plan', group: 'type' }
+const M_AGENT = [
+  { action: 'finish', label: 'Mark finished…', group: 'agent', when: 'quiet-unfinished' },
+  { action: 'dismiss', label: 'Dismiss from the board', group: 'agent', when: 'dismissable' },
+]
 /**
  * The NODE TYPE registry. Every node has a `type`; a context's is given at creation (`--context-type=<type>`, the tool's
  * `context_type`, case-insensitive; default `context`) and changed only by the dashboard (Show as group / plan: setType2) or
  * by --ask (a question). Per type:
  * - `kind`      the node kind it belongs to (context | agent | session; the kind never changes, §1.4)
  * - `settable`  a caller may give it as --context-type (agent, session and question are the bridge's: --agent / --ask)
- * - `reserved`  named, not built yet (test-run: build step 2d) — refused `type-reserved`
+ * - `reserved`  named, not built yet — refused `type-reserved` (none since 2d built test-run; kept for later types)
  * - `fields`    the report fields a node of this type takes (a group takes no progress: it has no bar; a question no plan)
- * - `glyph`, `show`  display: the row's glyph and what shows where a bar would ('bar' | 'count' | 'status')
+ * - `glyph`, `show`  display: the row's glyph and what shows where a bar would ('bar' | 'count' | 'status' | 'tests':
+ *               a test-run's bar AND its pass / fail counts, testCounts2)
  * - `bar`       its own bar: 'auto' (its plan items only when it holds any — ROLLUP — else its children's bars), 'items'
  *               (always "N of M" over its items), 'none'
+ * - `items`     (2d) where its plan ITEMS are: 'children' (its own plan-item children, + its questions), or 'tree' (a
+ *               test-run: every plan item / question BELOW it, reached through its BUCKETS — the contexts that hold them —
+ *               not through an agent or a group; runItems2)
  * - `counts_as` what it adds to its PARENT's rollup: 'bar' (its bar), 'item' (one of "N of M"), 'none' (a plan item
  *               counts as an item whatever its type)
- * - `plan_end`  it can hold a plan that ENDS (§5.7)
+ * - `plan_end`  it can hold a plan that ENDS (§5.7); `ends` (2d): the states of a CONTEXT plan node's own line that end
+ *               it (done / abandoned; a test-run's failed line ends it too — the run is over)
  * - `children`  the node types allowed under it (null = any; [] = none)
- * - `menu`      the context-aware menu's actions — the slot #92 fills (the dashboard reads it)
+ * - `menu`      (2d, #92) the context-aware menu: [{ action, label, group, when? }] in display order (menuOf2)
  */
 export const NODE_TYPES = deep({
-  context: { kind: 'context', settable: true, fields: REPORT_FIELDS, glyph: '•', show: 'bar', bar: 'auto', counts_as: 'bar', plan_end: true, children: null },
-  plan: { kind: 'context', settable: true, fields: REPORT_FIELDS, glyph: '☰', show: 'bar', bar: 'items', counts_as: 'bar', plan_end: true, children: null },
-  group: { kind: 'context', settable: true, fields: REPORT_FIELDS.filter(f => f !== 'progress'), glyph: '▤', show: 'count', bar: 'none', counts_as: 'none', plan_end: false, children: null },
-  question: { kind: 'context', settable: false, fields: ['text', 'state', 'stale_after', 'details', 'data', 'log', 'ask'], glyph: '?', show: 'status', bar: 'none', counts_as: 'item', plan_end: false, children: [] },
-  'test-run': { kind: 'context', settable: true, reserved: true, fields: REPORT_FIELDS, glyph: '⚑', show: 'bar', bar: 'items', counts_as: 'bar', plan_end: true, children: null },
-  agent: { kind: 'agent', settable: false, fields: REPORT_FIELDS, glyph: '◆', show: 'bar', bar: 'auto', counts_as: 'bar', plan_end: true, children: null },
-  session: { kind: 'session', settable: false, fields: REPORT_FIELDS, glyph: '◎', show: 'bar', bar: 'auto', counts_as: 'bar', plan_end: true, children: null },
+  context: { kind: 'context', settable: true, fields: REPORT_FIELDS, glyph: '•', show: 'bar', bar: 'auto', counts_as: 'bar', plan_end: true, children: null,
+    menu: [...M_ITEM, ...M_PLAN(), M_AS_GROUP, M_AS_PLAN, M_MERGE, ...M_NODE] },
+  plan: { kind: 'context', settable: true, fields: REPORT_FIELDS, glyph: '☰', show: 'bar', bar: 'items', counts_as: 'bar', plan_end: true, children: null,
+    menu: [...M_ITEM, ...M_PLAN(), M_AS_GROUP, M_MERGE, ...M_NODE] },
+  group: { kind: 'context', settable: true, fields: REPORT_FIELDS.filter(f => f !== 'progress'), glyph: '▤', show: 'count', bar: 'none', counts_as: 'none', plan_end: false, children: null,
+    menu: [M_ITEM[3], M_AS_PLAN, M_MERGE, ...M_NODE] },
+  question: { kind: 'context', settable: false, fields: ['text', 'state', 'stale_after', 'details', 'data', 'log', 'ask'], glyph: '?', show: 'status', bar: 'none', counts_as: 'item', plan_end: false, children: [],
+    menu: [{ action: 'answer', label: 'Answer…', group: 'question', when: 'open-question' }, { action: 'change_answer', label: 'Change answer…', group: 'question', when: 'answered-question' },
+      { action: 'withdraw', label: 'Withdraw', group: 'question', when: 'open-question' }, M_NODE[0], M_NODE[3]] },
+  'test-run': { kind: 'context', settable: true, fields: REPORT_FIELDS, glyph: '⚑', show: 'tests', bar: 'items', items: 'tree', counts_as: 'bar', plan_end: true, ends: ['done', 'failed', 'abandoned'], children: null,
+    menu: [...M_ITEM, ...M_PLAN('the run'), M_MERGE, ...M_NODE] },
+  agent: { kind: 'agent', settable: false, fields: REPORT_FIELDS, glyph: '◆', show: 'bar', bar: 'auto', counts_as: 'bar', plan_end: true, children: null,
+    menu: [...M_PLAN('its plan'), ...M_AGENT, ...M_NODE] },
+  session: { kind: 'session', settable: false, fields: REPORT_FIELDS, glyph: '◎', show: 'bar', bar: 'auto', counts_as: 'bar', plan_end: true, children: null,
+    menu: [...M_PLAN('its plan'), ...M_AGENT, M_NODE[2], M_NODE[3]] },
 })
 /** A node's registry entry (an unknown type reads as `context`). */
 export const typeOf = n => NODE_TYPES[n && n.type] || NODE_TYPES.context
@@ -225,8 +282,13 @@ export function parseContextType(raw, o = {}) {
  * The MESSAGE (entry) TYPE registry. Every entry has a `type` (`--message-type=<type>`, the tool's `message_type`; default
  * `note`) and, when its type declares any, typed `fields` — validated, so the bridge can count them. `--data` stays the
  * free-form extra the bridge does not interpret. `settable`: a caller may give it (the others are written by the bridge:
- * an ask is a `question` entry, an answer an `answer` entry, …); `reserved`: named, not built yet (test-result: step 2d).
- * Field specs: { type: 'string' | 'text' | 'int' | 'bool' | 'enum' | 'duration' | 'time' | 'list', max?, min?, values?, item? }.
+ * an ask is a `question` entry, an answer an `answer` entry, …); `reserved`: named, not built yet (none since 2d).
+ * `keep` (2d): the node attribute where the node KEEPS its latest entry of this type's fields (test-result → `test`), so
+ * the bridge can count them (testCounts2) after the entry has left the in-memory log — and with log:false too.
+ * Field specs: { type: 'string' | 'text' | 'int' | 'bool' | 'enum' | 'duration' | 'time' | 'list', max?, min?, values?,
+ * item?, required? (the type needs it: refused without it), at_most? (an int no greater than that other field) }. A
+ * duration is kept in ms: a number IS ms (so a kept value validates to itself), a string has a unit ("4.1s", "250ms",
+ * "2m", "1h25m"); a bare-number string is refused (no unit).
  */
 export const MESSAGE_TYPES = deep({
   note: { settable: true, fields: {} },   // a plain report (the default)
@@ -235,8 +297,18 @@ export const MESSAGE_TYPES = deep({
   withdrawal: { settable: false, fields: { note: { type: 'string', max: ACTIVITY_LIMITS.text } } },
   expiry: { settable: false, fields: { after_ms: { type: 'int', min: 0 } } },
   event: { settable: false, fields: {} },   // a structural change the bridge logs: moved, renamed, merged, unmerged, emptied, a type change
-  'test-result': { settable: true, reserved: true, fields: { result: { type: 'enum', values: ['pass', 'fail', 'skip'] }, checks: { type: 'int', min: 0 }, duration: { type: 'duration' } } },
+  // 2d: one test's outcome (`result`, required), how many checks it ran and how many of them failed, how long it took
+  'test-result': { settable: true, keep: 'test', fields: { result: { type: 'enum', values: ['pass', 'fail', 'skip'], required: true }, checks: { type: 'int', min: 0 },
+    failed: { type: 'int', min: 0, at_most: 'checks' }, duration: { type: 'duration' } } },
 })
+/** A duration field's value → ms (NaN when bad): a number is ms; a string needs a unit — "4.1s", "250ms", "2m", "1h25m". */
+function durationMs(v) {
+  if (typeof v === 'number') return Number.isFinite(v) && v >= 0 ? Math.round(v) : NaN
+  if (typeof v !== 'string') return NaN
+  const s = v.trim().toLowerCase(), ms = /^(\d+(?:\.\d+)?)\s*ms$/.exec(s)
+  if (ms) return Math.round(parseFloat(ms[1]))
+  return /^[\d.]+$/.test(s) ? NaN : parseDuration(s)
+}
 /**
  * Validate an entry's typed FIELDS against its message type (the registry): unknown fields are refused, each value is
  * checked and normalised (a duration → ms, an int from a numeric string …). → { ok, fields } (only the fields given) or
@@ -246,7 +318,9 @@ export const MESSAGE_TYPES = deep({
 export function validateEntryFields(type, fields) {
   const T = MESSAGE_TYPES[type]
   if (!T) return bad('bad-message-type', `message type "${type}" is not one of ${Object.keys(MESSAGE_TYPES).join('|')}`)
-  if (fields == null) return { ok: true, fields: {} }
+  const need = Object.keys(T.fields).filter(k => T.fields[k].required)
+  const needs = out => { const miss = need.filter(k => out[k] === undefined); return miss.length ? bad('bad-fields', `a ${type} entry needs ${miss.map(k => `${k}${T.fields[k].values ? ` (${T.fields[k].values.join('|')})` : ''}`).join(', ')}`) : { ok: true, fields: out } }
+  if (fields == null) return needs({})
   if (typeof fields !== 'object' || Array.isArray(fields)) return bad('bad-fields', 'fields must be an object of the message type\'s typed fields')
   const out = {}
   for (const [k, v] of Object.entries(fields)) {
@@ -262,17 +336,18 @@ export function validateEntryFields(type, fields) {
       out[k] = x
     } else if (s.type === 'int' || s.type === 'time') {
       const n = typeof v === 'number' ? v : typeof v === 'string' && /^\s*-?\d+\s*$/.test(v) ? Number(v) : NaN
-      if (!Number.isInteger(n) || n < (s.type === 'time' ? 1 : s.min != null ? s.min : -Infinity)) return no(`must be ${s.type === 'time' ? 'a ms time' : `an integer${s.min != null ? ` ≥ ${s.min}` : ''}`}`)
+      if (!Number.isSafeInteger(n) || n < (s.type === 'time' ? 1 : s.min != null ? s.min : -Infinity)) return no(`must be ${s.type === 'time' ? 'a ms time' : `an integer${s.min != null ? ` ≥ ${s.min}` : ''}`}`)
       out[k] = n
     } else if (s.type === 'bool') { const b = boolOf(v); if (b === null) return no('must be true or false'); out[k] = b }
     else if (s.type === 'enum') { const x = typeof v === 'string' ? lc(v.trim()) : ''; if (!s.values.includes(x)) return no(`must be one of ${s.values.join('|')}`); out[k] = x }
-    else if (s.type === 'duration') { const ms = typeof v === 'string' && /^\s*[\d.]+\s*$/.test(v) ? NaN : parseDuration(v); if (!Number.isFinite(ms) || ms < 0) return no('must be a duration like "4.1s" or "2m"'); out[k] = ms }
+    else if (s.type === 'duration') { const ms = durationMs(v); if (!Number.isFinite(ms) || ms < 0) return no('must be a duration with a unit, like "4.1s", "250ms" or "2m" (a number is ms)'); out[k] = ms }
     else if (s.type === 'list') {
       if (!Array.isArray(v) || (s.max && v.length > s.max) || v.some(x => typeof x !== 'string' || !normText(x) || (s.item && cpLen(normText(x)) > s.item))) return no(`must be a list of at most ${s.max} strings of ≤ ${s.item} characters`)
       out[k] = v.map(x => normText(x))
     }
   }
-  return { ok: true, fields: out }
+  for (const [k, s] of Object.entries(T.fields)) if (s.at_most && out[k] !== undefined && out[s.at_most] !== undefined && out[k] > out[s.at_most]) return bad('bad-fields', `${type}.${k} (${out[k]}) can't be more than ${s.at_most} (${out[s.at_most]})`)
+  return needs(out)
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -334,7 +409,7 @@ export function nodeView(sess, n) {
   if (!n) return null
   return { id: n.id, key: n.key, scope: n.scope, label: n.label, path: pathOf(sess, n), kind: n.kind, type: n.type,
     ...(n.transient ? { transient: true, ...(n.grace_ms ? { grace_ms: n.grace_ms } : {}) } : {}), ...(n.merged_into ? { merged_into: n.merged_into } : {}),
-    ...(n.plan ? { plan_item: true } : {}) }
+    ...(n.plan ? { plan_item: true } : {}), ...(n.test ? { test: { ...n.test } } : {}) }
 }
 /** The visible tree below a node, for tests and debugging: { label, key, id, kids:[…] }. */
 export function treeOf(sess, node = rootOf(sess)) {
@@ -1223,6 +1298,15 @@ function applyReport(t, node, m, o = {}) {
   if ('progress' in m) fset(t, node, 'progress', m.progress ? { ...m.progress } : null)
   if ('eta_at' in m) fset(t, node, 'eta_at', m.eta_at || null)
   if (FINAL.has(stateOf(node))) fset(t, node, 'eta_at', null)
+  // 2d: a type with `keep` (test-result → `test`): the node keeps this entry's fields (+ the state it left the node in: the
+  // result stands while that state does, testOutcome2); a later report that STARTS it again (todo / running / blocked, with
+  // no test-result) clears it — a new run of that test. No state is implied by a result (the state drives the bar).
+  const keepAs = MESSAGE_TYPES[mtype] && MESSAGE_TYPES[mtype].keep
+  if (keepAs) {
+    fset(t, node, keepAs, { ...(mfields || {}), ts: t.now, entry: m.log !== false ? entryId : null, state: stateOf(node) })
+    const so = STATE_OUTCOME[st]
+    if (so && mfields && mfields.result && so !== mfields.result) warn(t, { code: 'result-state', result: mfields.result, state: st, what: `the result says ${mfields.result} but the state says ${st} — the count shows ${mfields.result} until the state changes` })
+  } else if (st && OPEN_ITEM.has(st) && node.test) fset(t, node, 'test', null)
   fset(t, node, 'implicit', false)
   if (!by) touch(t, node, m.stale_after_ms, o.caller)
   if (setText && node.transient) keepNode(t, node)   // its OWN line makes a transient context permanent (§3.8)
@@ -1309,7 +1393,7 @@ function parseReport(input, o, warnings) {
     if (!T.settable) return bad('bad-message-type', `"${v}" entries are written by the bridge (${v === 'question' ? 'ask a question with ask' : v === 'answer' ? 'answers come from the dashboard' : 'not by a report'})`)
     mtype = v
   }
-  if (given('fields')) { const f = validateEntryFields(mtype || 'note', input.fields); if (!f.ok) return f; mfields = f.fields }
+  if (given('fields') || mtype) { const f = validateEntryFields(mtype || 'note', given('fields') ? input.fields : null); if (!f.ok) return f; mfields = f.fields }   // a type's required fields too (test-result needs result)
   const typed = mtype != null || mfields != null
   // ---- a QUESTION (#85): ask (+ choices / free / expires); it always sets the line, always logs
   if (['ask', 'choices', 'free', 'expires'].some(given)) {
@@ -1495,9 +1579,14 @@ function applyPlan2(t, target, items, scope) {
  */
 export function planOf2(sess, node) {
   if (!sess || !node || !typeOf(node).plan_end) return null
-  const kids = childrenOf2(sess, node), items = kids.filter(c => c.plan)
-  if (!items.length) return null
-  for (const c of kids) if (!c.plan && countsAs(c) === 'item') items.push(c)
+  let items
+  if (typeOf(node).items === 'tree') { items = runItems2(sess, node); if (!items.some(c => c.plan)) return null }   // 2d: a test-run's items are in its buckets
+  else {
+    const kids = childrenOf2(sess, node)
+    items = kids.filter(c => c.plan)
+    if (!items.length) return null
+    for (const c of kids) if (!c.plan && countsAs(c) === 'item') items.push(c)
+  }
   let open = 0, done = 0, skipped = 0, doneAt = 0, all = true
   for (const it of items) {
     const s = stateOf(it)
@@ -1508,14 +1597,15 @@ export function planOf2(sess, node) {
 }
 /**
  * When a plan ENDED, or null while it is open (6c / 6d): every item done (the last one's time), a CONTEXT plan node's own
- * line set done / abandoned, or the plan-end marker of an agent / the root — whichever came first. Skipped, failed, idle,
- * todo, running and blocked items keep it open; a group has no plan end.
+ * line set to one of its type's `ends` (done / abandoned; a test-run's failed too, 2d), or the plan-end marker of an agent /
+ * the root — whichever came first. Skipped, failed, idle, todo, running and blocked items keep it open; a group has no plan
+ * end.
  */
 export function planEndAt2(sess, node, p = planOf2(sess, node)) {
   if (!p) return null
   const ends = []
   if (p.allDoneAt != null) ends.push(p.allDoneAt)
-  if (node.kind === 'context' && node.current && PLAN_END.has(node.current.state)) ends.push(node.current.ts || 0)
+  if (node.kind === 'context' && node.current && typeOf(node).ends.includes(node.current.state)) ends.push(node.current.ts || 0)
   if (node.plan_end && PLAN_END.has(node.plan_end.state)) ends.push(node.plan_end.ts || 0)
   return ends.length ? Math.min(...ends) : null
 }
@@ -1523,7 +1613,7 @@ export function planEndAt2(sess, node, p = planOf2(sess, node)) {
 export function planEndHow2(sess, node, p = planOf2(sess, node)) {
   if (!p || planEndAt2(sess, node, p) == null) return null
   if (p.allDoneAt != null) return 'all-done'
-  if (node.kind === 'context' && node.current && PLAN_END.has(node.current.state)) return node.current.state
+  if (node.kind === 'context' && node.current && typeOf(node).ends.includes(node.current.state)) return node.current.state
   return node.plan_end ? node.plan_end.state : null
 }
 
@@ -1572,7 +1662,7 @@ export function bar2(sess, node, memo) {
     if (node.progress) r = { ...node.progress, skipped: skOf(node.progress), pct: progressPct(node.progress), rollup: false, n: 1 }
     else {
       const kids = childrenOf2(sess, node).filter(c => countsAs(c) !== 'none').sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-      const items = kids.filter(c => countsAs(c) === 'item')
+      const items = T.items === 'tree' ? runItems2(sess, node) : kids.filter(c => countsAs(c) === 'item')   // 2d: a test-run's items, across its buckets
       if (T.bar === 'items' || items.some(c => c.plan)) r = itemsBar(items)
       else {
         const bars = kids.filter(c => countsAs(c) === 'bar').map(c => bar2(sess, c, memo)).filter(Boolean)
@@ -1584,10 +1674,106 @@ export function bar2(sess, node, memo) {
   if (memo) memo.set(node.id, r)
   return r
 }
-/** What a row shows for its type (NODE_TYPES): { type, glyph, show:'bar'|'count'|'status', bar?, count? } — the dashboard's input. */
+/**
+ * What a row shows for its type (NODE_TYPES): { type, glyph, show:'bar'|'count'|'status'|'tests', bar?, count?, tests? } —
+ * the dashboard's input. A test-run ('tests') shows its bar (its items across its buckets) AND its counts (testCounts2).
+ */
 export function displayOf2(sess, node, o = {}) {
   const T = typeOf(node)
-  return { type: node.type, glyph: T.glyph, show: T.show, ...(T.show === 'bar' ? { bar: bar2(sess, node, o.memo) } : {}), ...(T.show === 'count' ? { count: groupCount2(sess, node, o) } : {}) }
+  return { type: node.type, glyph: T.glyph, show: T.show, ...(T.show === 'bar' || T.show === 'tests' ? { bar: bar2(sess, node, o.memo) } : {}),
+    ...(T.show === 'count' ? { count: groupCount2(sess, node, o) } : {}), ...(T.show === 'tests' ? { tests: testCounts2(sess, node) } : {}) }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2d: test runs (§1.7 test-run / test-result, §3.8's buckets)
+
+/**
+ * A test-run's ITEMS (NODE_TYPES `items: 'tree'`): every plan item and question below it, reached through its BUCKETS —
+ * the contexts that hold them (Pending / In progress / Passed / Failed, a nested test-run) — never through an agent (its
+ * work is its own) or a group (a group adds nothing to a rollup). An item's own children are not walked. In sibling order.
+ * @param {any} sess @param {any} node @returns {any[]}
+ */
+export function runItems2(sess, node) {
+  const out = []
+  const walk = n => { for (const c of childrenOf2(sess, n)) { if (countsAs(c) === 'item') out.push(c); else if (c.kind === 'context' && countsAs(c) === 'bar') walk(c) } }
+  walk(node)
+  return out
+}
+/**
+ * One test's OUTCOME: 'pass' | 'fail' | 'skip' | 'running' | 'pending' (null for a node that is not a test). Its latest
+ * test-result's `result` while the node is still in the state that report left it in; else (a later dashboard tick or
+ * report changed the state — the latest word wins — or it has no result) its STATE: done → pass, failed → fail, skipped /
+ * abandoned → skip, running / blocked → running, anything else (todo, idle) → pending.
+ */
+export function testOutcome2(node) {
+  if (!node) return null
+  const s = stateOf(node)
+  if (node.test && node.test.result && node.test.state === s) return node.test.result
+  return STATE_OUTCOME[s] || (LIVE.has(s) ? 'running' : 'pending')
+}
+/**
+ * A test-run's COUNTS (what shows beside its bar, §1.7 `show: 'tests'`; any node can be asked): its TESTS are its items
+ * (runItems2) plus every other context below it, through its buckets, that holds a test-result (`test`) — the run node's
+ * own result is not one of them. Per test its outcome (testOutcome2); `checks` / `failed_checks` / `duration_ms` add up the
+ * tests' latest test-results. "History follows the node": a test moved out of the run no longer counts, and a test started
+ * again (todo / running) has dropped its old result. → null when it holds no test.
+ * @returns {null | { tests, passed, failed, skipped, running, pending, checks, failed_checks, duration_ms, text }}
+ */
+export function testCounts2(sess, node) {
+  if (!sess || !node) return null
+  const tests = []
+  const walk = n => {
+    for (const c of childrenOf2(sess, n)) {
+      if (countsAs(c) === 'item') { if (!isQuestion2(c)) tests.push(c) }   // a question counts in the bar, but it is not a test
+      else if (c.kind !== 'context' || countsAs(c) === 'none') continue
+      else if (c.test && c.type !== 'test-run') tests.push(c)
+      else walk(c)
+    }
+  }
+  walk(node)
+  if (!tests.length) return null
+  const r = { tests: tests.length, passed: 0, failed: 0, skipped: 0, running: 0, pending: 0, checks: 0, failed_checks: 0, duration_ms: 0, text: '' }
+  const key = { pass: 'passed', fail: 'failed', skip: 'skipped', running: 'running', pending: 'pending' }
+  for (const c of tests) {
+    r[key[testOutcome2(c)]]++
+    if (c.test) { r.checks += c.test.checks || 0; r.failed_checks += c.test.failed || 0; r.duration_ms += c.test.duration || 0 }
+  }
+  const open = r.running + r.pending
+  r.text = [`${r.passed} passed`, `${r.failed} failed`, r.skipped && `${r.skipped} skipped`, open && `${open} to go`].filter(Boolean).join(' · ') + ` of ${r.tests}` +
+    (r.checks ? ` · ${r.checks} check${r.checks === 1 ? '' : 's'}${r.failed_checks ? ` (${r.failed_checks} failed)` : ''}` : '')
+  return r
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 2d: the context-aware MENU (#92) — NODE_TYPES `menu`, filtered by WHEN2
+
+/** The `when` predicates of the menu entries (sess, node, o = { now, staleMin }) — each mirrors applyAction2's own check. */
+const WHEN2 = Object.freeze({
+  'item-not-done': (s, n) => !!n.plan && stateOf(n) !== 'done',
+  'item-not-skipped': (s, n) => !!n.plan && stateOf(n) !== 'skipped',
+  'item-not-todo': (s, n) => !!n.plan && stateOf(n) !== 'todo',
+  'context-not-abandoned': (s, n) => n.kind === 'context' && !(n.current && n.current.state === 'abandoned'),
+  'plan-open': (s, n) => { const p = planOf2(s, n); return !!p && planEndAt2(s, n, p) == null },
+  'plan-ended': (s, n) => { const p = planOf2(s, n); return !!p && planEndAt2(s, n, p) != null && p.allDoneAt == null },
+  'holds-open-plan': (s, n) => (n.kind !== 'context' || !!planOf2(s, n)) && heldPlans2(s, n).length > 0,
+  'quiet-unfinished': (s, n, o) => !n.finished_at && quiet2(s, n, o.now, o.staleMin),
+  'dismissable': (s, n, o) => subtree2(s, n).every(x => (x === n ? quiet2(s, x, o.now, o.staleMin) : x.kind !== 'agent' || x.implicit || quiet2(s, x, o.now, o.staleMin))) && !openPlanIds(s).has(n.id),
+  'not-root': (s, n) => n.parent != null,
+  'not-item': (s, n) => !n.plan,
+  'open-question': (s, n) => isOpenQuestion2(n),
+  'answered-question': (s, n) => !!(isQuestion2(n) && n.current && n.current.question && n.current.question.status === 'answered'),
+})
+/**
+ * The context-aware MENU of a node NOW (#92, folded into the type registry): its type's `menu` entries whose `when` holds —
+ * [{ action, label, group }] in display order; each `action` is an applyAction2 action. A plan item's item actions come with
+ * its type's menu (a plan item is an attribute, not a type). o = { now, staleMin } (the dashboard's slider; for finish /
+ * dismiss: is the agent quiet).
+ * @param {any} sess @param {any} node @param {{ now?: number, staleMin?: number }} [o]
+ */
+export function menuOf2(sess, node, o = {}) {
+  if (!sess || !node) return []
+  const ctx = { now: Number.isFinite(o.now) ? o.now : Date.now(), staleMin: Number.isFinite(o.staleMin) ? o.staleMin : 15 }
+  return typeOf(node).menu.filter(m => !m.when || WHEN2[m.when](sess, node, ctx)).map(m => ({ action: m.action, label: m.label, group: m.group }))
 }
 
 /**
@@ -1617,7 +1803,7 @@ export function groupCount2(sess, node, o = {}) {
 /**
  * Change a context's TYPE (§5.7 — the dashboard's Show as group / Show as plan; 2c's action calls this): one `type` node
  * record + a logged `event` entry ("shown as a group by robin via dashboard (…)"); its children keep their states. Only
- * between the SETTABLE context types (context | plan | group); a question stays a question, an agent / the session have
+ * between the SETTABLE context types (context | plan | group | test-run); a question stays a question, an agent / the session have
  * theirs (`bad-type`); a plan item can't become a type that adds nothing to its plan (a group: `bad-type`); a reserved type
  * → `type-reserved`; the same type again → `no-change`.
  * @param {any} state @param {{ session: string, project?: string, user?: string, realm?: string }} ident @param {string} id
@@ -2096,8 +2282,18 @@ function openPlanIds(sess) {
 /** What removing an ENDED plan takes (6b): the plan node itself (with its items) when it is a plain context — not the root,
  * not an agent, not itself a plan item — holding nothing but the items and no live line; else just its items. */
 function planRemoval2(sess, n, p) {
-  if (n.kind === 'context' && n.parent != null && !n.plan && childrenOf2(sess, n).length === p.items.length && !(n.current && LIVE.has(n.current.state))) return [n]
+  // 2d: a test-run holds its items in buckets — it goes whole when everything below it is a bucket or an item (no agent)
+  const only = typeOf(n).items === 'tree' ? subtree2(sess, n).slice(1).every(x => x.kind === 'context') : childrenOf2(sess, n).length === p.items.length
+  if (n.kind === 'context' && n.parent != null && !n.plan && only && !(n.current && LIVE.has(n.current.state))) return [n]
   return p.items
+}
+/** 2d: is `n`'s plan part of an enclosing test-run's plan (n is one of its BUCKETS: the run's items include n's)? */
+function inRunPlan2(sess, n, p) {
+  for (let a = n.parent != null ? sess.nodes.get(n.parent) : null; a; a = a.parent != null ? sess.nodes.get(a.parent) : null) {
+    if (a.kind !== 'context') return false
+    if (typeOf(a).items === 'tree') { const rp = planOf2(sess, a); return !!rp && rp.items.includes(p.items[0]) }
+  }
+  return false
 }
 /**
  * The subtrees that may be EVICTED (6a / 6c), oldest first: FINISHED agents (by finished_at) and ENDED plans (by when they
@@ -2112,6 +2308,7 @@ function evictionCandidates2(sess, keep) {
     if (n.kind === 'agent' && n.finished_at && !keep.has(n.id) && !open.has(n.id)) out.push({ at: n.finished_at, id: n.id, roots: [n] })
     const p = planOf2(sess, n), end = p ? planEndAt2(sess, n, p) : null
     if (end == null || p.items.some(i => open.has(i.id)) || (n.parent != null && keep.has(n.id))) continue
+    if (inRunPlan2(sess, n, p)) continue   // 2d: a test-run's bucket goes with its run (the run is the candidate), not alone
     const roots = planRemoval2(sess, n, p)
     if (!roots.some(r => keep.has(r.id))) out.push({ at: end, id: n.id, roots })
   }

@@ -7,7 +7,8 @@ answered Q46 (only `/…` and single-step `../X` for `--move-to`, plus a resolve
 list, not a plan), reversed 6c decision 7 for bars (ROLLUP: a plan node's bar is its items only) and made nodes and entries
 TYPED (§1.7: a built-in registry of node types — a group is `--context-type=group`, a question a node of type `question` —
 and of message types — an answer is an `answer` entry). All his decisions
-are in §9 "Decisions". The build (§8) has started (steps 1, 2a and 2b done; 2c built, see §8). The agreed design is in
+are in §9 "Decisions". The build (§8) has started (steps 1, 2a and 2b done; 2c and 2d built, see §8 — 2d made `test-run` and
+`test-result` real types and filled the registry's `menu` slot for #92; its questions Q56 – Q60 are open). The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
 
@@ -153,10 +154,14 @@ what a type allows and how it shows, instead of special-casing groups or questio
 
 **Node types.** Every node has a `type`. Per type the registry declares: the `kind` it belongs to (context / agent /
 session — the kind never changes), whether a caller may give it (`settable`), the report FIELDS a node of that type takes
-(others are refused `bad-field`), its DISPLAY (`glyph`, and what `show`s where a bar would: `bar` | `count` | `status`), its
-ROLLUP behaviour (`bar`: its own bar — `auto` / `items` / `none`; `counts_as`: what it adds to its parent's rollup — `bar` /
-`item` / `none`), whether it can hold a plan that ENDS (`plan_end`), the node types allowed under it (`children`), and its
-MENU actions — the context-aware menu of #92 folds into this slot (empty until #92).
+(others are refused `bad-field`), its DISPLAY (`glyph`, and what `show`s where a bar would: `bar` | `count` | `status` |
+`tests`), its ROLLUP behaviour (`bar`: its own bar — `auto` / `items` / `none`; `items` (2d): where its plan items are —
+`children`, or `tree` for a test-run: below it, through its buckets; `counts_as`: what it adds to its parent's rollup — `bar` /
+`item` / `none`), whether it can hold a plan that ENDS (`plan_end`, and `ends` (2d): the states of its own line that end it —
+`done` / `abandoned`, a test-run's `failed` too), the node types allowed under it (`children`), and its MENU — the
+context-aware menu of #92, folded into this slot in step 2d: `[{ action, label, group, when }]` in display order, `action`
+being a dashboard action (§5.4, `applyAction2`) and `when` the condition under which it shows (`menuOf2`: the entries that
+apply to a node now; Q60).
 | Type | Kind | Set by | Bar / display | Adds to its parent | Notes |
 |---|---|---|---|---|---|
 | `context` | context | default; `--context-type=context` | `auto`: its plan items only when it holds any (ROLLUP), else its children's bars | its bar | plan-capable (an `--item` makes it a plan node) |
@@ -165,7 +170,7 @@ MENU actions — the context-aware menu of #92 folds into this slot (empty until
 | `question` | context | `--ask` (§5.8) | `status` (asked / answered / …) | one ITEM | holds no children; takes no `plan` / `progress` |
 | `agent` | agent | `--agent` | `auto` | its bar | |
 | `session` | session | the bridge (the root) | `auto` | — | |
-| `test-run` | context | (reserved — build step 2d) | `items` | its bar | #81's dashboard test reporter is its first user |
+| `test-run` | context | `--context-type=test-run` (step 2d) | `items` over its items across its BUCKETS (`items: tree`), shown WITH its counts (`show: tests`: "2 passed · 1 failed · 1 to go of 4 · 27 checks", Q56) | its bar | its plan also ends on a `failed` line; #81's dashboard test reporter is its first user (§3.8, Q59) |
 - **The flag** is `--context-type=<type>` (the tool's `context_type`), lower-case kebab-case flag style, values
   case-insensitive. It gives a NEW context its type (on an existing node it is ignored with `exists`, §3.5); only the
   settable context types are taken (`bad-type` otherwise; `question` only with `--ask`); a reserved one → `type-reserved`.
@@ -186,10 +191,18 @@ not interpret.
 | `withdrawal` | the bridge, for a withdrawn question | `note` |
 | `expiry` | the bridge, for an expired question | `after_ms` |
 | `event` | the bridge, for a structural change (moved, renamed, merged, unmerged, emptied, a type change) | — |
-| `test-result` | (reserved — build step 2d) | `result` (pass / fail / skip), `checks`, `duration` |
-- A caller may give only the settable types (`note` now; `test-result` from step 2d: `--message-type=test-result --result
-  pass --checks 22 --duration 4.1s`); a bridge type → `bad-message-type`, a reserved one → `type-reserved`. The tool takes
-  the typed fields as `fields:{…}`; the script maps a type's field flags (`--result`, `--checks`, …) onto them (step 9).
+| `test-result` | any report (step 2d): one test's outcome | `result` (pass / fail / skip, REQUIRED), `checks`, `failed` (≤ `checks`), `duration` (ms; Q58) |
+- A caller may give only the settable types (`note`, and `test-result` since step 2d: `--message-type=test-result --result
+  pass --checks 22 --duration 4.1s`); a bridge type → `bad-message-type`, a reserved one → `type-reserved` (none is left).
+  The tool takes the typed fields as `fields:{…}`; the script maps a type's field flags (`--result`, `--checks`, `--failed`,
+  `--duration` — the flag is the field's name) onto them (step 9). A duration is kept in ms: a NUMBER is ms, a string needs a
+  unit ("4.1s", "250ms", "2m", "1h25m").
+- **A node keeps its latest test-result** (the registry's `keep: "test"` → the node's `test`: the fields, the entry id, and
+  the state the report left it in) — so the bridge COUNTS them per run (a test-run's counts, §5.7) after the entry has left
+  the in-memory log, and with `log:false` too (the checkpoint carries it, step 3). The result stands while the node is in
+  that state: a later state change wins (the latest word), and a restart (todo / running / blocked without a test-result)
+  clears it, so a second run starts clean. A result never implies a state; a result that contradicts its call's own state →
+  warning `result-state` (Q57).
 - Answers are entries of type `answer`; the node's STATE (done / failed …) still drives plans and progress.
 
 ---
@@ -509,7 +522,7 @@ Q19 FINAL).
 | `--move-to "<path>"` | after the report is applied, move the target there (relative: `../X` only, one step; absolute: `/…`; a bare `X` or a deeper relative path → `bad-path` with `suggest:"/…"`, Q45 / Q46), creating missing transient contexts; one all-or-nothing change (§3.8) |
 | `--resolve "<path>"` | (Q46) print the absolute path + id a relative (or absolute) path resolves to NOW from the target's current parent (`--key` / `--id` / `--path`, else the `--agent` node); changes nothing (§3.8) |
 | `--context-type=<type>` | (TYPES, §1.7) a NEW context's type: `context` (default) \| `plan` \| `group` (a list, not a plan, §5.7); case-insensitive; on an existing node ignored with `exists`; replaces the draft's `--group` |
-| `--message-type=<type>` | (TYPES, §1.7) the entry's message type (default `note`); a type's typed fields as flags of their own (`--result pass --checks 22 --duration 4.1s` for `test-result`, step 2d), validated; `--data` stays free-form |
+| `--message-type=<type>` | (TYPES, §1.7) the entry's message type (default `note`); a type's typed fields as flags of their own (`--result pass --checks 22 --failed 0 --duration 4.1s` for `test-result`, step 2d), validated; `--data` stays free-form |
 | `--transient[=<dur>]` / `--keep` | a NEW context is transient (it vanishes when its last child leaves; `=30s` = after a grace period with no child, Q44 — with `--move-to` it applies to the contexts that call creates) / make a transient context permanent (§3.8) |
 | `--text "<text>"` | log an entry; a leading `@` also sets the line (§4.0) |
 | `--guide agent\|session` | print the guide; with `--agent` it is also the agent's first report (§4.4) |
@@ -645,7 +658,8 @@ an old prompt pasted into a tool call).
   options listed BELOW it as the answers to pick (the `choices`, one each), then the free-text field when the question
   allows one. The dialog never parses options out of the text; the choices are structured fields.
 - Rows show their TYPE's glyph and, where a bar would be, what the type `show`s (a bar, a group's count, a question's
-  status — §1.7); the right-click menu comes from the registry's `menu` slot once #92 fills it.
+  status, a test-run's bar and counts — §1.7); the right-click menu comes from the registry's `menu` slot (#92, filled in
+  step 2d: `menuOf2`).
 - Log entries show `at` on hover when it differs from the node's path now. Copy command = `--agent <scope> --key <key>` (or
   `--id <id>` when the node has no key path).
 - The view state (pins, hidden, open / closed, selection, DETAILS fold, last seen) is per USER on the bridge (§5.6), no longer
@@ -762,6 +776,13 @@ it beats what the host knows even under clock skew. New `lib/view-state.js` hold
     Its children keep their states either way (plan items stay plan items; under a plan again they count in its "N of M").
     A plan item can't be a group (`bad-type`): it counts in its own parent's plan. A group takes no `progress`
     (`bad-field`: it has no bar).
+- **Test runs** (step 2d; §3.8's `Tests`): a context of TYPE `test-run`. Its ITEMS are every plan item (and question) BELOW
+  it reached through contexts — its BUCKETS (`Pending` / `In progress` / `Passed` / `Failed`) and nested test-runs — never
+  through an agent or a group. Its bar is "N of M" over them (a failed test is remaining, as any failed item); its plan ends
+  when every item is done or when its own line is done, abandoned or FAILED; where the bar is, its row also shows its COUNTS:
+  its TESTS (those items, minus questions, plus any other context there holding a test-result) by outcome — passed /
+  failed / skipped / running / pending — with the checks, failed checks and duration their test-results add up to (§1.7's
+  kept `test`). It adds its bar to its parent. A bucket is not evicted alone: an ended run goes whole (Q56, Q59).
 
 ### 5.8 Questions (#85 / #90 on ids; TYPES)
 - **Ask:** `--ask "<question>" --choice "A" --choice "B" [--free] [--expires 2h] [--details …]`. The question goes on the
@@ -1052,6 +1073,35 @@ existing checks keep passing while the core is written.
      cutover); **#92 (the context-aware menu) folds into the registry's `menu` slot**.
    *Tests:* unit — a test-run's bar and counts across its buckets, `test-result` field validation (good, bad enum, negative
    count, duration forms), the reserved names now accepted.
+
+   **2d as built** (2026-10-03): in `src/lib/activity2.js`, still beside the 1.7x model and wired into nothing. The
+   reserved names are real types (no reserved type is left; the mechanism stays). `test-run`: a settable context type
+   (`--context-type=test-run`) with `bar: items`, `items: tree` (`runItems2`: its plan items / questions below it through
+   context buckets and nested runs, not through an agent or a group — so §3.8's Pending / In progress / Passed / Failed
+   work unchanged, the buckets being plain transient contexts), `show: tests` (`displayOf2` gives the bar AND
+   `testCounts2` = { tests, passed, failed, skipped, running, pending, checks, failed_checks, duration_ms, text }),
+   `counts_as: bar`, `ends: done | failed | abandoned` (a new registry slot; every other type `done | abandoned`), children
+   any. `planOf2` / `planEndAt2` / `bar2` read the `items` and `ends` slots; eviction takes an ended run WHOLE (a bucket is
+   never a candidate of its own; a run whose line is still live keeps its node and loses only its items, as 6b).
+   `test-result`: settable; fields `result` (pass | fail | skip, `required` — a new field-spec flag), `checks`, `failed`
+   (`at_most: checks` — a new flag; added so #81's "N checks (M failed)" maps across), `duration` (ms: a number is ms, a
+   string needs a unit, "250ms" accepted); `validateEntryFields` checks required fields even with no `fields` given. The
+   registry's `keep: "test"` makes the node keep its latest one (`node.test` = fields + `ts` + `entry` + the `state` it
+   left; in `nodeView`); `testOutcome2` = that result while the node is in that state, else by state (done → pass, failed →
+   fail, skipped / abandoned → skip, running / blocked → running, else pending); a restart clears it; `result-state`
+   warning on a contradiction in one call; with `log:false` it is kept with `entry: null`. #92: every type's `menu`
+   filled (data: `{ action, label, group, when }`), `menuOf2(sess, node, { now, staleMin })` answers the entries that apply
+   now (the `when` predicates mirror `applyAction2`'s own checks; Pin / Hide / Copy command stay dashboard-side). #81's
+   reporter is NOT rewired (cutover, step 9+); `test_activity2d_unit` shows its calls mapped onto the model: run start =
+   `--key tests --context-type=test-run` + a transient `Pending` holding one plan item per script; a script start =
+   `--state running --move-to "../In progress"`; its end = `--state done|failed --message-type=test-result --result …
+   --checks … --failed … --duration … --move-to "../Passed"|"../Failed"` (FAIL lines in `--details`); the tick = a
+   `log:false` line on the run (no progress needed: the bar and counts come from the items); the end = a `done` / `failed`
+   line on the run. A second run: the known scripts answer `exists-elsewhere` to the re-plan, so the reporter moves them
+   back with `--state todo --move-to "../Pending"` (their kept results drop; every bucket keeps its id). Left for later:
+   checkpoints carrying `test` (step 3), the script's field flags (step 9), the dashboard's use of `tests` and `menuOf2`
+   (step 10). Questions Q56 – Q60 (§9). Tests: `tests/unit/test_activity2d_unit.mjs` (+ 2b's reserved-name checks
+   updated).
 3. **v6 records + replay.** `recordKind` v6 only; `createReplay` folds node records (newest wins per field, `create` seals
    the run) and attaches entries by `n` — no remapping. cp / cf / rep v6; `planCarryForward` carries structure. *Tests:* a
    seeded REPLAY FUZZ like #82's (400 random sequences of reports, plans, moves, `--move-to` with transient vanish /
@@ -1258,8 +1308,8 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q49, Q11b, GROUPS, ROLLUP and TYPES are decided (Decisions above). Build step 2c raised the questions below; the
-build follows the recommendation for each until Robin answers.
+Q40 – Q49, Q11b, GROUPS, ROLLUP and TYPES are decided (Decisions above). Build steps 2c (Q50 – Q55) and 2d (Q56 – Q60)
+raised the questions below; the build follows the recommendation for each until Robin answers.
 
 50. **How `--before` / `--after` find their anchor** (§3.2, §4.1). *Recommend (built):* a §3.2 reference, but since an
     anchor is always a sibling, a bare key that names no sibling (or names a node elsewhere) is also tried as the label (or
@@ -1281,6 +1331,23 @@ build follows the recommendation for each until Robin answers.
 55. **Message types of the dashboard's entries** (§1.7). *Recommend (built):* a state tick (done / skip / complete …) and a
     dashboard message are `note` entries carrying `act`; only structural changes are `event`. Alternative: a bridge
     `message` type for dashboard messages, and `event` for ticks.
+56. **What a test-run row shows** (§1.7, §5.7). *Recommend (built):* `show: tests` — its items bar across the buckets AND
+    its counts ("2 passed · 1 failed · 1 to go of 4 · 27 checks (2 failed)"); the dashboard lays them out. Alternative:
+    the counts instead of the bar.
+57. **A test-result vs the test's state** (§1.7). *Recommend (built):* the latest word wins — the kept result counts while
+    the node stays in the state that report left it in; a later state change wins; a restart (todo / running / blocked)
+    clears it; no state is implied by a result; a contradiction within one call → warning `result-state`. Alternatives: the
+    result always wins, or the state always wins (the result only adds checks / duration).
+58. **The test-result fields** (§1.7). *Recommend (built):* `result` (pass | fail | skip, required), `checks`, `failed`
+    (≤ `checks`; added beyond the draft so #81's failed-check count maps across), `duration` (ms; a number is ms, a string
+    needs a unit). Alternative: the draft's three fields only, `result` optional.
+59. **A test-run's tests and plan** (§5.7). *Recommend (built):* its items are the plan items below it through context
+    buckets and nested runs (not agents, not groups); any other context there with a test-result is a test too; its plan
+    also ends on a `failed` line; an ended run is evicted whole. Alternative: direct children only (no buckets), or buckets
+    of their own type.
+60. **The per-type menus** (#92, §1.7, §5.4). *Recommend (built):* the menus listed in `NODE_TYPES` (model actions only,
+    shown when they apply; Pin / Hide / Copy command stay in the dashboard). Alternative: also list the dashboard-only
+    entries in the registry.
 
 ---
 

@@ -31,10 +31,11 @@ export const ORDER = Object.freeze([
   'test_activity_carry_live', 'test_activity_6c_live', 'test_activity_actions_live', 'test_activity_notices_live',
   'test_activity_plan82_live', 'test_activity_msg_live', 'test_activity_ask_live', 'test_activity_detail_live',
   'test_realm_guides_live', 'test_activity_revise_live', 'test_node_id_unit', 'test_activity2_unit', 'test_activity2b_unit', 'test_activity2c_unit',
+  'test_activity2d_unit',
 ])
 
 export const GROUPS = Object.freeze({
-  unit: ['test_lib_unit', 'test_persistence', 'test_activity_unit', 'test_node_id_unit', 'test_activity2_unit', 'test_activity2b_unit', 'test_activity2c_unit'],
+  unit: ['test_lib_unit', 'test_persistence', 'test_activity_unit', 'test_node_id_unit', 'test_activity2_unit', 'test_activity2b_unit', 'test_activity2c_unit', 'test_activity2d_unit'],
   mesh: ['test_mesh', 'test_subpeers', 'test_topics', 'test_identity', 'test_keepalive_live', 'test_stable_ids_live',
     'test_toollist_changed_live', 'test_receive_rename_live', 'test_reclaim_preserve_live', 'test_from_topic_live'],
   security: ['test_consent', 'test_grants_live', 'test_http_egress_live', 'test_vault_live', 'test_facet_probe_live',
