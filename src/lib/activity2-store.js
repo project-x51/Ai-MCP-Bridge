@@ -4,8 +4,8 @@
 // call and the bytes on disk, so the unit tests drive it on temp dirs without a bridge.
 //
 // THE STAGING (spec §8 step 6 "as built"): steps 6 – 8 ran this store only behind the pre-cutover switch
-// AI_BRIDGE_ACTIVITY_V2=1; step 9 removed the switch — every gateway holds this store (the 1.7x board in lib/activity.js
-// is no longer reached; step 11 deletes it). Step 9 added the batch, the read-only resolve / find, the waiters' question
+// AI_BRIDGE_ACTIVITY_V2=1; step 9 removed the switch — every gateway holds this store (step 11 deleted the 1.7x board that
+// lib/activity.js held). Step 9 added the batch, the read-only resolve / find, the waiters' question
 // outcome and `--guide agent`'s first report (guideAgent). The dashboard is step 10.
 //
 // WHAT IT DOES

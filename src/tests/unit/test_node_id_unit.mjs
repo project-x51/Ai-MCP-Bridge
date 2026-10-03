@@ -2,10 +2,11 @@
 // (mintId / legacyId — the §1.2 vectors, case folding, an independent base32), keys (validKey's charset edges, slugKey,
 // uniqueKey's clashes), labels (normLabel / labelKey), references (parseRef), `@`-free paths with quoting (parsePath2 /
 // formatPath2, Q37), 1.7x `@` paths refused as `legacy-form` with the converted path, and the leading-`@` text rule
-// (parseText, Q36). Pure: no bridge, no sockets, no clock. The 1.7x model these sit beside is tested by test_activity_unit.
+// (parseText, Q36). Pure: no bridge, no sockets, no clock. Step 11 deleted the 1.7x model these were built beside; its v5 readers live in lib/activity-v5.js.
 import { createHash } from 'node:crypto'
 import { testOnly } from '../helpers/check.mjs'
 import * as A from '../../lib/activity.js'
+import * as V5 from '../../lib/activity-v5.js'   // step 11: the 1.7x (v5) readers the migration keeps
 let pass = 0, fail = 0
 const check = (n, c, x = '') => { if (!testOnly(n)) return; let ok = false; try { ok = typeof c === 'function' ? !!c() : !!c } catch (e) { x = `threw: ${e && e.message} ${x}` } ok ? (pass++, console.log('PASS', n)) : (fail++, console.log('FAIL', n, x)) }
 const J = JSON.stringify
@@ -172,11 +173,11 @@ await section(() => {
   check('text: non-string refused', A.parseText(null).code === 'bad-text')
 })
 
-// ================================================================= the 1.7x model is untouched
+// ================================================================= the 1.7x (v5) readers (step 11: lib/activity-v5.js, for the migration)
 await section(() => {
-  const p = A.parsePath('spec-70/@Tharsis/@~z12')
-  check('1.7x: parsePath still reads @ paths (the bridge keeps 1.75 logic until step 9)', p.ok && p.path === 'spec-70/@Tharsis/@z12' && p.current === true)
-  check('1.7x: ACTIVITY_FORMAT is still 5', A.ACTIVITY_FORMAT === 5)
+  const p = V5.parsePath('spec-70/@Tharsis/@~z12')
+  check('1.7x: the v5 parsePath still reads @ paths (the converter reads 1.7x records with it)', p.ok && p.path === 'spec-70/@Tharsis/@z12' && p.current === true)
+  check('1.7x: the v5 ACTIVITY_FORMAT is 5; lib/activity.js no longer exports the 1.7x parser', V5.ACTIVITY_FORMAT === 5 && A.parsePath === undefined && A.ACTIVITY_FORMAT === undefined)
 })
 
 console.log(`\n${pass} passed, ${fail} failed`)

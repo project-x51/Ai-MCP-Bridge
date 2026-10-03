@@ -874,18 +874,15 @@ setInterval(() => {
 }, SWEEP_MS).unref()
 
 // ---------------------------------------------------------------- #70 activity board (step 2: the `log` + `activity` tools)
-// ONE WRITER PER HOST: this host's GATEWAY owns the activity state and its daily JSONL (activity/<host>/YYYY-MM-DD.jsonl
-// under the persist dir, via the persistence facet). A follower authenticates its own sub-peer, then forwards the call UP
-// its control link (ACTIVITY frame with a request id → ACTIVITY_R; a timeout and a clear code when there's no gateway).
-// A newly elected gateway REPLAYS the host's files (newest first: lib/activity.js createReplay) before it serves a `log`
-// call, so it continues the same history. The pure model is lib/activity.js; this section is the I/O around it: config,
-// replay, appends + checkpoints (cp/rep), retention, expiry, the memory budget, the gone sweep, the id → offset index.
+// ONE WRITER PER HOST: this host's GATEWAY owns the activity state and its day files (activity/<host>/YYYY-MM-DD.jsonl +
+// their index files under the persist dir, via the persistence facet's activity2). A follower authenticates its own
+// sub-peer, then forwards the call UP its control link (ACTIVITY frame with a request id → ACTIVITY_R; a timeout and a
+// clear code when there's no gateway). A newly elected gateway REPLAYS the host's files before it serves anything, so it
+// continues the same history. The pure model is lib/activity2.js (on lib/activity.js's primitives), the store
+// lib/activity2-store.js; this section is the I/O around them: config, the timers (checkpoints, the rollover, the gc tick),
+// expiry, the memory budget, the gone sweep, the tools, the notices.
 const ACT_FWD_MS = Number(process.env.AI_BRIDGE_ACTIVITY_FWD_MS) || 5000                // follower → gateway request timeout
-const ACT_LOAD_WAIT_MS = Number(process.env.AI_BRIDGE_ACTIVITY_LOAD_WAIT_MS) || 15000   // a `log` call waits this long for a restart replay
-const ACT_GC_MS = Number(process.env.AI_BRIDGE_ACTIVITY_GC_MS) || 60000                 // expire() + enforceBudget() cadence
-const ACT_RETENTION_MS = Number(process.env.AI_BRIDGE_ACTIVITY_RETENTION_MS) || 86400000   // retention sweep cadence (also at gateway start)
-const ACT_INDEX_MAX = Number(process.env.AI_BRIDGE_ACTIVITY_INDEX_MAX) || 100000          // id → (day, offset) entries kept; beyond, a lookup scans the day file
-const ACT_PHASE1_MS = Number(process.env.AI_BRIDGE_ACTIVITY_PHASE1_MS) || 300            // a long replay publishes a provisional board after this
+const ACT_GC_MS = Number(process.env.AI_BRIDGE_ACTIVITY_GC_MS) || 60000                 // the gc tick: auto-abandon, the expiry pass, the memory budget (actGc2)
 const ACT_ROLLOVER_CHECK_MS = Number(process.env.AI_BRIDGE_ACTIVITY_ROLLOVER_CHECK_MS) || 30000   // v1.63.0 (#70 6b): how often the gateway looks for a local day rollover (→ carry-forward)
 // v1.63.0 (#70 6b) TEST-ONLY CLOCK HOOK: the activity board's clock = the wall clock + this offset (ms). It drives every
 // activity time (report times, day-file names, the replay window, expiry, the rollover check, the board's `now`), so a test
@@ -893,25 +890,20 @@ const ACT_ROLLOVER_CHECK_MS = Number(process.env.AI_BRIDGE_ACTIVITY_ROLLOVER_CHE
 // restart whose replay window excludes older files). Never set it on a live bridge.
 const ACT_CLOCK_OFFSET_MS = Number(process.env.AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS) || 0
 const actNow = () => Date.now() + ACT_CLOCK_OFFSET_MS
-const LOG_FIELDS = [...Act.MESSAGE_FIELDS, 'items']   // v1.62.0 (#70 step 6a): + path (the node tree) + items (a batch); v1.63.0 (6b): + plan (in MESSAGE_FIELDS)
 const ACT_TAP = process.env.AI_BRIDGE_TEST_ACTIVITY_TAP === '1'   // test-only (#70 step 4): `activity {tap:true}` returns the recent gossip frames sent/received
 const BOARD_FIELDS = ['project', 'session', 'user', 'host', 'log', 'entry', ...(ACT_TAP ? ['tap'] : [])]   // #88 step 9: the 2.0 read's fields (lib/activity2-store.js board / logPage / entry)   // v1.60.0: + host (the mesh board); v1.62.0: + path (a node and its subtree)
 function activityConfig(cfg) { const w = []; const c = Act.resolveConfig(cfg && cfg.activity, process.env, w); for (const x of w) log(`activity config: ${x}`); return c }
 let ACT_CFG = activityConfig(CFG)
-let activity = null        // the host's activity state — on the GATEWAY only (a follower forwards)
-let actReplay = null       // { phase: 'replaying' | 'published' | 'done', promise, stats }
-const actIndex = new Map() // entry id -> { day, offset, length } in this host's JSONL (details/data lookups)
 const actPresent = new Set()   // session keys seen live on this host's roster (a present → absent transition marks them gone)
-let actApplies = 0, actCpTimer = null, actCpEvery = 0, actCpBusy = false
-let actCfDay = null, actCfLast = null   // v1.63.0 (#70 6b): the local day whose file holds this gateway's carry-forward; the last one written (tap)
+let actApplies = 0, actCpTimer = null, actCpEvery = 0
 const actCheckpointMs = () => Number(process.env.AI_BRIDGE_ACTIVITY_CHECKPOINT_MS) || ACT_CFG.progress_checkpoint_sec * 1000   // env: tests use a short interval
 const tzOff = t => -new Date(t).getTimezoneOffset()
 const actDisabled = () => ({ ok: false, code: 'activity-disabled', what: 'the activity board is disabled on this host (config activity.enabled / AI_BRIDGE_ACTIVITY_ENABLED)' })
 // #88 (2.0): THE BOARD IS 2.0. Steps 6 – 8 built it behind a pre-cutover switch (AI_BRIDGE_ACTIVITY_V2=1); build step 9
 // REMOVED the switch: every GATEWAY holds the 2.0 store (lib/activity2-store.js: the id-keyed model + the v6 day files,
 // their per-day index files and the ghost table) — `act2` — and refuses to start on unconverted history (exit 78, the §7.5
-// start check). The 1.7x board (`activity`, lib/activity.js) is no longer created; its code below is unreached until step
-// 11 deletes it. Gossip v6 (step 7): the gateway announces `activity_gossip:6` and shares its board with the peer hubs
+// start check); build step 11 DELETED the 1.7x board (lib/activity.js's path-keyed model, its replay, checkpoints and
+// carry-forward, gossip v5, the path-addressed actions and the 1.7x feature flags). Gossip v6 (step 7): the gateway announces `activity_gossip:6` and shares its board with the peer hubs
 // that announce 6 too (a 1.7x hub announces 5: the equality check fails both ways and nothing is shared, §6.2), other
 // hosts' boards and log pages are read through their owners, and dashboard actions go to the node's owner by id (§6.3).
 // Step 10: the dashboard's board pushes are the 2.0 board's units by node id (lib/activity2-dash.js, actDashUnits).
@@ -920,25 +912,9 @@ const actRemote2 = G2.createRemote2({ origin: HOSTNAME })   // #88 step 7: the o
 profile.config.watch(c => {   // live-reload: the knobs apply to the next call / sweep (enabled, stale window, caps, cadence)
   const n = activityConfig(c)
   if (JSON.stringify(n) === JSON.stringify(ACT_CFG)) return
-  ACT_CFG = n; if (activity) activity.config = n; if (act2) act2.setConfig(n)
+  ACT_CFG = n; if (act2) act2.setConfig(n)
   scheduleActivityCheckpoints(); log('activity config reloaded')
 })
-function indexEntry(id, day, offset, length) {
-  actIndex.set(id, { day, offset, length })
-  if (actIndex.size > ACT_INDEX_MAX) actIndex.delete(actIndex.keys().next().value)
-}
-// gateway promotion (becomeGateway): create the host's state and replay its files in the background (startup is never
-// blocked on it); `log` calls wait for it, reads see the phase-1 board as soon as it's published
-function startActivity() {
-  return startActivity2()   // #88 step 9: always the 2.0 board (the 1.7x start below is unreached; step 11 deletes it)
-  if (activity) return
-  activity = Act.createActivity({ config: ACT_CFG, origin: HOSTNAME, idPrefix: `act_${crypto.randomBytes(2).toString('hex')}_` })
-  activity.config = ACT_CFG
-  actReplay = { phase: 'replaying', stats: null, promise: null }
-  actReplay.promise = replayActivity().catch(e => log(`activity replay failed: ${(e && e.message) || e}`))
-    .finally(() => { actReplay.phase = 'done'; syncActivityGone(); syncActivityBells(); actChanged(); actRollover('startup') })   // #70 step 4: the replayed board goes out to the peer hubs (step 5: with its bells); 6b: today's carry-forward if the files have none yet
-  scheduleActivityCheckpoints()
-}
 // #88 step 6: the 2.0 gateway's start (the switch on). §7.5's START CHECK first — before the replay: v5 (1.7x) history, or a
 // migration that did not finish (its backup directory is still there) → REFUSE TO START: the line goes to stderr (the
 // tray shows it) and the process exits 78; no history and no marker → the marker is written (a fresh host). Followers own
@@ -960,7 +936,7 @@ function startActivity2() {
   log(`activity (2.0): ${fsx ? `replayed ${st.fed} record(s) → ${st.sessions} session(s), ${st.nodes} node(s), ${st.ghosts} ghost(s) (${st.ghosts_rebuilt || 0} from the index files) in ${st.ms}ms` : 'memory-only board (no persistence)'}`)
   act2.rollover(actNow(), 'startup')
   actExpire2(false)   // step 9: an expired question's asker is told, as at every pass
-  syncActivityGone(); syncActivityBells()   // step 10 (Q72, as 1.7x after its replay): the sessions live on the roster now are present; the armed doorbells' bells
+  syncActivityGone2(); syncActivityBells()   // step 10 (Q72, as 1.7x after its replay): the sessions live on the roster now are present; the armed doorbells' bells
   scheduleActivityCheckpoints()
   startView2()
 }
@@ -1129,125 +1105,41 @@ function refuseStart2(r) {
   role = 'stopping'
   process.exit(r.code || 78)
 }
-async function replayActivity() {
-  if (!PERSIST) return
-  const t0 = actNow()
-  await pruneActivity(t0)   // retention first (startup), so the replay never reads a file it is about to delete
-  const rp = Act.createReplay(activity, { now: t0 })
-  const fromDay = Act.localDay(t0 - ACT_CFG.finished_visible_hours * 3600000)
-  let n = 0
-  for await (const r of persistence.activity.readBackwards(HOSTNAME, { fromDay })) {
-    if (Act.recordKind(r.rec) === 'entry') indexEntry(r.rec.id, r.day, r.offset, r.length)   // v1.62.0: v2 entries only (a 1.61 v1 record is skipped)
-    if (rp.feed(r.rec, r.day) === 'old' && !rp.wantsOlder(r.day)) break   // past the window (an older cp a rep line needs is still read)
-    if (++n % 256 === 0 && actReplay.phase === 'replaying' && (rp.phase1Complete() || actNow() - t0 > ACT_PHASE1_MS)) {
-      rp.publish(); actReplay.phase = 'published'; actChanged()   // phase 1: current lines / bars / states visible now (and gossiped); history follows
-      log(`activity: board published after ${n} records (${rp.phase1Complete() ? 'phase 1 complete' : 'provisional'}); replay continues`)
-    }
-  }
-  const st = rp.finish()
-  actReplay.stats = { ...st, ms: actNow() - t0 }
-  if (st.fed) log(`activity: replayed ${st.entries} entries, ${st.cps} checkpoints, ${st.cfs} carry-forwards, ${st.reps} repeat lines → ${st.sessions} session(s) in ${actNow() - t0}ms`)
-  actCfDay = st.cf_today ? Act.localDay(t0) : null   // v1.63.0 (#70 6b): no carry-forward in today's file yet → one is written as soon as the replay is done
-}
-async function pruneActivity(now) {   // retention: delete day files older than log_retention_days (gateway only — the host's one writer)
-  if (!PERSIST || !activity || role !== 'gateway') return
-  try {
-    const gone = await persistence.activity.prune(HOSTNAME, Act.localDay(now - ACT_CFG.log_retention_days * 86400000))
-    if (gone.length) log(`activity: retention removed ${gone.length} day file(s): ${gone.join(', ')}`)
-  } catch (e) { log(`activity: retention failed: ${e.message}`) }
-}
-setInterval(() => { pruneActivity(actNow()) }, ACT_RETENTION_MS).unref()
-async function persistActivity(rec) {   // one JSONL line (a logged entry or a cp); never from a non-gateway process
-  if (!PERSIST || !activity || role !== 'gateway') return null
-  try {
-    const loc = await persistence.activity.append(HOSTNAME, Act.localDay(rec.ts), JSON.stringify(rec))
-    if (loc && typeof rec.id === 'string') indexEntry(rec.id, loc.day, loc.offset, loc.length)
-    return loc
-  } catch (e) { log(`activity: JSONL append failed: ${e.message}`); return null }
-}
 // checkpoints: every progress_checkpoint_sec, a cp line per context whose bar / line / ETA changed via log:false, and
 // ONE trailing repeat line for the alive-but-unchanged ones (rewritten in place while the key set stays the same)
 function scheduleActivityCheckpoints() {
-  const ms = PERSIST && (activity || act2) ? actCheckpointMs() : 0
+  const ms = PERSIST && act2 ? actCheckpointMs() : 0
   if (ms === actCpEvery) return
   if (actCpTimer) clearInterval(actCpTimer)
   actCpTimer = null; actCpEvery = ms
   if (ms > 0) { actCpTimer = setInterval(() => { checkpointActivity().catch(e => log(`activity: checkpoint failed: ${e.message}`)) }, ms); actCpTimer.unref() }
 }
 async function checkpointActivity() {
-  if (act2) { if (role === 'gateway' && PERSIST) act2.checkpoint(actNow()); return }   // #88 step 6: the 2.0 store writes its cp / rep lines synchronously
-  if (!activity || role !== 'gateway' || !PERSIST || actCpBusy || (actReplay && actReplay.phase !== 'done')) return
-  actCpBusy = true
-  try { await writeCheckpoints(Act.planCheckpoints(activity, actNow())) } finally { actCpBusy = false }
-}
-async function writeCheckpoints(writes) {   // the planned cp lines + the repeat line (appended, or rewritten in place) → { cp, rep }
-  const day = activity.cp.day, n = { cp: 0, rep: 0 }
-  for (const w of writes) {
-    if (w.kind === 'cp') { if (await persistActivity(w.rec)) n.cp++; continue }
-    const rep = activity.cp.rep, line = JSON.stringify(w.rec)   // a log entry may have closed it meanwhile (rep null): then just append
-    const loc = w.rewrite && rep && rep.offset != null ? await persistence.activity.replaceTail(HOSTNAME, day, rep.offset, line) : await persistence.activity.append(HOSTNAME, day, line)
-    if (rep && loc && activity.cp.rep === rep) rep.offset = loc.offset
-    if (loc) n.rep++
-  }
-  return n
+  if (act2 && role === 'gateway' && PERSIST) act2.checkpoint(actNow())   // #88 step 6: the 2.0 store writes its cp / rep lines synchronously
 }
 // #70 step 3 (v1.59.0): PREPARE-SHUTDOWN — the tray calls POST /admin/prepare-shutdown right before it TerminateProcess()es
-// the bridges (a kill runs no 'exit' handler, so the log:false progress since the last checkpoint was lost). Waits out an
-// in-flight tick, writes every dirty context's cp + the repeat line NOW (flushCheckpoints withRep), then drains the
-// facet's write queues so every queued append (log entries too) is on disk before we answer. Followers write no activity
-// files and keep no deferred writes (their persistence writes are issued immediately), so only the gateway needs it.
+// the bridges (a kill runs no 'exit' handler, so the log:false progress since the last checkpoint was lost). #88: the 2.0
+// store writes every dirty node's cp + the repeat line NOW — synchronously, so nothing is queued (files_drained stays 0:
+// step 11 deleted the 1.7x write queues) — and the view-state file. Followers write no activity files.
 async function flushActivityNow() {
   const out = /** @type {any} */ ({ cp: 0, rep: 0, files_drained: 0 })
-  if (act2 && role === 'gateway') {   // #88 step 6: the 2.0 store's writes are synchronous — nothing is queued
-    if (!PERSIST) return { ...out, skipped: 'no-persistence' }
-    viewSaveNow()   // #88 step 8: the view-state file too
-    if (!actCheckpointMs()) return { ...out, skipped: 'checkpoints-off' }
-    return { ...out, cp: act2.flush(actNow()) }
-  }
-  if (!activity || role !== 'gateway') return { ...out, skipped: 'no-activity-board' }
+  if (!act2 || role !== 'gateway') return { ...out, skipped: 'no-activity-board' }
   if (!PERSIST) return { ...out, skipped: 'no-persistence' }
-  for (const t0 = Date.now(); actCpBusy && Date.now() - t0 < 2000;) await new Promise(r => setTimeout(r, 20))   // a checkpoint tick is mid-write
-  if (actReplay && actReplay.phase !== 'done') out.skipped = 'replaying'      // nothing new is applied before the replay ends
-  else if (!actCheckpointMs()) out.skipped = 'checkpoints-off'               // progress_checkpoint_sec 0: log:false is memory-only by choice
-  else if (!actCpBusy) {
-    actCpBusy = true
-    try { Object.assign(out, await writeCheckpoints(Act.flushCheckpoints(activity, actNow(), { withRep: true }))) } finally { actCpBusy = false }
-  }
-  out.files_drained = await persistence.activity.drain()
-  return out
+  viewSaveNow()   // #88 step 8: the view-state file too
+  if (!actCheckpointMs()) return { ...out, skipped: 'checkpoints-off' }
+  return { ...out, cp: act2.flush(actNow()) }
 }
-process.on('exit', () => {   // a clean shutdown flushes the pending checkpoints (sync appends; a kill skips this — one interval lost)
-  if (act2) { if (PERSIST && actCheckpointMs() && role === 'gateway') try { act2.flush(actNow()) } catch { } viewSaveNow(); return }   // #88 step 6: the 2.0 store (synchronous); step 8: + the view-state file
-  if (!activity || !PERSIST || !actCheckpointMs() || (actReplay && actReplay.phase !== 'done')) return
-  try { for (const w of Act.flushCheckpoints(activity, actNow())) persistence.activity.appendSync(HOSTNAME, activity.cp.day, JSON.stringify(w.rec)) } catch { }
+process.on('exit', () => {   // a clean shutdown flushes the pending checkpoints (the 2.0 store, synchronously; #88 step 8: + the view-state file) — a kill skips this
+  if (!act2) return
+  if (PERSIST && actCheckpointMs() && role === 'gateway') try { act2.flush(actNow()) } catch { }
+  viewSaveNow()
 })
-// v1.63.0 (#70 6b): CARRY-FORWARD. At each LOCAL DAY ROLLOVER (checked every ACT_ROLLOVER_CHECK_MS on the activity clock)
-// — and once after a restart's replay when today's file holds no carry-forward yet — the gateway appends a `cf` record
-// for every long-lived node (lib/activity.js planCarryForward: every open plan item + its ancestors, and every node whose
-// state would otherwise fall out of the replay window) to the NEW day's file. The replay window (finished_visible_hours)
-// then always holds them, so a plan open for weeks survives restarts and the day-file retention; older history stays in
-// the older files. Serialised with the checkpoint writer (one writer per file).
-async function carryForwardActivity(why) {
-  if (!activity || role !== 'gateway' || !PERSIST || (actReplay && actReplay.phase !== 'done') || actCpBusy) return null
-  actCpBusy = true
-  try {
-    const now = actNow(), day = Act.localDay(now)
-    let n = 0
-    for (const w of Act.planCarryForward(activity, now)) if (await persistActivity(w.rec)) n++
-    actCfDay = day; actCfLast = { day, at: now, written: n, why }
-    if (n) log(`activity: carried ${n} long-lived node(s) forward into ${day} (${why})`)
-    return n
-  } finally { actCpBusy = false }
-}
+// v1.63.0 (#70 6b) → #88 step 6: the DAY ROLLOVER, checked every ACT_ROLLOVER_CHECK_MS on the activity clock — the 2.0 store's
+// rollover: the `cf` of every long-lived node into the new day (§2.3), the closed days' index files, retention, the
+// conflicted-copy scan, the ghosts' days. Once per local day (rolloverDue), and at the gateway's start.
 function actRollover(why) {
-  if (act2) {   // #88 step 6: the 2.0 store's rollover — cf into the new day, the closed days' index files, retention, the scan, ghosts
-    if (role !== 'gateway' || !act2.rolloverDue(actNow())) return
-    try { act2.rollover(actNow(), why) } catch (e) { log(`activity: rollover failed: ${(e && e.message) || e}`) }
-    return
-  }
-  if (!activity || role !== 'gateway' || !PERSIST || (actReplay && actReplay.phase !== 'done')) return
-  if (actCfDay === Act.localDay(actNow())) return
-  carryForwardActivity(why).catch(e => log(`activity: carry-forward failed: ${(e && e.message) || e}`))
+  if (!act2 || role !== 'gateway' || !act2.rolloverDue(actNow())) return
+  try { act2.rollover(actNow(), why) } catch (e) { log(`activity: rollover failed: ${(e && e.message) || e}`) }
 }
 setInterval(() => actRollover('day rollover'), ACT_ROLLOVER_CHECK_MS).unref()
 /** #88: the 2.0 owner's expiry pass (question expiry, the transient grace sweep, expiry — each written), every ACT_GC_MS
@@ -1266,12 +1158,6 @@ function actExpire2(remote) {
   }
   if (changed) actChanged()   // #88 step 7: the removals reach the peer hubs as a delta
   else actScheduleExpiry()
-}
-function actBudget() {
-  if (act2) return actBudget2()   // #88 step 10 (Q72): the 2.0 budget
-  const r = Act.enforceBudget(activity, ACT_CFG.memory_budget_mb * 1048576)
-  if (r.evicted.length || r.entries_dropped) log(`activity: over the ${ACT_CFG.memory_budget_mb} MB budget — evicted ${r.evicted.length} finished agent(s), dropped ${r.entries_dropped} log entries`)
-  return r.evicted.length
 }
 /** #88 step 10 (Q72): the 2.0 MEMORY BUDGET (lib/activity2.js enforceBudget2) — the oldest finished agents / ended plans
  * evicted (written: `remove` why "evict"; their view records pruned), then the oldest in-memory log entries dropped; the
@@ -1299,40 +1185,7 @@ function actGc2() {
   if (actBudget2()) changed = true
   if (changed) actChanged()   // the abandons / evictions reach the peer hubs (and the waiters) as a delta
 }
-setInterval(() => {   // expiry (finished/gone agents past finished_visible_hours leave the board) + the memory budget
-  if (act2 && role === 'gateway') { actGc2(); return }   // #88 step 6: the 2.0 pass writes its removals; step 10: + auto-abandon and the budget
-  if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
-  const now = actNow()
-  // v1.64.0 (#70 6c): AUTO-ABANDON — the open plans of a session gone (not on this host's roster, no message) for
-  // abandoned_plan_days become abandoned: entries attributed to the bridge, persisted in order (they end those plans, which
-  // then expire a window later like any ended plan)
-  const ab = Act.autoAbandon(activity, now, { live: s => actPresent.has(s.key) })
-  if (ab.records.length) {
-    log(`activity: abandoned ${ab.abandoned.length} plan node(s)/item(s) of session(s) gone ${ACT_CFG.abandoned_plan_days}+ days: ${[...new Set(ab.abandoned.map(a => a.session))].join(', ')}`)
-    if (PERSIST) (async () => { for (const rec of ab.records) await persistActivity(rec) })().catch(e => log(`activity: auto-abandon append failed: ${(e && e.message) || e}`))
-  }
-  let changed = Act.expire(activity, now).length > 0 || ab.records.length > 0
-  for (const k of [...actPresent]) if (!activity.local.has(k)) actPresent.delete(k)
-  for (const o of Act.expireRemote(activity, now)) { actOwner.delete(o); changed = true }   // #70 step 4: a host down past the window leaves the board
-  if (actBudget()) changed = true
-  if (changed) actChanged()   // #70 step 4: removals reach the peer hubs as a delta
-}, ACT_GC_MS).unref()
-// GONE: a session whose sub-peer was live on this host's roster and then left (deregister, TTL expiry, its follower
-// process exited) is marked gone; it is cleared when the session comes back (re-registers or reports again). A session
-// never seen live here (e.g. one only replayed from the files) is not marked — it simply goes stale.
-function syncActivityGone() {
-  if (act2) return syncActivityGone2()   // #88 step 10 (Q72): the 2.0 board
-  if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
-  const live = new Set()
-  for (const s of roster.values()) { if (s.origin) continue; for (const sp of (s.subpeers || [])) live.add(Act.sessionKey({ realm: sp.realm || REALM, project: sp.project, user: sp.user, session: sp.name, host: HOSTNAME })) }   // v1.60.0: the key has the host
-  const now = actNow()
-  let changed = false
-  for (const [k, sess] of activity.local) {
-    if (live.has(k)) { if (!actPresent.has(k)) { actPresent.add(k); if (sess.gone_at) { Act.markSessionGone(activity, sess, null); changed = true } } }
-    else if (actPresent.has(k)) { actPresent.delete(k); Act.markSessionGone(activity, sess, now); changed = true }
-  }
-  if (changed) actChanged()   // #70 step 4: gone / back reaches the peer hubs
-}
+setInterval(() => { if (act2 && role === 'gateway') actGc2() }, ACT_GC_MS).unref()   // auto-abandon, the expiry pass (finished / gone agents past finished_visible_hours leave the board) + the memory budget
 /** #88 step 10 (Q72): GONE on the 2.0 board, as 1.7x — a session of this host's board whose sub-peer was live on the roster
  * and left is marked gone (the session, its agents and root: in memory only — lib/activity2.js markSessionGone2); back on
  * the roster → cleared. Never seen live here (replayed only, or script-only) → never marked (it goes stale). */
@@ -1352,31 +1205,6 @@ function syncActivityGone2() {
 async function activityLog(ident, input, opts = {}) {   // opts.script: an aimb-log.mjs report (#70 step 3) — never tracked for gone
   if (!ACT_CFG.enabled) return actDisabled()
   return activityLog2(ident, input, opts)   // #88 step 9: always the 2.0 board
-  if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
-  const batch = !!input && typeof input === 'object' && input.items !== undefined
-  const split = batch ? Act.splitBatch(input) : null   // v1.62.0 (#70 step 6a): a BATCH — its bounds refuse the whole call (before any wait)
-  if (split && !split.ok) return split
-  if (actReplay && actReplay.phase !== 'done') {   // a new gateway finishes the replay before it applies anything
-    const ready = await Promise.race([actReplay.promise.then(() => true), new Promise(res => { setTimeout(() => res(false), ACT_LOAD_WAIT_MS).unref() })])
-    if (!ready) return { ok: false, code: 'activity-loading', what: 'the activity board is still loading this host\'s log after a restart — retry in a moment' }
-  }
-  let res
-  if (!batch) res = await actApplyOne(ident, input)
-  else {   // items IN ORDER, one result each (+ its ref); one bad item never aborts the rest; ONE coalesced gossip / dashboard update
-    const results = []
-    for (const it of split.items) {
-      const r = it.error ? it.error : await actApplyOne(ident, it.input)
-      results.push(it.ref !== undefined ? { ref: it.ref, ...r } : r)
-    }
-    const failed = results.filter(r => !r.ok).length
-    res = { ok: true, results, applied: results.length - failed, failed }
-  }
-  if (batch ? res.applied : res.ok) {
-    actChanged()   // #70 step 4: coalesced into ≤1 gossip frame per second per peer link (a batch: one change)
-    syncActivityBells()   // #70 step 5: a new session may be one an armed doorbell watches
-    if (!opts.script) actPresent.add(Act.sessionKey({ ...ident, host: HOSTNAME }))   // a script-only session is never marked gone (it can still go stale)
-  }
-  return res
 }
 // #88 step 6: a `log` call on the 2.0 board — the 2.0 tool's fields (lib/activity2.js parseCall), its records written
 // through the store's writer in order. Step 9: a BATCH (`items`, §4.2: lib/activity2.js splitBatch2 — ≤ 64 items, ≤ 64 KB;
@@ -1461,21 +1289,6 @@ async function activityRead2(q, ctx = {}) {
   const theirs = wantHost && lc(wantHost) === lc(HOSTNAME) ? [] : G2.remoteBoard2(actRemote2, { ...bq, host: wantHost }, now, ACT_CFG.stale_after_min)
   return { ...head, sessions: [...mine, ...theirs].map(actShow) }
 }
-// one message (a single call or one batch item) → the `log` result shape; persisted in order (a batch awaits each append)
-async function actApplyOne(ident, input) {
-  const now = actNow()
-  const p = Act.parseMessage(input, { now, tzOffsetMin: tzOff(now) })
-  if (!p.ok) return p
-  const r = Act.apply(activity, ident, p.msg, now)
-  if (!r.ok) return r
-  let persisted = null   // v1.63.0 (#70 6b): every record the call wrote, in order (the target's entry, then each new plan item's)
-  if (PERSIST && r.records.length) { persisted = true; for (const rec of r.records) if (!(await persistActivity(rec))) persisted = false }
-  if (++actApplies % 50 === 0) actBudget()
-  return { ok: true, id: r.id, ts: r.ts, session: ident.session, path: r.path, agent: r.agent, context: r.context, current: r.current, state: r.state, stale_at: r.stale_at, logged: r.logged,
-    ...(r.plan ? { plan: r.plan } : {}), ...(persisted === false ? { persisted: false } : {}), ...(r.evicted.length ? { evicted: r.evicted } : {}), ...(r.warnings.length ? { warnings: r.warnings } : {}),
-    ...(r.rank ? { rank: r.rank } : {}), ...(r.moved ? { moved: r.moved } : {}), ...(r.cascade ? { cascade: r.cascade.map(c => ({ path: c.path, from_state: c.from })) } : {}),   // v1.69.0 (#82): placed / moved / what the abandon cascaded to
-    ...(r.question ? { question: r.question } : {}) }   // v1.71.0 (#85): a question asked / withdrawn — its status, choices, …
-}
 const actShow = o => (o && typeof o === 'object' && o.project != null ? { ...o, project: projName(o.project) } : o)   // #71: canonical project spelling
 // ctx (v1.61.0, #70 step 5): who is asking — { ws } a dashboard (its queued remote fetches are bounded per dashboard),
 // onQueued(info) to hear a queued fetch's expected wait (the page shows a spinner), maxWaitMs (a follower's forwarded
@@ -1483,45 +1296,13 @@ const actShow = o => (o && typeof o === 'object' && o.project != null ? { ...o, 
 async function activityRead(q, ctx = {}) {
   if (!ACT_CFG.enabled) return actDisabled()
   return act2 ? activityRead2(q && typeof q === 'object' ? q : {}, ctx) : { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
-  if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
-  q = q && typeof q === 'object' ? q : {}
-  const now = actNow()
-  const head = { ok: true, host: HOSTNAME, now, stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
-    ...(activity.remote.size ? { remote_hosts: actRemoteInfo() } : {}), ...(ACT_TAP && q.tap ? { tap: { ...actTap, carry_forward: actCfLast, cf_day: actCfDay, replay: actReplay && actReplay.stats } } : {}) }
-  if (q.entry != null) {   // v1.60.0: a REMOTE entity's entry is fetched from its owner (entry:{id, host}; a remote CURRENT line is found by id)
-    const e = q.entry && typeof q.entry === 'object' ? q.entry : { id: q.entry }
-    const id = String(e.id || ''), want = typeof e.host === 'string' && e.host.trim() ? e.host.trim() : null
-    if (!id) return { ok: false, code: 'id-required', what: 'entry needs { id } (+ host for a remote host\'s log entry)' }
-    let remote = null
-    if (want && lc(want) !== lc(HOSTNAME)) { remote = actKnownHost(want); if (!remote) return { ok: false, code: 'unknown-host', what: `no activity from a host "${want}" is held here` } }
-    else if (!want && !Act.findEntry(activity, id, now)) { const loc = Act.locateEntry(activity, id); if (loc && !loc.local) remote = loc.host }
-    if (remote) { const r = await activityRemote(remote, 'entry', { id }, ctx); return r.ok === false ? r : { ...head, from_host: remote, source: r.source, ...(r.via ? { via: r.via } : {}), ...(r.note ? { note: r.note } : {}), ...(r.queued_ms ? { queued_ms: r.queued_ms } : {}), entry: actShow(r.entry) } }
-    const r = await lookupActivityEntry(id, now)
-    if (r.ok === false && !want && activity.remote.size) r.what += ' — for another host\'s older log entry pass entry:{ id, host }'
-    return r.ok === false ? r : { ...head, ...r }
-  }
-  if (q.log != null) {   // v1.60.0: the session is found on ANY host held; a remote one's log page is fetched from its owner
-    const lq = typeof q.log === 'object' && q.log ? q.log : { session: q.log }
-    let cands = Act.locateSessions(activity, lq)
-    const nq = Act.queryNodeKey(lq)   // v1.62.0: the node (path / agent / context) — a name on several hosts narrows to those holding it
-    if (cands.length > 1 && nq.ok && nq.key) { const f = cands.filter(c => c.session.nodes.has(nq.key)); if (f.length) cands = f }
-    if (cands.length > 1) return { ok: false, code: 'ambiguous-session', what: 'several sessions match — pass project, user and/or host', candidates: cands.map(c => ({ session: c.session.session, project: projName(c.session.project), user: c.session.user, host: c.host })) }
-    const c = cands[0]
-    const sub = { ...lq, ...(c ? { session: c.session.session, project: c.session.project, user: c.session.user } : {}) }
-    delete sub.host
-    if (c && !c.local) { const r = await activityRemote(c.host, 'log', sub, ctx); return r.ok === false ? r : { ...head, from_host: c.host, ...(r.queued_ms ? { queued_ms: r.queued_ms } : {}), log: actShow(r.log) } }
-    const lv = await actLogPage(sub, now)   // v1.61.0: continues into this host's day files once memory runs out
-    if (!lv.ok) return lv
-    const { ok: _ok, ...rest } = lv
-    return { ...head, log: actShow({ ...rest, host: HOSTNAME }) }
-  }
-  return { ...head, sessions: Act.boardView(activity, now, { project: q.project, session: q.session, agent: q.agent, path: q.path, host: q.host, active_only: !!q.active_only }).map(actShow) }
 }
 // v1.65.0 (#70 6d): DASHBOARD ACTIONS — the dashboard's first WRITE path ("Decisions before 6c and 6d" + "Decisions after 6c,
 // for 6d" 11). An authenticated DASHBOARD socket (realm token + kind "dashboard"; never a page leaf, a logger or a socket
-// without a hello) sends {type:"activity_action", ref, host, session, project, user, path, action, args} → {type:
+// without a hello) sends {type:"activity_action", ref, host, session, project, user, id, action, args} → {type:
 // "activity_action", ref, result} (a forward waiting in the queue first gets {type:"activity_queued", ref, …}). `host` = the
-// node's ORIGIN: this host → applied here (lib/activity.js applyAction; every record persisted in order, then gossiped +
+// node's ORIGIN: this host → applied here (#88: lib/activity2.js applyAction2 through the store, by id — activityAction2;
+// every record written in order, then gossiped +
 // pushed to dashboards like any change); another host → forwarded over the existing authenticated hub link as ACTIVITY_ACT
 // {rid, q, by:{user}} — the same per-link queue and the owner's fetch bucket as ACTIVITY_REQ — applied by the OWNER (each host
 // writes only its own nodes) and answered with ACTIVITY_RES {rid, result}. Attribution `by` = { kind:"dashboard", user: this
@@ -1529,80 +1310,9 @@ async function activityRead(q, ctx = {}) {
 // host from the LINK the frame came on, never from the frame. Followers serve no dashboard (the WS ingress is the
 // gateway's), so there is no follower path to forward.
 const ACT_DASH_USER = PROC_USER || 'dashboard'
-/** The action fields a dashboard / a hub frame may carry (bounded strings; args = { state, stale_min } only). */
-function actActionQuery(m) {
-  const q = {}, src = m && typeof m === 'object' ? m : {}
-  for (const k of ['session', 'project', 'user', 'path', 'action']) if (src[k] != null && typeof src[k] !== 'object') q[k] = String(src[k]).slice(0, 512)
-  const a = src.args && typeof src.args === 'object' && !Array.isArray(src.args) ? src.args : null
-  if (a) {
-    q.args = {}; if (typeof a.state === 'string') q.args.state = a.state.slice(0, 16); if (Number.isFinite(Number(a.stale_min))) q.args.stale_min = Number(a.stale_min)
-    for (const k of ['to', 'before', 'after', 'position']) if (typeof a[k] === 'string') q.args[k] = a[k].slice(0, 512)   // v1.69.0 (#82): move's new parent; reorder / move's place
-    if (typeof a.text === 'string') q.args.text = a.text.slice(0, 8192)   // v1.70.0 (#83 / #84): edit_text's new line (240 kept) / message's text (2000 code points at most — the library checks); v1.71.0 (#85): answer's free text (1000)
-    if (typeof a.choice === 'string') q.args.choice = a.choice.slice(0, 512)   // v1.71.0 (#85): answer's choice
-  }
-  return q
-}
 async function activityAction(m, ctx = {}) {   // on the gateway a dashboard is attached to
   if (!ACT_CFG.enabled) return actDisabled()
   return activityAction2(m, ctx)   // #88 step 9: always the 2.0 board
-  if (!activity) return { ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' }
-  const q = actActionQuery(m)
-  if (!q.action || !Act.ACTIVITY_ACTIONS.includes(q.action)) return { ok: false, code: 'bad-action', what: `action must be one of ${Act.ACTIVITY_ACTIONS.join('|')}` }
-  if (!q.session) return { ok: false, code: 'unknown-session', what: 'an action names its session' }
-  const host = typeof m.host === 'string' && m.host.trim() ? m.host.trim() : HOSTNAME
-  if (lc(host) === lc(HOSTNAME)) return actApplyAction(q, { kind: 'dashboard', user: ACT_DASH_USER, host: HOSTNAME })
-  const remote = actKnownHost(host)
-  if (!remote) return { ok: false, code: 'unknown-host', host, what: `no activity from a host "${host.slice(0, 80)}" is held here` }
-  if (Act.PLAN82_ACTIONS.includes(q.action)) {   // v1.69.0 (#82): only an owner that declared activity_plan applies move / reorder
-    const pl = peerGw.get(actOwner.get(remote))
-    if (pl && pl.act && pl.act.cap && !pl.act.plan) return { ok: false, code: 'owner-unsupported', host: remote, what: `host ${remote} runs a bridge older than 1.69.0 — ${q.action} needs 1.69.0+ on the node's host` }
-  }
-  if (Act.MSG_ACTIONS.includes(q.action)) {   // v1.70.0 (#83 / #84): only an owner that declared activity_msg applies edit_text / message
-    const pl = peerGw.get(actOwner.get(remote))
-    if (pl && pl.act && pl.act.cap && !pl.act.msg) return { ok: false, code: 'owner-unsupported', host: remote, what: `host ${remote} runs a bridge older than 1.70.0 — ${q.action === 'message' ? 'messaging its sessions' : 'editing its lines'} needs 1.70.0+ on the node's host` }
-  }
-  if (Act.ASK_ACTIONS.includes(q.action)) {   // v1.71.0 (#85): only an owner that declared activity_ask applies answer / withdraw
-    const pl = peerGw.get(actOwner.get(remote))
-    if (pl && pl.act && pl.act.cap && !pl.act.ask) return { ok: false, code: 'owner-unsupported', host: remote, what: `host ${remote} runs a bridge older than 1.71.0 — ${q.action === 'answer' ? 'answering' : 'withdrawing'} its sessions' questions needs 1.71.0+ on the node's host` }
-  }
-  if (Act.REVISE_ACTIONS.includes(q.action)) {   // v1.75.0 (#90): only an owner that declared activity_revise changes an answer
-    const pl = peerGw.get(actOwner.get(remote))
-    if (pl && pl.act && pl.act.cap && !pl.act.revise) return { ok: false, code: 'owner-unsupported', host: remote, what: `host ${remote} runs a bridge older than 1.75.0 — changing an answer needs 1.75.0+ on the node's host` }
-  }
-  return activityRemote(remote, 'action', q, { ...ctx, by: { user: ACT_DASH_USER } })   // queued like a fetch; owner-unreachable / owner-unsupported / busy
-}
-/** The OWNER applies one action to its own node, persists its records in order and publishes the change. */
-async function actApplyAction(q, by) {
-  if (!ACT_CFG.enabled) return { ...actDisabled(), host: HOSTNAME }
-  if (actReplay && actReplay.phase !== 'done') {   // like a `log` call: nothing is applied before the restart replay ends
-    const ready = await Promise.race([actReplay.promise.then(() => true), new Promise(res => { setTimeout(() => res(false), ACT_LOAD_WAIT_MS).unref() })])
-    if (!ready) return { ok: false, code: 'activity-loading', host: HOSTNAME, what: 'the activity board is still loading this host\'s log after a restart — retry in a moment' }
-  }
-  const r = Act.applyAction(activity, { ...q, realm: REALM }, actNow(), { by })
-  if (!r.ok) return { ...r, host: HOSTNAME }
-  let persisted = null
-  if (PERSIST && r.records.length) { persisted = true; for (const rec of r.records) if (!(await persistActivity(rec))) persisted = false }
-  const released = actSettleWaiters()   // v1.71.0 (#85): a script waiting on this question (aimb-log --wait) hears it now (before actChanged settles it unseen)
-  actChanged()   // gossip (≤1/s per link) + the dashboards' deltas
-  log(`activity: ${r.action} on ${q.session}/${r.path || '@root'} (${projName(q.project || 'unclassified')}) ${Act.byText(by)}${r.dismissed ? ` — ${r.dismissed.nodes} node(s) off the board` : ''}`)
-  let delivery = null
-  if (r.ident) {
-    const nt = Act.actionNotice(r, { by, host: HOSTNAME, ts: actNow() })
-    if (nt.verb === Act.MESSAGE_NOTICE_VERB || nt.verb === Act.ANSWER_NOTICE_VERB) {   // #84: a person's message goes AT ONCE, and the dashboard hears whether it reached an inbox; #85: so does an answer
-      let dr = /** @type {any} */ (null)
-      try { dr = await notifyActivitySession(r.ident, nt, { now: true }) } catch { }
-      const one = dr && Array.isArray(dr.messages) ? dr.messages.find(m => m && m.verb === nt.verb) : dr
-      delivery = one && one.delivered ? 'live' : one && one.parked ? 'parked' : 'none'
-    } else notifyActivitySession(r.ident, nt)   // #80 / #83: tell the session (batched; never fails the action)
-  }
-  const isAns = Act.ASK_ACTIONS.includes(r.action) || Act.REVISE_ACTIONS.includes(r.action), lost = delivery === 'none' && !(isAns && released)   // #85: an answer a waiting script took is not lost; #90: + change_answer
-  const warns = [...(r.warnings || []), ...(lost ? ['not-delivered'] : [])]
-  return { ok: true, host: HOSTNAME, action: r.action, path: r.path, applied: r.applied, ...(r.dismissed ? { dismissed: r.dismissed } : {}), ...(warns.length ? { warnings: warns } : {}),
-    ...(delivery ? { delivered: delivery !== 'none', delivery, ...(lost ? { what: isAns ? 'not delivered: the session has no inbox and no script was waiting — the answer is on the node (the activity tool / aimb-log --wait-answer read it)' : 'not delivered: the session has no inbox (a script-only session) — the message is logged on the node' } : {}) } : {}),   // v1.70.0 (#84): live | parked | none
-    ...(isAns ? { released, question: r.question } : {}), ...(r.previous ? { previous: r.previous } : {}),   // v1.71.0 (#85): how many waiting scripts it released; the question as it is now; v1.75.0 (#90): the answer a change replaced
-    ...(r.action === 'edit_text' ? { text: r.new_text } : {}),   // v1.70.0 (#83): the line as kept (after the 240-character limit)
-    ...(r.moved_from != null ? { moved_from: r.moved_from, to: r.to } : {}), ...(r.where ? { where: r.where } : {}), ...(r.rank ? { rank: r.rank } : {}),   // v1.69.0 (#82)
-    ...(persisted === false ? { persisted: false } : {}) }
 }
 // #88 step 7 (gossip v6, §6.3): a dashboard ACTION on the 2.0 board, BY ID — {type:"activity_action", ref, host, session,
 // project, user, id, action, args} with id-valued args (to_id, before_id, after_id, into_id; label + merges = the clash
@@ -1655,7 +1365,7 @@ async function actApplyAction2(q, by) {
 // BATCHING per session: notices queue for notice_batch_sec (activity config, default 3 s; 0 = each at once); each new one
 // re-arms the window, at most ACT_NOTICE_MAX_WINDOWS windows after the first, or at ACT_NOTICE_MAX queued. At the flush the
 // queue is grouped by verb (first-seen order): one notice goes as it is; several of one verb become ONE message through
-// ACT_NOTICE_COMBINE[verb] (activity_changed: lib/activity.js combineActionNotices; any other verb: actCombineNotices — subject
+// ACT_NOTICE_COMBINE[verb] (activity_changed / activity_text_edited: lib/activity2.js combineActionNotices2; any other verb: actCombineNotices — subject
 // "<first subject> (+N more)", body { notices:[…], count }). opts.now flushes the session's queue (with this one) at once —
 // for a notice a person waits on (#84 a message, #85 an answer). Prepare-shutdown and a clean exit flush every queue.
 // DELIVERY (actDeliverNotice): a SYSTEM envelope (env.system — the exemption #72's notices ride; set only here, by bridge
@@ -1749,47 +1459,6 @@ function wLogCmd(v) {
   const ok = x => typeof x === 'string' && x.length > 0 && x.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(x)
   if (!v || typeof v !== 'object' || !ok(v.node) || !ok(v.script)) return null
   return { node: v.node, script: v.script, token_file: ok(v.token_file) ? v.token_file : null }
-}
-// #70 step 5 (v1.61.0): HISTORY PAGING INTO THE DAY FILES. logView pages the in-memory log; once it runs out (or the
-// cursor is a file cursor `f1.<day>.<offset>`) the page continues in this host's daily JSONL, read BACKWARDS in chunks
-// (step 2's reader — async I/O per chunk, so it yields to the event loop) through log_retention_days: the entity's
-// logged entries older than its oldest in-memory one, up to the page's room (entries + bytes; ACT_PAGE_* for a remote
-// owner's page, the 32 KB cap for a local one). A page reads at most ACT_SCAN_BYTES of file — a sparse agent in a
-// busy file gets a short (maybe empty) page with a cursor to go on. next_cursor = the file position before the last
-// record taken (or scanned); null once the window is exhausted.
-// v1.64.0 (#70 6c): the file half is lib/activity.js filePage — it STOPS at the node's RUN BOUNDARY (the record that began its
-// current run: run_start + earlier_cursor, "show earlier runs" = cursor:earlier_cursor + earlier:true) and says pruned when the
-// run began in a day file retention already deleted. A first file page starts in the day file of the oldest entry memory
-// served (newer days hold nothing older than it — nor the run's start), not at the newest file's end.
-const ACT_SCAN_BYTES = Number(process.env.AI_BRIDGE_ACTIVITY_SCAN_BYTES) || 8 * 1048576
-async function actLogPage(q, now, opts = {}) {
-  const lv = Act.logView(activity, q, now, { ...opts, files: !!PERSIST })
-  if (!lv.ok || !lv.files) return lv
-  const f = lv.files; delete lv.files
-  const fromDay = Act.localDay(now - ACT_CFG.log_retention_days * 86400000)
-  const before = f.from || (f.before ? { day: Act.localDay(f.before.ts), offset: null } : null)
-  return Act.filePage(lv, f, persistence.activity.readBackwards(HOSTNAME, { fromDay, before }),
-    { now, maxBytes: Math.min(f.maxBytes, ACT_PAGE_BYTES), scanBytes: ACT_SCAN_BYTES, earlier: !!(q && q.earlier) })
-}
-// one entry in full: memory first (a current line holds its details/data), else this host's JSONL — by the id index,
-// else a scan of the day file the id's timestamp names (± a day). Checkpoint / repeat lines never match.
-async function lookupActivityEntry(id, now) {
-  if (!id) return { ok: false, code: 'id-required', what: 'entry needs { id }' }
-  const mem = Act.findEntry(activity, id, now)
-  if (mem && mem.complete) return { source: 'memory', entry: actShow(mem.entry) }
-  if (PERSIST) {
-    let rec = null, via = null
-    const ix = actIndex.get(id)
-    if (ix) { const r = await persistence.activity.readAt(HOSTNAME, ix.day, ix.offset, ix.length); if (r && r.id === id && Act.recordKind(r) === 'entry') { rec = r; via = 'index' } }
-    const t = rec ? null : Act.entryTime(id)
-    if (t) for (const d of new Set([Act.localDay(t), Act.localDay(t - 86400000), Act.localDay(t + 86400000)])) { const r = await persistence.activity.find(HOSTNAME, d, id); if (r && Act.recordKind(r) === 'entry') { rec = r; via = 'scan'; break } }   // v1.62.0: a 1.61 (v1) record is not an entry
-    if (rec) {
-      const { v: _v, new_from: _n, line_id: _li, line_details: _ld, line_data: _lx, ...e } = rec   // v1.75.0 (#90): a question's status entry also carries the LINE's kept id / details / data (for the replay) — not this entry's
-      return { source: 'file', via, entry: actShow({ ...e, rendered: Act.renderText(e.text, e.progress, e.eta_at, now) }) }
-    }
-  }
-  if (mem) return { source: 'memory', entry: actShow(mem.entry), note: 'details/data are not available: this entry is not in this host\'s log files' }
-  return { ok: false, code: 'unknown-entry', what: `no entry ${id} on this host (in memory or in its daily log files)` }
 }
 // ---- the follower side: forward to this host's gateway over the control link, wait for its answer
 const actPending = new Map()   // rid -> { resolve, timer }
@@ -1994,7 +1663,7 @@ function loggerResolve(ws, m) {
 }
 
 // ---- #70 step 4 (v1.60.0): MESH-WIDE GOSSIP of the board + ON-DEMAND remote history, over the existing peer-hub links.
-// One-hop like the roster slices: each gateway sends ITS OWN host's units (lib/activity.js planSlice — current lines only,
+// One-hop like the roster slices: each gateway sends ITS OWN host's units (#88: lib/activity2-gossip.js planSlice2 — current lines only,
 // never details/data/log) to every peer hub that declared `activity_gossip` in PEER_HELLO: a FULL slice on every (re)link
 // and on request (`ACTIVITY_REQ {op:"resync"}`), then DELTAS (changed entities + removals). At most ONE frame per
 // ACT_GOSSIP_MS (1 s) per link: a change only KICKS a per-link timer, so any burst coalesces into the next frame; each
@@ -2033,7 +1702,7 @@ function actChanged() {
   for (const p of peerGw.values()) actKick(p)
   actDashKick()
 }
-function actUnitsNow() { if (!actUnits || actUnitsVer !== actVer) { actUnits = act2 ? G2.gossipUnits2(act2.state) : Act.gossipUnits(activity); actUnitsVer = actVer } return actUnits }   // #88 step 7: v6 units by id with the switch on
+function actUnitsNow() { if (!actUnits || actUnitsVer !== actVer) { actUnits = G2.gossipUnits2(act2.state); actUnitsVer = actVer } return actUnits }   // #88 step 7: v6 units by id
 // adoptPeer: a fresh link state; a 1.60+ peer gets a FULL slice right away (#63 rule: a full slice on every (re)link)
 // #88 step 7: with the switch on the format is 6 and the peer must announce 6 (§6.2's equality check, both ways): a 1.7x
 // hub announces 5, so nothing is shared with it in either direction (one log line says so). The 1.7x feature flags
@@ -2041,10 +1710,9 @@ function actUnitsNow() { if (!actUnits || actUnitsVer !== actVer) { actUnits = a
 const actFormat = () => (process.env.AI_BRIDGE_TEST_GOSSIP === 'v5' ? 5 : G2.GOSSIP2_FORMAT)   // #88 step 9: always v6 (=v5: a test's stand-in for a 1.7x hub)
 function actLinkInit(p, gw, hello) {
   if (!p) return
-  const v2 = true   // #88 step 9: always 2.0 (the 1.7x flags below are dead until step 11)
-  p.act = { gw, host: hostOfGw(gw), cap: !actLegacy() && !!(hello && hello.activity_gossip === actFormat()), plan: !v2 && !!(hello && Number(hello.activity_plan) >= 1), msg: !v2 && !!(hello && Number(hello.activity_msg) >= 1), ask: !v2 && !!(hello && Number(hello.activity_ask) >= 1), revise: !v2 && !!(hello && Number(hello.activity_revise) >= 1), seq: 0, pub: v2 ? G2.createPub2() : Act.createPub(), needFull: true, last: 0, timer: null, beat: false,   // v1.69.0 (#82): plan = it applies move / reorder
+  p.act = { gw, host: hostOfGw(gw), cap: !actLegacy() && !!(hello && hello.activity_gossip === actFormat()), seq: 0, pub: G2.createPub2(), needFull: true, last: 0, timer: null, beat: false,
     bucket: ACT_FETCH_RATE, bucketAt: Date.now(), resyncAt: 0 }
-  if (v2 && !p.act.cap && !actLegacy()) {   // #88 step 7: a 1.7x (or older) hub — not a supported state (§6.2): say so once per link, share nothing
+  if (!p.act.cap && !actLegacy()) {   // #88 step 7: a 1.7x (or older) hub — not a supported state (§6.2): say so once per link, share nothing
     const v = hello && hello.activity_gossip != null ? `activity_gossip:${String(hello.activity_gossip).slice(0, 8)}` : 'no activity format'
     log(`activity: ${p.act.host} declares ${v} — a 2.0 gateway shares activity only with 2.0 hosts (activity_gossip:${G2.GOSSIP2_FORMAT}); nothing is shared with it until it is upgraded (docs/spec-88.md §6.2)`)
     tapRec('recv', { peer: p.act.host, kind: 'format-mismatch', v: hello ? hello.activity_gossip : null })
@@ -2052,9 +1720,9 @@ function actLinkInit(p, gw, hello) {
     if (!actUnshared.has(gw)) actUnshared.set(gw, { host: p.act.host, since: Date.now(), activity_gossip: hello && hello.activity_gossip != null ? hello.activity_gossip : null })
     actUnsharedChanged()
   } else if (actUnshared.delete(gw)) actUnsharedChanged()   // the same gateway back on v6
-  if (v2) for (const [g, u] of [...actUnshared]) if (g !== gw && lc(u.host) === lc(p.act.host) && p.act.cap) { actUnshared.delete(g); actUnsharedChanged() }   // that HOST is back, upgraded (a new gateway session)
+  for (const [g, u] of [...actUnshared]) if (g !== gw && lc(u.host) === lc(p.act.host) && p.act.cap) { actUnshared.delete(g); actUnsharedChanged() }   // that HOST is back, upgraded (a new gateway session)
   if (p.act.cap) actKick(p)
-  if (p.act.cap && v2) { p.act.viewFull = true; p.act.viewWhy = 'link'; viewKick() }   // #88 step 8: the whole view set on every (re)link
+  if (p.act.cap) { p.act.viewFull = true; p.act.viewWhy = 'link'; viewKick() }   // #88 step 8: the whole view set on every (re)link
 }
 // #88 Q70 (2.0, the switch on): UNSHARED HOSTS — the linked peer hubs whose activity format check failed (a host still on
 // 1.7x: nothing is shared with it, §6.2). Robin: "a serious issue — show in RED". This gateway's own list (by link) goes
@@ -2101,16 +1769,14 @@ function actKick(p) {
 }
 function actSendTo(p) {
   const a = p.act
-  if (!a || !a.cap || peerGw.get(a.gw) !== p || !p.sock || p.sock.destroyed || role !== 'gateway' || !(activity || act2) || process.env.AI_BRIDGE_TEST_GOSSIP === 'silent') return
+  if (!a || !a.cap || peerGw.get(a.gw) !== p || !p.sock || p.sock.destroyed || role !== 'gateway' || !act2 || process.env.AI_BRIDGE_TEST_GOSSIP === 'silent') return
   const now = Date.now()
   if (actDownUntil > now) return                                     // we announced going down: quiet (full slices follow the hold)
-  if (actReplay && actReplay.phase === 'replaying') { setTimeout(() => actKick(p), 250).unref(); return }   // nothing to show before phase 1
   const full = a.needFull
-  const plan = act2 ? G2.planSlice2(act2.state, a.pub, { full, maxBytes: ACT_SLICE_MAX_BYTES, units: actUnitsNow() })   // #88 step 7: the v6 slice (one unit per node, by id)
-    : Act.planSlice(activity, a.pub, { full, maxBytes: ACT_SLICE_MAX_BYTES, units: actUnitsNow() })
+  const plan = G2.planSlice2(act2.state, a.pub, { full, maxBytes: ACT_SLICE_MAX_BYTES, units: actUnitsNow() })   // #88 step 7: the v6 slice (one unit per node, by id)
   let frame = null
   // #88 Q70 (2.0): the 1.7x hosts this gateway is linked to ride the v6 slices — on a full one, and on a delta when the list changed
-  const us = act2 ? actUnsharedOwn() : null, usSig = us ? JSON.stringify(us) : null, usDue = !!us && (full || a.usSig !== usSig)
+  const us = actUnsharedOwn(), usSig = JSON.stringify(us), usDue = full || a.usSig !== usSig
   if (plan.body) frame = { t: 'ACTIVITY_SLICE', origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq + 1, ...(full ? { log_cmd: actLogCmd() } : { base: a.seq }), ...plan.body }   // the body carries v (#70 step 6a); v1.65.0 (6d): a full one our aimb-log paths
   else if (usDue) frame = { t: 'ACTIVITY_SLICE', v: actFormat(), origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq + 1, base: a.seq, sessions: [] }   // Q70: only the list changed — an empty delta carries it
   else if (a.beat) frame = { t: 'ACTIVITY_SLICE', v: actFormat(), origin: HOSTNAME, epoch: ACT_EPOCH, seq: a.seq, base: a.seq, sessions: [], beat: true }   // the #63 heartbeat: lets the receiver check it is in sync
@@ -2147,24 +1813,7 @@ function onActivityFrame(sock, f) {
     log(`activity: dropped a ${f.t} from ${gw} claiming origin "${String(f.origin).slice(0, 80)}"`)
     tapRec('recv', { peer: host, kind: 'forged', t: f.t }); refuse('unauthorized', 'a frame may speak only for its own link host'); return
   }
-  return onActivityFrame2(sock, gw, p, host, f, refuse)   // #88 step 7: gossip v6 (step 9: always)
-  if (f.t === 'ACTIVITY_SLICE') {
-    if (!activity || lc(host) === lc(HOSTNAME)) return   // never let a peer write our own host's entities
-    if (!f.full && actOwner.get(host) !== gw) { actAskResync(p, host); return }   // a delta from a link that never sent us a full slice
-    const r = Act.applySlice(activity, host, f)
-    if (ACT_TAP) tapRec('recv', { peer: host, ...tapSlice(f), ok: r.ok, code: r.code })
-    if (!r.ok) { if (r.code === 'out-of-sync') actAskResync(p, host); else if (r.code !== 'bad-version' || !p.act || !p.act.badVer) { if (r.code === 'bad-version' && p.act) p.act.badVer = true; log(`activity: slice from ${host} refused: ${r.code}`) } ; return }   // v1.62.0: an old-format (v1) slice is skipped, logged once per link
-    if (f.full) { actOwner.set(host, gw); const lc2 = wLogCmd(f.log_cmd); if (lc2) actHostCmd.set(host, lc2); else actHostCmd.delete(host) }   // v1.65.0 (#70 6d): its aimb-log paths (the dashboard's "copy command")
-    if (r.changed || f.full) actDashKick()
-  } else if (f.t === 'ACTIVITY_DOWN') {
-    tapRec('recv', { peer: host, kind: 'down' })
-    if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, actNow())) { log(`activity: ${host} is going down (${String(f.reason || 'notice').slice(0, 40)}) — its agents show as gone`); actDashKick() }
-  } else if (f.t === 'ACTIVITY_REQ') actServe(sock, p, host, f)
-  else if (f.t === 'ACTIVITY_ACT') actServeAction(sock, p, host, f)   // v1.65.0 (#70 6d)
-  else if (f.t === 'ACTIVITY_RES') {
-    const q = actRemotePending.get(f.rid)
-    if (q && q.sock === sock) { clearTimeout(q.timer); actRemotePending.delete(f.rid); q.resolve(f.result && typeof f.result === 'object' ? f.result : { ok: false, code: 'bad-response', what: 'the owning host sent no result' }) }
-  }
+  return onActivityFrame2(sock, gw, p, host, f, refuse)   // #88 step 7: gossip v6 (step 11: the only format)
 }
 // #88 step 7: the v6 frames (the switch on) — the same link rules as v5 (ownership is the LINK's host; a frame naming another
 // origin was dropped above), folded into the held remote boards (lib/activity2-gossip.js applySlice2) instead of the 1.7x
@@ -2199,42 +1848,26 @@ function actTakeToken(a) {
   return null
 }
 // the OWNER side of a remote fetch: rate-limited per link (token bucket), paged (ACT_PAGE_ENTRIES / ACT_PAGE_BYTES), and
-// only ever about this host's own entities. logView is an in-memory slice of ≤ a page; an entry's details/data are read
-// back through lookupActivityEntry (id index → readAt, else a streamed day-file scan — async, never a big sync read).
+// only ever about this host's own nodes (#88: the 2.0 store pages by id through its index files, §5.2; an entry's
+// details / data come from its day file).
 function actServe(sock, p, host, f) {
   const reply = result => { try { sendFrame(sock, { t: 'ACTIVITY_RES', rid: f.rid, result }) } catch { } ; tapRec('sent', { peer: host, kind: 'res', op: f.op, ok: !!(result && result.ok), code: result && result.code }) }
   tapRec('recv', { peer: host, kind: f.op === 'resync' ? 'resync' : 'req', op: f.op })
   if (f.op === 'resync') { if (p.act && p.act.cap) { p.act.needFull = true; actKick(p) } return }   // no reply: the full slice is the answer
-  if (role !== 'gateway' || !(activity || act2)) return reply({ ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })
+  if (role !== 'gateway' || !act2) return reply({ ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })
   if (!ACT_CFG.enabled) return reply({ ...actDisabled(), host: HOSTNAME })
   const limited = actTakeToken(p.act)   // v1.65.0: shared with the actions (actServeAction)
   if (limited) return reply(limited)
   const q = f.q && typeof f.q === 'object' ? f.q : {}
-  if (act2) {   // #88 step 7: the OWNER of a 2.0 board pages a node's subtree BY ID through its index files (§5.2, §6.3), or one entry
-    try {
-      if (f.op === 'log') {
-        const lv = act2.logPage(q, actNow(), { maxEntries: ACT_PAGE_ENTRIES, maxBytes: ACT_PAGE_BYTES })
-        if (!lv.ok) return reply({ ...lv, host: HOSTNAME })
-        const { ok: _ok, ...rest } = lv
-        return reply({ ok: true, host: HOSTNAME, log: { ...rest, host: HOSTNAME } })
-      }
-      if (f.op === 'entry') { const r = act2.entry(String(q.id || ''), actNow()); return reply(r.ok === false ? { ...r, host: HOSTNAME } : { ok: true, host: HOSTNAME, source: r.source, entry: { ...r.entry, host: HOSTNAME } }) }
-    } catch (e) { return reply({ ok: false, code: 'owner-error', host: HOSTNAME, what: String((e && e.message) || e) }) }
-    return reply({ ok: false, code: 'bad-op', what: `unknown activity request ${String(f.op).slice(0, 40)}` })
-  }
-  if (f.op === 'log') {   // v1.61.0: a page continues into this host's day files once memory runs out (actLogPage)
-    actLogPage(q, actNow(), { maxEntries: ACT_PAGE_ENTRIES, maxBytes: ACT_PAGE_BYTES }).then(lv => {
+  try {   // #88 step 7: the OWNER of a 2.0 board pages a node's subtree BY ID through its index files (§5.2, §6.3), or one entry
+    if (f.op === 'log') {
+      const lv = act2.logPage(q, actNow(), { maxEntries: ACT_PAGE_ENTRIES, maxBytes: ACT_PAGE_BYTES })
       if (!lv.ok) return reply({ ...lv, host: HOSTNAME })
       const { ok: _ok, ...rest } = lv
-      reply({ ok: true, host: HOSTNAME, log: { ...rest, host: HOSTNAME } })
-    }, e => reply({ ok: false, code: 'owner-error', host: HOSTNAME, what: String((e && e.message) || e) }))
-    return
-  }
-  if (f.op === 'entry') {
-    lookupActivityEntry(String(q.id || ''), actNow()).then(r => reply(r.ok === false ? { ...r, host: HOSTNAME } : { ok: true, host: HOSTNAME, ...r }),
-      e => reply({ ok: false, code: 'owner-error', host: HOSTNAME, what: String((e && e.message) || e) }))
-    return
-  }
+      return reply({ ok: true, host: HOSTNAME, log: { ...rest, host: HOSTNAME } })
+    }
+    if (f.op === 'entry') { const r = act2.entry(String(q.id || ''), actNow()); return reply(r.ok === false ? { ...r, host: HOSTNAME } : { ok: true, host: HOSTNAME, source: r.source, entry: { ...r.entry, host: HOSTNAME } }) }
+  } catch (e) { return reply({ ok: false, code: 'owner-error', host: HOSTNAME, what: String((e && e.message) || e) }) }
   reply({ ok: false, code: 'bad-op', what: `unknown activity request ${String(f.op).slice(0, 40)}` })
 }
 // v1.65.0 (#70 6d): the OWNER side of a forwarded dashboard ACTION — the same per-link bucket as a fetch; applied only to THIS
@@ -2244,13 +1877,13 @@ function actServeAction(sock, p, host, f) {
   const reply = result => { try { sendFrame(sock, { t: 'ACTIVITY_RES', rid: f.rid, result }) } catch { } ; tapRec('sent', { peer: host, kind: 'res', op: 'action', ok: !!(result && result.ok), code: result && result.code }) }
   const q = f.q && typeof f.q === 'object' ? f.q : {}
   tapRec('recv', { peer: host, kind: 'act', op: q.action })
-  if (role !== 'gateway' || !(activity || act2)) return reply({ ok: false, code: 'not-gateway', host: HOSTNAME, what: 'this bridge does not hold the activity board' })
+  if (role !== 'gateway' || !act2) return reply({ ok: false, code: 'not-gateway', host: HOSTNAME, what: 'this bridge does not hold the activity board' })
   if (!ACT_CFG.enabled) return reply({ ...actDisabled(), host: HOSTNAME })
   const limited = actTakeToken(p.act)
   if (limited) return reply(limited)
   if (q.host != null && lc(String(q.host)) !== lc(HOSTNAME)) return reply({ ok: false, code: 'not-owner', host: HOSTNAME, what: `host ${HOSTNAME} writes only its own nodes (this action names ${String(q.host).slice(0, 80)})` })
   const by = { kind: 'dashboard', user: f.by && typeof f.by.user === 'string' && f.by.user.trim() ? f.by.user.slice(0, 64) : 'dashboard', host }
-  const apply = act2 ? actApplyAction2(G2.actionQuery2(q), by) : actApplyAction(actActionQuery(q), by)   // #88 step 7: by id on the 2.0 board
+  const apply = actApplyAction2(G2.actionQuery2(q), by)   // #88 step 7: by id on the 2.0 board
   apply.then(reply, e => reply({ ok: false, code: 'owner-error', host: HOSTNAME, what: String((e && e.message) || e) }))
 }
 /**
@@ -2329,16 +1962,13 @@ function actDispatch(p, job) {
 /** A host name as held (case-insensitive), or null. */
 function actKnownHost(h) {
   const k = lc(h)
-  for (const o of (act2 ? actRemote2.hosts : activity.remote).keys()) if (lc(o) === k) return o   // #88 step 7: the held v6 boards with the switch on
+  for (const o of actRemote2.hosts.keys()) if (lc(o) === k) return o   // #88 step 7: the held v6 boards
   for (const o of actOwner.keys()) if (lc(o) === k) return o
   return null
 }
 /** #88 step 7: the board head's remote_hosts on the 2.0 board — { host, sessions, nodes, seq, down_at?, truncated?, linked, log_cmd? }. */
 function actRemoteInfo2() {
   return G2.remoteInfo2(actRemote2).map(x => { const p = peerGw.get(actOwner.get(x.host)); return { ...x, linked: !!(p && p.sock && !p.sock.destroyed), ...(actHostCmd.has(x.host) ? { log_cmd: actHostCmd.get(x.host) } : {}) } })
-}
-function actRemoteInfo() {
-  return Act.remoteInfo(activity).map(x => { const p = peerGw.get(actOwner.get(x.host)); return { ...x, linked: !!(p && p.sock && !p.sock.destroyed), ...(p && p.act && p.act.plan ? { plan: true } : {}), ...(p && p.act && p.act.msg ? { msg: true } : {}), ...(p && p.act && p.act.ask ? { ask: true } : {}), ...(p && p.act && p.act.revise ? { revise: true } : {}), ...(actHostCmd.has(x.host) ? { log_cmd: actHostCmd.get(x.host) } : {}) } })   // v1.65.0: + that host's aimb-log paths; v1.69.0 (#82): plan = it applies move / reorder
 }
 // a peer link went away (dropPeer: closed, retired, expired): its in-flight fetches fail, and if it owned a host's slice
 // that slice's agents show as GONE until the host returns
@@ -2349,13 +1979,12 @@ function actLinkLost(gw, p, why) {
   const host = hostOfGw(gw)
   if (actUnshared.delete(gw)) actUnsharedChanged()   // #88 Q70: the 1.7x host's link dropped → off the list
   if (actUnsharedRemote.delete(host)) actUnsharedChanged()   // … and what this peer reported goes with its link
-  if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, actNow())) { log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`); actDashKick() }
   if (act2 && actOwner.get(host) === gw && G2.markOriginDown2(actRemote2, host, actNow())) { log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`); actDashKick() }   // #88 step 7; step 10: + the dashboards
 }
 // GOING DOWN (the tray's prepare-shutdown, or a clean exit): tell every peer hub now, so their boards show our agents gone
 // at once instead of after the link times out. Resolves once the frames are written (≤300 ms) with the number sent.
 function actAnnounceDown(reason) {
-  if (role !== 'gateway' || !(activity || act2) || actLegacy()) return Promise.resolve(0)
+  if (role !== 'gateway' || !act2 || actLegacy()) return Promise.resolve(0)
   const links = [...peerGw.values()].filter(p => p.act && p.act.cap && p.sock && !p.sock.destroyed)
   actDownUntil = Date.now() + ACT_DOWN_HOLD_MS
   if (actDownTimer) clearTimeout(actDownTimer)
@@ -2374,7 +2003,7 @@ function actAnnounceDown(reason) {
 // nothing. On subscribe (or {type:"activity_sub", resync:true}): {type:"activity_board", full:true, epoch, seq, head,
 // upsert:[every unit]}; then at most once per ACT_GOSSIP_MS, when anything changed (local or remote):
 // {type:"activity_delta", epoch, seq, base, head, upsert:[changed units], remove:[unit ids]} — each dashboard diffed against
-// its OWN published view (lib/activity.js dashUnits / planDashDelta over boardView raw: reported states + raw times, so
+// its OWN published view (#88: lib/activity2-dash.js dashUnits2 / planDashDelta2 — reported states + raw times, so
 // time passing is never a change; the page computes stale with its own slider). A delta whose `base` isn't the page's
 // seq means one was lost → the page asks for a resync. head = { host, now, stale_after_min, remote_hosts, loading? }.
 // Requests {type:"activity", ref, query} → {type:"activity", ref, result} (a queued remote fetch first sends
@@ -2387,14 +2016,10 @@ function actAnnounceDown(reason) {
 // view_user ("view: robin", Q29 / Q41), unshared_hosts (Q70: shown in RED), fs_warnings.
 const actDashSubs = () => [...leaves].filter(ws => ws.kind === 'dashboard' && ws.actSub && ws.readyState === 1)
 function actDashHead() {
-  if (act2) {
-    const unshared = actUnsharedHosts(), h = act2.head()
-    return { host: HOSTNAME, now: actNow(), format: h.format, stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min,
-      remote_hosts: actRemoteInfo2().map(x => { const { seq: _s, ...r } = /** @type {any} */ (x); return r }), log_cmd: actLogCmd(), user: ACT_DASH_USER, view_user: VIEW_USER,
-      ...(unshared.length ? { unshared_hosts: unshared } : {}), ...(h.fs_warnings ? { fs_warnings: h.fs_warnings } : {}) }
-  }
-  return { host: HOSTNAME, now: actNow(), stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
-    remote_hosts: activity && activity.remote.size ? actRemoteInfo() : [], log_cmd: actLogCmd(), user: ACT_DASH_USER }   // v1.65.0 (#70 6d): our aimb-log paths (never a token) + who actions are attributed to
+  const unshared = actUnsharedHosts(), h = act2.head()
+  return { host: HOSTNAME, now: actNow(), format: h.format, stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min,
+    remote_hosts: actRemoteInfo2().map(x => { const { seq: _s, ...r } = /** @type {any} */ (x); return r }), log_cmd: actLogCmd(), user: ACT_DASH_USER, view_user: VIEW_USER,   // v1.65.0 (#70 6d): our aimb-log paths (never a token) + who actions are attributed to
+    ...(unshared.length ? { unshared_hosts: unshared } : {}), ...(h.fs_warnings ? { fs_warnings: h.fs_warnings } : {}) }
 }
 // #79 (v1.66.0): each session group's CLIENT KIND for the dashboard's session glyph (code ">_", cowork a bubble, a page a
 // globe, else a plain window) — from the mesh ROSTER (sub-peers and project-bearing bare sessions carry client_kind),
@@ -2409,28 +2034,25 @@ function actRosterKinds() {
   }
   if (actKinds.size > 4096) actKinds.delete(actKinds.keys().next().value)   // bounded (oldest first)
 }
-const actWithKind = g => { const k = actKinds.get(actKindKey(g.realm, g.project, g.user, g.session)); return k ? { ...g, client_kind: k } : g }
 const actDashUnits = () => {
   actRosterKinds()
-  if (act2) return dashUnits2({ state: act2.state, host: HOSTNAME, remote: actRemote2, project: projName, kindOf: g => actKinds.get(actKindKey(g.realm, g.project, g.user, g.session)) || null })   // #88 step 10
-  return Act.dashUnits(Act.boardView(activity, actNow(), { raw: true }).map(actShow).map(actWithKind))
+  return dashUnits2({ state: act2.state, host: HOSTNAME, remote: actRemote2, project: projName, kindOf: g => actKinds.get(actKindKey(g.realm, g.project, g.user, g.session)) || null })   // #88 step 10
 }
-const actDashDelta = (pub, units, opts) => (act2 ? planDashDelta2(pub, units, opts) : Act.planDashDelta(pub, units, opts))
 function actDashSubscribe(ws) {   // a full board now (not throttled): the page's view starts from it
   ws.actSub = { pub: new Map(), seq: 1, head: '' }
-  const plan = actDashDelta(ws.actSub.pub, actDashUnits(), { full: true }), head = actDashHead()
+  const plan = planDashDelta2(ws.actSub.pub, actDashUnits(), { full: true }), head = actDashHead()
   ws.actSub.head = JSON.stringify({ ...head, now: 0 })
-  try { ws.send(JSON.stringify({ type: 'activity_board', full: true, epoch: ACT_EPOCH, seq: 1, head, ...(act2 ? { types: DASH_TYPES } : {}), upsert: plan.upsert })) } catch { }   // #88 step 10: + the type registry (labels of the units' menus)
+  try { ws.send(JSON.stringify({ type: 'activity_board', full: true, epoch: ACT_EPOCH, seq: 1, head, types: DASH_TYPES, upsert: plan.upsert })) } catch { }   // #88 step 10: + the type registry (labels of the units' menus)
 }
 function actDashKick() {
-  if (actDashTimer || role !== 'gateway' || !(activity || act2) || !actDashSubs().length) return
+  if (actDashTimer || role !== 'gateway' || !act2 || !actDashSubs().length) return
   actDashTimer = setTimeout(() => {
     actDashTimer = null; actDashLast = Date.now()
     const subs = actDashSubs()
-    if (!subs.length || !(activity || act2)) return
+    if (!subs.length || !act2) return
     const units = actDashUnits(), head = actDashHead(), hj = JSON.stringify({ ...head, now: 0 })
     for (const ws of subs) {
-      const plan = actDashDelta(ws.actSub.pub, units)
+      const plan = planDashDelta2(ws.actSub.pub, units)
       if (plan.empty && hj === ws.actSub.head) continue
       const base = ws.actSub.seq++
       ws.actSub.head = hj
@@ -2441,15 +2063,15 @@ function actDashKick() {
 }
 // #70 step 5 (v1.61.0): the DOORBELL flag. A session is "armed" while a `listener` leaf on this gateway watches its name
 // (+ project); a listener that just closed counts for ACT_BELL_GRACE_MS more (the doorbell script exits on mail and
-// re-arms — the bell shouldn't flicker). lib/activity.js setBells marks the local sessions; it rides the gossip header.
+// re-arms — the bell shouldn't flicker). lib/activity2.js setBells2 marks the local sessions; it rides the gossip header.
 const ACT_BELL_GRACE_MS = Number(process.env.AI_BRIDGE_ACTIVITY_BELL_GRACE_MS) || 5000
 const actBellClosed = new Map()   // JSON watch -> closed-at
 function syncActivityBells() {
-  if (!(activity || act2) || role !== 'gateway') return   // #88 step 10 (Q72): the 2.0 board too (lib/activity2.js setBells2)
+  if (!act2 || role !== 'gateway') return   // #88 step 10 (Q72): lib/activity2.js setBells2
   const now = Date.now(), watches = []
   for (const ws of leaves) if (ws.kind === 'listener' && ws.readyState === 1 && ws.watch) watches.push(ws.watch)
   for (const [k, t] of [...actBellClosed]) { if (now - t > ACT_BELL_GRACE_MS) actBellClosed.delete(k); else watches.push(JSON.parse(k)) }
-  if (act2 ? act2.setBells(watches) : Act.setBells(activity, watches)) actChanged()
+  if (act2.setBells(watches)) actChanged()
 }
 function actBellClose(ws) {
   if (!ws.watch || !ws.watch.name) return
@@ -2933,7 +2555,7 @@ function rosterFor(ws) {
     ? rosterPayload() : rosterPayloadFor(ws.project, ws.realm))
 }
 function broadcastRoster() {
-  syncActivityGone()     // #70: a session that left this host's roster shows as gone (cleared when it returns)
+  syncActivityGone2()     // #70: a session that left this host's roster shows as gone (cleared when it returns)
   try { actDashKick() } catch { }   // #79: a roster change can change a session's client kind (its dashboard glyph); throttled, no-op without subscribers
   noteRosterProjects()   // #71: give every roster project a canonical spelling before it goes out
   const frame = { type: 'ROSTER', ...rosterPayload(), grants: consent.grantSet(), realm_defaults: realmDefaults.current(), project_names: projectNames.list() }   // #62: followers merge the grant set (consent is checked in the process hosting the target); #66b: and the realm defaults
@@ -3064,17 +2686,9 @@ const refreshCap = () => TEST_GOSSIP === 'legacy' ? {} : { gossip_refresh: true,
 const gossipFrame = (slice = localRosterSlice(), pg = localPagesSlice(), gr = consent.grantSet(), rd = realmDefaults.current(), pn = projectNames.list()) => ({ t: 'PEER_ROSTER', gateway: SESSION, host: ADVERTISE, port: PORT, sessions: slice, pages: pg, grants: gr, realm_defaults: rd, project_names: pn, ...refreshCap(), ...(viewOn() ? { view_v: viewSet.viewV() } : {}) })
 // #70 step 4 (v1.60.0): `activity_gossip:N` = this hub sends + understands ACTIVITY_SLICE / _DOWN / _REQ / _RES in format N (a ≤1.59
 // peer ignores the field, never gets the frames, and ignores them if it did; 'legacy' test gossip mimics that). v1.62.0 (#70
-// step 6a, the node tree): N = 2 — a 1.60/1.61 peer (N = 1) and this hub exchange no slices or fetches (owner-unsupported)
-// v1.69.0 (#82): `activity_plan:1` = this hub's owner applies the plan-workflow actions (move / reorder) — a ≤1.68 peer ignores
-// the field; a 1.69 gateway forwards those actions only to an owner that declared it (else owner-unsupported). The format stays v5.
-// v1.70.0 (#83 / #84): `activity_msg:1` = this hub's owner applies edit_text / message the same way (a 1.69 owner would answer
-// bad-action). AI_BRIDGE_TEST_NO_ACTIVITY_MSG=1 (tests only) leaves it out, to stand in for a 1.69 owner.
-// v1.71.0 (#85): `activity_ask:1` = this hub's owner applies the question actions (answer / withdraw) — a 1.71 gateway forwards
-// them only to an owner that declared it (else owner-unsupported). AI_BRIDGE_TEST_NO_ACTIVITY_ASK=1 (tests only) leaves it out.
-// v1.75.0 (#90): `activity_revise:1` = this hub's owner applies change_answer (a ≤1.74 owner would answer bad-action) — a 1.75
-// gateway forwards it only to an owner that declared it (else owner-unsupported). AI_BRIDGE_TEST_NO_ACTIVITY_REVISE=1 (tests only).
-// #88 step 7 (2.0, the switch on): `activity_gossip:6` ALONE (§6.2) — v6 slices, id-addressed ACTIVITY_REQ / ACTIVITY_ACT,
-// the rename / merge actions and the clash answer; the 1.7x flags above are no longer sent (or read: actLinkInit).
+// step 6a, the node tree): N = 2 — a peer with another N and this hub exchange no slices or fetches (owner-unsupported).
+// #88 step 7 (2.0): `activity_gossip:6` ALONE (§6.2) — v6 slices, id-addressed ACTIVITY_REQ / ACTIVITY_ACT, the rename /
+// merge actions and the clash answer; 1.7x's feature flags (activity_plan / _msg / _ask / _revise) are neither sent nor read.
 // #88 step 9: the switch is gone — `activity_gossip:6` alone, always. TEST-ONLY: AI_BRIDGE_TEST_GOSSIP=v5 makes this hub
 // announce activity_gossip:5 as a 1.7x hub does (and expect 5 back: actFormat), so a test can stand up "a host left on
 // 1.7x" (Q70) without a 1.7x build; =legacy announces nothing (a ≤1.59 hub).
@@ -3297,7 +2911,7 @@ function becomeGateway(server) {
   flushPendingTraces()
   server.on('connection', onControlConn)
   failActivityPending('gateway-lost', 'this bridge became the gateway mid-call — retry'); gwRegistered = false
-  startActivity()    // #70: this host's activity board + its daily JSONL are owned here now (replayed in the background)
+  startActivity2()    // #70 / #88: this host's activity board + its day files are owned here now (the start check, then the replay)
   startWsIngress(WS_PORT)
   broadcastRoster()
   maybeLaunchTray()
@@ -3539,7 +3153,7 @@ function onWsConnection(ws) {
           try { ws.send(JSON.stringify(m.type === 'activity' ? { type: 'activity', ref: m.ref != null ? m.ref : null, result: deny } : { type: 'activity_board', ...deny })) } catch {}
         } else if (m.type === 'activity_sub') {   // #70 step 5: the Activity view opened (or a resync after a seq gap) → a full board, then deltas
           // #88 step 10: the 2.0 board's units (lib/activity2-dash.js)
-          if (role !== 'gateway' || !(activity || act2)) { try { ws.send(JSON.stringify({ type: 'activity_board', ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })) } catch {} ; return }
+          if (role !== 'gateway' || !act2) { try { ws.send(JSON.stringify({ type: 'activity_board', ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })) } catch {} ; return }
           if (!ACT_CFG.enabled) { try { ws.send(JSON.stringify({ type: 'activity_board', ...actDisabled() })) } catch {} ; return }
           actDashSubscribe(ws)
         } else if (m.type === 'activity_unsub') {

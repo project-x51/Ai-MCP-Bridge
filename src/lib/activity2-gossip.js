@@ -1,8 +1,8 @@
 // #88 (v2.0) build step 7: GOSSIP v6 — 2.0 gateways sharing their activity boards across hosts (docs/spec-88.md §6).
 //
 // THE STAGING (spec §8 step 7 "as built"): the bridge uses this module only with the pre-cutover switch
-// AI_BRIDGE_ACTIVITY_V2=1 (as step 6's store); without it the 1.7x gossip v5 (lib/activity.js planSlice / applySlice)
-// serves as before, until step 9 switches the bridge for good. bridge.mjs keeps the links, timers and frames; this module
+// AI_BRIDGE_ACTIVITY_V2=1 (as step 6's store); step 9 switched the bridge for good and step 11 deleted the 1.7x gossip v5
+// (lib/activity.js planSlice / applySlice). bridge.mjs keeps the links, timers and frames; this module
 // is the pure part, so the unit tests drive it without sockets.
 //
 // THE v6 SLICE (§6.1): one UNIT per NODE, keyed by its ID — `id`, `p` (the parent id; none for the session root, which

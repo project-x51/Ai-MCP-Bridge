@@ -937,7 +937,7 @@
 
   // ------------------------------------------------ activity (#70 step 5, v1.61.0; the node tree: step 6a, v1.62.0)
   // The PURE part — window.AimbAct, unit-tested by tests/test_dashboard_activity.mjs. The bridge sends REPORTED states and
-  // raw times (boardView raw), one unit per session group and one per NODE (an agent or a context, any depth, `parent_key`
+  // raw times, one unit per session group and one per NODE (an agent or a context, any depth, `parent_id`
   // linking them), so stale is computed HERE from last_activity + the item's own stale_after (else the slider): the slider
   // is instant and a delta never carries "time passed". AGENTS (and the session) go stale by their own activity; a CONTEXT
   // shows its nearest agent ancestor's staleness / gone (6a). Also: the status glyph (centre = state, ring = time left
@@ -992,10 +992,10 @@
         } });
     }
     function isCtx(u){ return !!u&&u.nkind==='context'; }
-    // #88 step 10: a unit's NODE ID and its parent's (2.0: node_id / parent_id; a 1.7x-shaped unit — key / parent_key — still links)
-    function nidOf(u){ return u?(u.node_id!=null?u.node_id:u.key):null; }
-    function pidOf(u){ return u?(u.node_id!=null?(u.parent_id||null):(u.parent_key||null)):null; }
-    // the VIEW STATE's target of a row (§5.6): a node's id; a session row (or a 1.7x-shaped unit) its unit id
+    // #88 step 10: a unit's NODE ID and its parent's (node_id / parent_id; step 11: 1.7x-shaped units — key / parent_key — are gone)
+    function nidOf(u){ return u?(u.node_id!=null?u.node_id:null):null; }
+    function pidOf(u){ return u?(u.parent_id||null):null; }
+    // the VIEW STATE's target of a row (§5.6): a node's id; a session row its unit id
     function vt(u){ return u?(u.kind==='node'&&u.node_id?u.node_id:u.id):null; }
     // §5.7: a GROUP's count where a bar would be — its children (tree nodes) minus ABANDONED ones (withdrawn / expired
     // questions too): done = done, skipped = skipped, the rest open → { n, open, done, skipped, text } | null ("4 items" while
@@ -1208,7 +1208,7 @@
     function lcs(v){ return String(v==null?'':v).toLowerCase(); }
     function selfActive(s){ return !!(s&&s.current&&!s.finished_at&&s.state!=='gone'); }
     // projects (A→Z) → sessions (A→Z: a live tree must not reshuffle under the pointer) → the NODE TREE of each session (6a):
-    // nodes linked by parent_key within their host (a session on several hosts shows each host's nodes); children in
+    // nodes linked by parent_id within their host (a session on several hosts shows each host's nodes); children in
     // RANK order (#82: plan items, then contexts, then agents, each by rank — derived from creation order unless placed). A node whose parent has not
     // arrived yet sits at the top level. Each tree node: { u, kids, owner, parentHost, open, endedPlan, planNode, fbar? } —
     // owner = the nearest agent above (or the host's session self); parentHost = the parent's host (top level — 6c: the
@@ -1326,8 +1326,10 @@
     // has_path, pinned, hidden, no_view, question }. Items: { id, label, act?, args?, confirm?, copy?, view?, dlg?, pick? }
     // or { sep:true }.
     function menuFor(m){
-      m=m||{}; if(m.menu) return menuFor2(m);
-      return menuFor17(m); }
+      m=m||{};
+      if(m.kind==='entry'){ var out=[{id:'copy-id',label:'Copy entry id',copy:'id'}]; if(m.has_path) out.push({id:'copy-path',label:'Copy path',copy:'path'}); return out; }   // a log entry: its copies
+      if(m.kind!=='node'&&m.kind!=='session') return [];   // a project row: nothing
+      return menuFor2(m); }
     var DLG_OF={rename:'rename',edit_text:'edit',message:'message',answer:'answer',change_answer:'answer'};
     function menuFor2(m){
       var out=[], last=null, sep=function(){ if(out.length&&!out[out.length-1].sep) out.push({sep:true}); }, L=m.labels||{};
@@ -1351,45 +1353,6 @@
       out.push(m.pinned?{id:'unpin',label:'Unpin',view:'unpin'}:{id:'pin',label:'Pin to the top',view:'pin'});
       out.push(m.hidden?{id:'unhide',label:'Unhide',view:'unhide'}:{id:'hide',label:'Hide',view:'hide'});
       return out; }
-    // the 1.7x menu (a unit without `menu`: kept for the entries' menu and old fixtures; step 11 deletes it)
-    function menuFor17(m){
-      m=m||{}; var out=[], sep=function(){ if(out.length&&!out[out.length-1].sep) out.push({sep:true}); };
-      if(m.kind==='entry'){ out.push({id:'copy-id',label:'Copy entry id',copy:'id'}); if(m.has_path) out.push({id:'copy-path',label:'Copy path',copy:'path'}); return out; }
-      if(m.kind!=='node'&&m.kind!=='session') return out;
-      if(m.plan_item){ var st=m.item_state||'todo';
-        if(st!=='done') out.push({id:'done',label:'Mark done',act:'done'});
-        if(st!=='skipped') out.push({id:'skip',label:'Skip',act:'skip'});
-        if(st!=='todo') out.push({id:'reopen',label:'Reopen (back to ☐)',act:'reopen'});
-        if(st!=='abandoned') out.push({id:'abandon',label:'Abandon item',act:'abandon'}); }
-      // #82: abandon ANY context (with its open contexts / items below — the bridge cascades), asked first
-      // #85: a QUESTION — Answer… / Withdraw question… while it is open (its host must run 1.71+); no Abandon / Edit text on it
-      if(m.question){ if(m.question.status==='asked'&&m.can_ask){ out.push({id:'answer',label:'Answer…',act:'answer',dlg:'answer'}); out.push({id:'withdraw',label:'Withdraw question…',act:'withdraw',confirm:true}); }
-        else if(m.question.status==='answered'&&m.can_revise) out.push({id:'change-answer',label:'Change answer…',act:'change_answer',dlg:'answer'}); }   // #90: a 1.75+ owner
-      else if(m.kind==='node'&&m.nkind==='context'&&!m.plan_item&&!m.plan_node&&m.can_plan&&m.own_state!=='abandoned') out.push({id:'abandon-ctx',label:'Abandon…',act:'abandon',confirm:true});
-      var ab=false;
-      if(m.plan_node){ sep();
-        if(!m.plan_end_how){ out.push({id:'complete',label:'Mark plan complete',act:'complete'}); out.push({id:'abandon_plan',label:'Abandon plan…',act:'abandon_plan',confirm:true}); ab=true; }
-        else if(m.plan_end_how!=='all-done') out.push({id:'reopen_plan',label:'Reopen plan',act:'reopen_plan'}); }
-      if(m.agent_ok){ sep();
-        if(m.owns_open&&!ab) out.push({id:'abandon_plan',label:'Abandon open plan items…',act:'abandon_plan',confirm:true});
-        if(m.quiet&&!m.finished){ out.push({id:'finish-done',label:'Mark finished — done…',act:'finish',args:{state:'done'},confirm:true}); out.push({id:'finish-failed',label:'Mark finished — failed…',act:'finish',args:{state:'failed'},confirm:true}); }
-        if((m.quiet||m.finished)&&m.subtree_quiet&&!m.holds_open) out.push({id:'dismiss',label:'Dismiss from the board…',act:'dismiss',confirm:true}); }
-      if(m.can_msg){ sep();   // #83 / #84: the node's host must run 1.70+ (a session row: one host's line)
-        if(!m.question) out.push({id:'edit-text',label:'Edit text…',act:'edit_text',dlg:'edit'});   // #85: a question's line is its question
-        out.push({id:'message',label:'Message session…',act:'message',dlg:'message'}); }
-      if(m.kind==='node'&&m.can_plan){ sep();   // #82: ORDER and MOVE (the node's host must run 1.69+)
-        if(m.up) out.push({id:'move-up',label:'Move up',act:'reorder',args:m.up});
-        if(m.down) out.push({id:'move-down',label:'Move down',act:'reorder',args:m.down});
-        out.push({id:'move-to',label:'Move to…',act:'move',pick:true}); }
-      sep();
-      if(m.kind==='node') out.push({id:'copy-path',label:'Copy path',copy:'path'}); else out.push({id:'copy-session',label:'Copy session name',copy:'session'});
-      if(m.has_cmd) out.push({id:'copy-cmd',label:'Copy its aimb-log command',copy:'cmd'});
-      if(m.no_view) return out;
-      sep();
-      out.push(m.pinned?{id:'unpin',label:'Unpin',view:'unpin'}:{id:'pin',label:'Pin to the top',view:'pin'});
-      out.push(m.hidden?{id:'unhide',label:'Unhide',view:'unhide'}:{id:'hide',label:'Hide',view:'hide'});
-      return out;
-    }
     // #82 (v1.69.0): ORDER — a node's RANK is the bridge's (lib/activity.js rankOf: a stored fractional rank when it was placed, else
     // DERIVED from its creation time + plan position, so the default is creation order); siblings show plan items first, then the
     // other contexts, then agents, each by rank — a state change never moves a row. rankOf here only fills in for a bridge that
@@ -1608,10 +1571,10 @@
   // PANEL beside the tree (below it on a narrow screen) shows its subtree's merged log — the tree has no Log rows any more. A
   // right-click (the Menu key / Shift+F10 on a focused row; a long-press on touch) opens the row's menu: the actions valid for
   // it (sent as {type:"activity_action"} — the bridge applies them on the node's owning host, attributed to this dashboard's
-  // user), copies, and the view-only Pin / Hide (kept in this browser).
+  // user), copies, and the view-only Pin / Hide (#88: kept in your per-user view on the bridge, §5.6).
   var ACT={ st:{units:null,seq:0,epoch:null,head:null,error:null}, on:false, skew:0, staleMin:null, planOpenMin:null, activeOnly:false, plansOnly:false, defLevel:'all', levels:{}, open:{},
     logs:{}, ents:{}, ref:0, pending:{}, tips:{}, acts:{}, togs:{}, opened:{}, rowInfo:{}, rowMenu:{}, kmap:{}, kn:0, timer:null,
-    sel:null, selN:null, pins:{}, hidden:{}, showHidden:{}, fb:{}, menu:null, dlg:null, lastCopy:null, fullIdx:{}, fullSess:{}, suppressClick:false,
+    sel:null, selN:null, showHidden:{}, fb:{}, menu:null, dlg:null, lastCopy:null, fullIdx:{}, fullSess:{}, suppressClick:false,
     fullPar:{}, rowNode:{}, drag:null,   // #82: each node's parent (full tree); data-k → node id; the row being dragged
     logOrder:'oldest', follow:true, newN:0, detOpen:true, detId:null, detShown:{},   // #87: the log order (per viewer), following the edge, "N new"; #86: the details section open, its fetch, the last shown entry per node
     // #88 step 10 (§5.6): the PER-USER VIEW from the bridge (null until a 2.0 welcome brings one — then pins / hidden / open /
@@ -1664,10 +1627,11 @@
     if(lo!==ACT.logOrder){ ACT.logOrder=lo; ACT.follow=true; ACT.newN=0; }
     var sr=vget('opt:show_removed')===true; if(sr!==ACT.showRemoved){ ACT.showRemoved=sr; if(ACT.sel) actRefreshSel(); }
     var ao=document.getElementById('actActive'), pf=document.getElementById('actPlans'); if(ao) ao.checked=ACT.activeOnly; if(pf) pf.checked=ACT.plansOnly; }
-  // pins / hidden as maps of view targets (the view's pin:<t> / hide:<t>), else this browser's (no view)
+  // pins / hidden as maps of view targets (the view's pin:<t> / hide:<t>); none without a view (#88 step 11: the page keeps no
+  // pins of its own — this browser's 1.7x ones are only READ once, by the import below)
   function viewTargets(prefix){ var o={}; if(!ACT.view) return null; Object.keys(ACT.view.recs).forEach(function(k){ if(k.indexOf(prefix)===0&&ACT.view.recs[k].v!=null) o[k.slice(prefix.length)]=1; }); return o; }
-  function actPins(){ return viewTargets('pin:')||ACT.pins; }
-  function actHidden(){ return viewTargets('hide:')||ACT.hidden; }
+  function actPins(){ return viewTargets('pin:')||{}; }
+  function actHidden(){ return viewTargets('hide:')||{}; }
   // the ONE-TIME IMPORT (Q13): this browser's 1.7x pins / hidden → the view (by the units' paths), then the keys go
   function actImportLegacy(){
     if(ACT.imported||!ACT.view||!ACT.st.units) return; ACT.imported=true;
@@ -1766,23 +1730,8 @@
     return '<span class="pills">'+h+'</span>';
   }
   function attr(s){ return esc(s).replace(/"/g,'&quot;'); }
-  // ---- 6d: view-only PIN / HIDE, kept in this browser (try/catch: private windows and blocked storage just forget)
-  function loadSet(k){ try{ var a=JSON.parse(localStorage.getItem(k)||'[]'), o={}; (Array.isArray(a)?a:[]).forEach(function(x){ if(typeof x==='string') o[x]=1; }); return o; }catch(e){ return {}; } }
-  function saveSet(k,o){ try{ localStorage.setItem(k,JSON.stringify(Object.keys(o))); }catch(e){} }
   // ---- 6d: the aimb-log command of a node's HOST (the board head for this host, remote_hosts for the others — paths only)
   function hostCmd(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return h.log_cmd||null; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return (r&&r.log_cmd)||null; }
-  // #82: does the node's host apply move / reorder / abandon-any-context? This gateway (it served this page) does; another host
-  // when the board head says so (remote_hosts[].plan — a ≤1.68 owner would refuse them)
-  function hostPlan(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return true; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return !!(r&&r.plan); }
-  // #83 / #84 (v1.70.0): does the node's host apply Edit text… / Message session…? This gateway does; another host when the board
-  // head says so (remote_hosts[].msg — a ≤1.69 owner would refuse them: the menu leaves them out)
-  function hostMsg(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return true; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return !!(r&&r.msg); }
-  // #85 (v1.71.0): does the node's host apply Answer… / Withdraw question…? This gateway does; another host when the board head says
-  // so (remote_hosts[].ask — a ≤1.70 owner would refuse them: the menu leaves them out, and a click opens no dialog)
-  function hostAsk(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return true; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return !!(r&&r.ask); }
-  // #90 (v1.75.0): does the node's host apply Change answer…? This gateway does; another host when remote_hosts[].revise says so
-  // (a ≤1.74 owner would refuse it: the menu leaves it out, and a click on an answered question opens nothing)
-  function hostRevise(host){ var h=ACT.st.head||{}; if(lcs(host)===lcs(h.host)) return true; var r=(h.remote_hosts||[]).filter(function(x){ return lcs(x.host)===lcs(host); })[0]; return !!(r&&r.revise); }
   // #85: the "? N" attention badge — N open questions below a collapsed row (and on the session / project headers)
   function qBadge(n,tip){ return n>0?'<span class="qbadge" data-tip="'+tip+'" aria-label="'+n+' open question'+(n===1?'':'s')+'">? '+n+'</span>':''; }
   // #83: the line's ✎ marker — its text was written from the dashboard (until its session reports again)
@@ -1878,7 +1827,7 @@
     function nodeMenu(t,s){ return function(){ var ft=ACT.fullIdx[t.u.id]||t, u=ft.u, n2=anow(), sm2=actStaleMin(), ag=u.nkind==='agent', lc=hostCmd(u.host), e=AimbAct.effState(u,ft.owner,n2,sm2), qq=AimbAct.qOf(u);
       var quiet=ag&&AimbAct.quietAgent(ft,n2,sm2);
       return { kind:'node', menu:u.menu||[], labels:typeLabels(u.type), nkind:u.nkind, type:u.type, plan_item:!!u.plan_item, quiet:quiet, finished:!!u.finished_at, subtree_quiet:ag&&ft.kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }),
-        has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,u):null, pinned:!!actPins()[u.node_id], hidden:!!actHidden()[u.node_id], id:u.id, vt:u.node_id, fbId:u.id, nid:u.node_id,
+        has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,u):null, pinned:!!actPins()[u.node_id], hidden:!!actHidden()[u.node_id], no_view:!ACT.view, id:u.id, vt:u.node_id, fbId:u.id, nid:u.node_id,
         name:(ag?'agent ':'')+u.path, label:u.label||u.name, why:e.gone?'gone':e.stale?'stale':u.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(ft), nNodes:AimbAct.countNodes(ft), host:u.host,
         own_state:(u.current&&u.current.state)||null, sid:s.id, session:s.session, cur:u.current?{text:u.current.text,state:u.current.state}:null,
         edit_states:u.edit_states||AimbAct.editStates({nkind:u.nkind,plan_item:!!u.plan_item,holds_plan:!!ft.planNode}), question:qq, qtext:u.current?u.current.text:'',
@@ -1891,7 +1840,7 @@
       var pn=kids.some(function(c){ return !!c.u.plan_item; }), root={u:se,kids:kids,planNode:pn,endedPlan:pn&&AimbAct.planEnded(kids,se)}; root.open=(pn&&!root.endedPlan)||kids.some(function(c){ return !!c.open; });
       var e=AimbAct.effState(se,null,n2,sm2), quiet=AimbAct.rootQuiet(se,kids,n2,sm2);
       return { kind:'session', menu:tgt?(se.menu||[]):[], labels:typeLabels('session'), quiet:quiet, finished:!!se.finished_at, subtree_quiet:kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }),
-        has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,null):null, pinned:!!actPins()[s.id], hidden:!!actHidden()[s.id], no_view:!!hostLine, id:s.id, vt:s.id, fbId:rowId, nid:se.node_id,
+        has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,null):null, pinned:!!actPins()[s.id], hidden:!!actHidden()[s.id], no_view:!!hostLine||!ACT.view, id:s.id, vt:s.id, fbId:rowId, nid:se.node_id,
         name:'session '+s.session+(multi?' on '+host:''), why:e.gone?'gone':e.stale?'stale':se.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(root), nNodes:AimbAct.countNodes(root), host:host, session:s.session, sid:s.id,
         cur:se&&se.current?{text:se.current.text,state:se.current.state}:null, edit_states:se.edit_states||AimbAct.editStates({nkind:'agent',holds_plan:pn}) }; }; }   // #83 / #84: the session root (one host's line)
     function hiddenRow(pid,nHidden,nShown,d){
@@ -2176,7 +2125,6 @@
     if(it.copy){ var txt=it.copy==='id'?info.id:it.copy==='path'?(info.path||''):it.copy==='session'?info.session:it.copy==='cmd'?model.cmd:''; actCopy(txt||'',it.copy==='cmd'?'the aimb-log command':it.copy==='id'?'the entry id':it.copy==='session'?'the session name':'the path'); return; }
     if(it.view){ var key=model.vt||model.id, pin=it.view==='pin'||it.view==='unpin', on=it.view==='pin'||it.view==='hide';
       if(ACT.view) viewSet((pin?'pin:':'hide:')+key,on?1:null);   // #88 step 10: your view on the bridge (§5.6)
-      else { var set=pin?ACT.pins:ACT.hidden; if(on) set[key]=1; else delete set[key]; saveSet(pin?'aimb.act.pins':'aimb.act.hidden',set); }
       actRender(); return; }
     if(it.pick==='move'){ actPickMove(info,model); return; }     // #82 / #88: Move to… — a picker of targets by id (the depth rules), then a confirm
     if(it.pick==='merge'){ actPickMerge(info,model); return; }   // #88 step 10: Merge into… — a picker of contexts, then a confirm
@@ -2516,7 +2464,6 @@
     window.addEventListener('resize',function(){ actMenuClose(false); }); window.addEventListener('blur',function(){ actMenuClose(false); });
     window.addEventListener('pagehide',function(){ viewFlush(); });   // #88 step 10: a debounced view change is not lost when the page goes
     document.addEventListener('scroll',function(){ actMenuClose(false); },true);
-    ACT.pins=loadSet('aimb.act.pins'); ACT.hidden=loadSet('aimb.act.hidden');   // 6d: view-only, per browser
     actLoadOrder();   // #87: the log order, per viewer (oldest first unless this browser chose newest first)
     var ao=document.getElementById('actActive');
     try{ ACT.activeOnly=localStorage.getItem('aimb.act.active')==='1'; }catch(e){}

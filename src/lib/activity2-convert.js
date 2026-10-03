@@ -51,8 +51,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { lc } from './keys.js'
-import { recordKind, parsePath, formatPath, pathKey, legacyId, mintId, validKey, slugKey, uniqueKey, sessionKey, normBy, normQuestion, formatPath2, labelKey,
-  ACTIVITY_STATES, parseProgress } from './activity.js'
+import { legacyId, mintId, validKey, slugKey, uniqueKey, sessionKey, normBy, normQuestion, formatPath2, labelKey, ACTIVITY_STATES, parseProgress } from './activity.js'
+import { recordKind, parsePath, formatPath, pathKey } from './activity-v5.js'   // step 11: the v5 readers (moved out of lib/activity.js)
 import { ACTIVITY2_FORMAT, createModel, createFold2, getSession2, carryOf2, planCarryForward2, freeLabel, pathOf, capAt, childrenOf2, rootOf, timingStep } from './activity2.js'
 import { classifyNames, nameWarning, linesOf, writeAtomic, buildIndex } from './activity2-files.js'
 

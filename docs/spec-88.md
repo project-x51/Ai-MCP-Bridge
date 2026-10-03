@@ -17,7 +17,8 @@ built gossip v6 behind the same switch — Robin changed its Q70 (a 1.7x host is
 the per-user view state (and Q70's `unshared_hosts`) behind the same switch — Robin accepted its Q71 as built; step 9
 removed the switch (the gateway runs 2.0 only) and built the 2.0 tool, script and guides — its Q72 (build the four missing
 1.7x behaviours in step 10) and Q73 (accepted as built) were decided overnight as recommended, for Robin to review; step 10
-built the dashboard on the 2.0 board and Q72's behaviours — its Q74 – Q77 are open).
+built the dashboard on the 2.0 board and Q72's behaviours — its Q74 – Q77 are open; step 11 deleted the 1.7x
+machinery — its Q78 was decided overnight as recommended, for Robin to review).
 The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
@@ -1839,6 +1840,83 @@ existing checks keep passing while the core is written.
     names the new form is left), the page's `localStorage` pins. KEPT from #82: ranks (`rankBetween`, `placeRanks`,
     `siblingCmp`, `derivedRank`), the cascade, positions, the actions. *Tests:* the full suite; a grep check that no
     `moved_from` reader and no `@~` parser is left outside `activity-v5.js` and the `legacy-form` detector.
+
+    **11 as built** (2026-10-04): the 1.7x machinery is deleted; the bridge, the page and the libraries carry only 2.0. No
+    version bump (2.0.0 is step 12); no new config key; no behaviour of a 2.0 gateway changed (everything deleted was
+    unreached since step 9 / 10). Nothing is renamed: the `*2` names stay (this step asks for none) and lib/activity.js keeps
+    its name as the home of the shared primitives.
+    `lib/activity.js` (4 108 → 792 lines) keeps only what the 2.0 code imports — found by a dependency walk from every import
+    of it in the libraries, the bridge, the scripts and the kept tests: the limits, states, defaults and `resolveConfig` (the
+    migration script's import included); `normBy` / `byText`; the question helpers (`normQuestion`, `questionView`,
+    `sameAnswer`, `answerText`, `answerEntryText`, `questionEntryDetails`, `stampText`, the limits / statuses / verb);
+    `sessionKey` / `groupKey`, `localDay`, `entryTime`; #82's ranks (`rankOf`, `rankGroup`, `siblingCmp`, `derivedRank`,
+    `rankBetween`, `validRank`, `RANK_DIGITS` — `placeRanks` and the cascade live on as 2.0's own in lib/activity2.js);
+    `parseDuration` / `parseProgress` / `parseEta`; the notice verbs, `MESSAGE_LIMITS`, `firstWords`; step 1's identity
+    primitives with the §4.5 legacy-form DETECTORS (`parsePath2`'s `legacyPath`, `parseText`'s `@~` refusal); `stateOf`,
+    `progressPct`, `forceBar`; `renderText`, `fmtNum`, `fmtEta`, `progressText`. DELETED with the model: #82's path code
+    (`rekeySubtree`, `applyMove` and its re-keying, `placeRanks` / `placeRanksUnder`, `cascadeAbandon`, `findAnchor`), the
+    1.7x replay (`createReplay` with `remapSegs`, `remapGone`, `foreign`, `goneAt`, `deadAt`, `sealRuns` / `sealNode`,
+    `movedAt`, `mv` / `mvAlias`; `replayNewestFirst`), the alias paging (`nodeAliases`, `matchAlias`, `fileEntryMatches`,
+    `fileEntryView`, `fileRunStart`, `filePage`, `logView`, `findEntry`), checkpoints and carry-forward (`planCheckpoints`,
+    `flushCheckpoints`, `planCarryForward`, the `cpLive` re-key), `parseMessage` with `resolveAddress` / `splitPrefix` /
+    `parseContextParam` / `normAgentPath` / `parsePlan` / `parseAnchor` / `parsePosition` / `parseMove` / `parseAsk` /
+    `parseWithdraw` / `withDefaults` / `splitBatch` (the positional / `--plan` / `--to` handling with them), `apply` /
+    `applyAsk` / `applyAction` / `dismissNode`, the 1.7x views (`staleAt`, `effectiveState`, `rollup`, `boardView`,
+    `dashUnits`, `planDashDelta`, `setBells`, `locateSessions`, `queryNodeKey`), the v5 notices (`actionNotice`,
+    `messageNotice`, `answerNotice`, `combineActionNotices`, `expireQuestions`, `questionOutcome`), gossip v5 (`snapshot`,
+    `mergeSnapshot`, `gossipUnits`, `createPub`, `planSlice`, `applySlice`, `markOriginDown`, `expireRemote`, `remoteInfo`),
+    `markSessionGone`, `expire`, `autoAbandon`, `estimateBytes` / `enforceBudget`, and the 1.7x field lists and feature
+    gates (`MESSAGE_FIELDS`, `ASK_FIELDS` / `usesAsk`, `PLAN82_FIELDS` / `usesPlan82`, `BATCH_DEFAULT_FIELDS`,
+    `ACTIVITY_ACTIONS`, `PLAN82_ACTIONS`, `MSG_ACTIONS`, `ASK_ACTIONS`, `REVISE_ACTIONS`, `QUESTION_LINE_STATE`).
+    NEW `lib/activity-v5.js` (142 lines): the 1.7x (v5) READERS the migration needs, moved out of lib/activity.js —
+    `recordKind` (formats v2 – v5; v1 and v6 records are not v5), the 1.7x path parser (`parsePath` with its scanner,
+    `formatPath`, `pathKey`) and the v5 `ACTIVITY_FORMAT` (5). `lib/activity2-convert.js` (the converter, where step 4 built
+    it) imports them from there, so the migration script and the 2.0 gateway's start check are unchanged.
+    THE BRIDGE (`bridge.mjs`, 4 361 → 3 975 lines): the 1.7x board (`activity`) and everything only it reached — its start and
+    replay (`startActivity`, `replayActivity`, the phase-1 publish, the id → offset index `actIndex`), its writes
+    (`persistActivity`, `writeCheckpoints`, `carryForwardActivity`, the retention sweep `pruneActivity` and its timer — the
+    2.0 store prunes at its rollover), the 1.7x `log` / read / action paths (`actApplyOne`, the 1.7x `activityRead` body,
+    `actActionQuery`, `actApplyAction` with the `activity_plan` / `_msg` / `_ask` / `_revise` gates and their
+    `owner-unsupported` answers, `actLogPage`, `lookupActivityEntry`), the 1.7x gc tick, budget and gone sweep (`actBudget`,
+    `syncActivityGone`), gossip v5 (the v5 slice / merge / down calls, the dead frame handling after `onActivityFrame2`, the
+    owner's v5 paging, `actRemoteInfo`, the link's `plan` / `msg` / `ask` / `revise` flags, the peer hello's flag comments)
+    and the 1.7x dashboard units (`Act.dashUnits` over `boardView`, `actWithKind`). What stays is what 2.0 already ran, the
+    dispatchers folded into it: `startActivity2` and `syncActivityGone2` are called directly; `activityLog` /
+    `activityRead` / `activityAction` keep only the enabled check before their `*2`. Env knobs only the 1.7x board read are
+    gone: `AI_BRIDGE_ACTIVITY_LOAD_WAIT_MS`, `_RETENTION_MS`, `_INDEX_MAX`, `_PHASE1_MS`, `_SCAN_BYTES`. Prepare-shutdown
+    keeps its answer's shape (`files_drained` is always 0: there are no queued writes any more). Test hooks KEPT:
+    `AI_BRIDGE_TEST_GOSSIP=v5` (Q70's "host left on 1.7x"), `=legacy` (a ≤ 1.59 hub — the federation and page tests use
+    it), `=silent`.
+    THE PERSISTENCE FACETS: `persistence.activity` — the 1.7x daily-JSONL writer / reader (`append`, `replaceTail`, `drain`,
+    `appendSync`, `readAt`, `find`, `days`, `readBackwards`, `prune`) — is gone from `facets/persistence/file.js`, `none.js`
+    and `_template.js`; `activity2` (step 6) is the facet's only activity part.
+    THE PAGE (`dashboard.html`, 2 622 → 2 569 lines): `menuFor17` (the page-computed 1.7x menu) — `menuFor` now gives a log
+    entry its copies, a project row nothing and every node / session row the registry menu (`menuFor2`); the host version
+    gates `hostPlan` / `hostMsg` / `hostAsk` / `hostRevise`; the 1.7x unit shapes (`key` / `parent_key` standing in for
+    node ids in `nidOf` / `pidOf`); and the page's OWN pin / hide store in `localStorage` (`loadSet` / `saveSet`,
+    `ACT.pins` / `ACT.hidden`): pins and hidden rows live only in the per-user view (§5.6), and a page without a view (no
+    2.0 welcome yet) offers no Pin / Hide. KEPT (Q78): Q13's ONE-TIME IMPORT, which reads this browser's 1.7x
+    `aimb.act.pins` / `aimb.act.hidden` once (with its 1.7x path → label conversion, `legacyPath`), moves them into the view
+    and removes the keys.
+    THE GREP CHECK: no `moved_from` reader outside the converter (`lib/activity2-convert.js`, reading 1.7x records with
+    `lib/activity-v5.js`) — lib/activity2.js's `moved_from` is the 2.0 move ACTION's result field (the path before the
+    move), not a record reader; no `@` / `@~` path parser outside `lib/activity-v5.js`, the legacy-form detectors
+    (`parsePath2` / `parseText` in lib/activity.js, the flag checks in `tools/aimb-log.mjs`) and the page's one-time import
+    (Q78). `tests/fixtures/activity-v175.js` (the frozen 1.7x library the converter's fuzzes and the migration tests write
+    history with) is unchanged.
+    Tests: `tests/unit/test_activity_unit.mjs` (2 928 → 255 lines; 857 → 109 checks) keeps the checks of the primitives that
+    stayed — limits, states, defaults, resolveConfig, parseDuration, parseProgress / parseEta (now called directly: they
+    were reached through parseMessage), renderText / fmtNum / fmtEta, forceBar / stateOf, localDay / entryTime, sessionKey /
+    groupKey, normBy / byText, firstWords, the ranks, the question constants / normQuestion / questionView /
+    answerEntryText / stampText — and the v5 path reader and recordKind (from lib/activity-v5.js), plus a check that the
+    1.7x model is gone from lib/activity.js; its header lists what was RETIRED: every check of the deleted model
+    (parseMessage, apply, the 1.7x views, gossip v5, the budget, read views and paging, checkpoints, the 1.7x replay and its
+    seeded fuzzes, the 1.7x JSONL facet, the 1.7x dashboard units and bells, splitBatch, 6b – 6d and #79 – #85 / #90 through
+    the 1.7x model — each rebuilt on 2.0 and tested there in steps 2 – 10) and the `AIMB_TEST_ACTIVITY_LIB` hook.
+    `tests/unit/test_node_id_unit.mjs`: its "the 1.7x model is untouched" section checks the v5 reader in lib/activity-v5.js
+    (and that lib/activity.js no longer exports it). No other test changed. The full suite
+    (typecheck included): 87 of 87 scripts, 3 303 checks, 0 failed — green on the first run, no #74 flake.
+    Question Q78 (§9).
 12. **Release 2.0.0**: architecture.md §12 (the v6 layout, `views/`, the migration's temporary `activity-v5-backup/`) + §13,
     README (2.0 forms, the removed-forms table, "all hosts upgrade together"), the RESUME STATE deploy notes = the §7.1
     runbook, the live cutover on EVERY host in one window (dry-run on each first). In `config.json`: the briefing and the
@@ -1850,7 +1928,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built), Q69 that of step 6 (accepted as built), Q70 that of step 7 (changed: built in step 8) and Q71 that of step 8 (accepted as built), Q72 – Q73 those of step 9 (decided overnight as recommended, for Robin to review) — step 10's Q74 – Q77 are under "Open questions"; GROUPS, ROLLUP and TYPES are decisions
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built), Q69 that of step 6 (accepted as built), Q70 that of step 7 (changed: built in step 8) and Q71 that of step 8 (accepted as built), Q72 – Q73 those of step 9 (decided overnight as recommended, for Robin to review) — step 10's Q74 – Q77 and step 11's Q78 are under "Open questions"; GROUPS, ROLLUP and TYPES are decisions
 Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
@@ -2020,6 +2098,15 @@ Open — raised by build step 10 (built as recommended; posted on the board unde
   ("Build/W70"; "here" for the node itself), with a leading "@" when the entry SET the line (the 2.0 text rule, §4.0); the
   hover gives the full path and, when the node moved or was renamed since, "logged as <its path then>". *Alternative:* the
   1.7x tags ("@~root", "@root", "@~" on the last context). Recommendation: accept as built.
+Open — raised by build step 11 (decided overnight as recommended, built so; posted on the board under Questions / "Step 11
+(Q78)"):
+- **Q78** (build step 11) The dashboard's ONE-TIME IMPORT of a browser's 1.7x pins / hidden rows (Q13, step 10). Step 11
+  deleted the page's own `localStorage` pin / hide store (pins and hidden rows live only in the per-user view; a page with
+  no view offers no Pin / Hide). *As built:* the import is KEPT — the first time a browser opens the 2.0 board it reads
+  that browser's `aimb.act.pins` / `aimb.act.hidden`, maps them by path to node ids, writes them into the view and removes
+  the keys — so pins made on 1.7x survive the cutover; it is the only 1.7x path conversion left in the page.
+  *Alternative:* delete it with the store (those pins are lost and pinned again by hand). Recommendation: keep it for
+  2.0.0; remove it in a later release.
 
 ---
 

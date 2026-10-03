@@ -1,7 +1,7 @@
 // #88 (v2.0) build step 2a: the ID-KEYED MODEL's STRUCTURE and RESOLUTION (docs/spec-88.md §1 – §3, §5.1).
 //
-// Written BESIDE the 1.7x path model in lib/activity.js, which keeps serving the bridge (1.75 logic) until step 9 switches
-// it; nothing imports this module yet except its tests (tests/unit/test_activity2_unit.mjs). It uses the step 1 identity
+// Written BESIDE the 1.7x path model in lib/activity.js, which served the bridge (1.75 logic) until step 9 switched it and
+// step 11 deleted it; the bridge runs this model through lib/activity2-store.js. It uses the step 1 identity
 // primitives of lib/activity.js (mintId, validKey, slugKey, uniqueKey, normLabel, labelKey, parsePath2, parseRef,
 // formatPath2) and #82's ranks (rankOf, rankBetween, derivedRank).
 //
@@ -3725,7 +3725,7 @@ export function rebuildGhosts2(state, indexes) {
 // #88 step 10 (Q72): the four 1.7x board behaviours no earlier step rebuilt — GONE (markSessionGone2; expire2 above lets
 // a gone agent / a gone session leave after finished_visible_hours, never while holding an open plan), the DOORBELL flag
 // (setBells2), AUTO-ABANDON (autoAbandon2) and the MEMORY BUDGET (estimateBytes2 / enforceBudget2) — on ids, with the same
-// behaviour as 1.7x (lib/activity.js markSessionGone, setBells, autoAbandon, enforceBudget). gone_at and bell are IN MEMORY
+// behaviour as 1.7x (its markSessionGone, setBells, autoAbandon, enforceBudget — deleted in step 11). gone_at and bell are IN MEMORY
 // only (never persisted, as 1.7x: a restart forgets them; the replay never sets them); the abandon and the budget's
 // evictions WRITE their records (entries attributed to the bridge; `remove` why "evict"), so the replay folds them.
 
