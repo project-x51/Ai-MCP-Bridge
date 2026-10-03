@@ -1300,6 +1300,7 @@ Reported by Architect (Marz, Robins-Mac, 2026-10-02).
   after 8 of 19 checks, all passed. 3/3 standalone straight after. A native abort is a new symptom: worth capturing
   stderr and a crash dump next time.
 
+- Bridget's review run of v1.75.0 (parallel, 2026-10-03 ~14:40): `activity/test_activity_dashboard_live` lost its remote host mid-run ("no-answer" on paging, then 10 dependent checks); 44/44 alone, twice. A fifth member of the family.
 **Suspicion:** a timing race around bridge restart/re-link under CPU load, or a test-harness port/timeout
 assumption. **Wanted:** reproduce under load (e.g. run each in a loop alongside a CPU hog), then find whether a
 bridge actually crashes (capture stderr) or the harness times out, and fix it or harden the test.
