@@ -416,7 +416,9 @@ export function remoteBoard2(remote, q = {}, now, staleMin) {
     for (const s of [...sl.sessions.values()].sort((a, b) => cmp(a.key, b.key))) {
       if (!matches(s, q)) continue
       out.push({ session: s.ident.session, project: s.ident.project, user: s.ident.user, realm: s.ident.realm, host: o, remote: true, ...(sl.down_at ? { down_at: sl.down_at } : {}),
-        created_at: s.created_at, last_activity: s.last_activity, root_id: s.rootId, ghosts: s.ghosts_n || 0, nodes: remoteRows(s, now, staleMin) })
+        created_at: s.created_at, last_activity: s.last_activity, root_id: s.rootId,
+        ...(s.gone_at ? { gone_at: s.gone_at } : {}), ...(s.bell ? { bell: true } : {}),   // #88 step 10 (Q72): the owner's gone / doorbell marks (its header)
+        ghosts: s.ghosts_n || 0, nodes: remoteRows(s, now, staleMin) })
     }
   }
   return out

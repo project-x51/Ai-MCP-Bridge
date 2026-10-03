@@ -23,8 +23,10 @@
 // through 2.0 gateways instead); the gossiped count's `partial` flag (a v6 slice carries log_n only); the HOME host of a
 // session on two hosts (the 2.0 board lists each host's copy as its own row, tagged host — there is no merged multi-host
 // group); the dashboard board head's finished_plan_open_min + an ended plan's plan_end_at (the dashboard's board pushes are
-// not wired to 2.0 until step 10); 3. AUTO-ABANDON of a gone session's open plan (the 1.7x abandoned_plan_days sweep is not
-// wired to 2.0).
+// not wired to 2.0 until step 10).
+// 3. AUTO-ABANDON (RESTORED in step 10, spec Q72, on the 2.0 board) through the test clock hook: a script-only session's
+//    open plan (#70: A done, B open); the gateway restarted 2 days + 1 h later (abandoned_plan_days 1) abandons B, then the
+//    plan node #70, as entries attributed to the bridge (by "bridge", the 1.7x text), written to the shifted day's file.
 // AIMB_TEST_BRIDGE=<file> runs it against another bridge copy (the pre-change proof).
 import { testOnly } from '../helpers/check.mjs'
 import { testPorts } from '../helpers/ports.mjs'
@@ -228,6 +230,33 @@ check('6c pruned: a run that began in a day file retention deleted ends in prune
 const sA = await call(A, 'activity', { log: { session: 'Runner' } })
 check('6c pruned: the session\'s own run began in that deleted file too (pruned); a child\'s new run is no boundary for it (its run 2 shows, its run 1 is an earlier run)', sA.log?.pruned === true && !sA.log?.run_start && texts(sA.log).includes('run 2 note 1') && texts(sA.log).includes('old: day -1') && !texts(sA.log).includes('run 1 note 1') && !texts(sA.log).some(t => /4 days ago/.test(t)), J(sA.log && [sA.log.pruned, sA.log.run_start, texts(sA.log)]))
 await stop(A); await stop(B)
+
+// ================================================================= 3. AUTO-ABANDON through the clock hook (step 10, Q72: the 2.0 board)
+const dirE = fs.mkdtempSync(path.join(tmp, 'pE-')), cfgE = path.join(tmp, 'cfgE.json'); fs.writeFileSync(cfgE, J({ token: TOKEN, activity: { abandoned_plan_days: 1 } }))
+const envE = { AI_BRIDGE_CONFIG: cfgE, AI_BRIDGE_PORT: String(tp(14720)), AI_BRIDGE_WS_PORT: String(tp(14721)), AI_BRIDGE_BIND: '127.0.0.1', AI_BRIDGE_PERSISTENCE: 'file', AI_BRIDGE_PERSIST_DIR: dirE, AI_BRIDGE_ACTIVITY_GC_MS: '300' }
+const HOUR = 3600000
+const E1 = await spawn('SixcE1', envE)
+const hostE = (await call(E1, 'my_identity')).host || os.hostname()
+const sayE = (...args) => runLog([LOGGER, '--session', 'Ghosty', '--project', 'SixC', '--ws-port', String(tp(14721)), ...args], { AI_BRIDGE_CONFIG: cfgE })
+const s1 = sayE('--key', 'n70', '--label', '#70', '--text', '@the plan', '--item', 'a', 'A', '--item', 'b', 'B')
+const s2 = sayE('--key', 'a', '--done')
+await sleep(1500)
+const e1 = await call(E1, 'activity', { session: 'Ghosty' })
+check('auto-abandon (setup): a script-only session\'s plan — A done, B open — and nothing abandoned within the day', s1.code === 0 && s2.code === 0 && nodeAt(e1.sessions, 'Ghosty', '#70/B')?.state === 'todo' && nodeAt(e1.sessions, 'Ghosty', '#70/A')?.state === 'done' && nodeAt(e1.sessions, 'Ghosty', '#70')?.state === 'running',
+  J([s1.code, s1.out, s2.code, s2.out, (sessOf(e1.sessions, 'Ghosty')?.nodes || []).map(n => [n.path, n.state])]))
+await stop(E1)
+const E2 = await spawn('SixcE2', { ...envE, AI_BRIDGE_TEST_ACTIVITY_CLOCK_OFFSET_MS: String(2 * DAY + HOUR) })
+const e2 = await until(async () => (await call(E2, 'activity', { session: 'Ghosty' })).sessions || [], b => nodeAt(b, 'Ghosty', '#70/B')?.state === 'abandoned' && nodeAt(b, 'Ghosty', '#70')?.state === 'abandoned', 10000)
+check('auto-abandon: restarted 2 days later (the clock hook; abandoned_plan_days 1), the gateway abandons the gone session\'s open item and the plan node; the done item stays done', nodeAt(e2, 'Ghosty', '#70/B')?.state === 'abandoned' && nodeAt(e2, 'Ghosty', '#70')?.state === 'abandoned' && nodeAt(e2, 'Ghosty', '#70/A')?.state === 'done',
+  J((sessOf(e2, 'Ghosty')?.nodes || []).map(n => [n.path, n.state])))
+const lgE = await call(E2, 'activity', { log: { session: 'Ghosty', path: '#70' } })
+const byBr = (lgE.log?.entries || []).filter(e => e.by === 'bridge')
+check('auto-abandon: logged as entries attributed to the bridge (by:"bridge", "abandoned by the bridge — the session has been gone 1 day"), newest first in the plan\'s log', byBr.length === 2 && byBr.every(e => e.state === 'abandoned' && e.text === 'abandoned by the bridge — the session has been gone 1 day') && J(byBr.map(e => e.path)) === J(['#70', '#70/B']),
+  J(lgE.log?.entries?.map(e => [e.path, e.state, e.by, e.text])))
+const dayE = localDay(Date.now() + 2 * DAY + HOUR)
+const recE = F.readDay(dirE, hostE, dayE).map(l => l.rec).filter(Boolean)
+check('auto-abandon: … and persisted in the (shifted) day\'s file as v6 entries with by:"bridge"', recE.filter(r => r.by === 'bridge' && r.v === 6 && r.state === 'abandoned' && r.kind == null).length === 2, J([hostE, dayE, recE.map(r => [r.kind || 'entry', r.at, r.state, r.by])]))
+await stop(E2)
 
 check('no response, reminder, script output or error EVER contained the realm token', !seen.some(t => t.includes(TOKEN)), seen.filter(t => t.includes(TOKEN)).length)
 console.log(`\n${pass} passed, ${fail} failed`)

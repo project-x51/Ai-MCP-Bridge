@@ -23,7 +23,8 @@
 //     tests/unit/test_activity7_unit.mjs (a report = the node + its chain; the byte cap; down → gone);
 //   - one "Twin" GROUP spanning both hosts (hosts, multi_host, selves): 1.7x-only (the 2.0 read lists one session per host;
 //     grouping is the dashboard's, rebuilt in step 10);
-//   - a subscribed dashboard's push (activity_sub → board + deltas): 1.7x-only until step 10 (answers not-in-2.0-yet);
+//   - a subscribed dashboard's push (activity_sub → board + deltas): rebuilt on 2.0 in step 10 and checked in
+//     test_activity_dashboard_live.mjs (+ the merged multi-host session in tests/unit/test_activity10_unit.mjs);
 //   - the 1.61 peer (activity_gossip:1) and the LEGACY ≤ 1.59 hub D (its own board, no frames, still federated): 1.7x-only —
 //     2.0 never meets one; a 1.7x peer is covered by test_activity2_gossip_live.mjs (§6 the 1.7x stand-in L) and by 6a here;
 //   - the 1.7x `@`-path forms (paths, rel paths, implicit intermediates): 1.7x-only.

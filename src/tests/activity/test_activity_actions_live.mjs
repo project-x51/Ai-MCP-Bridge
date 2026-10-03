@@ -12,11 +12,11 @@
 // on the parent); a page leaf, a logger and a socket without a hello refused; forged hub frames (no hello / not an adopted
 // peer / naming another owner / claiming a host); a remote host's aimb-log paths in the board head (never the token); the
 // entry count (log_n, the page's total) exact after restarts past the replay window.
-// Retired in step 9 (1.7x-only): path-addressed actions; the dashboard's pushed board / deltas and its own head (log_cmd,
-// user) — the board pushes answer `not-in-2.0-yet` until step 10 (checked); a session marked GONE when its sub-peer leaves
+// Retired in step 9 (1.7x-only): path-addressed actions; a session marked GONE when its sub-peer leaves
 // (syncActivityGone is 1.7x — the whole-session dismissal is checked on a STALE session root instead); the row's
 // plan_end_at / plan_end_how / plan_node (2.0 rows carry none — a plan's end is checked through the actions' own refusals:
 // already-ended / not-ended / no-open-plan); 1.7x's log.total / partial (2.0: log_n + the log page's total).
+// Restored in step 10: the dashboard's pushed board and its own head (log_cmd, user — who actions are attributed to).
 // AIMB_TEST_BRIDGE=<file> runs it against another bridge copy (the pre-change proof).
 import { testOnly } from '../helpers/check.mjs'
 import { testPorts } from '../helpers/ports.mjs'
@@ -135,7 +135,8 @@ const dash = await wsClient(Number(B_PORT) + 1, 'dashboard')
 check('dashboard: welcomed on B', dash.welcome?.type === 'welcome')
 dash.send({ type: 'activity_sub' })
 const sub = await until(async () => dash.msgs.find(m => m.type === 'activity_board'), x => !!x, 5000, 50)
-check('board pushes (2.0): activity_sub answers not-in-2.0-yet (the dashboard\'s board is build step 10) — the `activity` read serves the board', sub?.ok === false && sub?.code === 'not-in-2.0-yet', J(sub))
+check('board pushes (2.0, step 10): activity_sub → a full board by node id, its head naming this host\'s aimb-log paths and who actions are attributed to (never the token)', sub?.full === true && !!sub?.head?.log_cmd?.script && sub?.head?.user === 'robin' && !J(sub).includes(TOKEN)
+  && (sub.upsert || []).some(u => u.kind === 'node' && /^[a-z2-7]{16}$/.test(u.node_id || '')), J(sub && { ...sub, upsert: (sub.upsert || []).length, types: undefined }))
 const rh = await until(async () => ((await call(B, 'activity', { session: '-none-' })).remote_hosts || []).find(x => x.host === HA), x => !!x?.log_cmd, 5000, 100)
 check('board head (6d): each remote host\'s aimb-log paths (from its full slice) — never the token', !!rh?.log_cmd?.script && /aimb-log\.mjs$/.test(rh.log_cmd.script) && !!rh.log_cmd.node && !J(rh).includes(TOKEN), J(rh))
 const Q = (id, action, args, extra = {}) => ({ host: HB, session: 'Lead', project: 'ACTS', user: 'robin', id, action, ...(args ? { args } : {}), ...extra })

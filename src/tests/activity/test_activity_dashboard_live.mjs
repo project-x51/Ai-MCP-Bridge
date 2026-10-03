@@ -9,13 +9,17 @@
 //   E  127.0.0.4:14240 "DASH-A"  (!) a second hub with A's host name → B logs the duplicate-hostname warning
 // Every host keeps log_entries_per_agent = 10 (a page never exceeds it), so a 30–40 entry history takes several pages.
 // Ports 14200–14299 (this file's port block).
-// RETIRED in step 9 (each named where it stood): the board PUSHES — activity_sub's full board, deltas (≤1/s, chained, only
-// what changed, nested and plan-item deltas, the folded view = a fresh board), the seq-gap resync, activity_unsub, the units'
-// raw shape and #79's client_kind on a session unit — the dashboard's pushes answer `not-in-2.0-yet` until build step 10
-// rebuilds the page (one check pins that); a session that LEFT shown gone (syncActivityGone is 1.7x — a gap in 2.0); the
-// doorbell bell on the board (syncActivityBells is 1.7x — a gap in 2.0); paging on into a SEEDED older day file and the
-// skipped 1.61-format line in it (a 2.0 gateway refuses v5 history; the earlier run is made live instead, by a dismissal and
-// a re-create of the same key — §3.7).
+// RETIRED in step 9 (each named where it stood): paging on into a SEEDED older day file and the skipped 1.61-format line in
+// it (a 2.0 gateway refuses v5 history; the earlier run is made live instead, by a dismissal and a re-create of the same key
+// — §3.7).
+// RESTORED in step 10 (the board PUSHES on the 2.0 units, lib/activity2-dash.js — docs/spec-88.md §5.4): activity_sub's
+// FULL board (+ the 2.0 head: format 6, view_user; the type registry), units BY NODE ID (a node's unit names the owner's
+// node id, parent_id, the RAW state — no rendered / stale_at), #79's client_kind on the session unit, deltas (≤ 1 per
+// second, chained, only what changed; the folded view = a fresh full board), the seq-gap resync, nested + plan-item deltas,
+// a RENAME and a MOVE keeping every unit id (no remove), the page leaf getting no pushes, activity_unsub.
+// RESTORED in step 10 (spec Q72, on the `activity` read rows): 8. a session that LEFT (deregistered) shows its agents gone
+// + the session's gone_at — on B's board and its owner's, no down_at — and is cleared when it registers again; 9. the
+// doorbell bell on the (remote and owner's) board, cleared after the re-arm grace (A: 500 ms), and a local doorbell.
 // AIMB_TEST_BRIDGE=<file> runs it against another bridge copy (the pre-change proof).
 import { testOnly } from '../helpers/check.mjs'
 import { testPorts } from '../helpers/ports.mjs'
@@ -102,11 +106,35 @@ function wsClient(port, hello, host = '127.0.0.1') {
   })
 }
 const dashOn = (port, inst) => wsClient(port, { kind: 'dashboard', instance: inst })
-// the dashboard's board (2.0: the `activity` read on its WS until step 10 rebuilds the pushes)
+// the dashboard's board: the `activity` read on its WS, and (step 10) the PUSHES folded into a store as the page does
 const sessOf = (b, name, host) => ((b && b.sessions) || []).find(s => String(s.session).toLowerCase() === name.toLowerCase() && (!host || s.host === host))
 const nodeAt = (s, p) => ((s && s.nodes) || []).find(n => n.path === p)
 const retired = (what, why) => console.log(`SKIP ${what} (retired in #88 step 9: ${why})`)
-const STEP10 = 'the dashboard\'s board pushes answer not-in-2.0-yet until build step 10 rebuilds the page'
+// the page's delta store (dashboard.html AimbAct.applyMsg, same rules): a full board replaces; a delta needs base === seq
+function applyMsg(st, m) {
+  if (m.type === 'activity_board') { if (m.ok === false) { st.error = m; return 'error' } st.units = {}; st.epoch = m.epoch; st.seq = m.seq; for (const u of m.upsert || []) st.units[u.id] = u; return 'full' }
+  if (m.type === 'activity_delta') {
+    if (!st.units || m.epoch !== st.epoch || m.base !== st.seq) return 'resync'
+    for (const id of m.remove || []) delete st.units[id]
+    for (const u of m.upsert || []) st.units[u.id] = u
+    st.seq = m.seq; return 'delta'
+  }
+  return null
+}
+const canon = st => J(Object.keys(st.units || {}).sort().map(k => st.units[k]))
+// a SUBSCRIBED dashboard: its pushes folded into d.store (d.drop = lose that many deltas; a gap → resync, as the page)
+function subscribe(d) {
+  d.store = { units: null, seq: 0, epoch: null }; d.drop = 0; d.dropped = []; d.resyncs = 0
+  d.boards = () => d.msgs.filter(m => m.type === 'activity_board' || m.type === 'activity_delta')
+  d.ws.on('message', raw => { const m = JSON.parse(String(raw)); if (m.type !== 'activity_board' && m.type !== 'activity_delta') return
+    if (m.type === 'activity_delta' && d.drop > 0) { d.drop--; d.dropped.push(m); return }
+    if (applyMsg(d.store, m) === 'resync') { d.resyncs++; d.send({ type: 'activity_sub', resync: true }) } })
+  d.send({ type: 'activity_sub' })
+  return d
+}
+const units = d => Object.values((d.store && d.store.units) || {})
+const grp = (d, name) => units(d).find(u => u.kind === 'session' && String(u.session).toLowerCase() === name.toLowerCase())
+const agt = (d, name, p, host) => units(d).find(u => u.kind === 'node' && grp(d, name) && u.group === grp(d, name).key && u.path === p && (!host || u.host === host))
 
 const all = []
 const drop = h => { const i = all.indexOf(h); if (i >= 0) all.splice(i, 1) }
@@ -120,7 +148,7 @@ try {
   // ---- the mesh
   const B = await spawn('HubB', '127.0.0.1', B_PORT, HB, { ...fileOf(dirs.B), AI_BRIDGE_SEEDS: `127.0.0.2:${A_PORT},127.0.0.3:${C_PORT},127.0.0.4:${E_PORT}`, AI_BRIDGE_ACTIVITY_QUEUE_DASH: '12' }); all.push(B)
   await sleep(500)
-  const A = await spawn('HubA', '127.0.0.2', A_PORT, HA, { ...fileOf(dirs.A), AI_BRIDGE_ACTIVITY_PAGE_ENTRIES: '8', AI_BRIDGE_ACTIVITY_FETCH_RATE: '2' }); all.push(A)
+  const A = await spawn('HubA', '127.0.0.2', A_PORT, HA, { ...fileOf(dirs.A), AI_BRIDGE_ACTIVITY_PAGE_ENTRIES: '8', AI_BRIDGE_ACTIVITY_FETCH_RATE: '2', AI_BRIDGE_ACTIVITY_BELL_GRACE_MS: '500' }); all.push(A)
   const C = await spawn('HubC', '127.0.0.3', C_PORT, HC); all.push(C)
   const ids = await Promise.all([A, B, C].map(h => call(h, 'my_identity')))
   check('harness: A, B, C are gateways (2.0 boards)', ids.every(i => i.role === 'gateway'), J(ids.map(i => [i.role, i.bridge_version])))
@@ -135,22 +163,85 @@ try {
   const s2 = await lb.log({ agent: 'builder', label: 'Builder', text: '@compiling', progress: '2/10 files' })
   check('harness: the scripts\' reports (2.0 forms) applied on A and B', s1.ok && s2.ok, J([s1, s2]))
 
-  // ---- 1. the dashboard's board: the `activity` read (the pushes are step 10)
+  // ---- 1. the dashboard's board: the PUSHES (step 10: units by node id) and the `activity` read
   const d0 = await dashOn(WSB, 'dash-idle'); closers.push(d0)
-  const d1 = await dashOn(WSB, 'dash-sub'); closers.push(d1)
-  d1.send({ type: 'activity_sub' })
-  const sub = await until(async () => d1.msgs.find(m => m.type === 'activity_board'), x => !!x, 3000, 50)
-  check('subscribe (step 10 pending): activity_sub answers not-in-2.0-yet — no board pushed (the dashboard reads the board with the activity request)', !!sub && sub.ok === false && sub.code === 'not-in-2.0-yet' && !sub.upsert, J(sub))
-  retired('subscribe: a FULL board first / deltas ≤1 per second, chained, only what changed / the folded view = a fresh full board', STEP10)
-  retired('resync after a seq gap; nested (6a) and plan-item (6b) deltas; unsubscribe', STEP10)
-  retired('units are RAW (no rendered / stale_at) and #79 client_kind on a session unit', `dashboard units — ${STEP10}`)
+  const d1 = subscribe(await dashOn(WSB, 'dash-sub')); closers.push(d1)
+  await until(async () => d1.store.units && agt(d1, 'Orch', 'Research'), x => !!x, 6000, 50)
+  const full1 = d1.msgs.find(m => m.type === 'activity_board')
+  check('subscribe: a FULL board first (full, epoch, seq 1, head with the stale default, this host, format 6, whose view; the type registry)', !!full1 && full1.full === true && full1.seq === 1 && !!full1.epoch && full1.head?.stale_after_min === 15 && full1.head?.host === HB && full1.head?.format === 6
+    && typeof full1.head?.view_user === 'string' && !!full1.types?.plan?.menu?.complete, J(full1 && { ...full1, upsert: (full1.upsert || []).length, types: Object.keys(full1.types || {}) }))
+  const ru = agt(d1, 'Orch', 'Research', HA)
+  check('subscribe: the full board holds the mesh — A\'s agent (tagged A, the OWNER\'s node id) and B\'s, as units; the session unit carries A\'s root', !!ru && ru.node_id === s1.node?.id && ru.id === J(['n', grp(d1, 'Orch').key, HA.toLowerCase(), s1.node?.id]) && ru.parent_id === grp(d1, 'Orch').self?.node_id
+    && agt(d1, 'Local', 'Builder')?.host === HB && grp(d1, 'Orch')?.kind === 'session' && grp(d1, 'Orch')?.host === HA, J(units(d1).map(u => [u.kind, u.session || u.path, u.host, u.node_id])))
+  check('subscribe: units are RAW — the reported state, the line\'s template, no rendered / stale_at; the type and its menu (no clock in it)', ru?.state === 'running' && ru?.current?.text === 'reading the spec' && !('rendered' in (ru?.current || {})) && !('stale_at' in (ru || {})) && ru?.last_activity > 0
+    && ru?.type === 'agent' && Array.isArray(ru?.menu) && ru.menu.includes('finish|quiet') && ru?.bar?.done === 1, J(ru))
+  // #79: the session unit carries client_kind from the MESH ROSTER: Orch registers on A as a claude-code sub-peer → "code"
+  const kreg = await call(A, 'register_self', { name: 'Orch', secret: 'k79', project: 'AIMB', user: 'robin', client: 'claude-code' })
+  const gk = await until(async () => grp(d1, 'Orch'), g => g && g.client_kind === 'code', 8000)
+  check('#79 client_kind: a session unit takes its client kind from the mesh roster (Orch on A as claude-code → "code" on B\'s dashboard); a script-only session has none', kreg.ok && gk?.client_kind === 'code' && !('client_kind' in (grp(d1, 'Local') || {})), J([kreg.ok, gk && { ...gk, self: undefined }, grp(d1, 'Local')?.client_kind]))
+  // ---- 1b. a burst → deltas only, ≤1 per second, each carrying only what changed
+  const pump = await logger('127.0.0.1', WSB, { session: 'Pump', project: 'Tools', user: 'robin' }); closers.push(pump)
+  for (const ag of ['p1', 'p2', 'p3']) await pump.log({ agent: ag, label: ag.toUpperCase(), text: '@pumping {progress}', progress: '0/60' })
+  await sleep(1500)
+  const mark = d1.msgs.length, tStart = Date.now()
+  for (let i = 1; i <= 60; i++) { for (const ag of ['p1', 'p2', 'p3']) pump.send({ agent: ag, progress: `${i}/60`, log: false }); await sleep(50) }
+  const tEnd = Date.now()
+  await sleep(1600)
+  const burst = d1.msgs.slice(mark).filter(m => m.type === 'activity_board' || m.type === 'activity_delta')
+  const deltas = burst.filter(m => m.type === 'activity_delta'), gaps = deltas.slice(1).map((m, i) => m._t - deltas[i]._t), secs = (tEnd - tStart) / 1000
+  check(`deltas: 180 updates in ${secs.toFixed(1)} s → only DELTAS (no full board) to the subscriber`, deltas.length >= 2 && burst.every(m => m.type === 'activity_delta'), J(burst.map(m => m.type)))
+  check(`deltas: at most one per second (${deltas.length} in ${secs.toFixed(1)} s, gaps ≥ ~1 s)`, deltas.length <= Math.ceil(secs) + 2 && gaps.every(g => g >= 900), J(gaps))
+  check('deltas: chained — each base is the previous seq', deltas.every((m, i) => i === 0 || m.base === deltas[i - 1].seq) && deltas.every(m => m.seq === m.base + 1), J(deltas.map(m => [m.base, m.seq])))
+  check('deltas: carry only what changed (the pumped agents + their session, never the whole board)', deltas.every(m => (m.upsert || []).length <= 4 && (m.upsert || []).every(u => (u.kind === 'node' && /^P[123]$/.test(u.path)) || (u.kind === 'session' && u.session === 'Pump'))), J(deltas.map(m => (m.upsert || []).map(u => u.path || u.session))))
+  check('no subscription → no pushes: the idle dashboard got no activity_board / activity_delta', !d0.msgs.some(m => m.type === 'activity_board' || m.type === 'activity_delta'), J(d0.msgs.map(m => m.type)))
+  const d2 = subscribe(await dashOn(WSB, 'dash-truth'))
+  await until(async () => d2.store.units, x => !!x, 4000)
+  check('deltas: the subscriber\'s folded view equals a fresh full board', canon(d1.store) === canon(d2.store) && agt(d1, 'Pump', 'P3')?.progress?.done === 60, `${canon(d1.store).length} vs ${canon(d2.store).length}`)
+  d2.close()
+  // ---- 1c. seq gap → resync
+  const nFull = d1.msgs.filter(m => m.type === 'activity_board').length
+  d1.drop = 1
+  await la.log({ agent: 'gap1', label: 'Gap 1', text: '@first change (its delta is lost)' })
+  await until(async () => d1.dropped.length, x => x > 0, 4000)
+  await sleep(1100)
+  await la.log({ agent: 'gap2', label: 'Gap 2', text: '@second change' })
+  await until(async () => d1.msgs.filter(m => m.type === 'activity_board').length > nFull && agt(d1, 'Orch', 'Gap 2'), x => !!x, 5000)
+  check('resync: the delta after a lost one does not follow → the page asks again and gets a FULL board', d1.resyncs >= 1 && d1.msgs.filter(m => m.type === 'activity_board').length > nFull, J({ resyncs: d1.resyncs, fulls: d1.msgs.filter(m => m.type === 'activity_board').length }))
+  check('resync: the view is whole again (the lost change is there)', !!agt(d1, 'Orch', 'Gap 1') && !!agt(d1, 'Orch', 'Gap 2'), J(units(d1).filter(u => u.kind === 'node').map(u => u.path)))
+  // ---- 1d. NESTED units by id, a plan's items, and a rename / move that keep every id
+  await la.log({ key: 'p70', label: '#70', plan: [{ key: 'spec', label: 'Spec' }, { key: 'build', label: 'Build' }, { key: 'ship', label: 'Ship' }] })
+  await la.log({ agent: 'w70', label: 'W70', under: 'build', text: '@deep line {progress}', progress: '1/4 tiles' })
+  await until(async () => agt(d1, 'Orch', '#70/Build/W70'), x => !!x, 5000)
+  const w70 = agt(d1, 'Orch', '#70/Build/W70'), b70 = agt(d1, 'Orch', '#70/Build'), p70 = agt(d1, 'Orch', '#70')
+  check('nested units: node_id / parent_id link the tree by id (no path keys); depth; plan items with plan_ix; the plan\'s "N of M" bar', w70?.parent_id === b70?.node_id && b70?.parent_id === p70?.node_id && p70?.parent_id === grp(d1, 'Orch').self.node_id && w70?.depth === 3
+    && ['Spec', 'Build', 'Ship'].every((n, i) => agt(d1, 'Orch', `#70/${n}`)?.plan_item === true && agt(d1, 'Orch', `#70/${n}`)?.plan_ix === i) && p70?.bar?.items && p70?.bar?.total === 3, J([w70, b70, p70].map(u => u && [u.node_id, u.parent_id, u.depth, u.path])))
+  await sleep(1200)
+  const mark3 = d1.msgs.length
+  await la.log({ key: 'spec', state: 'done' })
+  await until(async () => agt(d1, 'Orch', '#70/Spec')?.state === 'done', x => x, 5000)
+  await sleep(300)
+  const d6b = d1.msgs.slice(mark3).filter(m => m.type === 'activity_delta')
+  check('plan-item deltas: the tick arrives as a delta carrying the item and the plan node whose bar moved — not the untouched items', d6b.some(m => (m.upsert || []).some(u => u.path === '#70/Spec' && u.state === 'done')) && d6b.some(m => (m.upsert || []).some(u => u.path === '#70' && u.bar?.done === 1))
+    && !d6b.some(m => (m.upsert || []).some(u => u.path === '#70/Ship')), J(d6b.map(m => (m.upsert || []).map(u => u.path || u.session))))
+  const ids1 = new Set(units(d1).map(u => u.id)), mark4 = d1.msgs.length
+  const ren = await d1.act({ host: HA, session: 'Orch', project: 'AIMB', user: 'robin', id: p70.node_id, action: 'rename', args: { label: '#70 renamed' } })
+  await until(async () => agt(d1, 'Orch', '#70 renamed/Build/W70'), x => !!x, 6000)
+  const rmv = d1.msgs.slice(mark4).filter(m => m.type === 'activity_delta').flatMap(m => m.remove || [])
+  check('a RENAME from the dashboard (by id, on A through B): every unit keeps its id — no remove; the label and the descendants\' paths follow', ren.ok && !rmv.length && agt(d1, 'Orch', '#70 renamed')?.id === p70.id && agt(d1, 'Orch', '#70 renamed/Build/W70')?.id === w70.id && [...ids1].every(id => units(d1).some(u => u.id === id)), J([ren, rmv]))
+  const mv = await d1.act({ host: HA, session: 'Orch', project: 'AIMB', user: 'robin', id: w70.node_id, action: 'move', args: { to_id: agt(d1, 'Orch', '#70 renamed/Ship').node_id } })
+  await until(async () => agt(d1, 'Orch', '#70 renamed/Ship/W70'), x => !!x, 6000)
+  check('a MOVE (by id): the same unit id, a new parent_id', mv.ok && agt(d1, 'Orch', '#70 renamed/Ship/W70')?.id === w70.id && agt(d1, 'Orch', '#70 renamed/Ship/W70')?.parent_id === agt(d1, 'Orch', '#70 renamed/Ship')?.node_id, J(mv))
+  const d3 = subscribe(await dashOn(WSB, 'dash-truth2'))
+  await until(async () => d3.store.units, x => !!x, 4000)
+  await sleep(1200)
+  check('nested deltas: the folded view equals a fresh full board', canon(d1.store) === canon(d3.store), `${canon(d1.store).length} vs ${canon(d3.store).length}`)
+  d3.close()
   const bd1 = await until(() => d1.req({}), r => !!nodeAt(sessOf(r, 'Orch', HA), 'Research'), 6000, 150)
   check('board read: the head (ok, format 6, the stale default, this host)', bd1.ok === true && bd1.format === 6 && bd1.stale_after_min === 15 && bd1.host === HB, J({ ...bd1, sessions: (bd1.sessions || []).length }))
   check('board read: it holds the mesh — A\'s agent (its session tagged A, remote) and B\'s own', nodeAt(sessOf(bd1, 'Orch', HA), 'Research')?.kind === 'agent' && sessOf(bd1, 'Orch', HA)?.remote === true && !!nodeAt(sessOf(bd1, 'Local', HB), 'Builder') && !sessOf(bd1, 'Local', HB)?.remote,
     J((bd1.sessions || []).map(s => [s.session, s.host, s.remote, (s.nodes || []).map(n => n.path)])))
   const rs = nodeAt(sessOf(bd1, 'Orch', HA), 'Research')
   check('board read: a remote row carries the reported state, the line and the progress (and the owner\'s node id)', rs?.state === 'running' && rs?.current?.text === 'reading the spec' && rs?.progress?.done === 1 && rs?.progress?.total === 4 && rs?.id === s1.node?.id && rs?.last_activity > 0, J(rs))
-  check('no subscription → no pushes: the idle dashboard got no activity_board / activity_delta', !d0.msgs.some(m => m.type === 'activity_board' || m.type === 'activity_delta'), J(d0.msgs.map(m => m.type)))
 
   // ---- 4. read access: a page leaf gets neither pushes nor reads
   const pg = await wsClient(WSB, { kind: 'page', page_kind: 'probe', title: 'Probe page', instance: 'probe-pg' })
@@ -159,12 +250,12 @@ try {
   pg.send({ type: 'activity_sub' })
   await sleep(300)
   const pgSub = pg.msgs.find(m => m.type === 'activity_board')
-  check('page leaf: activity_sub is refused too (dashboard-only — not even the step-10 answer; no board in the answer)', !!pgSub && pgSub.ok === false && pgSub.code === 'dashboard-only' && !pgSub.upsert, J(pgSub))
+  check('page leaf: activity_sub is refused too (dashboard-only; no board in the answer)', !!pgSub && pgSub.ok === false && pgSub.code === 'dashboard-only' && !pgSub.upsert, J(pgSub))
   pg.send({ type: 'hello', token: TOKEN, kind: 'dashboard', instance: 'probe-pg-2' })
   await sleep(200)
   const pr2 = await pg.req({ session: 'Orch' }, 3000)
   check('page leaf: a second hello cannot turn it into a dashboard (already-hello; still refused)', pg.msgs.some(m => m.type === 'error' && m.code === 'already-hello') && pr2.code === 'dashboard-only', J([pg.msgs.filter(m => m.type === 'error'), pr2]))
-  retired('page leaf: no board pushes reach it', STEP10)
+  check('page leaf: no board pushes reach it', !pg.msgs.some(m => (m.type === 'activity_board' && m.ok !== false) || m.type === 'activity_delta'), J(pg.msgs.map(m => m.type)))
   pg.close()
 
   // ---- 5. history paging into the DAY FILES — local (B), ≥3 pages, the run boundary, then "show earlier runs"
@@ -243,8 +334,22 @@ try {
   const busy = res2.filter(r => r?.code === 'busy')
   check('queue bound: 30 at once from one dashboard (bound 12) → the excess is `busy` with retry_after_ms; the rest ok', busy.length >= 14 && busy.every(r => r.retry_after_ms > 0) && res2.filter(r => r?.ok).length + busy.length === 30, J(res2.map(r => r ? r.code || 'ok' : 'none')))
 
-  // ---- 8. host down (its host went away) — a session that LEFT is a 2.0 gap
-  retired('gone: a session that LEFT shows its agents gone (no host_down)', 'syncActivityGone is 1.7x — local sessions are not marked gone when their sub-peer leaves (a gap in 2.0)')
+  // ---- 8. gone (the session left) vs host down (its host went away) — step 10 (Q72) rebuilt gone on the 2.0 board
+  const reg = await call(A, 'register_self', { name: 'Leaver', secret: 'lv', project: 'AIMB' })
+  const lv = await call(A, 'log', { as: 'Leaver', secret: 'lv', agent: 'w', label: 'W', text: '@working', state: 'running' })
+  const lvOn = await until(() => d1.req({ session: 'Leaver' }), r => !!nodeAt(sessOf(r, 'Leaver', HA), 'W'), 6000, 150)
+  check('gone (harness): a registered session on A reports an agent; on B\'s board, running, not gone', lv.ok && nodeAt(sessOf(lvOn, 'Leaver', HA), 'W')?.state === 'running' && !sessOf(lvOn, 'Leaver', HA)?.gone_at, J([lv, sessOf(lvOn, 'Leaver', HA)]))
+  await call(A, 'deregister', { peer_id: reg.peer_id, secret: 'lv' })
+  const gb = await until(() => d1.req({ session: 'Leaver' }), r => nodeAt(sessOf(r, 'Leaver', HA), 'W')?.state === 'gone', 8000, 200)
+  const gs = sessOf(gb, 'Leaver', HA), gl = nodeAt(gs, 'W')
+  check('gone: a session that LEFT (deregistered) shows its agents gone (was running, the line kept) and the session\'s gone_at — with no down_at (its host is fine)', gl?.state === 'gone' && gl?.was === 'running' && gl?.current?.text === 'working' && gs?.gone_at > 0 && !gs?.down_at, J(gs))
+  const ga = await call(A, 'activity', { session: 'Leaver' })
+  check('gone: ... and on its OWNER\'s board too (a local gone row)', nodeAt(sessOf(ga, 'Leaver', HA), 'W')?.state === 'gone' && sessOf(ga, 'Leaver', HA)?.gone_at > 0, J(sessOf(ga, 'Leaver', HA)))
+  const reg2 = await call(A, 'register_self', { name: 'Leaver', secret: 'lv', project: 'AIMB' })
+  const back = await until(() => d1.req({ session: 'Leaver' }), r => nodeAt(sessOf(r, 'Leaver', HA), 'W')?.state === 'running' && !sessOf(r, 'Leaver', HA)?.gone_at, 8000, 200)
+  check('gone: the session back on the roster (registered again) → the mark is cleared (running again)', !!reg2.peer_id && nodeAt(sessOf(back, 'Leaver', HA), 'W')?.state === 'running' && !sessOf(back, 'Leaver', HA)?.gone_at, J(sessOf(back, 'Leaver', HA)))
+  await call(A, 'deregister', { peer_id: reg2.peer_id, secret: 'lv' })
+  await until(() => d1.req({ session: 'Leaver' }), r => nodeAt(sessOf(r, 'Leaver', HA), 'W')?.state === 'gone', 8000, 200)
   const lc1 = await logger('127.0.0.3', Number(C_PORT) + 1, { session: 'Cee', project: 'AIMB', user: 'robin' })
   const c1 = await lc1.log({ agent: 'c1', label: 'C1', text: '@on C', state: 'running' })
   const cOn = await until(() => d1.req({ session: 'Cee' }), r => !!nodeAt(sessOf(r, 'Cee', HC), 'C1'), 6000, 150)
@@ -256,11 +361,31 @@ try {
   check('host down: C killed → its agents gone (the line kept) AND the distinct host-down mark (the session\'s down_at; the head\'s remote_hosts names C down)', nodeAt(cee, 'C1')?.state === 'gone' && nodeAt(cee, 'C1')?.was === 'running' && nodeAt(cee, 'C1')?.current?.text === 'on C' && cee?.down_at > 0
     && (hd.remote_hosts || []).some(x => x.host === HC && x.down_at > 0), J([cee, hd.remote_hosts]))
   check('host down: ... and A\'s sessions (their host is fine) have no down_at, their agents not gone', !!sessOf(hd, 'Orch', HA) && !sessOf(hd, 'Orch', HA).down_at && nodeAt(sessOf(hd, 'Orch', HA), 'Research')?.state !== 'gone', J(sessOf(hd, 'Orch', HA)))
+  check('host down: ... and A\'s GONE session (it left; its host is fine) still has no down_at', nodeAt(sessOf(hd, 'Leaver', HA), 'W')?.state === 'gone' && !sessOf(hd, 'Leaver', HA)?.down_at, J(sessOf(hd, 'Leaver', HA)))
   const cpg = await d1.req({ log: { session: 'Cee', host: HC } })
   check('host down: a page of C\'s node → owner-unreachable (with the host), promptly', cpg.ok === false && cpg.code === 'owner-unreachable' && cpg.host === HC, J(cpg))
 
-  // ---- 9. the doorbell flag — a 2.0 gap
-  retired('bell: an armed doorbell → bell:true on the (remote) board; cleared after the re-arm grace; a local doorbell', 'syncActivityBells is 1.7x — the doorbell bell is not on the 2.0 board (a gap)')
+  // ---- 9. the doorbell flag: a listener armed on A for Orch → the bell on B's board; gone shortly after it closes (step 10, Q72)
+  const bell = await wsClient(WSA, { kind: 'listener', watch: { name: 'Orch', project: 'AIMB' } }, '127.0.0.2')
+  const bOn = await until(() => d1.req({}), r => sessOf(r, 'Orch', HA)?.bell === true, 5000, 150)
+  check('bell: an armed doorbell on the session\'s host → bell:true on the (remote) board', sessOf(bOn, 'Orch', HA)?.bell === true, J({ ...sessOf(bOn, 'Orch', HA), nodes: undefined }) + ' on A: ' + J(((await call(A, 'activity', { session: 'Orch' })).sessions || []).map(g => g.bell)))
+  check('bell: ... on the owner\'s own board too', sessOf(await call(A, 'activity', { session: 'Orch' }), 'Orch', HA)?.bell === true)
+  check('bell: other sessions have none', !!sessOf(bOn, 'PagerA', HA) && !sessOf(bOn, 'PagerA', HA).bell && !sessOf(bOn, 'Local', HB)?.bell, J((bOn.sessions || []).map(s => [s.session, s.bell])))
+  bell.close()
+  const bOff = await until(() => d1.req({}), r => !!sessOf(r, 'Orch', HA) && !sessOf(r, 'Orch', HA).bell, 6000, 150)
+  check('bell: closing the listener clears it (after the short re-arm grace)', !!sessOf(bOff, 'Orch', HA) && !sessOf(bOff, 'Orch', HA).bell, J({ ...sessOf(bOff, 'Orch', HA), nodes: undefined }))
+  const bellB = await wsClient(WSB, { kind: 'listener', watch: { name: 'local' } })
+  const bLoc = await until(() => d1.req({}), r => sessOf(r, 'Local', HB)?.bell === true, 4000, 150)
+  check('bell: a local doorbell (name only, any case) marks a local session', sessOf(bLoc, 'Local', HB)?.bell === true, J({ ...sessOf(bLoc, 'Local', HB), nodes: undefined }))
+  bellB.close()
+
+  // ---- 10. unsubscribe: no more pushes
+  d1.send({ type: 'activity_unsub' })
+  await sleep(300)
+  const nAfter = d1.boards().length
+  await la.log({ agent: 'after-unsub', label: 'After unsub', text: '@a change after unsubscribe' })
+  await sleep(1800)
+  check('unsubscribe: no pushes after activity_unsub', d1.boards().length === nAfter, `${d1.boards().length - nAfter} more`)
 
   // ---- 11. a second hub with A's host name → B warns once (rate-limited)
   const E = await spawn('HubE', '127.0.0.4', E_PORT, HA); all.push(E)

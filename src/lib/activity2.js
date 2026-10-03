@@ -1374,6 +1374,7 @@ function touch(t, node, staleMs, caller) {
   if (caller && caller.kind === 'agent' && caller !== owner) bump(caller)
   fset(t, owner, 'implicit', false)
   fset(t, sess, 'last_activity', Math.max(sess.last_activity, t.now))
+  if (sess.gone_at) fset(t, sess, 'gone_at', null)   // step 10 (Q72): a report from the session clears its gone mark, as 1.7x (in memory only)
 }
 
 /**
@@ -1991,6 +1992,24 @@ export function menuOf2(sess, node, o = {}) {
   if (!sess || !node) return []
   const ctx = { now: Number.isFinite(o.now) ? o.now : Date.now(), staleMin: Number.isFinite(o.staleMin) ? o.staleMin : 15 }
   return typeOf(node).menu.filter(m => !m.when || WHEN2[m.when](sess, node, ctx)).map(m => ({ action: m.action, label: m.label, group: m.group }))
+}
+/**
+ * Step 10 (§5.4): the menu as the DASHBOARD's units carry it — menuOf2 without the clock. Every entry whose `when` holds
+ * now, except the two that depend on the VIEWER's stale slider: `finish` (quiet-unfinished) and `dismiss` (dismissable)
+ * come with `when: "quiet"` / `when: "quiet-tree"` for the page to check against its own slider (the page's quietAgent /
+ * subtreeAgentsQuiet mirror quiet2); their slider-free parts — not finished yet; not part of an OPEN plan — are checked
+ * here. So a unit never changes just because time passed.
+ * @param {any} sess @param {any} node @returns {{ action: string, label: string, group: string, when?: string }[]}
+ */
+export function menuStatic2(sess, node) {
+  if (!sess || !node) return []
+  const ctx = { now: 0, staleMin: 15 }, out = []
+  for (const m of typeOf(node).menu) {
+    if (m.when === 'quiet-unfinished') { if (!node.finished_at) out.push({ action: m.action, label: m.label, group: m.group, when: 'quiet' }); continue }
+    if (m.when === 'dismissable') { if (!openPlanIds(sess).has(node.id)) out.push({ action: m.action, label: m.label, group: m.group, when: 'quiet-tree' }); continue }
+    if (!m.when || WHEN2[m.when](sess, node, ctx)) out.push({ action: m.action, label: m.label, group: m.group })
+  }
+  return out
 }
 
 /**
@@ -3148,7 +3167,9 @@ export function recordKind2(r) {
  * Remove LOCAL agents that finished more than `finished_visible_hours` ago (each with its subtree) and ENDED plans that
  * long after they ended (planRemoval2: the plan node with its items when it is a plain context, else its items; a
  * test-run's bucket goes with its run) — never anything holding part of an OPEN plan. Each removal is a `remove` record,
- * why "expire" (+ the transient vanish it may cause). → { records, entries, writes, removed:[{ ident, id, key, label, path }] }
+ * why "expire" (+ the transient vanish it may cause). Step 10 (Q72, as 1.7x): an agent GONE (gone_at) that long expires like
+ * a finished one, and a GONE session that long with no open plan leaves whole (a `remove` of its root; removed[].session).
+ * → { records, entries, writes, removed:[{ ident, id, key, label, path, session? }] }
  * @param {any} state @param {number} now
  */
 export function expire2(state, now) {
@@ -3157,8 +3178,20 @@ export function expire2(state, now) {
   for (const sess of [...state.sessions.values()]) {
     const t = newTx(state, sess, now)
     let open = openPlanIds(sess)
+    // step 10 (Q72, 1.7x expire): a GONE session past the window that holds no open plan leaves WHOLE — one `remove` record
+    // of its root (why "expire", as the dismiss action removes a session; the replay folds it the same way)
+    if (sess.gone_at && now - sess.gone_at >= win && !open.size) {
+      const root = rootOf(sess)
+      out.removed.push({ ident: { ...sess.ident }, id: root.id, key: '', label: root.label, path: '', session: true })
+      record(t, 'remove', root, { why: 'expire', was: '' })
+      mdel(t, state.sessions, sess.key)
+      out.records.push(...t.records); out.entries.push(...t.entries); out.writes.push(...t.writes)
+      continue
+    }
     const gone = n => { out.removed.push({ ident: { ...sess.ident }, id: n.id, key: n.key, label: n.label, path: pathOf(sess, n) }); removeNode(t, n, 'expire'); open = openPlanIds(sess) }
-    for (const n of [...sess.nodes.values()]) if (sess.nodes.get(n.id) === n && n.kind === 'agent' && !n.merged_into && n.finished_at && now - n.finished_at >= win && !open.has(n.id)) gone(n)
+    // an agent FINISHED (step 10, Q72: or GONE — 1.7x visible()) the window ago, never one holding part of an open plan
+    const endOf = n => n.finished_at || n.gone_at || null
+    for (const n of [...sess.nodes.values()]) if (sess.nodes.get(n.id) === n && n.kind === 'agent' && !n.merged_into && endOf(n) && now - endOf(n) >= win && !open.has(n.id)) gone(n)
     for (const n of [...sess.nodes.values()]) {
       if (sess.nodes.get(n.id) !== n || n.merged_into) continue
       const p = planOf2(sess, n), end = p ? planEndAt2(sess, n, p) : null
@@ -3686,4 +3719,166 @@ export function rebuildGhosts2(state, indexes) {
     added++
   }
   return { added }
+}
+
+// ===============================================================================================================
+// #88 step 10 (Q72): the four 1.7x board behaviours no earlier step rebuilt — GONE (markSessionGone2; expire2 above lets
+// a gone agent / a gone session leave after finished_visible_hours, never while holding an open plan), the DOORBELL flag
+// (setBells2), AUTO-ABANDON (autoAbandon2) and the MEMORY BUDGET (estimateBytes2 / enforceBudget2) — on ids, with the same
+// behaviour as 1.7x (lib/activity.js markSessionGone, setBells, autoAbandon, enforceBudget). gone_at and bell are IN MEMORY
+// only (never persisted, as 1.7x: a restart forgets them; the replay never sets them); the abandon and the budget's
+// evictions WRITE their records (entries attributed to the bridge; `remove` why "evict"), so the replay folds them.
+
+/**
+ * Mark a LOCAL session as having LEFT the mesh — the session and every agent of it (and its root) get gone_at = now — or
+ * pass `now = null` to clear it (the session is back). A later report from the session clears the session's mark and the
+ * reporting chain's (touch), as 1.7x.
+ * @param {any} state @param {{ session: string, project?: string, user?: string, realm?: string }} ident @param {number|null} now
+ * @returns {boolean} whether the session is known
+ */
+export function markSessionGone2(state, ident, now) {
+  const sess = getSession2(state, ident)
+  if (!sess) return false
+  const at = Number.isFinite(now) ? now : null
+  sess.gone_at = at
+  for (const n of sess.nodes.values()) if (n.kind !== 'context') n.gone_at = at
+  return true
+}
+
+/**
+ * The DOORBELL flag (1.7x setBells): mark each LOCAL session whose name (+ project, when the watch names one) a doorbell
+ * `listener` on this host's gateway watches — `bell` rides the session header (gossip v6, the board).
+ * @param {any} state @param {{ name?: string|null, project?: string|null }[]} watches
+ * @returns {boolean} whether any session's flag changed
+ */
+export function setBells2(state, watches) {
+  const s1 = v => (typeof v === 'string' && v.trim() ? v.trim() : null)
+  const pk = p => String(p == null ? '' : p).trim().toLowerCase() || 'unclassified'
+  const ws = (Array.isArray(watches) ? watches : []).filter(w => w && s1(w.name)).map(w => ({ n: lc(w.name.trim()), p: s1(w.project) ? pk(w.project) : null }))
+  let changed = false
+  for (const s of state.sessions.values()) {
+    const b = ws.some(w => w.n === lc(s.ident.session) && (!w.p || w.p === pk(s.ident.project)))
+    if (!!s.bell !== b) { s.bell = b; changed = true }
+  }
+  return changed
+}
+
+/**
+ * AUTO-ABANDON (1.7x autoAbandon, #70 6c): every OPEN plan of a LOCAL session GONE for `abandoned_plan_days` — not live
+ * (opts.live(sess) false: the gateway passes "on this host's roster") and quiet that long (its gone_at, else its
+ * last_activity: a script-only session is never marked gone, and gone_at doesn't survive a restart) — is abandoned: each
+ * OPEN item (todo / running / blocked) an abandoned line, then the plan node itself (a context by its line, an agent / the
+ * session by the plan-end marker), deepest plans first (abandonPlans2). Each entry is a SYSTEM message attributed to the
+ * bridge (`by:"bridge"`, opts.by): it touches no activity and never makes the session look alive.
+ * → { records, entries, writes (to persist, in order), abandoned:[{ ident, id, path, item, from, entry_id, cascade? }] }
+ * @param {any} state @param {number} now @param {{ live?: (sess: any) => boolean, by?: string }} [opts]
+ */
+export function autoAbandon2(state, now, opts = {}) {
+  const days = Number(state.config.abandoned_plan_days) > 0 ? Number(state.config.abandoned_plan_days) : 90
+  const live = opts && typeof opts.live === 'function' ? opts.live : () => false, by = (opts && opts.by) || 'bridge'
+  const out = { records: [], entries: [], writes: [], abandoned: [] }
+  if (!state.config.enabled || !Number.isFinite(now)) return out
+  const text = `abandoned by the bridge — the session has been gone ${days} day${days === 1 ? '' : 's'}`
+  for (const sess of [...state.sessions.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))) {
+    if (live(sess)) continue
+    const since = sess.gone_at || sess.last_activity
+    if (!(now - since >= days * DAY)) continue
+    const plans = [...sess.nodes.values()].filter(n => { if (n.merged_into) return false; const p = planOf2(sess, n); return !!p && planEndAt2(sess, n, p) == null })
+    if (!plans.length) continue
+    const t = newTx(state, sess, now, { by })
+    const done = abandonPlans2(t, plans, text)
+    out.records.push(...t.records); out.entries.push(...t.entries); out.writes.push(...t.writes)
+    for (const d of done) out.abandoned.push({ ident: { ...sess.ident }, ...d })
+  }
+  return out
+}
+
+// the MEMORY BUDGET — an ESTIMATE of V8 heap use (1.7x's: strings at 2 bytes / char + fixed per-object / Map-entry overheads)
+const OBJ = 64, MAPE = 48, NUMS = 48, MB = 1048576
+const sB = s => (typeof s === 'string' ? 16 + 2 * s.length : 0)
+const jB = v => (v == null ? 0 : typeof v === 'string' ? sB(v) : OBJ + sB(JSON.stringify(v)))
+const progB = p => (p ? OBJ + sB(p.unit) + 16 : 0)
+const byB = b => (!b ? 0 : typeof b === 'string' ? sB(b) : OBJ + sB(b.user) + sB(b.host))
+const lineB = l => (l ? OBJ + sB(l.id) + sB(l.text) + sB(l.state) + 16 + jB(l.details) + jB(l.data) + jB(l.question) + byB(l.by) : 0)
+const entryB = e => 16 + OBJ + sB(e.id) + sB(e.text) + sB(e.state) + sB(e.type) + NUMS + progB(e.progress) + jB(e.fields) + byB(e.by) + sB(e.act)
+/** One node's estimated bytes (its object, its index entries, its line, bar, kept test and in-memory log). */
+function nodeB(n) {
+  let b = OBJ * 2 + 3 * MAPE + sB(n.id) + sB(n.key) + sB(n.label) + sB(n.asked) + sB(n.creator) + sB(n.chain) + sB(n.scope) + sB(n.parent) + sB(n.type) + sB(n.rank)
+    + NUMS * 2 + lineB(n.current) + progB(n.progress) + jB(n.test) + (n.plan_end ? OBJ : 0)
+  for (const x of n.log || []) b += entryB(x)
+  return b
+}
+const ghostB = g => OBJ + 2 * MAPE + sB(g.id) + sB(g.key) + sB(g.label) + sB(g.creator) + sB(g.chain) + sB(g.scope) + sB(g.parent) + sB(g.type) + NUMS
+function sessionB(s) {
+  const i = s.ident || {}
+  let b = OBJ + MAPE + sB(s.key) + sB(i.session) + sB(i.project) + sB(i.user) + sB(i.realm) + sB(i.host) + NUMS + 6 * OBJ
+  for (const n of s.nodes.values()) b += nodeB(n)
+  if (s.ghosts instanceof Map) for (const g of s.ghosts.values()) b += ghostB(g)
+  if (s.aliases instanceof Map) for (const [k, a] of s.aliases) b += OBJ + MAPE + sB(k) + sB(a.path) + NUMS
+  if (s.scope instanceof Map) b += s.scope.size * (MAPE + 64)
+  return b
+}
+/**
+ * Estimated in-memory bytes of this host's board (+ opts.remote: the held 2.0 boards of the other hosts, lib/activity2-gossip.js
+ * createRemote2 — counted, never evicted, as 1.7x counted its remote slices).
+ * @param {any} state @param {{ remote?: any }} [opts]
+ */
+export function estimateBytes2(state, opts = {}) {
+  let b = OBJ
+  for (const s of state.sessions.values()) b += sessionB(s)
+  const rem = opts && opts.remote && opts.remote.hosts instanceof Map ? opts.remote.hosts : null
+  if (rem) for (const [o, sl] of rem) { b += MAPE + sB(o); for (const s of (sl.sessions instanceof Map ? sl.sessions.values() : [])) b += sessionB(s) }
+  return b
+}
+/**
+ * Bring the board under `budgetBytes` (default config.memory_budget_mb), as 1.7x enforceBudget: (1) EVICT the oldest
+ * candidates across this host's sessions — FINISHED agents (by finished_at) and ENDED plans (by when they ended;
+ * evictionCandidates2) — each WITH ITS SUBTREE, a `remove` record why "evict" (written: the replay folds it), never one
+ * holding part of an OPEN plan; then (2) DROP the oldest IN-MEMORY log entries across every local node (each node's log
+ * from its front; log_dropped grows — nothing is written: the day files keep them). Never a current line, an unfinished
+ * agent, a session's root, or a remote board. May still be over (over:true) when current lines alone exceed the budget.
+ * → { records, entries, writes, evicted:[{ ident, id, key, label, path }], entries_dropped, bytes_before, bytes_after, over }
+ * @param {any} state @param {number} [budgetBytes] @param {number} [now] @param {{ remote?: any }} [opts]
+ */
+export function enforceBudget2(state, budgetBytes, now, opts = {}) {
+  const budget = Number.isFinite(budgetBytes) && budgetBytes > 0 ? budgetBytes : (Number(state.config.memory_budget_mb) || 64) * MB
+  const at = Number.isFinite(now) ? now : Date.now()
+  const before = estimateBytes2(state, opts)
+  const out = { records: [], entries: [], writes: [], evicted: [], entries_dropped: 0, bytes_before: before, bytes_after: before, over: false }
+  let bytes = before
+  if (bytes > budget) {
+    const cand = []
+    for (const sess of state.sessions.values()) for (const c of evictionCandidates2(sess, new Set())) cand.push({ sess, c })
+    cand.sort((x, y) => x.c.at - y.c.at || (x.sess.key < y.sess.key ? -1 : x.sess.key > y.sess.key ? 1 : 0) || (x.c.id < y.c.id ? -1 : x.c.id > y.c.id ? 1 : 0))
+    for (const { sess, c } of cand) {
+      if (bytes <= budget) break
+      if (state.sessions.get(sess.key) !== sess) continue
+      const t = newTx(state, sess, at)
+      for (const r of c.roots) {
+        if (sess.nodes.get(r.id) !== r) continue   // went with an evicted ancestor
+        const ids = [r.id]
+        for (let i = 0; i < ids.length; i++) for (const k of sess.kids.get(ids[i]) || []) ids.push(k)
+        for (const id of ids) { const n = sess.nodes.get(id); if (n) bytes -= nodeB(n) - ghostB(n) }
+        out.evicted.push({ ident: { ...sess.ident }, id: r.id, key: r.key, label: r.label, path: pathOf(sess, r) })
+        removeNode(t, r, 'evict')
+      }
+      out.records.push(...t.records); out.entries.push(...t.entries); out.writes.push(...t.writes)
+    }
+  }
+  if (bytes > budget) {
+    const all = []
+    for (const sess of state.sessions.values()) for (const n of sess.nodes.values()) n.log.forEach((e, i) => all.push({ ts: e.ts, i, n }))
+    all.sort((x, y) => x.ts - y.ts || x.i - y.i)
+    for (const { n } of all) {
+      if (bytes <= budget) break
+      if (!n.log.length) continue
+      const e = n.log[0]
+      n.log = n.log.slice(1); n.log_dropped++
+      out.entries_dropped++
+      bytes -= entryB(e)
+    }
+  }
+  out.bytes_after = estimateBytes2(state, opts)
+  out.over = out.bytes_after > budget
+  return out
 }

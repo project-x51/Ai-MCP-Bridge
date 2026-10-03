@@ -37,6 +37,8 @@ import * as Act from './lib/activity.js'
 import * as A2 from './lib/activity2.js'
 import { createStore2, LOG2_FIELDS } from './lib/activity2-store.js'
 import * as G2 from './lib/activity2-gossip.js'
+import { dashUnits2, planDashDelta2, dashTypes2 } from './lib/activity2-dash.js'
+const DASH_TYPES = dashTypes2()   // #88 step 10: the node-type registry as the dashboard reads it (sent with each full board)
 import { createViewSet, viewUser, VIEW_TTL_MS, VIEW_GOSSIP_MAX_BYTES } from './lib/view-state.js'
 import { logSnippet, logToolHint, logCmd, guideText } from './lib/log-snippet.js'
 import { create as createEgress } from './services/egress.js'
@@ -912,10 +914,9 @@ const actDisabled = () => ({ ok: false, code: 'activity-disabled', what: 'the ac
 // 11 deletes it. Gossip v6 (step 7): the gateway announces `activity_gossip:6` and shares its board with the peer hubs
 // that announce 6 too (a 1.7x hub announces 5: the equality check fails both ways and nothing is shared, §6.2), other
 // hosts' boards and log pages are read through their owners, and dashboard actions go to the node's owner by id (§6.3).
-// The dashboard's board pushes answer `not-in-2.0-yet` until step 10.
+// Step 10: the dashboard's board pushes are the 2.0 board's units by node id (lib/activity2-dash.js, actDashUnits).
 let act2 = /** @type {any} */ (null)   // the 2.0 store — on the GATEWAY only
 const actRemote2 = G2.createRemote2({ origin: HOSTNAME })   // #88 step 7: the other 2.0 hosts' boards (gossip v6), on the gateway
-const actNotYet2 = (step, what) => ({ ok: false, code: 'not-in-2.0-yet', what: `${what} is not wired to the 2.0 activity board yet (#88 build step ${step})` })
 profile.config.watch(c => {   // live-reload: the knobs apply to the next call / sweep (enabled, stale window, caps, cadence)
   const n = activityConfig(c)
   if (JSON.stringify(n) === JSON.stringify(ACT_CFG)) return
@@ -959,6 +960,7 @@ function startActivity2() {
   log(`activity (2.0): ${fsx ? `replayed ${st.fed} record(s) → ${st.sessions} session(s), ${st.nodes} node(s), ${st.ghosts} ghost(s) (${st.ghosts_rebuilt || 0} from the index files) in ${st.ms}ms` : 'memory-only board (no persistence)'}`)
   act2.rollover(actNow(), 'startup')
   actExpire2(false)   // step 9: an expired question's asker is told, as at every pass
+  syncActivityGone(); syncActivityBells()   // step 10 (Q72, as 1.7x after its replay): the sessions live on the roster now are present; the armed doorbells' bells
   scheduleActivityCheckpoints()
   startView2()
 }
@@ -1256,7 +1258,7 @@ function actExpire2(remote) {
   if (!act2 || role !== 'gateway') return
   let changed = false, expired = []
   try { const x = act2.expire(actNow()); changed = x.changed; expired = x.expired || []; if (x.left) viewPrune(x.left) } catch (e) { log(`activity: expiry failed: ${(e && e.message) || e}`) }   // step 8: + the view records of what expired
-  if (remote) for (const o of G2.expireRemote2(actRemote2, actNow(), ACT_CFG.finished_visible_hours * 3600000)) { actOwner.delete(o); log(`activity: ${o} has been down for ${ACT_CFG.finished_visible_hours} h — its board leaves this one`) }   // #88 step 7
+  if (remote) for (const o of G2.expireRemote2(actRemote2, actNow(), ACT_CFG.finished_visible_hours * 3600000)) { actOwner.delete(o); log(`activity: ${o} has been down for ${ACT_CFG.finished_visible_hours} h — its board leaves this one`); actDashKick() }   // #88 step 7; step 10: + the dashboards
   if (expired.length) {
     const now = actNow()
     log(`activity: ${expired.length} question(s) expired unanswered: ${expired.map(e => `${e.ident.session}/${e.path}`).join(', ').slice(0, 300)}`)
@@ -1266,12 +1268,39 @@ function actExpire2(remote) {
   else actScheduleExpiry()
 }
 function actBudget() {
+  if (act2) return actBudget2()   // #88 step 10 (Q72): the 2.0 budget
   const r = Act.enforceBudget(activity, ACT_CFG.memory_budget_mb * 1048576)
   if (r.evicted.length || r.entries_dropped) log(`activity: over the ${ACT_CFG.memory_budget_mb} MB budget — evicted ${r.evicted.length} finished agent(s), dropped ${r.entries_dropped} log entries`)
   return r.evicted.length
 }
+/** #88 step 10 (Q72): the 2.0 MEMORY BUDGET (lib/activity2.js enforceBudget2) — the oldest finished agents / ended plans
+ * evicted (written: `remove` why "evict"; their view records pruned), then the oldest in-memory log entries dropped; the
+ * held remote boards count, never evicted (1.7x). → how many subtrees were evicted */
+function actBudget2() {
+  if (!act2 || role !== 'gateway') return 0
+  let r
+  try { r = act2.budget(ACT_CFG.memory_budget_mb * 1048576, actNow(), { remote: actRemote2 }) } catch (e) { log(`activity: budget failed: ${(e && e.message) || e}`); return 0 }
+  if (r.evicted.length || r.entries_dropped) log(`activity: over the ${ACT_CFG.memory_budget_mb} MB budget — evicted ${r.evicted.length} finished agent(s), dropped ${r.entries_dropped} log entries`)
+  if (r.left) viewPrune(r.left)
+  return r.evicted.length
+}
+/** #88 step 10 (Q72): the 2.0 gc tick, in 1.7x's order — AUTO-ABANDON (the open plans of a session gone — not on this host's
+ * roster, no report — for abandoned_plan_days: entries attributed to the bridge, written in order), the expiry pass
+ * (actExpire2: + the gone agents / gone sessions past the window), the present set pruned, then the memory budget. */
+function actGc2() {
+  if (!act2 || role !== 'gateway') return
+  let changed = false
+  try {
+    const ab = act2.autoAbandon(actNow(), { live: s => actPresent.has(s.key) })
+    if (ab.changed) { changed = true; log(`activity: abandoned ${ab.abandoned.length} plan node(s)/item(s) of session(s) gone ${ACT_CFG.abandoned_plan_days}+ days: ${[...new Set(ab.abandoned.map(a => a.ident.session))].join(', ')}`) }
+  } catch (e) { log(`activity: auto-abandon failed: ${(e && e.message) || e}`) }
+  actExpire2(true)
+  for (const k of [...actPresent]) if (!act2.state.sessions.has(k)) actPresent.delete(k)
+  if (actBudget2()) changed = true
+  if (changed) actChanged()   // the abandons / evictions reach the peer hubs (and the waiters) as a delta
+}
 setInterval(() => {   // expiry (finished/gone agents past finished_visible_hours leave the board) + the memory budget
-  if (act2 && role === 'gateway') { actExpire2(true); return }   // #88 step 6: the 2.0 pass writes its removals
+  if (act2 && role === 'gateway') { actGc2(); return }   // #88 step 6: the 2.0 pass writes its removals; step 10: + auto-abandon and the budget
   if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
   const now = actNow()
   // v1.64.0 (#70 6c): AUTO-ABANDON — the open plans of a session gone (not on this host's roster, no message) for
@@ -1292,6 +1321,7 @@ setInterval(() => {   // expiry (finished/gone agents past finished_visible_hour
 // process exited) is marked gone; it is cleared when the session comes back (re-registers or reports again). A session
 // never seen live here (e.g. one only replayed from the files) is not marked — it simply goes stale.
 function syncActivityGone() {
+  if (act2) return syncActivityGone2()   // #88 step 10 (Q72): the 2.0 board
   if (!activity || role !== 'gateway' || (actReplay && actReplay.phase !== 'done')) return
   const live = new Set()
   for (const s of roster.values()) { if (s.origin) continue; for (const sp of (s.subpeers || [])) live.add(Act.sessionKey({ realm: sp.realm || REALM, project: sp.project, user: sp.user, session: sp.name, host: HOSTNAME })) }   // v1.60.0: the key has the host
@@ -1302,6 +1332,21 @@ function syncActivityGone() {
     else if (actPresent.has(k)) { actPresent.delete(k); Act.markSessionGone(activity, sess, now); changed = true }
   }
   if (changed) actChanged()   // #70 step 4: gone / back reaches the peer hubs
+}
+/** #88 step 10 (Q72): GONE on the 2.0 board, as 1.7x — a session of this host's board whose sub-peer was live on the roster
+ * and left is marked gone (the session, its agents and root: in memory only — lib/activity2.js markSessionGone2); back on
+ * the roster → cleared. Never seen live here (replayed only, or script-only) → never marked (it goes stale). */
+function syncActivityGone2() {
+  if (!act2 || role !== 'gateway') return
+  const live = new Set()
+  for (const s of roster.values()) { if (s.origin) continue; for (const sp of (s.subpeers || [])) live.add(Act.sessionKey({ realm: sp.realm || REALM, project: sp.project, user: sp.user, session: sp.name, host: HOSTNAME })) }
+  const now = actNow()
+  let changed = false
+  for (const [k, sess] of act2.state.sessions) {
+    if (live.has(k)) { if (!actPresent.has(k)) { actPresent.add(k); if (sess.gone_at) { act2.markGone(sess.ident, null); changed = true } } }
+    else if (actPresent.has(k)) { actPresent.delete(k); act2.markGone(sess.ident, now); changed = true }
+  }
+  if (changed) actChanged()   // gone / back reaches the peer hubs (gossip v6: the header's gone_at, each agent's)
 }
 // ---- the gateway's handlers (a follower reaches them through activityCall → ACTIVITY frame)
 async function activityLog(ident, input, opts = {}) {   // opts.script: an aimb-log.mjs report (#70 step 3) — never tracked for gone
@@ -1344,7 +1389,12 @@ async function activityLog2(ident, input, opts = {}) {
   const batch = input.items !== undefined
   const r = batch ? act2.batch(id, input, now, { tzOffsetMin: tzOff(now) }) : act2.apply(id, input, now, { tzOffsetMin: tzOff(now) })
   if (!r.ok) return r
-  if (batch ? r.applied : true) actChanged()
+  if (batch ? r.applied : true) {
+    actChanged()
+    syncActivityBells()   // step 10 (Q72, 1.7x): a new session may be one an armed doorbell watches
+    if (!opts.script) actPresent.add(Act.sessionKey({ ...id, host: HOSTNAME }))   // step 10 (Q72, 1.7x): a script-only session is never marked gone (it can still go stale)
+    if (++actApplies % 50 === 0) actBudget2()   // step 10 (Q72, 1.7x): the budget every 50 reports too
+  }
   const { left, ...res } = r
   if (left) viewPrune(left)   // #88 step 8: nodes that left the board (a transient vanish, a merge) → their view records tombstoned
   return batch ? res : { ...res, session: ident.session }
@@ -2041,7 +2091,7 @@ function actUnsharedHosts() {
   for (const [h, list] of actUnsharedRemote) for (const u of list) add(u, h)
   return [...by.values()].sort((a, b) => (a.host < b.host ? -1 : 1))
 }
-function actUnsharedChanged() { if (role === 'gateway') for (const p of peerGw.values()) actKick(p) }
+function actUnsharedChanged() { if (role === 'gateway') { for (const p of peerGw.values()) actKick(p); actDashKick() } }   // #88 step 10: + the dashboards' head (Q70)
 // coalescing: one timer per link, due ACT_GOSSIP_MS after that link's last frame — every change before it fires rides it
 function actKick(p) {
   const a = p && p.act
@@ -2129,9 +2179,10 @@ function onActivityFrame2(sock, gw, p, host, f, refuse) {
     if (f.full) { actOwner.set(host, gw); const lc2 = wLogCmd(f.log_cmd); if (lc2) actHostCmd.set(host, lc2); else actHostCmd.delete(host) }
     if (Array.isArray(f.unshared)) actUnsharedRemote.set(host, actUnsharedWire(f.unshared, host)); else if (f.full) actUnsharedRemote.delete(host)   // #88 Q70: the 1.7x hosts IT is linked to
     if (r.left) viewPrune(r.left)   // #88 step 8: nodes this delta removed → their view records tombstoned (the owner does too; LWW converges)
+    if (r.changed || f.full || Array.isArray(f.unshared)) actDashKick()   // #88 step 10: the dashboards' merged board
   } else if (f.t === 'ACTIVITY_DOWN') {
     tapRec('recv', { peer: host, kind: 'down' })
-    if (actOwner.get(host) === gw && G2.markOriginDown2(actRemote2, host, actNow())) log(`activity: ${host} is going down (${String(f.reason || 'notice').slice(0, 40)}) — its agents show as gone`)
+    if (actOwner.get(host) === gw && G2.markOriginDown2(actRemote2, host, actNow())) { log(`activity: ${host} is going down (${String(f.reason || 'notice').slice(0, 40)}) — its agents show as gone`); actDashKick() }
   } else if (f.t === 'ACTIVITY_REQ') actServe(sock, p, host, f)
   else if (f.t === 'ACTIVITY_ACT') actServeAction(sock, p, host, f)
   else if (f.t === 'ACTIVITY_RES') {
@@ -2299,7 +2350,7 @@ function actLinkLost(gw, p, why) {
   if (actUnshared.delete(gw)) actUnsharedChanged()   // #88 Q70: the 1.7x host's link dropped → off the list
   if (actUnsharedRemote.delete(host)) actUnsharedChanged()   // … and what this peer reported goes with its link
   if (activity && actOwner.get(host) === gw && Act.markOriginDown(activity, host, actNow())) { log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`); actDashKick() }
-  if (act2 && actOwner.get(host) === gw && G2.markOriginDown2(actRemote2, host, actNow())) log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`)   // #88 step 7
+  if (act2 && actOwner.get(host) === gw && G2.markOriginDown2(actRemote2, host, actNow())) { log(`activity: ${host}'s agents show as gone (${why || 'link lost'})`); actDashKick() }   // #88 step 7; step 10: + the dashboards
 }
 // GOING DOWN (the tray's prepare-shutdown, or a clean exit): tell every peer hub now, so their boards show our agents gone
 // at once instead of after the link times out. Resolves once the frames are written (≤300 ms) with the number sent.
@@ -2329,8 +2380,19 @@ function actAnnounceDown(reason) {
 // Requests {type:"activity", ref, query} → {type:"activity", ref, result} (a queued remote fetch first sends
 // {type:"activity_queued", ref, wait_ms, position}). Pushes and reads are for DASHBOARDS only, never page leaves (#70
 // "Decisions before step 5" 7: registered sessions read with the `activity` tool).
+// #88 build step 10 (§5.4): on the 2.0 board the UNITS are by node id (lib/activity2-dash.js dashUnits2 — this host's
+// sessions + every held remote session, merged per session across hosts: one session unit carrying each host's ROOT, one
+// unit per node with its parent_id; raw states + raw times, the registry's type / glyph / show, the bar / tests bar /
+// time, the menu without the clock), diffed per dashboard by planDashDelta2. The head adds the 2.0 fields: format 6,
+// view_user ("view: robin", Q29 / Q41), unshared_hosts (Q70: shown in RED), fs_warnings.
 const actDashSubs = () => [...leaves].filter(ws => ws.kind === 'dashboard' && ws.actSub && ws.readyState === 1)
 function actDashHead() {
+  if (act2) {
+    const unshared = actUnsharedHosts(), h = act2.head()
+    return { host: HOSTNAME, now: actNow(), format: h.format, stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min,
+      remote_hosts: actRemoteInfo2().map(x => { const { seq: _s, ...r } = /** @type {any} */ (x); return r }), log_cmd: actLogCmd(), user: ACT_DASH_USER, view_user: VIEW_USER,
+      ...(unshared.length ? { unshared_hosts: unshared } : {}), ...(h.fs_warnings ? { fs_warnings: h.fs_warnings } : {}) }
+  }
   return { host: HOSTNAME, now: actNow(), stale_after_min: ACT_CFG.stale_after_min, finished_plan_open_min: ACT_CFG.finished_plan_open_min, ...(actReplay && actReplay.phase !== 'done' ? { loading: actReplay.phase } : {}),
     remote_hosts: activity && activity.remote.size ? actRemoteInfo() : [], log_cmd: actLogCmd(), user: ACT_DASH_USER }   // v1.65.0 (#70 6d): our aimb-log paths (never a token) + who actions are attributed to
 }
@@ -2348,22 +2410,27 @@ function actRosterKinds() {
   if (actKinds.size > 4096) actKinds.delete(actKinds.keys().next().value)   // bounded (oldest first)
 }
 const actWithKind = g => { const k = actKinds.get(actKindKey(g.realm, g.project, g.user, g.session)); return k ? { ...g, client_kind: k } : g }
-const actDashUnits = () => { actRosterKinds(); return Act.dashUnits(Act.boardView(activity, actNow(), { raw: true }).map(actShow).map(actWithKind)) }
+const actDashUnits = () => {
+  actRosterKinds()
+  if (act2) return dashUnits2({ state: act2.state, host: HOSTNAME, remote: actRemote2, project: projName, kindOf: g => actKinds.get(actKindKey(g.realm, g.project, g.user, g.session)) || null })   // #88 step 10
+  return Act.dashUnits(Act.boardView(activity, actNow(), { raw: true }).map(actShow).map(actWithKind))
+}
+const actDashDelta = (pub, units, opts) => (act2 ? planDashDelta2(pub, units, opts) : Act.planDashDelta(pub, units, opts))
 function actDashSubscribe(ws) {   // a full board now (not throttled): the page's view starts from it
   ws.actSub = { pub: new Map(), seq: 1, head: '' }
-  const plan = Act.planDashDelta(ws.actSub.pub, actDashUnits(), { full: true }), head = actDashHead()
+  const plan = actDashDelta(ws.actSub.pub, actDashUnits(), { full: true }), head = actDashHead()
   ws.actSub.head = JSON.stringify({ ...head, now: 0 })
-  try { ws.send(JSON.stringify({ type: 'activity_board', full: true, epoch: ACT_EPOCH, seq: 1, head, upsert: plan.upsert })) } catch { }
+  try { ws.send(JSON.stringify({ type: 'activity_board', full: true, epoch: ACT_EPOCH, seq: 1, head, ...(act2 ? { types: DASH_TYPES } : {}), upsert: plan.upsert })) } catch { }   // #88 step 10: + the type registry (labels of the units' menus)
 }
 function actDashKick() {
-  if (actDashTimer || role !== 'gateway' || !activity || !actDashSubs().length) return
+  if (actDashTimer || role !== 'gateway' || !(activity || act2) || !actDashSubs().length) return
   actDashTimer = setTimeout(() => {
     actDashTimer = null; actDashLast = Date.now()
     const subs = actDashSubs()
-    if (!subs.length || !activity) return
+    if (!subs.length || !(activity || act2)) return
     const units = actDashUnits(), head = actDashHead(), hj = JSON.stringify({ ...head, now: 0 })
     for (const ws of subs) {
-      const plan = Act.planDashDelta(ws.actSub.pub, units)
+      const plan = actDashDelta(ws.actSub.pub, units)
       if (plan.empty && hj === ws.actSub.head) continue
       const base = ws.actSub.seq++
       ws.actSub.head = hj
@@ -2378,11 +2445,11 @@ function actDashKick() {
 const ACT_BELL_GRACE_MS = Number(process.env.AI_BRIDGE_ACTIVITY_BELL_GRACE_MS) || 5000
 const actBellClosed = new Map()   // JSON watch -> closed-at
 function syncActivityBells() {
-  if (!activity || role !== 'gateway') return
+  if (!(activity || act2) || role !== 'gateway') return   // #88 step 10 (Q72): the 2.0 board too (lib/activity2.js setBells2)
   const now = Date.now(), watches = []
   for (const ws of leaves) if (ws.kind === 'listener' && ws.readyState === 1 && ws.watch) watches.push(ws.watch)
   for (const [k, t] of [...actBellClosed]) { if (now - t > ACT_BELL_GRACE_MS) actBellClosed.delete(k); else watches.push(JSON.parse(k)) }
-  if (Act.setBells(activity, watches)) actChanged()
+  if (act2 ? act2.setBells(watches) : Act.setBells(activity, watches)) actChanged()
 }
 function actBellClose(ws) {
   if (!ws.watch || !ws.watch.name) return
@@ -3471,8 +3538,8 @@ function onWsConnection(ws) {
           const deny = { ok: false, code: 'dashboard-only', what: 'the activity board is for dashboards and registered sessions (the activity tool), not page leaves' }
           try { ws.send(JSON.stringify(m.type === 'activity' ? { type: 'activity', ref: m.ref != null ? m.ref : null, result: deny } : { type: 'activity_board', ...deny })) } catch {}
         } else if (m.type === 'activity_sub') {   // #70 step 5: the Activity view opened (or a resync after a seq gap) → a full board, then deltas
-          { try { ws.send(JSON.stringify({ type: 'activity_board', ...actNotYet2(10, 'the dashboard\'s board') })) } catch {} ; return }   // #88 step 6
-          if (role !== 'gateway' || !activity) { try { ws.send(JSON.stringify({ type: 'activity_board', ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })) } catch {} ; return }
+          // #88 step 10: the 2.0 board's units (lib/activity2-dash.js)
+          if (role !== 'gateway' || !(activity || act2)) { try { ws.send(JSON.stringify({ type: 'activity_board', ok: false, code: 'not-gateway', what: 'this bridge does not hold the activity board' })) } catch {} ; return }
           if (!ACT_CFG.enabled) { try { ws.send(JSON.stringify({ type: 'activity_board', ...actDisabled() })) } catch {} ; return }
           actDashSubscribe(ws)
         } else if (m.type === 'activity_unsub') {

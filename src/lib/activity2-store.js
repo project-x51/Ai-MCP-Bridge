@@ -247,11 +247,37 @@ export function createStore2(o) {
     flush(now) { const w = A2.flushCheckpoints2(state, now, { withRep: true }); persist(w); return w.length },
     /** The owner's expiry pass (questions, the grace sweep, removals — each written) + alias lifetime. → { changed, expired, removed } */
     expire(now) {
+      // step 10 (Q72): a GONE session may leave whole — its ids are collected first (it leaves memory with its ghosts)
+      const goneIds = new Map()
+      for (const s of state.sessions.values()) if (s.gone_at) goneIds.set(s.key, [...s.nodes.keys()])
       const p = A2.expirePass2(state, now)
       persist(p.writes)
       A2.expireAliases(state, now)
-      const left = leftOf(p.writes)
+      const pre = []
+      for (const [k, ids] of goneIds) if (!state.sessions.has(k)) pre.push(...ids)
+      const left = leftOf(p.writes, pre)
       return { changed: p.writes.length > 0, expired: p.expired, removed: p.removed, ...(left.length ? { left } : {}) }
+    },
+    /** Step 10 (Q72): mark a session GONE (now) or back (null) — in memory only (lib/activity2.js markSessionGone2). */
+    markGone(ident, now) { return A2.markSessionGone2(state, ident, now) },
+    /** Step 10 (Q72): the doorbell flags from the listeners' watches (lib/activity2.js setBells2). → whether any changed */
+    setBells(watches) { return A2.setBells2(state, watches) },
+    /** Step 10 (Q72): AUTO-ABANDON (lib/activity2.js autoAbandon2), its entries written in order (attributed to the bridge).
+     * → { changed, abandoned, persisted? } */
+    autoAbandon(now, opts = {}) {
+      const r = A2.autoAbandon2(state, now, opts)
+      const p = persist(r.writes)
+      return { changed: r.writes.length > 0, abandoned: r.abandoned, ...(p === false ? { persisted: false } : {}) }
+    },
+    /** Step 10 (Q72): the MEMORY BUDGET (lib/activity2.js enforceBudget2) — evictions written (`remove` why "evict"), then
+     * the oldest in-memory log entries dropped. opts.remote = the held remote boards (counted, never evicted).
+     * → { changed, evicted, entries_dropped, bytes_before, bytes_after, over, left?, persisted? } */
+    budget(budgetBytes, now, opts = {}) {
+      const r = A2.enforceBudget2(state, budgetBytes, now, opts)
+      const p = persist(r.writes)
+      const left = leftOf(r.records)
+      return { changed: r.writes.length > 0 || r.entries_dropped > 0, evicted: r.evicted, entries_dropped: r.entries_dropped, bytes_before: r.bytes_before, bytes_after: r.bytes_after, over: r.over,
+        ...(left.length ? { left } : {}), ...(p === false ? { persisted: false } : {}) }
     },
     /** Is a rollover due (a new local day since the last one, or none yet)? */
     rolloverDue(now) { return rollDay !== localDay(now) },
@@ -293,9 +319,10 @@ export function createStore2(o) {
         if (str(q.project) && projKey(q.project) !== projKey(id.project)) continue
         if (str(q.user) && lc(q.user) !== lc(id.user)) continue
         const memo = new Map(), nodes = []
-        const walk = (n, depth) => { nodes.push(nodeRow2(sess, n, depth, now, memo, state.config.stale_after_min)); for (const c of A2.childrenOf2(sess, n)) walk(c, depth + 1) }
+        const walk = (n, depth) => { nodes.push(goneRow2(sess, n, nodeRow2(sess, n, depth, now, memo, state.config.stale_after_min))); for (const c of A2.childrenOf2(sess, n)) walk(c, depth + 1) }
         walk(A2.rootOf(sess), 0)
         out.push({ session: id.session, project: id.project, user: id.user, realm: id.realm, host: id.host, created_at: sess.created_at, last_activity: sess.last_activity, root_id: sess.rootId,
+          ...(sess.gone_at ? { gone_at: sess.gone_at } : {}), ...(sess.bell ? { bell: true } : {}),   // step 10 (Q72): the session left the mesh; an armed doorbell watches it
           ghosts: sess.ghosts.size, nodes })
       }
       return out
@@ -444,4 +471,17 @@ export function nodeRow2(sess, n, depth, now, memo, staleMin) {
     ...(es => ({ state: es.state, ...(es.stale ? { stale: true, was: es.was } : {}), stale_at: es.stale_at }))(A2.effectiveState2(sess, n, now, staleMin)), current: l ? { id: l.id, ts: l.ts, text: l.text, state: l.state, has_details: !!(l.details || l.has_details), has_data: l.data != null || !!l.has_data, ...(l.by ? { by: l.by } : {}), ...(l.question ? { question: l.question } : {}) } : null,
     progress: n.progress || null, eta_at: n.eta_at || null, finished_at: n.finished_at || null, implicit: !!n.implicit, log_n: n.log.length + n.log_dropped, ...(n.log_floor ? { log_floor: n.log_floor } : {}),
     display: A2.displayOf2(sess, n, { now, memo }) }
+}
+
+const LIVE = new Set(['running', 'blocked'])
+/** Step 10 (Q72): a LOCAL node of a session that LEFT the mesh shows `gone` — the rule remoteRows (lib/activity2-gossip.js)
+ * applies to a remote one: an agent / the root with gone_at (or its session's), a context's live line through its owner
+ * (the nearest agent at or above, else the root); never a plan item, never a finished one. → the row (state:"gone", was). */
+export function goneRow2(sess, n, row) {
+  if (n.plan) return row
+  let o = n, guard = 0
+  while (o && o.kind === 'context' && o.parent != null && guard++ < 64) o = sess.nodes.get(o.parent)
+  const st = row.stale ? row.was : row.state
+  if (LIVE.has(st) && o && (o.gone_at || sess.gone_at) && !o.finished_at) { row.state = 'gone'; row.was = st; delete row.stale }
+  return row
 }

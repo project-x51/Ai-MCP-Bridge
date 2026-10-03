@@ -303,6 +303,38 @@
   .act-dlg h3 { margin:0 0 8px; font-size:14.5px; color:var(--fg-strong); } .act-dlg p { margin:0 0 8px; font-size:12.5px; line-height:1.45; } .act-dlg p.note { color:var(--muted); font-size:11.5px; }
   .act-dlg .btns { text-align:right; margin-top:10px; } .act-dlg .act-btn { padding:4px 14px; font-size:12.5px; }
   .act-btn.danger { color:var(--bad-fg); background:var(--bad); border-color:var(--bad); font-weight:600; } .act-btn.danger:hover { color:var(--bad-fg); filter:brightness(1.08); }
+  /* #88 build step 10 (2.0): Q70's unshared hosts in RED at the top of the board (and the Dropbox file warnings, amber); a
+     node's TYPE glyph (☰ plan, ▤ group, ⚑ test run), transient ◌, its time; a group's count and a test run's tests bar (passed
+     green, failed red) in the bar column; the "N new" badge of a node the viewer closed; the log's "new since you last looked"
+     divider, removed entries, "logged as" (moved); the clash dialog; the Answer dialog's options listed below the question */
+  .ar.unshared { background:color-mix(in srgb, var(--bad) 12%, transparent); border-left:3px solid var(--bad); }
+  .ar.unshared .unsh { color:var(--bad); font-weight:700; white-space:normal; }
+  .ar.fswarn .fsw { color:var(--warn); font-weight:600; white-space:normal; font-size:11.5px; }
+  .ar .tg { color:var(--muted); font-weight:700; margin-right:4px; }
+  .ar .trn { flex:none; color:var(--faint); font-size:11px; margin-left:3px; cursor:default; }
+  .ar .tk { flex:none; font-size:11px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .ar .pb.gcount { background:transparent; height:auto; font-size:11px; line-height:15px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:block; border-radius:0; }
+  .ar .pb.tests > i.tp { background:var(--ok); border-radius:3px 0 0 3px; }
+  .ar .pb.tests > b.tf { flex:none; display:block; height:100%; background:var(--bad); }
+  .act-legend .pb.lgb, .pb.lgb { display:inline-flex; width:40px; height:6px; border-radius:3px; background:var(--track); overflow:hidden; vertical-align:middle; }
+  .act-legend .pb.lgb > i { display:block; height:100%; } .act-legend .pb.tests > i.tp { background:var(--ok); } .act-legend .pb.tests > b.tf { display:block; height:100%; background:var(--bad); }
+  .nbadge { flex:none; font-size:10.5px; font-weight:700; line-height:15px; border-radius:9px; padding:0 6px; color:var(--bg); background:var(--info); white-space:nowrap; cursor:default; margin-left:4px; }
+  .ar.more.newsep .nm { color:var(--info); font-weight:700; }
+  .ar.le.rmd { opacity:.75; } .ar .rmk { flex:none; font-size:10px; font-weight:700; color:var(--faint); border:1px dashed var(--faint); border-radius:8px; padding:0 5px; }
+  .ar .ctag.moved { text-decoration:underline dotted; }
+  .act-btn.rmv.on { color:var(--fg-strong); border-color:var(--info); font-weight:600; }
+  .act-dlg .rnsug { margin:6px 0 0; font-size:12px; color:var(--muted); } .act-dlg .rnsug .act-btn { margin-left:4px; }
+  .act-dlg .clash { margin:8px 0 0 calc(var(--cd, 0) * 14px); padding:6px 8px; border:1px solid var(--line); border-radius:7px; font-size:12.5px; }
+  .act-dlg .clash .clq { margin:0 0 4px; } .act-dlg .clash .clo { display:flex; align-items:center; gap:6px; margin:3px 0; cursor:pointer; }
+  .act-dlg .clash .clo .act-in { display:inline-block; width:auto; flex:1 1 auto; min-width:120px; padding:2px 6px; font-size:12.5px; }
+  .act-dlg .clash .cln .k { color:var(--muted); font-size:11.5px; margin:4px 0 0; }
+  .act-dlg .qopts { display:flex; flex-direction:column; gap:4px; margin:4px 0 6px; }
+  .act-dlg .qopt { display:flex; align-items:center; gap:9px; width:100%; text-align:left; font:inherit; font-size:13px; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:7px 10px; cursor:pointer; }
+  .act-dlg .qopt:hover, .act-dlg .qopt:focus { border-color:var(--ask); outline:none; }
+  .act-dlg .qopt .qrad { flex:none; width:12px; height:12px; border-radius:50%; border:2px solid var(--faint); box-sizing:border-box; }
+  .act-dlg .qopt[aria-checked="true"] { border-color:var(--ask); background:var(--ask-bg); color:var(--fg-strong); font-weight:600; }
+  .act-dlg .qopt[aria-checked="true"] .qrad { border-color:var(--ask); background:radial-gradient(var(--ask) 0 3px, transparent 3.5px); }
+  .act-dlg option:disabled { color:var(--faint); }
   .act-toast { position:fixed; z-index:70; left:50%; bottom:18px; transform:translateX(-50%); background:var(--fg-strong); color:var(--bg); padding:6px 14px; border-radius:8px; font-size:12px; box-shadow:0 6px 18px rgba(0,0,0,.2); max-width:90vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* 6d: the PHONE layout, last so it wins over the base rules above (the 6a block near .ar came before .ar .nm / .ar .pb, so
      its bar + name widths never applied): narrower bars and names, tighter indentation — no sideways scrolling at 420 px */
@@ -336,7 +368,7 @@
       <label title="Show only plans, their items and the nodes that hold them, across all sessions (rolled-up bars then count only what is shown)"><input type="checkbox" id="actPlans" style="vertical-align:middle;margin-right:4px">plans</label>
       <label title="A running or blocked item with no message for this long counts as stale (an item's own stale_after wins)">stale after <input type="range" id="actStale" min="5" max="60" step="1" value="15"> <b id="actStaleV" style="color:var(--fg-strong)">15m</b></label>
       <label title="An ENDED plan (all done, or marked complete / abandoned) stays expanded this long (0 – 7 days), then collapses (it is not removed — the 7-day window does that); open plans (and what holds them) are always expanded">plans open <input type="range" id="actPlanOpen" min="0" max="22" step="1" value="8"> <b id="actPlanOpenV" style="color:var(--fg-strong)">2h</b></label>
-      <span><button class="act-btn" id="actExpand">Expand all</button> <button class="act-btn" id="actCollapse">Collapse all</button></span>
+      <span><button class="act-btn" id="actExpand">Expand all</button> <button class="act-btn" id="actCollapse">Collapse all</button> <button class="act-btn" id="actReset" title="Your view (pins, hidden rows, open / closed, the options) back to the defaults — on every dashboard of yours">Reset view</button></span>
     </div>
     <div class="act-main nosel" id="actmain">
       <div id="acttree" class="act-tree" role="tree" aria-label="Activity: projects, sessions and their agents"></div>
@@ -911,6 +943,14 @@
   // shows its nearest agent ancestor's staleness / gone (6a). Also: the status glyph (centre = state, ring = time left
   // before stale — agents only), the text placeholders (a port of lib/activity.js renderText), progress / ETA tooltips, the
   // project-level cycle, active-only filtering, the delta store (a seq gap → resync) and the tree.
+  // #88 build step 10 (2.0, docs/spec-88.md §5.4 – §5.8): the units are BY NODE ID (lib/activity2-dash.js: node_id,
+  // parent_id — the session's root rides its session unit as self / selves, with its node_id), labels without "@", each
+  // node's TYPE (the registry the full board sends as `types`: glyph, what shows where a bar would — a bar, a group's
+  // count, a question's status, a test-run's tests bar — and its menu's labels), the menu the bridge computed (minus the
+  // clock: finish / dismiss are checked here against the slider), the time ("took 4m 12s" / "running 3m"), actions by id
+  // (to_id / before_id / after_id / into_id; Rename…, Merge into…, the clash dialog), and the PER-USER VIEW (§5.6: pins,
+  // hidden, open / closed with the "? N" / "N new" badges, Expand / Collapse all, the selection, the details fold, last seen
+  // and the "new since you last looked" divider, the options, Reset view) kept on the bridge instead of this browser.
   var AimbAct=(function(){
     var MIN=60000, LIVE={running:1,blocked:1}, C=2*Math.PI*6.5;
     var MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -952,6 +992,17 @@
         } });
     }
     function isCtx(u){ return !!u&&u.nkind==='context'; }
+    // #88 step 10: a unit's NODE ID and its parent's (2.0: node_id / parent_id; a 1.7x-shaped unit — key / parent_key — still links)
+    function nidOf(u){ return u?(u.node_id!=null?u.node_id:u.key):null; }
+    function pidOf(u){ return u?(u.node_id!=null?(u.parent_id||null):(u.parent_key||null)):null; }
+    // the VIEW STATE's target of a row (§5.6): a node's id; a session row (or a 1.7x-shaped unit) its unit id
+    function vt(u){ return u?(u.kind==='node'&&u.node_id?u.node_id:u.id):null; }
+    // §5.7: a GROUP's count where a bar would be — its children (tree nodes) minus ABANDONED ones (withdrawn / expired
+    // questions too): done = done, skipped = skipped, the rest open → { n, open, done, skipped, text } | null ("4 items" while
+    // none is resolved, else the non-zero parts of "3 open · 1 done · 1 skipped"). lib/activity2.js groupCount2.
+    function groupCount(kids){ var open=0, done=0, sk=0; (kids||[]).forEach(function(c){ var u=c.u||c, s=u.current?u.current.state:'running'; if(s==='abandoned') return; if(s==='done') done++; else if(s==='skipped') sk++; else open++; });
+      var n=open+done+sk; if(!n) return null; var parts=[]; if(open) parts.push(open+' open'); if(done) parts.push(done+' done'); if(sk) parts.push(sk+' skipped');
+      return {n:n,open:open,done:done,skipped:sk,text:!done&&!sk?n+' item'+(n===1?'':'s'):parts.join(' · ')}; }
     function barOf(u){ return u?force(u,norm3(u.bar||u.progress||null)):null; }   // a node's bar: its own reported progress, else the bridge's rollup (#79: three parts; a done node full)
     // the state to SHOW. An AGENT (or the session): gone comes from the bridge (data); stale = running/blocked, not finished,
     // not implicit, quiet > its window. A CONTEXT (6a): its own reported state, but gone / stale / finished come from `owner`
@@ -981,6 +1032,14 @@
     function fmtHM(t){ var d=new Date(t); return p2(d.getHours())+':'+p2(d.getMinutes()); }
     function ago(ms){ return ms>=0?fmtDur(ms)+' ago':'in '+fmtDur(-ms); }
     var CAP={running:'Running',blocked:'Blocked',idle:'Idle',done:'Done',failed:'Failed',stale:'Stale',gone:'Gone',none:'No current line',todo:'To do',skipped:'Skipped',abandoned:'Abandoned'};
+    // #88 step 10 (TIME, §5.7): lib/activity2.js fmtTook — "850ms", "4.1s", "4m 12s", "1h 3m", "2d 3h"
+    function fmtTook(ms){ if(!isFinite(ms)||ms<0) return '?'; if(ms<1000) return Math.round(ms)+'ms'; if(ms<60000) return String(Math.round(ms/100)/10)+'s';
+      var s=Math.round(ms/1000), d=Math.floor(s/86400), h=Math.floor((s%86400)/3600), m=Math.floor((s%3600)/60), sec=s%60;
+      if(d) return d+'d'+(h?' '+h+'h':''); if(h) return h+'h'+(m?' '+m+'m':''); return m+'m'+(sec?' '+sec+'s':''); }
+    // a node's TIME as the row shows it: the bridge's text ("took 4m 12s", "took 30s (4m 42s over 2 runs)" — a plan's own
+    // start-to-end when it has one), else "running 3m" while an attempt is open (its started_at: the clock is the page's,
+    // so time passing never changes a unit); '' when it never started
+    function tookText(u,now){ var t=u&&u.took; if(!t) return ''; if(t.text) return t.text; if(t.started_at!=null&&t.ended_at==null) return 'running '+fmtTook(Math.max(0,now-t.started_at)); return ''; }
     // the glyph's hover text: ACTUAL times (never inline) — started, running for, last activity, stale-at; or done/failed at + took
     function statusTip(item,owner,now,staleMin,host){
       item=item||{}; var e=effState(item,owner,now,staleMin), L=[], ctx=isCtx(item);
@@ -992,13 +1051,14 @@
         L.push(e.hostDown?('Host '+(host||'?')+' is down or unreachable — its agents show as gone'):(ctx?'Gone — its agent left':'Gone — the session left the mesh'));
         L.push('was '+e.was+(item.gone_at?(e.hostDown?' · down since ':' · left at ')+fmtClock(item.gone_at,now):''));
       } else if(e.state==='done'||e.state==='failed'||e.state==='abandoned'){
-        L.push(CAP[e.state]+(!ctx&&fin?' at '+fmtClock(fin,now):'')+(!ctx&&fin&&start?' · took '+fmtDur(fin-start):''));
+        L.push(CAP[e.state]+(!ctx&&fin?' at '+fmtClock(fin,now):'')+(!ctx&&fin&&start&&!item.took?' · took '+fmtDur(fin-start):''));   // 2.0: the bridge's own time (below) when it has one
       } else L.push(e.stale?('Stale — was '+e.was):CAP[e.state]);
       if(start) L.push((ctx?'created ':'started ')+fmtClock(start,now)+(!ctx&&!e.gone&&e.state!=='done'&&e.state!=='failed'?' · running for '+fmtDur(now-start):''));
       if(item.last_activity) L.push('last activity '+fmtClock(item.last_activity,now)+' ('+ago(now-item.last_activity)+')');
       if(e.staleAt!=null) L.push((e.stale?'stale since ':'stale at ')+fmtClock(e.staleAt,now)+' ('+ago(now-e.staleAt)+')'+(!ctx&&item.stale_after_ms>0?' · its own stale_after '+fmtDur(item.stale_after_ms):''));
       if(ctx&&!e.plan) L.push('staleness follows '+(owner&&owner.path?('agent '+owner.path):'the session')+' (a context never goes stale by itself)');
       if(item.implicit&&!ctx) L.push('not reported yet — named by a path below it, so it never goes stale');
+      var tk=tookText(item,now); if(tk) L.push(tk.charAt(0).toUpperCase()+tk.slice(1));   // #88 step 10: TIME
       return L.join('\n');
     }
     function etaTip(eta,now){ return !(eta>0)?'':(eta>now?'ETA '+fmtEta(eta-now)+' (estimated), about '+fmtHM(eta):'ETA due now (estimated) — was about '+fmtHM(eta)); }
@@ -1163,9 +1223,11 @@
       groups.forEach(function(g){
         var selfOf=function(h){ var ss=g.s.selves||[g.s.self]; for(var i=0;i<ss.length;i++) if(ss[i]&&String(ss[i].host).toLowerCase()===String(h).toLowerCase()) return ss[i]; return g.s.self||null; };
         var hk=function(h,k){ return String(h).toLowerCase()+'\u0001'+k; }, tn={};
-        g.nodes.forEach(function(u){ tn[hk(u.host,u.key)]={u:u,kids:[],owner:null}; });
+        g.nodes.forEach(function(u){ tn[hk(u.host,nidOf(u))]={u:u,kids:[],owner:null,par:null}; });
         var top=[], headHost=g.s.home||(g.s.self?g.s.self.host:null);   // 6c: the HOME host (the bridge's `home`; a one-host session: its host)
-        g.nodes.forEach(function(u){ var t=tn[hk(u.host,u.key)], par=u.parent_key?tn[hk(u.host,u.parent_key)]:null; if(par){ par.kids.push(t); t.parentHost=par.u.host; } else { top.push(t); t.parentHost=headHost; } });
+        // #88 step 10: nodes link by parent_id (a top-level node's parent is its host's ROOT, which rides the session unit — so
+        // it is not among the node units and the node sits at the top); `par` = the parent tree node (null at the top)
+        g.nodes.forEach(function(u){ var t=tn[hk(u.host,nidOf(u))], pk=pidOf(u), par=pk?tn[hk(u.host,pk)]:null; if(par){ par.kids.push(t); t.par=par; t.parentHost=par.u.host; } else { top.push(t); t.parentHost=headHost; } });
         var cmpN=function(a,b){ return cmpRank(a.u,b.u); };   // #82: plan items, then contexts, then agents — each by rank (was: creation order)
         // on the whole tree, before filtering: planNode = holds plan items; endedPlan (6c rule); open = holds part of an OPEN plan
         var mark=function(t){ t.planNode=t.kids.some(function(c){ return !!c.u.plan_item; }); t.endedPlan=t.planNode&&planEnded(t.kids,t.u); var o=t.planNode&&!t.endedPlan;
@@ -1177,25 +1239,26 @@
         var liveLine=function(u){ var s=u.current&&u.current.state; return s==='running'||s==='blocked'; };
         var nActive=0;
         // 6d: PINNED nodes sort to the top of their parent; HIDDEN ones are left out (counted: nHidden) unless their parent's "show" is on
-        var pinned=function(t){ return !!(opts.pins&&opts.pins[t.u.id]); };
+        var pinned=function(t){ return !!(opts.pins&&opts.pins[vt(t.u)]); };   // #88 step 10: the view's target = the node id (a session row: its unit id)
         var walk=function(list,owner,parent,pid){ list.sort(function(a,b){ var x=pinned(a), y=pinned(b); return x!==y?(x?-1:1):cmpN(a,b); }); var ended=parent?planEnded(list,parent):null, out=[], nh=0; list.forEach(function(t){
           t.pinned=pinned(t); t.hid=false;
-          if(opts.hidden&&opts.hidden[t.u.id]){ if(!(opts.showHidden&&opts.showHidden[pid])){ nh++; return; } t.hid=true; }
+          if(opts.hidden&&opts.hidden[vt(t.u)]){ if(!(opts.showHidden&&opts.showHidden[pid])){ nh++; return; } t.hid=true; }
           var ow=owner||selfOf(t.u.host), itemEnded=t.u.plan_item&&(parent?ended:rootEnded(t.u.host));
           if(opts.activeOnly&&!t.open&&((t.u.nkind==='agent'&&!isActiveAgent(t.u))||itemEnded)) return;
           if(isActiveAgent(t.u)&&!t.u.implicit) nActive++;
           t.owner=ow;
-          t.kids=walk(t.kids,t.u.nkind==='agent'?t.u:ow,t.u,t.u.id); t.nHidden=t.kids.nHidden||0;
+          if(t.u.type==='group') t.gcount=groupCount(t.kids.filter(function(c){ return !(opts.hidden&&opts.hidden[vt(c.u)]); }));   // §5.7: a GROUP's count (the viewer's hidden rows not counted)
+          t.kids=walk(t.kids,t.u.nkind==='agent'?t.u:ow,t.u,vt(t.u)); t.nHidden=t.kids.nHidden||0;
           if(opts.activeOnly&&!t.open&&t.endedPlan&&t.u.nkind==='context'&&!t.u.plan_item&&!t.kids.length&&!liveLine(t.u)) return;   // an ended plan's own (plain) node, left empty
           // 6c: PLANS — only plan items, plan nodes and their ancestors (an ended plan's node that Active only emptied goes too)
           if(opts.plansOnly&&!t.u.plan_item&&!t.kids.length&&!(t.planNode&&!(opts.activeOnly&&t.endedPlan))) return;
           out.push(t); }); out.nHidden=nh; return out; };
-        var kids=walk(top,null,null,g.s.id);
+        var kids=walk(top,null,null,vt(g.s));
         if(opts.activeOnly&&!kids.length&&!(g.s.selves||[g.s.self]).some(selfActive)) return;
         if(opts.plansOnly&&!kids.length) return;
         var fbars=null;
         if(opts.activeOnly||opts.plansOnly){   // 6c: the rolled-up bars of what the filter shows (bottom-up), per host for the session row
-          var fb=function(t){ t.kids.forEach(fb); t.fbar=force(t.u,t.u.progress?ownBar(t.u.progress):rollKids(t.kids)); }; kids.forEach(fb);   // #79: a done node = 100%
+          var fb=function(t){ t.kids.forEach(fb); var ty=t.u.type; t.fbar=ty==='group'||ty==='question'?null:ty==='test-run'?(t.u.bar||null):force(t.u,t.u.progress?ownBar(t.u.progress):rollKids(t.kids)); }; kids.forEach(fb);   // #79: a done node = 100%; #88: a group / question has no bar, a test-run's is its items across its buckets (the bridge's)
           fbars={}; (g.s.selves||[g.s.self]).forEach(function(se){ if(se) fbars[lcs(se.host)]=force(se,se.progress?ownBar(se.progress):rollKids(kids.filter(function(t){ return lcs(t.u.host)===lcs(se.host); }))); });
         }
         var nAll=0; (function cnt(l){ l.forEach(function(t){ if(isActiveAgent(t.u)&&!t.u.implicit) nAll++; cnt(t.kids); }); })(kids);
@@ -1205,18 +1268,22 @@
         projs[pk].sessions.push({s:g.s,kids:kids,nActive:nAll,fbars:fbars,nHidden:kids.nHidden||0,top:top,nq:nqS}); projs[pk].nSessions++; projs[pk].nActive+=nAll; projs[pk].nq+=nqS;   // #85: nq = open questions in the session / project
       });
       order.sort(function(a,b){ return a<b?-1:a>b?1:0; });
-      var spin=function(x){ return !!(opts.pins&&opts.pins[x.s.id]); };
+      var spin=function(x){ return !!(opts.pins&&opts.pins[vt(x.s)]); };
       return order.map(function(k){ var p=projs[k]; p.sessions.sort(function(x,y){ var px=spin(x), py=spin(y); if(px!==py) return px?-1:1; var a=String(x.s.session).toLowerCase(), b=String(y.s.session).toLowerCase(); return a<b?-1:a>b?1:0; });
-        var vis=[], nh=0; p.sessions.forEach(function(x){ x.pinned=spin(x); x.hid=false; if(opts.hidden&&opts.hidden[x.s.id]){ if(!(opts.showHidden&&opts.showHidden['proj|'+p.key])){ nh++; return; } x.hid=true; } vis.push(x); });   // 6d: hidden sessions, per project
+        var vis=[], nh=0; p.sessions.forEach(function(x){ x.pinned=spin(x); x.hid=false; if(opts.hidden&&opts.hidden[vt(x.s)]){ if(!(opts.showHidden&&opts.showHidden['proj|'+p.key])){ nh++; return; } x.hid=true; } vis.push(x); });   // 6d: hidden sessions, per project
         p.sessions=vis; p.nHidden=nh; return p; });
     }
-    // a log entry's tag, relative to the node whose Log is open: '@~root' / '@root' for the node itself, else its relative
-    // path with '@~' on a current line's last context segment ('@Tharsis/@~z12'; an agent's own line: 'research/@~root')
-    function entryTag(x){ var r=x&&x.rel!=null?String(x.rel):'', cur=!!(x&&x.current);
-      if(!r) return cur?'@~root':'@root';
-      if(!cur) return r;
-      var i=r.lastIndexOf('/'), last=r.slice(i+1);
-      return last.charAt(0)==='@'?r.slice(0,i+1)+'@~'+last.slice(1):r+'/@~root'; }
+    // a log entry's tag, relative to the node whose Log is open (#88 step 10, 2.0 paths: no "@"): "here" for the node itself,
+    // else its path below it ("Tharsis/z12"); an entry that SET its node's line (current) reads "@here" / "@Tharsis/z12" — the
+    // 2.0 form of "this text became the line" (a leading @, §4.0)
+    function entryTag(x){ var r=x&&x.rel!=null?String(x.rel):'', cur=!!(x&&x.current); return (cur?'@':'')+(r||'here'); }
+    // a long PATH shortened in the MIDDLE for display (§1.3, Q11b: "Next release/…/Docs"; lib/activity2.js shortPath) — the full
+    // path goes on hover. Paths only: a label is never cut here.
+    function shortPath(p,max){ var s=String(p==null?'':p); max=max||80; var cps=Array.from(s); if(cps.length<=max) return s;
+      var segs=s.split('/'); if(segs.length>2){ var first=segs[0], tail=[], n=segs.length-1;
+        while(n>0&&Array.from(first+'/…/'+[segs[n]].concat(tail).join('/')).length<=max) tail.unshift(segs[n--]);
+        if(tail.length&&n>=1) return first+'/…/'+tail.join('/'); }
+      var keep=Math.max(2,max-1), h=Math.ceil(keep/2); return cps.slice(0,h).join('')+'…'+cps.slice(cps.length-(keep-h)).join(''); }
     // 6c: the subtree's entry count — each node's OWN count (`total`, gossiped for another host's nodes too) summed here; null
     // when a node has no count (an older bridge's remote node). subtreeLog also says whether any count understates (partial:
     // a run that began before its owner's replay window — older entries live only in the day files)
@@ -1231,10 +1298,15 @@
     function planOpenValue(i){ i=Math.max(0,Math.min(PLAN_OPEN_STEPS.length-1,Math.round(Number(i)||0))); return PLAN_OPEN_STEPS[i]; }
     // 6d: "Copy its aimb-log command" — the session's {log_snippet} command (lib/log-snippet.js logCmd: the HOST's absolute node +
     // script paths, --session / --project, #75's --token-file PATH when that bridge read its token from a file — NEVER a token)
-    // + --path for a node + the text placeholder. lc = { node, script, token_file } from the board head (this host) / remote_hosts.
+    // + the node + the text placeholder. lc = { node, script, token_file } from the board head (this host) / remote_hosts.
+    // #88 step 10 (§5.4): the node by its KEY — an agent reports as itself (--agent <its chain>), a context is --key <key> in
+    // its creator's scope (--agent <scope> when that is an agent); a node without a key is --id <id>; the session root
+    // nothing; a string = a 2.0 path (--path). The text: --text "@<text>" (a leading @ sets the line, §4.0).
     function dq(v){ return '"'+String(v).replace(/"/g,'\\"')+'"'; }
-    function logCmd(lc,session,project,path){ if(!lc||!lc.node||!lc.script) return null;
-      return dq(lc.node)+' '+dq(lc.script)+' --session '+dq(session)+' --project '+dq(project||'unclassified')+(lc.token_file?' --token-file '+dq(lc.token_file):'')+(path?' --path '+dq(path):'')+' "<text>"'; }
+    function logCmd(lc,session,project,n){ if(!lc||!lc.node||!lc.script) return null; var a='';
+      if(n&&typeof n==='object'){ if(n.nkind!=='session'){ if(n.key) a=n.nkind==='agent'?' --agent '+dq(n.scope?n.scope+'/'+n.key:n.key):(n.scope?' --agent '+dq(n.scope):'')+' --key '+dq(n.key); else if(n.node_id) a=' --id '+dq(n.node_id); } }
+      else if(n) a=' --path '+dq(n);
+      return dq(lc.node)+' '+dq(lc.script)+' --session '+dq(session)+' --project '+dq(project||'unclassified')+(lc.token_file?' --token-file '+dq(lc.token_file):'')+a+' --text "@<text>"'; }
     // 6d: QUIET (lib/activity.js quietAgent): an agent that finished, or is stale / gone by the viewer's slider — an implicit one
     // (it never reported) when every reported agent below it is; finish needs it, dismiss needs its whole subtree quiet
     function quietAgent(t,now,sm){ var u=t&&t.u; if(!u) return false; if(u.finished_at) return true; var e=effState(u,null,now,sm); if(e.gone||e.stale) return true;
@@ -1246,12 +1318,41 @@
     function ownsOpenPlan(t){ if(t.planNode&&!t.endedPlan) return true; return t.kids.some(function(c){ return c.u.nkind!=='agent'&&ownsOpenPlan(c); }); }
     function openItemsOwned(t){ var n=0; (function w(x){ if(x.planNode&&!x.endedPlan) x.kids.forEach(function(c){ if(isOpenItem(c.u)) n++; }); x.kids.forEach(function(c){ if(c.u.nkind!=='agent') w(c); }); })(t); return n; }
     function countNodes(t){ var n=1; t.kids.forEach(function(c){ n+=countNodes(c); }); return n; }
-    // 6d: the RIGHT-CLICK MENU of a row — only the actions valid for that row and state (#70 "Decisions before 6c and 6d" table).
-    // m = { kind: node|session|entry, nkind, plan_item, item_state, plan_node, plan_end_how (null = open | all-done | done |
-    // abandoned), agent_ok (an agent / one host's session root: the action target exists), owns_open, quiet, finished,
-    // subtree_quiet, holds_open, has_cmd, has_path, pinned, hidden, id }. Items: { id, label, act?, args?, confirm?, copy?, view? }
-    // or { sep:true }. act = the wire action; confirm = abandon_plan / finish / dismiss ask first.
+    // #88 step 10 (§5.4, #92): the RIGHT-CLICK MENU of a row = the registry's menu the BRIDGE computed for that node now (the
+    // unit's `menu`: its actions in display order — "finish|quiet" / "dismiss|quiet-tree" are checked HERE against the viewer's
+    // stale slider: m.quiet, m.subtree_quiet), labelled by the type registry the full board sent (m.labels: action → { label,
+    // group }; a separator between groups), then the dashboard's own: Move up / Move down (with Move to…), the copies, Pin /
+    // Hide. m = { kind: node|session|entry, menu:[…], labels, plan_item, quiet, subtree_quiet, finished, up, down, has_cmd,
+    // has_path, pinned, hidden, no_view, question }. Items: { id, label, act?, args?, confirm?, copy?, view?, dlg?, pick? }
+    // or { sep:true }.
     function menuFor(m){
+      m=m||{}; if(m.menu) return menuFor2(m);
+      return menuFor17(m); }
+    var DLG_OF={rename:'rename',edit_text:'edit',message:'message',answer:'answer',change_answer:'answer'};
+    function menuFor2(m){
+      var out=[], last=null, sep=function(){ if(out.length&&!out[out.length-1].sep) out.push({sep:true}); }, L=m.labels||{};
+      var lab=function(a,d){ return (L[a]&&L[a].label)||d||a; };
+      (m.menu||[]).forEach(function(s){ var p=String(s).split('|'), a=p[0], when=p[1]||null, grp=(L[a]&&L[a].group)||'node';
+        if(when==='quiet'&&!m.quiet) return;
+        if(when==='quiet-tree'&&!((m.quiet||m.finished)&&m.subtree_quiet)) return;
+        if(grp!==last){ sep(); last=grp; }
+        if(a==='finish'){ out.push({id:'finish-done',label:'Mark finished — done…',act:'finish',args:{state:'done'},confirm:true}); out.push({id:'finish-failed',label:'Mark finished — failed…',act:'finish',args:{state:'failed'},confirm:true}); return; }
+        if(a==='move'){ if(m.up) out.push({id:'move-up',label:'Move up',act:'reorder',args:m.up}); if(m.down) out.push({id:'move-down',label:'Move down',act:'reorder',args:m.down}); out.push({id:'move-to',label:lab(a,'Move to…'),act:'move',pick:'move'}); return; }
+        if(a==='merge'){ out.push({id:'merge',label:lab(a,'Merge into…'),act:'merge',pick:'merge'}); return; }
+        if(DLG_OF[a]){ out.push({id:a.replace(/_/g,'-'),label:lab(a),act:a,dlg:DLG_OF[a]}); return; }
+        var conf=a==='abandon_plan'||a==='dismiss'||a==='withdraw'||(a==='abandon'&&!m.plan_item);   // the destructive ones ask first
+        var l=lab(a); if(conf&&!/…$/.test(l)) l+='…';
+        out.push({id:a.replace(/_/g,'-'),label:l,act:a,confirm:conf}); });
+      sep();
+      if(m.kind==='node') out.push({id:'copy-path',label:'Copy path',copy:'path'}); else out.push({id:'copy-session',label:'Copy session name',copy:'session'});
+      if(m.has_cmd) out.push({id:'copy-cmd',label:'Copy its aimb-log command',copy:'cmd'});
+      if(m.no_view) return out;
+      sep();
+      out.push(m.pinned?{id:'unpin',label:'Unpin',view:'unpin'}:{id:'pin',label:'Pin to the top',view:'pin'});
+      out.push(m.hidden?{id:'unhide',label:'Unhide',view:'unhide'}:{id:'hide',label:'Hide',view:'hide'});
+      return out; }
+    // the 1.7x menu (a unit without `menu`: kept for the entries' menu and old fixtures; step 11 deletes it)
+    function menuFor17(m){
       m=m||{}; var out=[], sep=function(){ if(out.length&&!out[out.length-1].sep) out.push({sep:true}); };
       if(m.kind==='entry'){ out.push({id:'copy-id',label:'Copy entry id',copy:'id'}); if(m.has_path) out.push({id:'copy-path',label:'Copy path',copy:'path'}); return out; }
       if(m.kind!=='node'&&m.kind!=='session') return out;
@@ -1297,30 +1398,47 @@
     function rankOf(u){ return (u&&typeof u.rank==='string'&&u.rank)||(pad36(u&&u.created_at,9)+pad36(u&&u.plan_item&&u.plan_ix!=null&&u.plan_ix>=0?u.plan_ix+1:0,2)+'i'); }
     function rankGroup(u){ return u&&u.plan_item?0:u&&u.nkind==='context'?1:2; }
     function cmpRank(a,b){ var g=rankGroup(a)-rankGroup(b); if(g) return g; var x=rankOf(a), y=rankOf(b); if(x!==y) return x<y?-1:1; var p=String(a.key), q=String(b.key); if(p!==q) return p<q?-1:1; var h1=lcs(a.host), h2=lcs(b.host); return h1<h2?-1:h1>h2?1:0; }
-    // a sibling as the bridge's before / after expect it: "@\"name\"" for a context, the bare name for an agent
-    function sibRef(u){ return u.nkind==='agent'?String(u.name):'@"'+String(u.name)+'"'; }
-    // Move up / Move down: the neighbours in t's own group (same parent, same host) — { up:{before}, down:{after} } (null at an end)
+    // #88 step 10: siblings are named BY ID (before_id / after_id), never by a quoted name
+    // Move up / Move down: the neighbours in t's own group (same parent, same host) — { up:{before_id}, down:{after_id} } (null at an end)
     function moveSteps(t,sibs){ var g=rankGroup(t.u), same=(sibs||[]).filter(function(c){ return rankGroup(c.u)===g&&lcs(c.u.host)===lcs(t.u.host); }).sort(function(a,b){ return cmpRank(a.u,b.u); });
-      var i=-1; same.forEach(function(c,j){ if(c.u.id===t.u.id) i=j; });
-      return { up:i>0?{before:sibRef(same[i-1].u)}:null, down:i>=0&&i<same.length-1?{after:sibRef(same[i+1].u)}:null }; }
+      var i=-1; same.forEach(function(c,j){ if(nidOf(c.u)===nidOf(t.u)) i=j; });
+      return { up:i>0?{before_id:nidOf(same[i-1].u)}:null, down:i>=0&&i<same.length-1?{after_id:nidOf(same[i+1].u)}:null }; }
     function subtreeHeight(t){ var h=0; (function w(x,d){ if(d>h) h=d; x.kids.forEach(function(c){ w(c,d+1); }); })(t,0); return h; }
-    function inSubtree(t,x){ var k=String(t.u.key), xk=String(x.u.key); return lcs(t.u.host)===lcs(x.u.host)&&(xk===k||xk.indexOf(k+'/')===0); }
-    // can `t` move UNDER `x` (x = a tree node, or the session root {u:{key:'',depth:0,path:'',host}, kids:top})? Same host, not into
-    // itself, not where it already is, the depth limit (6), and no sibling there of the same kind and name (target-exists)
-    function canMoveInto(t,x){ if(!t||!x||lcs(t.u.host)!==lcs(x.u.host)) return false; if(x.u.key&&inSubtree(t,x)) return false;
-      if(String(t.u.parent_key||'')===String(x.u.key||'')) return false;
-      if((x.u.depth||0)+1+subtreeHeight(t)>6) return false;
-      return !x.kids.some(function(c){ return c.u.nkind===t.u.nkind&&lcs(c.u.name)===lcs(t.u.name)&&lcs(c.u.host)===lcs(t.u.host); }); }
-    // the MOVE TO… picker: every node of the session (on t's host) it may go under, in tree order, and the session root first
-    function moveTargets(top,t,sessName){ var out=[], root={u:{key:'',depth:0,path:'',host:t.u.host},kids:(top||[]).filter(function(c){ return lcs(c.u.host)===lcs(t.u.host); })};
-      if(canMoveInto(t,root)) out.push({path:'',label:sessName?sessName+' (the session root)':'(the session root)',depth:0});
-      (function w(l){ l.slice().sort(function(a,b){ return cmpRank(a.u,b.u); }).forEach(function(x){ if(lcs(x.u.host)!==lcs(t.u.host)||inSubtree(t,x)) return; if(canMoveInto(t,x)) out.push({path:x.u.path,label:x.u.path,depth:x.u.depth||0}); w(x.kids); }); })(root.kids);
+    // is x at or under t? (by the tree's parent links — 2.0 has no path keys to compare)
+    function inSubtree(t,x){ if(!t||!x||lcs(t.u.host)!==lcs(x.u.host)) return false; for(var y=x,i=0;y&&i<64;y=y.par,i++) if(y===t||nidOf(y.u)===nidOf(t.u)) return true; return false; }
+    // §1.3 / Q11b: the DEPTH rules of a move — HARD 32 (the moved subtree's deepest node), a WARNING past 20
+    var DEPTH_MAX=32, DEPTH_WARN=20;
+    function labelKey(s){ var v=String(s==null?'':s); try{ v=v.normalize('NFC'); }catch(e){} return v.toLowerCase(); }
+    // can `t` move UNDER `x` (x = a tree node, or its host's session root {u:{node_id, depth:0, path:'', host}, kids:top, root:true})?
+    // → { ok, why?, deep?: N, clash?: the same-label sibling there }. Same host, not into itself, not where it already is, not
+    // past depth 32 (greyed with the reason); past 20 → deep (the dialog warns); a same-label sibling there → clash (allowed:
+    // the clash dialog asks — merge them, or a different label, §1.6 / Q32)
+    function moveCheck(t,x){ if(!t||!x||!t.u||!x.u) return {ok:false,why:'no target'}; if(lcs(t.u.host)!==lcs(x.u.host)) return {ok:false,why:'another host'};
+      if(!x.root&&inSubtree(t,x)) return {ok:false,why:'it is under the node itself'};
+      if(String(pidOf(t.u)||'')===String(nidOf(x.u)||'')) return {ok:false,why:'it is already there'};
+      var d=(x.u.depth||0)+1+subtreeHeight(t);
+      if(d>DEPTH_MAX) return {ok:false,why:'too deep: its deepest node would be at depth '+d+' (the limit is '+DEPTH_MAX+')',depth:d};
+      var cl=null; (x.kids||[]).forEach(function(c){ if(!cl&&c!==t&&nidOf(c.u)!==nidOf(t.u)&&labelKey(c.u.label!=null?c.u.label:c.u.name)===labelKey(t.u.label!=null?t.u.label:t.u.name)) cl=c; });
+      return {ok:true,deep:d>DEPTH_WARN?d:null,clash:cl?cl.u:null,depth:d}; }
+    function canMoveInto(t,x){ return moveCheck(t,x).ok; }
+    // the MOVE TO… picker: every node of the session on t's host, in tree order, the session root first — each { id, path, label,
+    // depth, ok, why?, deep?, clash? } (not ok = greyed out, its reason on hover)
+    function moveTargets(top,t,sessName,rootU){ var out=[], root={root:true,u:{node_id:rootU&&rootU.node_id,depth:0,path:'',host:t.u.host},kids:(top||[]).filter(function(c){ return lcs(c.u.host)===lcs(t.u.host); })};
+      var add=function(x,label){ if(String(pidOf(t.u)||'')===String(nidOf(x.u)||'')) return; var c=moveCheck(t,x); if(!c.ok&&/under the node itself|another host/.test(c.why)) return;
+        out.push({id:nidOf(x.u),path:x.u.path||'',label:label,depth:x.u.depth||0,ok:c.ok,why:c.why||null,deep:c.deep||null,clash:c.clash?{id:nidOf(c.clash),label:c.clash.label||c.clash.name}:null}); };
+      add(root,sessName?sessName+' (the session root)':'(the session root)');
+      (function w(l){ l.slice().sort(function(a,b){ return cmpRank(a.u,b.u); }).forEach(function(x){ if(lcs(x.u.host)!==lcs(t.u.host)||inSubtree(t,x)) return; if(x.u.type!=='question') add(x,x.u.path); w(x.kids); }); })(root.kids);
+      return out; }
+    // MERGE INTO… (§3.6): the contexts of t's session on its host it may merge into — not itself or under it, not its parent's
+    // agent chain: a context (or plan item) → a context; never an agent, the root or a question (the owner checks the rest)
+    function mergeTargets(top,t){ var out=[]; if(!t||t.u.nkind!=='context') return out;
+      (function w(l){ l.slice().sort(function(a,b){ return cmpRank(a.u,b.u); }).forEach(function(x){ if(lcs(x.u.host)!==lcs(t.u.host)||inSubtree(t,x)) return; if(x.u.nkind==='context'&&x.u.type!=='question') out.push({id:nidOf(x.u),path:x.u.path,label:x.u.path,depth:x.u.depth||0}); w(x.kids); }); })((top||[]).filter(function(c){ return lcs(c.u.host)===lcs(t.u.host); }));
       return out; }
     // DRAG AND DROP: dropping `drag` on `over` at height fraction `frac` — a sibling of its own kind → reorder before (upper half) /
-    // after it; any other node it may move under → move into it (asked first); else null
-    function dropPlan(drag,over,frac){ if(!drag||!over||drag.u.id===over.u.id||lcs(drag.u.host)!==lcs(over.u.host)||inSubtree(drag,over)) return null;
-      if(String(drag.u.parent_key||'')===String(over.u.parent_key||'')&&rankGroup(drag.u)===rankGroup(over.u)) return frac<0.5?{act:'reorder',args:{before:sibRef(over.u)}}:{act:'reorder',args:{after:sibRef(over.u)}};
-      return canMoveInto(drag,over)?{act:'move',args:{to:over.u.path}}:null; }
+    // after it (by id); any other node it may move under → move into it (asked first; a same-label sibling there → the clash dialog); else null
+    function dropPlan(drag,over,frac){ if(!drag||!over||nidOf(drag.u)===nidOf(over.u)||lcs(drag.u.host)!==lcs(over.u.host)||inSubtree(drag,over)) return null;
+      if(String(pidOf(drag.u)||'')===String(pidOf(over.u)||'')&&rankGroup(drag.u)===rankGroup(over.u)) return frac<0.5?{act:'reorder',args:{before_id:nidOf(over.u)}}:{act:'reorder',args:{after_id:nidOf(over.u)}};
+      var c=moveCheck(drag,over); return c.ok&&over.u.type!=='question'?{act:'move',args:{to_id:nidOf(over.u)},to:over.u.path,check:c}:null; }
     // #82 part 2: the agent WORKING on a plan item — among its agent children, the most recently active one still running (not
     // finished, not gone), else the most recently active of them; null when it has none
     function workingAgent(t){ var ags=(t&&t.kids||[]).filter(function(c){ return c.u.nkind==='agent'; }); if(!ags.length) return null;
@@ -1354,9 +1472,11 @@
     // panel shows them OLDEST first (chat-style: the newest at the bottom — the default) or newest first. logRows gives the display
     // order: { e, i } per entry, { sep:true } for the "— earlier runs —" separator (sepAt = the index, in the newest-first list, of
     // the first entry of an earlier run; it sits between the two runs in either order)
-    function logRows(entries,sepAt,oldest){ var out=[], n=(entries||[]).length, hs=sepAt!=null&&sepAt>=0&&sepAt<n, i;
-      if(!oldest){ for(i=0;i<n;i++){ if(hs&&i===sepAt) out.push({sep:true}); out.push({e:entries[i],i:i}); } return out; }
-      for(i=n-1;i>=0;i--){ out.push({e:entries[i],i:i}); if(hs&&i===sepAt) out.push({sep:true}); } return out; }
+    // #88 step 10 (§5.6): newCount = how many of the newest entries are new since the viewer last looked (newSinceCount) — a
+    // { newsep:true } divider goes between them and the older ones (only when both are loaded), in either order
+    function logRows(entries,sepAt,oldest,newCount){ var out=[], n=(entries||[]).length, hs=sepAt!=null&&sepAt>=0&&sepAt<n, nw=newCount>0&&newCount<n?newCount:-1, i;
+      if(!oldest){ for(i=0;i<n;i++){ if(hs&&i===sepAt) out.push({sep:true}); if(i===nw) out.push({newsep:true}); out.push({e:entries[i],i:i}); } return out; }
+      for(i=n-1;i>=0;i--){ if(i===nw-1) out.push({newsep:true}); out.push({e:entries[i],i:i}); if(hs&&i===sepAt) out.push({sep:true}); } return out; }
     // a fresh FIRST page merged into what is loaded: the entries newer than the newest one held go on top (the older pages, the
     // cursor and the separator stay, so a reader keeps their place); no overlap (more than a page arrived) or nothing held → replace
     function mergeNewest(old,page){ old=old||[]; page=page||[]; if(!old.length) return {replace:true,entries:page.slice(),added:page.length};
@@ -1373,13 +1493,17 @@
     function byWho(b){ return b&&typeof b==='object'?(b.user||'dashboard')+' via dashboard ('+(b.host||'?')+')':b?String(b):''; }   // a question's answerer
     function nodeFacts(u,owner,o){ u=u||{}; o=o||{}; var now=o.now||Date.now(), out=[], cur=u.current||null, q=qOf(u), e=effState(u,owner,now,o.sm||15), bar=barOf(u);
       function add(k,v){ if(v!=null&&v!=='') out.push({k:k,v:String(v)}); }
-      var kind=o.kind==='session'?'session — its own line on '+(u.host||'?'):q?'question':u.plan_item?'plan item':u.nkind==='agent'?'agent':'context';
+      var kind=o.kind==='session'?'session — its own line on '+(u.host||'?'):q?'question':u.plan_item?'plan item'+(u.type&&u.type!=='context'?' ('+u.type+')':''):u.nkind==='agent'?'agent':(u.type&&u.type!=='context'?u.type:'context');   // #88: its TYPE (plan / group / test-run)
       if(u.implicit&&!cur) kind+=' (implicit: named by a path below it, never reported)';
       add('Kind',kind);
       if(q) add('State',(q.status==='asked'?'awaiting an answer':q.status)+(e.hostDown?' · its host is down':''));   // #90: an open question never goes stale
       else { var st=e.noLine||e.state==='none'?'no current line':e.state; if((e.stale||e.gone)&&e.was) st+=' (was '+e.was+')'; if(e.hostDown) st+=' · its host is down';
         if(u.plan_item) st+=' · item '+itemState(u); add('State',st); }
-      add('Progress',bar?barTip(bar):'');
+      add('Progress',bar&&u.type!=='test-run'?barTip(bar):'');
+      if(u.tests) add('Tests',u.tests.tooltip||'');   // #88 (Q56): a test-run's tests — passed vs failed vs total
+      if(o.gcount) add('Count',o.gcount.text);        // §5.7: a group's count
+      var tk=tookText(u,now); if(tk) add('Time',tk);   // §5.7 TIME
+      if(u.key&&o.kind!=='session') add('Key',(u.scope?u.scope+':':':')+u.key+(u.transient?' (transient: it goes when emptied)':''));   // §1.1: the written form <creator chain>:<key>
       add('ETA',u.eta_at&&cur?etaTip(u.eta_at,now):'');
       // who: the session (· project · user) on its host — the path itself is the panel's title
       add('Who',[o.session,o.project,o.user].filter(function(x){ return x; }).join(' · ')+' on '+(u.host||'?')+(u.host_down?' (down)':''));
@@ -1418,18 +1542,62 @@
     // the details / data MARKER after a line or on a log entry: ¶ = it has details (text), {} = it has data (JSON)
     function ddWhat(o){ return o?(o.has_details?'details':'')+(o.has_details&&o.has_data?' and ':'')+(o.has_data?'data':''):''; }
     function ddGlyph(o){ return o?(o.has_details?'¶':'')+(o.has_data?'{}':''):''; }
-    var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed',move:'moved',reorder:'moved',edit_text:'edited',message:'sent',answer:'answered',withdraw:'withdrawn',change_answer:'answer changed'};
+    // ---- #88 step 10: the PER-USER VIEW (§5.6) — the records the bridge keeps for this gateway's user (welcome view.recs, then
+    // {type:"view"} pushes; this page's own changes go out as view_set). A view = { recs: { k → { v, ts, origin } }, reset }.
+    // An entry id's ORDER (time, then sequence — lib/view-state.js seen's max register; the act_<hex>_ prefix changes per
+    // gateway start, so the id string itself is never compared): [ts, seq] or null
+    function idOrder(id){ var m=/([0-9a-z]+)-([0-9a-z]+)$/.exec(String(id||'')); if(!m) return null; var t=parseInt(m[1],36), s=parseInt(m[2],36); return isFinite(t)&&isFinite(s)?[t,s]:null; }
+    function idCmp(a,b){ var x=idOrder(a), y=idOrder(b); if(!x||!y) return x?1:y?-1:0; return x[0]-y[0]||x[1]-y[1]; }
+    function newView(){ return {recs:{},reset:-Infinity}; }
+    // merge records into the view → the keys whose value CHANGED. Newer ts wins (a tie: the tombstone, then the greater origin);
+    // seen:<t> is a MAX register (the greater entry id wins); a reset voids every record older than it (the page shows defaults)
+    function viewMerge(view,recs){ var ch=[];
+      (recs||[]).forEach(function(r){ if(!r||typeof r.k!=='string') return; var k=r.k, ts=Number(r.ts)||0, old=view.recs[k];
+        if(k==='reset'){ if(ts>view.reset){ view.reset=ts; Object.keys(view.recs).forEach(function(x){ if(view.recs[x].ts<ts){ delete view.recs[x]; ch.push(x); } }); ch.push('reset'); } return; }
+        if(ts<view.reset) return;
+        if(k.indexOf('seen:')===0&&old&&old.v!=null&&r.v!=null){ if(idCmp(r.v,old.v)<=0) return; }
+        else if(old&&(old.ts>ts||(old.ts===ts&&!(r.v===null&&old.v!==null)&&String(r.origin||'')<=String(old.origin||'')))) return;
+        view.recs[k]={v:r.v,ts:ts,origin:r.origin||''}; ch.push(k); });
+      return ch; }
+    // a record's live value (undefined when absent or a tombstone)
+    function viewGet(view,k){ var r=view&&view.recs[k]; return r&&r.v!=null?r.v:undefined; }
+    // OPEN / CLOSED (lib/view-state.js openState): an explicit open:<t> beats the default; Expand / Collapse all (`all`) covers
+    // a node CREATED BEFORE it that has no newer open: record → true / false, or null = the row's default
+    function viewOpen(view,t,createdAt){ var o=view&&view.recs['open:'+t], a=view&&view.recs.all; o=o&&o.v!=null?o:null; a=a&&a.v!=null?a:null;
+      if(a&&isFinite(createdAt)&&createdAt<a.ts&&(!o||o.ts<a.ts)) return a.v.o===1;
+      return o?o.v.o===1:null; }
+    // the BADGE of a node the viewer CLOSED (§5.6, H16): "? N" (N = open questions below it now − at the close, when > 0), else
+    // "N new" (its subtree's entry count now − at the close) — new activity never reopens a closed node. null = none
+    function closedBadge(rec,nqNow,nNow){ if(!rec||rec.o!==0) return null; var q=(nqNow||0)-(rec.q||0); if(q>0) return {kind:'q',n:q,text:'? '+q};
+      var n=(nNow||0)-(rec.n||0); return n>0?{kind:'new',n:n,text:n+' new'}:null; }
+    // the "NEW SINCE YOU LAST LOOKED" divider: how many of the entries (newest first) are newer than `seen` (0 = none; all of
+    // them = everything loaded is new). seen = the newest entry the viewer had on screen in that node's log (seen:<t>)
+    function newSinceCount(entries,seen){ if(!seen) return 0; var n=0; for(var i=0;i<(entries||[]).length;i++){ if(idCmp(entries[i].id,seen)>0) n++; else break; } return n; }
+    // the ONE-TIME IMPORT (Q13): this browser's 1.7x pins / hidden (path-keyed unit ids: ["n", group, host, "<1.7x path key>"] or
+    // ["s", group]) → view targets by the units' paths ("@\"Next release\"/@Docs" → "Next release/Docs", case-insensitive, same
+    // session group + host) — node units' node ids; a session unit keeps its id. → { targets:[…], unmatched:n }
+    function legacyPath(p){ return String(p||'').split('/').map(function(s){ s=s.replace(/^@~?/,''); if(s.charAt(0)==='"'&&s.charAt(s.length-1)==='"') s=s.slice(1,-1).replace(/""/g,'"'); return s; }).join('/'); }
+    function importTargets(ids,units){ var out=[], miss=0, byPath={}, sess={};
+      Object.keys(units||{}).forEach(function(id){ var u=units[id]; if(!u) return; if(u.kind==='session') sess[u.id]=1; else if(u.kind==='node'&&u.node_id) byPath[JSON.stringify([u.group,lcs(u.host),lcs(u.path)])]=u.node_id; });
+      (ids||[]).forEach(function(x){ var a=null; try{ a=JSON.parse(x); }catch(e){} if(!Array.isArray(a)){ miss++; return; }
+        if(a[0]==='s'){ if(sess[x]) out.push(x); else miss++; return; }
+        if(a[0]==='n'&&a.length===4){ var t=byPath[JSON.stringify([a[1],lcs(a[2]),lcs(legacyPath(a[3]))])]; if(t) out.push(t); else miss++; return; }
+        miss++; });
+      return {targets:out,unmatched:miss}; }
+    var ACTION_DONE={done:'marked done',skip:'skipped',reopen:'reopened',abandon:'abandoned',complete:'plan complete',abandon_plan:'abandoned',reopen_plan:'plan reopened',finish:'finished',dismiss:'dismissed',move:'moved',reorder:'moved',edit_text:'edited',message:'sent',answer:'answered',withdraw:'withdrawn',change_answer:'answer changed',
+      rename:'renamed',merge:'merged',show_as_group:'shown as a group',show_as_plan:'shown as a plan'};   // #88 step 10: + Rename…, Merge into…, Show as group / plan
     return { renderText:renderText, fmtNum:fmtNum, fmtEta:fmtEta, effState:effState, ringFrac:ringFrac, statusTip:statusTip, etaTip:etaTip, barTip:barTip, glyphSvg:glyphSvg, sessGlyph:sessGlyph, sessKind:sessKind,   // #79: sessGlyph
       applyMsg:applyMsg, nextLevel:nextLevel, isActiveAgent:isActiveAgent, selfActive:selfActive, buildTree:buildTree, entryTag:entryTag, subtreeCount:subtreeCount, barOf:barOf,
       fmtDur:fmtDur, fmtClock:fmtClock, pct:pct, planGlyph:planGlyph, isOpenItem:isOpenItem, planEnded:planEnded, hostTagOn:hostTagOn, itemState:itemState, barText:barText,
       planOpenDefault:planOpenDefault, rollKids:rollKids, subtreeLog:subtreeLog, norm3:norm3, force:force, skOf:skOf, skPct:skPct, ownBar:ownBar, progressText:progressText,   // #79
       nodeOpenDefault:nodeOpenDefault, PLAN_OPEN_STEPS:PLAN_OPEN_STEPS, planOpenIndex:planOpenIndex, planOpenValue:planOpenValue, logCmd:logCmd, quietAgent:quietAgent, subtreeAgentsQuiet:subtreeAgentsQuiet,
       rootQuiet:rootQuiet, ownsOpenPlan:ownsOpenPlan, openItemsOwned:openItemsOwned, countNodes:countNodes, menuFor:menuFor, ACTION_DONE:ACTION_DONE, lcs:lcs,   // 6d
-      rankOf:rankOf, rankGroup:rankGroup, cmpRank:cmpRank, sibRef:sibRef, moveSteps:moveSteps, canMoveInto:canMoveInto, moveTargets:moveTargets, dropPlan:dropPlan, workingAgent:workingAgent,   // #82
+      rankOf:rankOf, rankGroup:rankGroup, cmpRank:cmpRank, moveSteps:moveSteps, canMoveInto:canMoveInto, moveTargets:moveTargets, dropPlan:dropPlan, workingAgent:workingAgent,   // #82
       editStates:editStates, checkEdit:checkEdit, checkMsg:checkMsg, editedBy:editedBy, dispPath:dispPath, EDIT_MAX:EDIT_MAX, MSG_MAX:MSG_MAX,   // #83 / #84
       logRows:logRows, mergeNewest:mergeNewest, edgeDist:edgeDist, atEdge:atEdge, EDGE_PX:EDGE_PX, nodeFacts:nodeFacts, jsonTree:jsonTree, ddWhat:ddWhat, ddGlyph:ddGlyph,   // #86 / #87
       questionGlyph:questionGlyph, qOf:qOf, isQuestion:isQuestion, isOpenQuestion:isOpenQuestion, answerText:answerText, checkAnswer:checkAnswer, ANSWER_MAX:ANSWER_MAX, openQuestionsIn:openQuestionsIn,   // #85
-      checkChange:checkChange, byWho:byWho };   // #90
+      checkChange:checkChange, byWho:byWho,   // #90
+      nidOf:nidOf, pidOf:pidOf, vt:vt, idOrder:idOrder, idCmp:idCmp, newView:newView, viewMerge:viewMerge, viewGet:viewGet, viewOpen:viewOpen, closedBadge:closedBadge, newSinceCount:newSinceCount, legacyPath:legacyPath, importTargets:importTargets, groupCount:groupCount, fmtTook:fmtTook, tookText:tookText, shortPath:shortPath, moveCheck:moveCheck, mergeTargets:mergeTargets, DEPTH_MAX:DEPTH_MAX, DEPTH_WARN:DEPTH_WARN, labelKey:labelKey };   // #88 step 10
   })();
   window.AimbAct=AimbAct;
 
@@ -1445,7 +1613,12 @@
     logs:{}, ents:{}, ref:0, pending:{}, tips:{}, acts:{}, togs:{}, opened:{}, rowInfo:{}, rowMenu:{}, kmap:{}, kn:0, timer:null,
     sel:null, selN:null, pins:{}, hidden:{}, showHidden:{}, fb:{}, menu:null, dlg:null, lastCopy:null, fullIdx:{}, fullSess:{}, suppressClick:false,
     fullPar:{}, rowNode:{}, drag:null,   // #82: each node's parent (full tree); data-k → node id; the row being dragged
-    logOrder:'oldest', follow:true, newN:0, detOpen:true, detId:null, detShown:{} };   // #87: the log order (per viewer), following the edge, "N new"; #86: the details section open, its fetch, the last shown entry per node
+    logOrder:'oldest', follow:true, newN:0, detOpen:true, detId:null, detShown:{},   // #87: the log order (per viewer), following the edge, "N new"; #86: the details section open, its fetch, the last shown entry per node
+    // #88 step 10 (§5.6): the PER-USER VIEW from the bridge (null until a 2.0 welcome brings one — then pins / hidden / open /
+    // options live there, not in this browser), its user, the changes waiting for the debounced view_set, whether this page
+    // has applied its load-time choices (sel, the details fold — Q30), the selection to restore once the board arrives, the
+    // type registry (each full board's `types`), "show removed", and the one-time localStorage import
+    view:null, viewUser:null, viewQ:{}, viewTimer:null, viewLoaded:false, pendingSel:null, types:{}, showRemoved:false, imported:false };
   // ACT.open[id]: true / false = the viewer's choice; undefined = the row's default (6c: a plan node — open while its plan is
   // open or ended less than the finished-plan window ago; 6d: also every ANCESTOR of an open plan). ACT.rowInfo[data-k] = the
   // row's identity (also on the row's data-*); ACT.rowMenu[data-k] = its menu model (lazy); ACT.sel = the selected row
@@ -1454,7 +1627,60 @@
   function lcs(v){ return AimbAct.lcs(v); }
   function actStaleMin(){ return ACT.staleMin!=null?ACT.staleMin:((ACT.st.head&&ACT.st.head.stale_after_min)||15); }
   function actPlanOpenMin(){ var h=ACT.st.head&&ACT.st.head.finished_plan_open_min; return ACT.planOpenMin!=null?ACT.planOpenMin:(h!=null?h:120); }   // 6c: the bridge's finished_plan_open_min until the slider moves
-  function isOpen(id,def){ var v=ACT.open[id]; return v===undefined?!!def:!!v; }
+  // open / closed: the VIEW's choice (open:<t>, or Expand / Collapse all for a node created before it — §5.6) when there is one,
+  // else this page's own (a session row's host lines on a page with no view), else the row's default
+  function isOpen(id,def,t,createdAt){ if(ACT.view&&t!=null){ var v=AimbAct.viewOpen(ACT.view,t,createdAt); if(v!==null) return v; } var w=ACT.open[id]; return w===undefined?!!def:!!w; }
+  // the viewer opens / closes a row: an explicit open:<t> record — a close keeps the subtree's entry count and open questions
+  // (the "N new" / "? N" badge baseline, H16)
+  function setOpen(id,t,open,n,q){ if(ACT.view&&t!=null&&viewSet('open:'+t,open?{o:1}:{o:0,n:Math.max(0,n||0),q:Math.max(0,q||0)})){ delete ACT.open[id]; return; } ACT.open[id]=!!open; }
+  // ---- #88 step 10: the PER-USER VIEW (§5.6). A change goes into the view at once (stamped above what this page knows) and to
+  // the bridge in a debounced view_set (~1 s); the bridge stamps it, keeps it, replicates it and pushes it to this user's
+  // other dashboards. A RESET drops what is queued (it voids everything older anyway) and goes first.
+  var VIEW_DEBOUNCE_MS=1000;
+  function viewSet(k,v){ if(!ACT.view) return false; var old=ACT.view.recs[k], ts=Math.max(anow(),old?old.ts+1:0);
+    if(k==='reset'){ var r0=-Infinity; Object.keys(ACT.view.recs).forEach(function(x){ if(ACT.view.recs[x].ts>r0) r0=ACT.view.recs[x].ts; }); ts=Math.max(ts,r0+1); AimbAct.viewMerge(ACT.view,[{k:'reset',v:1,ts:ts,origin:''}]); ACT.viewQ={}; ACT.viewQ.reset=1; }
+    else { if(v==null&&!old) return true; ACT.view.recs[k]={v:v==null?null:v,ts:ts,origin:''}; ACT.viewQ[k]=v==null?null:v; }
+    if(!ACT.viewTimer) ACT.viewTimer=setTimeout(viewFlush,VIEW_DEBOUNCE_MS);
+    return true; }
+  function viewFlush(){ if(ACT.viewTimer){ clearTimeout(ACT.viewTimer); ACT.viewTimer=null; } var ks=Object.keys(ACT.viewQ); if(!ks.length) return;
+    var recs=ks.map(function(k){ return {k:k,v:ACT.viewQ[k]}; }); ACT.viewQ={};
+    for(var i=0;i<recs.length;i+=200){ if(!actSend({type:'view_set',recs:recs.slice(i,i+200)})){ recs.slice(i).forEach(function(r){ ACT.viewQ[r.k]=r.v; }); return; } } }   // not connected: kept for the next welcome
+  function vget(k){ return ACT.view?AimbAct.viewGet(ACT.view,k):undefined; }
+  // the welcome's view (a page load, or a reconnect): the records; at the page's FIRST load also the load-time choices (Q30):
+  // the selection (restored once the board has it) and the details fold
+  function actViewInit(v){
+    ACT.view=AimbAct.newView(); ACT.viewUser=v&&v.user||null;
+    AimbAct.viewMerge(ACT.view,(v&&v.recs)||[]);
+    if(!ACT.viewLoaded){ ACT.viewLoaded=true; var f=vget('fold:details'); if(f!==undefined) ACT.detOpen=f===1; var s=vget('sel'); if(s) ACT.pendingSel=s; }
+    actApplyOpts(); viewFlush(); actRender(); }
+  // a push from the bridge (this user's records changed elsewhere): the TREE choices apply live — pins, hidden, open / closed,
+  // all, reset, options; the selection and the details fold wait for this page's next load (Q30); seen merges silently
+  function actViewPush(recs){ if(!ACT.view) return; var ch=AimbAct.viewMerge(ACT.view,recs||[]);
+    if(ch.some(function(k){ return k==='reset'||k.indexOf('opt:')===0; })) actApplyOpts();
+    if(ch.length) actRender(); }
+  // the OPTIONS (Q38, §5.1): active only, plans only, the log order, show removed — from the view when there is one
+  function actApplyOpts(){ if(!ACT.view) return;
+    ACT.activeOnly=vget('opt:active_only')===true; ACT.plansOnly=vget('opt:plans_only')===true; var lo=vget('opt:log_order')==='newest'?'newest':'oldest';
+    if(lo!==ACT.logOrder){ ACT.logOrder=lo; ACT.follow=true; ACT.newN=0; }
+    var sr=vget('opt:show_removed')===true; if(sr!==ACT.showRemoved){ ACT.showRemoved=sr; if(ACT.sel) actRefreshSel(); }
+    var ao=document.getElementById('actActive'), pf=document.getElementById('actPlans'); if(ao) ao.checked=ACT.activeOnly; if(pf) pf.checked=ACT.plansOnly; }
+  // pins / hidden as maps of view targets (the view's pin:<t> / hide:<t>), else this browser's (no view)
+  function viewTargets(prefix){ var o={}; if(!ACT.view) return null; Object.keys(ACT.view.recs).forEach(function(k){ if(k.indexOf(prefix)===0&&ACT.view.recs[k].v!=null) o[k.slice(prefix.length)]=1; }); return o; }
+  function actPins(){ return viewTargets('pin:')||ACT.pins; }
+  function actHidden(){ return viewTargets('hide:')||ACT.hidden; }
+  // the ONE-TIME IMPORT (Q13): this browser's 1.7x pins / hidden → the view (by the units' paths), then the keys go
+  function actImportLegacy(){
+    if(ACT.imported||!ACT.view||!ACT.st.units) return; ACT.imported=true;
+    var done=[]; [['aimb.act.pins','pin:'],['aimb.act.hidden','hide:']].forEach(function(p){ var raw=null; try{ raw=localStorage.getItem(p[0]); }catch(e){} if(raw==null) return;
+      var arr=[]; try{ arr=JSON.parse(raw)||[]; }catch(e){} var r=AimbAct.importTargets(Array.isArray(arr)?arr:[],ACT.st.units);
+      r.targets.forEach(function(t){ viewSet(p[1]+t,1); }); done.push(r.targets.length+' '+(p[1]==='pin:'?'pin':'hidden row')+(r.targets.length===1?'':'s')+(r.unmatched?' ('+r.unmatched+' no longer on the board)':''));
+      try{ localStorage.removeItem(p[0]); }catch(e){} });
+    if(done.length){ viewFlush(); actToast('Moved this browser\'s '+done.join(' and ')+' into your view on the bridge'); } }
+  // restore the selection the view remembered (once, at load — Q30): a node by its id, or a session's root on its host
+  function actRestoreSel(){ var t=ACT.pendingSel; if(!t||!ACT.st.units) return; ACT.pendingSel=null; var U=ACT.st.units;
+    for(var id in U){ var u=U[id]; if(!u) continue;
+      if(u.kind==='node'&&u.node_id===t){ var g=null; for(var j in U) if(U[j]&&U[j].kind==='session'&&U[j].key===u.group){ g=U[j]; break; } if(g) actSelect({kind:'node',gk:g.key,sid:g.id,id:u.id,nid:t,host:u.host,path:u.path,session:g.session,project:g.project,user:g.user||'',nkind:u.nkind},true); return; }
+      if(u.kind==='session'){ var ss=u.selves||[u.self]; for(var i=0;i<ss.length;i++) if(ss[i]&&ss[i].node_id===t){ actSelect({kind:'session',gk:u.key,sid:u.id,nid:t,host:ss[i].host,path:'',session:u.session,project:u.project,user:u.user||''},true); return; } } } }
   function actSend(o){ if(sock&&sock.readyState===1){ try{ sock.send(JSON.stringify(o)); return true; }catch(e){} } return false; }
   function actWanted(){ var sec=document.querySelector('section[data-sec="activity"]'); return !!sec&&!sec.classList.contains('collapsed')&&!document.hidden&&!!sock&&sock.readyState===1; }
   function actSync(){
@@ -1469,6 +1695,8 @@
       var r=AimbAct.applyMsg(ACT.st,m);
       if(r==='resync'){ actSend({type:'activity_sub',resync:true}); return; }   // a lost delta: start again from a full board
       if(ACT.st.head&&ACT.st.head.now) ACT.skew=ACT.st.head.now-Date.now();
+      if(r==='full'&&m.types) ACT.types=m.types;   // #88 step 10: the type registry (the menus' labels)
+      if(r==='full'||r==='delta'){ actImportLegacy(); actRestoreSel(); }
       if(r==='full'){ var sl=document.getElementById('actStale'); if(sl&&ACT.staleMin==null){ sl.value=String(Math.max(5,Math.min(60,actStaleMin()))); actStaleLabel(); }
         var po=document.getElementById('actPlanOpen'); if(po&&ACT.planOpenMin==null){ po.value=String(AimbAct.planOpenIndex(actPlanOpenMin())); actPlanOpenLabel(); } }   // 6d: the slider's value is an index into 0 – 7 days
       actRender();
@@ -1485,6 +1713,7 @@
     if(L.loading||L.polling) return;   // #87: a page never overlaps a poll for new entries (a poll may replace the list)
     L.loading=true; L.err=null; L.queued=null; L.at=Date.now(); if(more) L.more=true;
     var lq={}; for(var k in q) if(q[k]!=null) lq[k]=q[k]; lq.limit=50; if(more&&L.next) lq.cursor=L.next; if(L.earlierMode) lq.earlier=true;
+    if(!more&&!L.loaded&&q.id) L.seenAt=vget('seen:'+q.id)||null;   // #88 step 10: "new since you last looked" — what the viewer had seen when this log opened
     actReq({log:lq},function(r){
       L.loading=false; L.queued=null;
       if(!r||r.ok===false){ L.err=r||{code:'no-answer'}; }
@@ -1570,24 +1799,45 @@
     if(age>15000){ delete ACT.fb[id]; return ''; } return '<span class="fb err" title="'+attr(f.what||'')+'">✗ '+esc(f.code)+'</span>'; }
   function actToast(text){ var t=document.createElement('div'); t.className='act-toast'; t.setAttribute('role','status'); t.textContent=text; document.body.appendChild(t); setTimeout(function(){ if(t.parentNode) t.parentNode.removeChild(t); },2600); }
   // ---- 6d: SELECTION → the log panel
-  function selKey(sel){ return 'sel|'+sel.gk+'|'+lcs(sel.host)+'|'+(sel.path||''); }
-  function selQuery(sel){ var q={session:sel.session,project:sel.project,user:sel.user||null,host:sel.host}; if(sel.path) q.path=sel.path; return q; }
-  function actSelect(sel){ var same=ACT.sel&&selKey(ACT.sel)===selKey(sel); ACT.sel=sel; if(!same){ ACT.selN=null; ACT.follow=true; ACT.newN=0; var key=selKey(sel); delete ACT.logs[key]; actLoadLog(key,selQuery(sel),false); } actRender(); }   // #87: a new selection opens at the followed edge
+  // #88 step 10: a selection names its node BY ID (sel.nid — a session row: its root on that host); the log query too (+ removed:
+  // "show removed", §5.1); the view remembers the selection (sel:<t>, restored at the next load — Q30)
+  function selKey(sel){ return 'sel|'+sel.gk+'|'+lcs(sel.host)+'|'+(sel.nid||sel.path||'')+(ACT.showRemoved?'|r':''); }
+  function selQuery(sel){ var q={session:sel.session,project:sel.project,user:sel.user||null,host:sel.host}; if(sel.nid) q.id=sel.nid; else if(sel.path) q.path=sel.path; if(ACT.showRemoved) q.removed=true; return q; }
+  function actSelect(sel,fromLoad){ var same=ACT.sel&&selKey(ACT.sel)===selKey(sel); ACT.sel=sel; if(!fromLoad&&sel.nid&&vget('sel')!==sel.nid) viewSet('sel',sel.nid); if(!same){ ACT.selN=null; ACT.follow=true; ACT.newN=0; var key=selKey(sel); delete ACT.logs[key]; actLoadLog(key,selQuery(sel),false); } actRender(); }   // #87: a new selection opens at the followed edge
   function actClearSel(){ ACT.sel=null; ACT.selN=null; ACT.follow=true; ACT.newN=0; }
   function actRefreshSel(){ if(!ACT.sel) return; var key=selKey(ACT.sel); delete ACT.logs[key]; ACT.selN=null; ACT.follow=true; ACT.newN=0; actLoadLog(key,selQuery(ACT.sel),false); }   // ↻: from the start again, at the edge
   // #87: the log ORDER, per viewer (localStorage, wrapped: a private window / blocked storage just forgets — oldest first)
   var LOG_ORDER_KEY='aimb.act.logOrder';
   function actLoadOrder(){ var v=null; try{ v=localStorage.getItem(LOG_ORDER_KEY); }catch(e){} ACT.logOrder=v==='newest'?'newest':'oldest'; }
-  function actSetOrder(o){ ACT.logOrder=o==='newest'?'newest':'oldest'; try{ localStorage.setItem(LOG_ORDER_KEY,ACT.logOrder); }catch(e){} ACT.follow=true; ACT.newN=0; actRender(); }
+  function actSetOrder(o){ ACT.logOrder=o==='newest'?'newest':'oldest'; if(!viewSet('opt:log_order',ACT.logOrder)) try{ localStorage.setItem(LOG_ORDER_KEY,ACT.logOrder); }catch(e){} ACT.follow=true; ACT.newN=0; actRender(); }   // #88 step 10: the view's opt:log_order (Q38)
+  // §5.1: "show removed" — the log pages include the removed children's entries (marked "(removed)"); kept as opt:show_removed
+  function actSetRemoved(on){ ACT.showRemoved=!!on; viewSet('opt:show_removed',ACT.showRemoved?true:null); if(ACT.sel) actRefreshSel(); actRender(); }
   function selAlive(){ var s=ACT.sel, U=ACT.st.units||{}; if(!s) return false; if(s.kind==='node') return !!U[s.id];
     var g=U[s.sid]; if(!g) return false; var hs=g.hosts||[g.host||(g.self&&g.self.host)]; return hs.some(function(h){ return lcs(h)===lcs(s.host); }); }
   function selfFor(s,host){ var ss=s.selves||[s.self]; for(var i=0;i<ss.length;i++) if(ss[i]&&lcs(ss[i].host)===lcs(host)) return ss[i]; return s.self||{}; }
+  // #88 step 10: a type's menu labels (the full board's registry) — the menu falls back to its own defaults without one
+  function typeLabels(type){ var T=ACT.types&&ACT.types[type]; return T&&T.menu?T.menu:{}; }
+  // §5.7: what a row shows where a bar would be — a bar; a GROUP's count ("4 items", "3 open · 1 done"); a test-run's ONE bar
+  // of its tests (Q56: passed green vs failed red vs total, the counts in its tooltip); nothing for a question (its pills say)
+  function testsBarHtml(tb,tipKey){ if(!tb||!(tb.total>0)) return '<span class="pb nil"></span>'; var pp=Math.max(0,Math.min(100,tb.pct_passed||0)), pf=Math.max(0,Math.min(100-pp,tb.pct_failed||0));
+    return '<span class="pb tests" data-tip="'+tipKey+'" aria-label="'+attr(tb.tooltip||'')+'"><i class="tp" style="width:'+pp.toFixed(1)+'%"></i>'+(pf>0?'<b class="tf" style="width:'+pf.toFixed(1)+'%"></b>':'')+'</span>'; }
+  function showHtml(u,bar,gcount,tipK,id){
+    var sh=u.show||(ACT.types[u.type]&&ACT.types[u.type].show)||(u.type==='group'?'count':u.type==='test-run'?'tests':u.type==='question'?'status':'bar');   // a unit names its TYPE; what it shows is the registry's (each full board's `types`)
+    if(sh==='count') return gcount?'<span class="pb gcount" data-tip="'+tipK(id+'gc','A group — a list, not a plan: '+gcount.text+' (abandoned and hidden rows not counted); it adds nothing to its parent\'s bar')+'">'+esc(gcount.text)+'</span>':'<span class="pb nil"></span>';
+    if(sh==='tests') return testsBarHtml(u.tests,tipK(id+'tb',function(){ return 'Tests: '+((u.tests&&u.tests.tooltip)||'none yet')+(bar?'\n'+AimbAct.barTip(bar).replace(/ — .*$/,'')+' finished (its items, across its buckets — what it adds to its parent)':''); }));
+    if(sh==='status') return '<span class="pb nil"></span>';
+    return barHtml(bar,tipK(id+'b',AimbAct.barTip(bar))); }
+  function tookHtml(u,now,tipK,id){ var t=AimbAct.tookText(u,now); if(!t) return ''; var tk=u.took||{};
+    return '<span class="tk" data-tip="'+tipK(id+'tk',function(){ var n2=anow(), L=[AimbAct.tookText(u,n2)]; if(tk.started_at) L.push('started '+AimbAct.fmtClock(tk.started_at,n2)); if(tk.ended_at) L.push('ended '+AimbAct.fmtClock(tk.ended_at,n2)); if(tk.attempts>1) L.push(tk.attempts+' runs, '+AimbAct.fmtTook(tk.took_total)+' in all'); if(tk.plan&&tk.plan.started_at) L.push('its plan: from '+AimbAct.fmtClock(tk.plan.started_at,n2)+(tk.plan.ended_at?' to '+AimbAct.fmtClock(tk.plan.ended_at,n2):' (still open)')); return L.join('\n'); })+'">'+esc(t)+'</span>'; }
+  // a closed node's badge (§5.6): "? N" (questions since the close) / "N new" (entries since the close); a node closed by
+  // default (no choice of the viewer's) keeps 6d's "? N" for every open question below it
+  function newBadge(b,tip){ return b?'<span class="'+(b.kind==='q'?'qbadge':'nbadge')+'" data-tip="'+tip+'" aria-label="'+attr(b.kind==='q'?b.n+' open question'+(b.n===1?'':'s')+' since you closed it':b.n+' new entr'+(b.n===1?'y':'ies')+' since you closed it')+'">'+esc(b.text)+'</span>':''; }
   function actRender(){
     var tree=document.getElementById('acttree'); if(!tree) return;
     var tag=document.getElementById('acttag'), now=anow(), sm=actStaleMin(), rows=[];
     ACT.tips={ hd:'Host down: its gateway sent a going-down notice or its link dropped — every agent on that host shows as gone until it returns (unlike gone: a session that left)' }; ACT.acts={}; ACT.togs={}; ACT.opened={}; ACT.rowInfo={}; ACT.rowMenu={}; ACT.rowNode={};
-    // 6d HOOK (6c): every row carries its identity as data-* attributes (kind; the node's ORIGIN host + path; session / project /
-    // user; an entry's id); ACT.rowInfo[data-k] holds the same object, ACT.rowMenu[data-k] its menu model. ex = { menu, tog, open, sel }
+    // 6d HOOK (6c): every row carries its identity as data-* attributes (kind; the node's ORIGIN host + path + node id; session /
+    // project / user; an entry's id); ACT.rowInfo[data-k] holds the same object, ACT.rowMenu[data-k] its menu model. ex = { menu, tog, open, sel }
     function row(id,cls,d,html,act,info,ex){ var k=kOf(id); ex=ex||{}; rows.push({k:k,cls:cls,d:d,html:html,info:info||null,open:ex.open,sel:!!ex.sel}); if(act) ACT.acts[k]=act; if(ex.tog) ACT.togs[k]=ex.tog; if(ex.open!=null) ACT.opened[k]=!!ex.open; if(info) ACT.rowInfo[k]=info; if(ex.menu) ACT.rowMenu[k]=ex.menu; }
     function sInfo(s,extra){ var o={kind:'session',session:s.session,project:s.project,user:s.user||''}; for(var x in extra) o[x]=extra[x]; return o; }
     function tipK(id,f){ var k='t'+kOf(id); ACT.tips[k]=f; return k; }
@@ -1595,37 +1845,43 @@
     if(!ACT.on&&!ACT.st.units){ tree.innerHTML='<div class="act-msg">'+(sock&&sock.readyState===1?'Open this section to watch the activity board.':'Not connected to the bridge.')+'</div>'; if(tag) tag.textContent=''; actRenderPanel(); return; }
     if(ACT.st.error){ tree.innerHTML='<div class="act-msg">'+esc(ACT.st.error.what||ACT.st.error.code)+'</div>'; if(tag) tag.textContent='off'; actRenderPanel(); return; }
     if(!ACT.st.units){ tree.innerHTML='<div class="act-msg"><span class="spin"></span>loading the activity board…</div>'; return; }
-    var projs=AimbAct.buildTree(ACT.st.units,{activeOnly:ACT.activeOnly,plansOnly:ACT.plansOnly,pins:ACT.pins,hidden:ACT.hidden,showHidden:ACT.showHidden}), pom=actPlanOpenMin();
+    var pins=actPins(), hidden=actHidden();
+    var projs=AimbAct.buildTree(ACT.st.units,{activeOnly:ACT.activeOnly,plansOnly:ACT.plansOnly,pins:pins,hidden:hidden,showHidden:ACT.showHidden}), pom=actPlanOpenMin();
     // 6d (#70 "Decisions after 6c, for 6d" 9): header and project COUNTS ignore the filters (always the real totals — the
     // unfiltered tree, which the menus also check actions against); rollups still follow the filters (6c)
     var full=AimbAct.buildTree(ACT.st.units,{}), counts={}, nAct=0;
     ACT.fullIdx={}; ACT.fullSess={}; ACT.fullPar={};
     full.forEach(function(p){ counts[p.key]=p; nAct+=p.nActive; p.sessions.forEach(function(x){ ACT.fullSess[x.s.id]=x; (function w(l,par){ l.forEach(function(t){ ACT.fullIdx[t.u.id]=t; ACT.fullPar[t.u.id]=par; w(t.kids,t); }); })(x.kids,x); }); });   // #82: + each node's parent (the session record for a top-level node: both have .kids)
     var nQ=0; full.forEach(function(p){ nQ+=p.nq||0; });   // #85: open questions on the whole board
-    if(tag) tag.textContent=full.length+(full.length===1?' project':' projects')+' · '+nAct+' active agent'+(nAct===1?'':'s')+(nQ?' · ? '+nQ+' open question'+(nQ===1?'':'s'):'')+(head.loading?' · loading':'');
+    if(tag) tag.textContent=full.length+(full.length===1?' project':' projects')+' · '+nAct+' active agent'+(nAct===1?'':'s')+(nQ?' · ? '+nQ+' open question'+(nQ===1?'':'s'):'')+(head.loading?' · loading':'')+(head.view_user?' · view: '+head.view_user:'');   // #88 step 10 (Q29 / Q41): whose view this is
     if(ACT.sel&&!selAlive()) actClearSel();   // 6d: the selected node left the board (dismissed, expired, its host's slice dropped)
+    // #88 Q70 (Robin: "a serious issue — show in RED"): each linked host still on 1.7x, at the TOP of the board — its activity is
+    // not on this board (and this board is not on it) until it is upgraded; the entry goes when its link drops or it comes back on 2.0
+    (head.unshared_hosts||[]).forEach(function(x){ var h=String(x.host||'?'), uk='unsh|'+h;
+      row(uk,'ar unshared',0,'<span class="chv"></span><span class="unsh" role="alert" data-tip="'+tipK(uk,function(){ return h+'\'s gateway '+(x.activity_gossip!=null?'announces activity_gossip:'+x.activity_gossip:'announces no 2.0 activity format')+' — a 2.0 gateway shares activity only with 2.0 hosts, so nothing of '+h+'\'s activity is on this board, and this board is not on '+h+', until it is upgraded to 2.0 (docs/spec-88.md §6.2).'+(x.since?'\nsince '+AimbAct.fmtClock(x.since,anow()):'')+((x.seen_by||[]).length?'\nlinked to: '+x.seen_by.join(', '):''); })+'">⚠ '+esc(h)+' is still on 1.7x'+(x.bridge_version?' ('+esc(x.bridge_version)+')':'')+': not on this board</span>',null,{kind:'warning',host:h}); });
+    (head.fs_warnings||[]).forEach(function(w,i){ var wk='fsw|'+i; row(wk,'ar fswarn',0,'<span class="chv"></span><span class="fsw" data-tip="'+tipK(wk,String(w))+'">⚠ '+esc(String(w).slice(0,200))+'</span>',null,{kind:'warning'}); });
     // ---- a session row: its own line (the root node); a multi-host session opens into each host's own line. Click = select
     function sessionRow(id,cls,d,ent,nameHtml,tagsHtml,parentDown,bell,fbar,info,ex){
       var e=AimbAct.effState(ent,null,now,sm), noLine=!ent.current, bar=fbar!==undefined?fbar:AimbAct.barOf(ent);
       var line=ent.current?lnMark('<span class="ln">'+esc(AimbAct.renderText(ent.current.text,bar,ent.eta_at,now))+'</span>',edMark(ent.current,function(f){ return tipK(id+'ed',f); })+ddMark(ent.current,function(t){ return tipK(id+'dd',t); })):'<span class="ln none">no status line of its own</span>';   // #83: ✎ = edited from the dashboard; #86: ¶ {} = details / data
-      var open=!!ACT.open[id], st=(ent.current&&ent.current.state)||'', can=!!ex.multi;
+      var can=!!ex.multi, open=can&&isOpen(id,false,ex.vt,ex.created_at), st=(ent.current&&ent.current.state)||'';
       row(id,cls+(e.stale&&!noLine?' stale':'')+(e.gone?' gone':'')+(st==='abandoned'?' abandoned':'')+(ex.sel?' sel':'')+(ex.hid?' hid':'')+(ex.pinned?' pinned':''),d,'<span class="chv">'+(can?(open?'▾':'▸'):'')+'</span>'+
-        '<span data-tip="'+tipK(id+'g',function(){ return noLine&&!e.gone?'No status line of its own (report @~root to set one)':AimbAct.statusTip(ent,null,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.sessGlyph(ex.kind,e,now,{none:noLine&&!e.gone})+'</span>'+   // #79: a session's own glyph (a window), not the agent ring
-        nameHtml+(ex.pinned?'<span class="pin" title="pinned (this browser)">📌</span>':'')+tagsHtml+pillsHtml(e,noLine,parentDown)+line+fbHtml(id)+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
+        '<span data-tip="'+tipK(id+'g',function(){ return noLine&&!e.gone?'No status line of its own (report --text "@…" with no --key to set one)':AimbAct.statusTip(ent,null,anow(),actStaleMin(),ent.host); })+'">'+AimbAct.sessGlyph(ex.kind,e,now,{none:noLine&&!e.gone})+'</span>'+   // #79: a session's own glyph (a window), not the agent ring
+        nameHtml+(ex.pinned?'<span class="pin" title="pinned (your view)">📌</span>':'')+tagsHtml+pillsHtml(e,noLine,parentDown)+line+tookHtml(ent,now,tipK,id)+fbHtml(id)+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
         (ent.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(ent.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+
-        (bell?'<span class="ic" data-tip="'+tipK(id+'d','Doorbell armed')+'">🔔</span>':'<span class="ic nil"></span>'),
-        ex.select,info,{menu:ex.menu,tog:can?function(){ ACT.open[id]=!open; actRender(); }:null,open:can?open:null,sel:ex.sel});
+        (bell?'<span class="ic" data-tip="'+tipK(id+'d','Doorbell armed — a doorbell is watching this session (a message wakes it)')+'">🔔</span>':'<span class="ic nil"></span>'),
+        ex.select,info,{menu:ex.menu,tog:can?function(){ setOpen(id,ex.vt,!open,0,0); actRender(); }:null,open:can?open:null,sel:ex.sel});
       return open&&can;
     }
-    // 6d: the menu model of a NODE row — checked against the UNFILTERED tree (a filter never hides what an action affects)
-    function nodeMenu(t,s){ return function(){ var ft=ACT.fullIdx[t.u.id]||t, u=ft.u, n2=anow(), sm2=actStaleMin(), ag=u.nkind==='agent', lc=hostCmd(u.host), e=AimbAct.effState(u,ft.owner,n2,sm2);
-      return { kind:'node', nkind:u.nkind, plan_item:!!u.plan_item, item_state:u.plan_item?AimbAct.itemState(u):null, plan_node:!!ft.planNode, plan_end_how:ft.planNode&&ft.endedPlan?(u.plan_end_how||'done'):null,
-        agent_ok:ag, owns_open:ag&&AimbAct.ownsOpenPlan(ft), quiet:ag&&AimbAct.quietAgent(ft,n2,sm2), finished:!!u.finished_at, subtree_quiet:ag&&AimbAct.quietAgent(ft,n2,sm2)&&ft.kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }),
-        holds_open:!!ft.open, has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,u.path):null, pinned:!!ACT.pins[u.id], hidden:!!ACT.hidden[u.id], id:u.id, fbId:u.id,
-        name:(ag?'agent ':'')+u.path, why:e.gone?'gone':e.stale?'stale':u.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(ft), nNodes:AimbAct.countNodes(ft), host:u.host,
-        own_state:(u.current&&u.current.state)||null, can_plan:hostPlan(u.host), sid:s.id, session:s.session, nid:u.id,   // #82: Move up / down / to…, Abandon… (a 1.69+ owner)
-        can_msg:hostMsg(u.host), cur:u.current?{text:u.current.text,state:u.current.state}:null, edit_states:AimbAct.editStates({nkind:u.nkind,plan_item:!!u.plan_item,holds_plan:!!ft.planNode}),   // #83 / #84 (a 1.70+ owner)
-        question:AimbAct.qOf(u), qtext:u.current?u.current.text:'', can_ask:hostAsk(u.host), can_revise:hostRevise(u.host),   // #85 (a 1.71+ owner); #90: Change answer… (a 1.75+ owner)
+    // 6d: the menu model of a NODE row — checked against the UNFILTERED tree (a filter never hides what an action affects);
+    // #88 step 10: the actions are the unit's menu (the bridge's registry), finish / dismiss checked here against the slider
+    function nodeMenu(t,s){ return function(){ var ft=ACT.fullIdx[t.u.id]||t, u=ft.u, n2=anow(), sm2=actStaleMin(), ag=u.nkind==='agent', lc=hostCmd(u.host), e=AimbAct.effState(u,ft.owner,n2,sm2), qq=AimbAct.qOf(u);
+      var quiet=ag&&AimbAct.quietAgent(ft,n2,sm2);
+      return { kind:'node', menu:u.menu||[], labels:typeLabels(u.type), nkind:u.nkind, type:u.type, plan_item:!!u.plan_item, quiet:quiet, finished:!!u.finished_at, subtree_quiet:ag&&ft.kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }),
+        has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,u):null, pinned:!!actPins()[u.node_id], hidden:!!actHidden()[u.node_id], id:u.id, vt:u.node_id, fbId:u.id, nid:u.node_id,
+        name:(ag?'agent ':'')+u.path, label:u.label||u.name, why:e.gone?'gone':e.stale?'stale':u.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(ft), nNodes:AimbAct.countNodes(ft), host:u.host,
+        own_state:(u.current&&u.current.state)||null, sid:s.id, session:s.session, cur:u.current?{text:u.current.text,state:u.current.state}:null,
+        edit_states:u.edit_states||AimbAct.editStates({nkind:u.nkind,plan_item:!!u.plan_item,holds_plan:!!ft.planNode}), question:qq, qtext:u.current?u.current.text:'',
         up:steps(ft).up, down:steps(ft).down }; }; }
     function steps(ft){ var par=ACT.fullPar[ft.u.id]; return AimbAct.moveSteps(ft,par?par.kids:[]); }   // its siblings: the parent's (or the session's top-level) children
     // … of a SESSION row (one host's root): a multi-host session's row offers only copies + pin / hide; its actions sit on each
@@ -1634,11 +1890,10 @@
       var kids=(fx?fx.top||fx.kids:[]).filter(function(t){ return lcs(t.u.host)===lcs(host); }), multi=!!s.multi_host, tgt=!multi||hostLine;
       var pn=kids.some(function(c){ return !!c.u.plan_item; }), root={u:se,kids:kids,planNode:pn,endedPlan:pn&&AimbAct.planEnded(kids,se)}; root.open=(pn&&!root.endedPlan)||kids.some(function(c){ return !!c.open; });
       var e=AimbAct.effState(se,null,n2,sm2), quiet=AimbAct.rootQuiet(se,kids,n2,sm2);
-      return { kind:'session', plan_node:tgt&&pn, plan_end_how:pn&&root.endedPlan?(se.plan_end_how||'done'):null, agent_ok:tgt, owns_open:AimbAct.ownsOpenPlan(root), quiet:quiet, finished:!!se.finished_at,
-        subtree_quiet:quiet&&kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }), holds_open:root.open, has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,null):null,
-        pinned:!!ACT.pins[s.id], hidden:!!ACT.hidden[s.id], no_view:!!hostLine, id:s.id, fbId:rowId, name:'session '+s.session+(multi?' on '+host:''), why:e.gone?'gone':e.stale?'stale':se.finished_at?'finished':'',
-        nOpen:AimbAct.openItemsOwned(root), nNodes:AimbAct.countNodes(root), host:host, session:s.session,
-        can_msg:tgt&&hostMsg(host), cur:se&&se.current?{text:se.current.text,state:se.current.state}:null, edit_states:AimbAct.editStates({nkind:'agent',holds_plan:pn}) }; }; }   // #83 / #84: the session root (one host's line)
+      return { kind:'session', menu:tgt?(se.menu||[]):[], labels:typeLabels('session'), quiet:quiet, finished:!!se.finished_at, subtree_quiet:kids.every(function(c){ return AimbAct.subtreeAgentsQuiet(c,n2,sm2); }),
+        has_cmd:!!lc, cmd:lc?AimbAct.logCmd(lc,s.session,s.project,null):null, pinned:!!actPins()[s.id], hidden:!!actHidden()[s.id], no_view:!!hostLine, id:s.id, vt:s.id, fbId:rowId, nid:se.node_id,
+        name:'session '+s.session+(multi?' on '+host:''), why:e.gone?'gone':e.stale?'stale':se.finished_at?'finished':'', nOpen:AimbAct.openItemsOwned(root), nNodes:AimbAct.countNodes(root), host:host, session:s.session, sid:s.id,
+        cur:se&&se.current?{text:se.current.text,state:se.current.state}:null, edit_states:se.edit_states||AimbAct.editStates({nkind:'agent',holds_plan:pn}) }; }; }   // #83 / #84: the session root (one host's line)
     function hiddenRow(pid,nHidden,nShown,d){
       if(nHidden>0) row(pid+'|hid','ar more click hidn',d,'<span class="chv"></span><span class="nm">'+nHidden+' hidden — show</span>',function(){ ACT.showHidden[pid]=true; actRender(); },null);
       else if(ACT.showHidden[pid]&&nShown>0) row(pid+'|hid','ar more click hidn',d,'<span class="chv"></span><span class="nm">hide '+nShown+' again</span>',function(){ delete ACT.showHidden[pid]; actRender(); },null);
@@ -1646,42 +1901,48 @@
     // ---- a NODE row (6a, any depth): an agent keeps the status ring; a context shows its state mark, line, bar, ETA. Click =
     // select (its log in the panel); the chevron (or a double-click) opens its children, one level deeper. 6b: a PLAN ITEM shows
     // ☐ / the in-progress mark / ☑ / a struck-through skipped row, its name as a checklist entry, and its line only once it says
-    // more than its name; a host tag only where the node's host differs from its parent's (AimbAct.hostTagOn)
+    // more than its name; a host tag only where the node's host differs from its parent's (AimbAct.hostTagOn).
+    // #88 step 10: its LABEL (no "@"), its TYPE's glyph (☰ plan, ▤ group, ⚑ test run), what its type shows where a bar would be,
+    // its TIME, and — closed by the viewer — the "? N" / "N new" badge
     function nodeRows(t,s,d,multi,inAb){
-      var u=t.u, ctx=u.nkind==='context', id=u.id, e=AimbAct.effState(u,t.owner,now,sm), pi=!!u.plan_item, ist=pi?AimbAct.itemState(u):null, can=t.kids.length>0||t.nHidden>0;
-      var open=can&&isOpen(id,AimbAct.nodeOpenDefault(t,now,pom)), sel=!!ACT.sel&&ACT.sel.kind==='node'&&ACT.sel.id===id;
+      var u=t.u, ctx=u.nkind==='context', id=u.id, nid=u.node_id, e=AimbAct.effState(u,t.owner,now,sm), pi=!!u.plan_item, ist=pi?AimbAct.itemState(u):null, can=t.kids.length>0||t.nHidden>0;
+      var open=can&&isOpen(id,AimbAct.nodeOpenDefault(t,now,pom),nid,u.created_at), sel=!!ACT.sel&&ACT.sel.kind==='node'&&ACT.sel.id===id;
       var noLine=ctx?e.noLine:!!u.implicit&&!u.current, bar=('fbar' in t)?t.fbar:AimbAct.barOf(u), own=(u.current&&u.current.state)||'';
       var ab=ist==='abandoned'||own==='abandoned';   // #82 part 5: an abandoned node greys out everything under it too (abd)
-      var q=AimbAct.qOf(u), qOpen=!!q&&q.status==='asked', fq=ACT.fullIdx[id]||t;   // #85: a QUESTION (its line is the question)
-      var nm=q?'<span class="nm qn" title="'+attr(u.path)+'">'+(/^\?\d+$/.test(String(u.name))?esc(u.name):'@'+esc(u.name))+'</span>':pi?'<span class="nm pi" title="'+attr(u.path)+'">'+esc(u.name)+'</span>':ctx?'<span class="nm ctx" title="'+attr(u.path)+'">@'+esc(u.name)+'</span>':'<span class="nm path" title="'+attr(u.path)+'">'+esc(u.name)+'</span>';
-      if(!open&&fq.nq>0) nm+=qBadge(fq.nq,tipK(id+'q',fq.nq+' open question'+(fq.nq===1?'':'s')+' below — expand to answer'));   // #85: the attention badge on a collapsed ancestor
+      var q=AimbAct.qOf(u), qOpen=!!q&&q.status==='asked', fq=ACT.fullIdx[id]||t, lbl=u.label!=null?u.label:u.name;   // #85: a QUESTION (its line is the question)
+      var ttl=attr(u.path+(u.key?'\nkey '+(u.scope?u.scope:'')+':'+u.key:''));
+      var tg=u.type==='plan'||u.type==='group'||u.type==='test-run'?'<span class="tg" title="'+(u.type==='plan'?'a plan: its bar is its items':u.type==='group'?'a group: a list, not a plan':'a test run')+'">'+esc((ACT.types[u.type]&&ACT.types[u.type].glyph)||(u.type==='plan'?'☰':u.type==='group'?'▤':'⚑'))+'</span>':'';
+      var nm=q?'<span class="nm qn" title="'+ttl+'">'+esc(lbl)+'</span>':pi?'<span class="nm pi" title="'+ttl+'">'+tg+esc(lbl)+'</span>':ctx?'<span class="nm ctx" title="'+ttl+'">'+tg+esc(lbl)+'</span>':'<span class="nm path" title="'+ttl+'">'+esc(lbl)+'</span>';
+      if(u.transient) nm+='<span class="trn" title="transient: it goes when its last child leaves (pin it, rename it or give it a line of its own to keep it)">◌</span>';
+      if(!open&&can){ var vrec=nid?vget('open:'+nid):undefined, nb=vrec&&vrec.o===0?AimbAct.closedBadge(vrec,fq.nq,AimbAct.subtreeCount(fq)):null;   // §5.6: a node the VIEWER closed — new activity never reopens it
+        if(nb) nm+=newBadge(nb,tipK(id+'nb',nb.kind==='q'?nb.n+' open question'+(nb.n===1?'':'s')+' below since you closed it — expand to answer':nb.n+' new entr'+(nb.n===1?'y':'ies')+' below since you closed it — expand (or select it) to see them'));
+        else if(fq.nq>0) nm+=qBadge(fq.nq,tipK(id+'q',fq.nq+' open question'+(fq.nq===1?'':'s')+' below — expand to answer')); }   // #85: the attention badge on a collapsed ancestor
       // #82 part 2: a plan item with AGENT children shows the working agent (its glyph + its current line) beside its box, even closed
       var wa=pi?AimbAct.workingAgent(ACT.fullIdx[id]||t):null, chip='';
       if(wa){ var we=AimbAct.effState(wa.u,null,now,sm), wl=wa.u.current?AimbAct.renderText(wa.u.current.text,AimbAct.barOf(wa.u),wa.u.eta_at,now):(wa.u.implicit?'not reported yet':'no current line');
-        chip='<span class="agon" data-tip="'+tipK(id+'w','agent '+wa.u.path+' is on it — '+(we.stale?'stale, was '+we.was:we.state)+'\n'+wl)+'">'+AimbAct.glyphSvg(we,now,null)+'<span class="agn">'+esc(wa.u.name)+'</span>'+esc(wl)+'</span>'; }
-      var line=pi&&u.current&&String(u.current.text)===String(u.name)?'<span class="ln">'+chip+'</span>':u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+(chip?' '+chip:'')+'</span>':'<span class="ln none">'+(ctx?'':u.implicit?'not reported yet':'no current line')+'</span>';
+        chip='<span class="agon" data-tip="'+tipK(id+'w','agent '+wa.u.path+' is on it — '+(we.stale?'stale, was '+we.was:we.state)+'\n'+wl)+'">'+AimbAct.glyphSvg(we,now,null)+'<span class="agn">'+esc(wa.u.label!=null?wa.u.label:wa.u.name)+'</span>'+esc(wl)+'</span>'; }
+      var line=pi&&u.current&&String(u.current.text)===String(lbl)?'<span class="ln">'+chip+'</span>':u.current?'<span class="ln">'+esc(AimbAct.renderText(u.current.text,bar,u.eta_at,now))+(chip?' '+chip:'')+'</span>':'<span class="ln none">'+(ctx?(chip||''):u.implicit?'not reported yet':'no current line')+'</span>';
       var ddm=u.current?ddMark(u.current,function(tt){ return tipK(id+'dd',tt); }):'';   // #86: ¶ {} = its line has details / data
       if(u.current) line=lnMark(line,edMark(u.current,function(f){ return tipK(id+'ed',f); })+ddm);   // #83: ✎ = its line was edited from the dashboard
       var qp='';
       if(q){   // #85: the question, then its answer (answered) — the pills say awaiting answer / expired / withdrawn
         var qby=q.by&&typeof q.by==='object'?(q.by.user||'dashboard')+' via dashboard ('+(q.by.host||'?')+')':q.by?String(q.by):'';
-        line='<span class="ln" data-tip="'+tipK(id+'qt',function(){ return 'Question ('+q.status+')'+(q.choices&&q.choices.length?' — choices: '+q.choices.join(' · '):'')+(q.free&&q.choices&&q.choices.length?' (or free text)':'')+(q.asked_at?'\nasked '+AimbAct.fmtClock(q.asked_at,anow()):'')+(q.expires_at&&q.status==='asked'?' · expires '+AimbAct.fmtClock(q.expires_at,anow()):'')+(q.answer?'\n'+(q.revised?'answer changed ':'answered ')+(qby?'by '+qby:'')+(q.at?' at '+AimbAct.fmtClock(q.at,anow()):'')+':\n'+AimbAct.answerText(q.answer,1000)+(q.revised&&q.previous&&q.previous.answer?'\n(was: '+AimbAct.answerText(q.previous.answer,200)+')':''):q.status!=='asked'&&q.at?'\n'+q.status+(qby?' by '+qby:'')+' at '+AimbAct.fmtClock(q.at,anow()):'')+(qOpen&&hostAsk(u.host)?'\nclick (or right-click → Answer…) to answer it':q.status==='answered'&&hostRevise(u.host)?'\nclick (or right-click → Change answer…) to change the answer':''); })+'">'+esc(u.current.text)+(q.answer?' <span class="qa">→ '+esc(AimbAct.answerText(q.answer))+'</span>':'')+'</span>';
+        line='<span class="ln" data-tip="'+tipK(id+'qt',function(){ return 'Question ('+q.status+')'+(q.choices&&q.choices.length?' — choices: '+q.choices.join(' · '):'')+(q.free&&q.choices&&q.choices.length?' (or free text)':'')+(q.asked_at?'\nasked '+AimbAct.fmtClock(q.asked_at,anow()):'')+(q.expires_at&&q.status==='asked'?' · expires '+AimbAct.fmtClock(q.expires_at,anow()):'')+(q.answer?'\n'+(q.revised?'answer changed ':'answered ')+(qby?'by '+qby:'')+(q.at?' at '+AimbAct.fmtClock(q.at,anow()):'')+':\n'+AimbAct.answerText(q.answer,1000)+(q.revised&&q.previous&&q.previous.answer?'\n(was: '+AimbAct.answerText(q.previous.answer,200)+')':''):q.status!=='asked'&&q.at?'\n'+q.status+(qby?' by '+qby:'')+' at '+AimbAct.fmtClock(q.at,anow()):'')+(qOpen?'\nclick (or right-click → Answer…) to answer it':q.status==='answered'?'\nclick (or right-click → Change answer…) to change the answer':''); })+'">'+esc(u.current.text)+(q.answer?' <span class="qa">→ '+esc(AimbAct.answerText(q.answer))+'</span>':'')+'</span>';
         if(ddm) line=lnMark(line,ddm);
         qp=qOpen?'<span class="pill ask">awaiting answer</span>':q.status==='expired'?'<span class="pill qx">expired</span>':q.status==='withdrawn'?'<span class="pill qx">withdrawn</span>':''; }
       var glyph=q?AimbAct.glyphSvg(e,now,'question'):pi?AimbAct.glyphSvg(e,now,'plan'):AimbAct.glyphSvg(e,now,noLine&&!e.gone?'none':ctx?'ctx':null);
-      var info={kind:'node',nkind:u.nkind,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',plan_item:pi?'1':'',plan_node:t.planNode?'1':'',drag:hostPlan(u.host)?'1':''};   // #82: drag = it can be dragged (reorder / move)
+      var info={kind:'node',nkind:u.nkind,type:u.type||'',host:u.host,path:u.path,nid:nid||'',session:s.session,project:s.project,user:s.user||'',plan_item:pi?'1':'',plan_node:t.planNode?'1':'',drag:(u.menu||[]).indexOf('move')>=0?'1':''};   // #82: drag = it can be dragged (reorder / move: its menu has Move)
       ACT.rowNode[kOf(id)]=id;
       row(id,'ar click'+(ctx?' cx':'')+(q?' q'+(qOpen?' qopen':''):'')+(pi?' pi'+(ist==='skipped'?' skipped':ist==='done'?' pdone':''):'')+(ab?' abandoned':'')+(inAb&&!ab?' abd':'')+(e.stale?' stale':'')+(e.gone?' gone':'')+(sel?' sel':'')+(t.hid?' hid':'')+(t.pinned?' pinned':''),d,'<span class="chv">'+(can?(open?'▾':'▸'):'')+'</span>'+
         '<span data-tip="'+tipK(id+'g',function(){ return q?'Question — '+(qOpen?'awaiting an answer':q.status):AimbAct.statusTip(u,t.owner,anow(),actStaleMin(),u.host); })+'">'+glyph+'</span>'+
-        nm+(t.pinned?'<span class="pin" title="pinned (this browser)">📌</span>':'')+(AimbAct.hostTagOn(t,multi)?hostTags([u.host],u.host_down?[u.host]:[]):'')+(q?'<span class="pills">'+qp+(e.hostDown?'<span class="pill hostdown" data-tip="hd">host down</span>':e.stale?'<span class="pill stale">stale</span>':'')+(e.gone&&!e.hostDown?'<span class="pill gone">gone</span>':'')+'</span>':pillsHtml(e,noLine,false))+line+fbHtml(id)+barHtml(bar,tipK(id+'b',AimbAct.barTip(bar)))+
+        nm+(t.pinned?'<span class="pin" title="pinned (your view)">📌</span>':'')+(AimbAct.hostTagOn(t,multi)?hostTags([u.host],u.host_down?[u.host]:[]):'')+(q?'<span class="pills">'+qp+(e.hostDown?'<span class="pill hostdown" data-tip="hd">host down</span>':e.stale?'<span class="pill stale">stale</span>':'')+(e.gone&&!e.hostDown?'<span class="pill gone">gone</span>':'')+'</span>':pillsHtml(e,noLine,false))+line+tookHtml(u,now,tipK,id)+fbHtml(id)+showHtml(u,bar,t.gcount||fq.gcount,tipK,id)+
         (u.eta_at&&!noLine?'<span class="ic" data-tip="'+tipK(id+'e',function(){ return AimbAct.etaTip(u.eta_at,anow()); })+'">⌛</span>':'<span class="ic nil"></span>')+'<span class="ic nil"></span>',
-        function(){ actSelect({kind:'node',gk:s.key,sid:s.id,id:id,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',nkind:u.nkind});
-          if(qOpen&&hostAsk(u.host)){ var mm=nodeMenu(t,s)(); actAnswerDlg(info,mm); }   // #85: a click on an OPEN question opens the Answer… dialog
-          else if(q&&q.status==='answered'&&hostRevise(u.host)){ var mm2=nodeMenu(t,s)(); actAnswerDlg(info,mm2); } },info,   // #90: … on an ANSWERED one, Change answer… (prefilled)
-        {menu:nodeMenu(t,s),tog:can?function(){ ACT.open[id]=!open; actRender(); }:null,open:can?open:null,sel:sel});
+        function(){ actSelect({kind:'node',gk:s.key,sid:s.id,id:id,nid:nid,host:u.host,path:u.path,session:s.session,project:s.project,user:s.user||'',nkind:u.nkind});
+          if(qOpen||(q&&q.status==='answered')){ var mm=nodeMenu(t,s)(); if((mm.menu||[]).some(function(a){ return a==='answer'||a==='change_answer'; })) actAnswerDlg(info,mm); } },info,   // #85 / #90: a click on an OPEN question opens Answer…, on an ANSWERED one Change answer… (prefilled)
+        {menu:nodeMenu(t,s),tog:can?function(){ setOpen(id,nid,!open,AimbAct.subtreeCount(fq),fq.nq); actRender(); }:null,open:can?open:null,sel:sel});
       if(!open) return;
       t.kids.forEach(function(c){ nodeRows(c,s,d+1,multi,inAb||ab); });
-      hiddenRow(id,t.nHidden,t.kids.filter(function(c){ return c.hid; }).length,d+1);
+      hiddenRow(nid||id,t.nHidden,t.kids.filter(function(c){ return c.hid; }).length,d+1);
     }
     if(!projs.length) rows.push({k:'empty',cls:'act-msg',d:0,html:ACT.plansOnly?'No plans'+(ACT.activeOnly?' open right now':'')+' (untick “plans” to see everything).':ACT.activeOnly?'Nothing active right now (untick “active only” to see finished agents).':'No agent activity on the mesh yet — sessions report with the log tool or tools/aimb-log.mjs.'});
     projs.forEach(function(p){
@@ -1694,16 +1955,16 @@
         var s=x.s, sid='sess|'+s.key, hosts=s.hosts||(s.host?[s.host]:[]);
         var self=s.self||{}, fb=x.fbars?(x.fbars[lcs(self.host)]||null):undefined, multi=!!s.multi_host;
         var ssel=!!ACT.sel&&ACT.sel.kind==='session'&&ACT.sel.sid===s.id&&(!multi||lcs(ACT.sel.host)===lcs(self.host));
-        var selS=function(h){ return function(){ actSelect({kind:'session',gk:s.key,sid:s.id,host:h,path:'',session:s.session,project:s.project,user:s.user||''}); }; };
+        var selS=function(h){ return function(){ var se=selfFor(s,h); actSelect({kind:'session',gk:s.key,sid:s.id,nid:se.node_id||null,host:h,path:'',session:s.session,project:s.project,user:s.user||''}); }; };
         var sq=(ACT.fullSess[s.id]||x).nq||0;   // #85: the session's open questions (the attention badge on its header)
         var sOpen=sessionRow(sid,'ar click',1,self,'<span class="nm">'+esc(nm(s.session))+'</span>'+qBadge(sq,tipK(sid+'q',sq+' open question'+(sq===1?'':'s')+' in this session')),hostTags(hosts,s.hosts_down),!!(s.hosts_down&&s.hosts_down.length),!!s.bell,fb,
-          sInfo(s,{host:self.host||'',home:s.home||self.host||'',hosts:hosts.join(','),path:''}),{multi:multi,sel:ssel,hid:x.hid,pinned:x.pinned,select:selS(self.host),menu:sessMenu(s,self.host,sid,false),kind:s.client_kind});
+          sInfo(s,{host:self.host||'',home:s.home||self.host||'',hosts:hosts.join(','),path:'',nid:self.node_id||''}),{multi:multi,sel:ssel,hid:x.hid,pinned:x.pinned,select:selS(self.host),menu:sessMenu(s,self.host,sid,false),kind:s.client_kind,vt:s.id,created_at:s.created_at});
         if(sOpen) (s.selves||[self]).forEach(function(se){   // 6b (#70 "Decisions before 6b" 6): each host's OWN line; the session row shows the host that most recently set one
           var hid='hself|'+s.key+'|'+se.host, he=AimbAct.effState(se,null,now,sm), hNo=!se.current, hd=lcs(se.host)===lcs(self.host);
           var sb=x.fbars?(x.fbars[lcs(se.host)]||null):AimbAct.barOf(se), isHome=s.home&&lcs(se.host)===lcs(s.home), hsel=!!ACT.sel&&ACT.sel.kind==='session'&&ACT.sel.sid===s.id&&lcs(ACT.sel.host)===lcs(se.host);
           row(hid,'ar click'+(he.stale&&!hNo?' stale':'')+(he.gone?' gone':'')+(hsel?' sel':''),2,'<span class="chv"></span><span data-tip="'+tipK(hid+'g',function(){ return hNo&&!he.gone?'No headline from '+se.host:AimbAct.statusTip(se,null,anow(),actStaleMin(),se.host); })+'">'+AimbAct.sessGlyph(s.client_kind,he,now,{none:hNo&&!he.gone})+'</span>'+
             hostTags([se.host],se.host_down?[se.host]:[])+pillsHtml(he,hNo,false)+(se.current?lnMark('<span class="ln" data-tip="'+tipK(hid+'l',(hd?'the headline: this host set it most recently':'this host\'s own line (another host set a headline more recently)')+(isHome?' · the session\'s HOME host (where it first appeared): top-level rows from it carry no host tag':''))+'">'+esc(AimbAct.renderText(se.current.text,sb,se.eta_at,now))+'</span>',edMark(se.current,function(f){ return tipK(hid+'ed',f); })+ddMark(se.current,function(t){ return tipK(hid+'dd',t); })):'<span class="ln none">no headline from this host</span>')+
-            fbHtml(hid)+barHtml(sb,tipK(hid+'b',AimbAct.barTip(sb)))+'<span class="ic nil"></span><span class="ic nil"></span>',selS(se.host),sInfo(s,{kind:'host-line',host:se.host,path:''}),{menu:sessMenu(s,se.host,hid,true),sel:hsel});
+            tookHtml(se,now,tipK,hid)+fbHtml(hid)+barHtml(sb,tipK(hid+'b',AimbAct.barTip(sb)))+'<span class="ic nil"></span><span class="ic nil"></span>',selS(se.host),sInfo(s,{kind:'host-line',host:se.host,path:'',nid:se.node_id||''}),{menu:sessMenu(s,se.host,hid,true),sel:hsel});
         });
         if(lvl!=='all') return;
         x.kids.forEach(function(t){ var rs=selfFor(s,t.u.host); nodeRows(t,s,2,multi,!!(rs&&rs.current&&rs.current.state==='abandoned')); });   // #82: an abandoned session root greys its tree
@@ -1735,15 +1996,17 @@
       panel._h='x'; var pb0=document.getElementById('actpb'); if(pb0) pb0.addEventListener('scroll',actLogScrolled); }
     var sel=ACT.sel, key=selKey(sel), q=selQuery(sel), L=ACT.logs[key], now=anow(), U=ACT.st.units||{}, g=U[sel.sid]||{}, oldest=ACT.logOrder!=='newest';
     var ft=sel.kind==='node'?ACT.fullIdx[sel.id]:null, fx=ACT.fullSess[sel.sid];
+    if(ft&&ft.u.path!=null&&ft.u.path!==sel.path) sel.path=ft.u.path;   // #88 step 10: a rename / move keeps the selection (by id) — its title follows the node's path now
     var c=ft?AimbAct.subtreeLog(ft):fx?AimbAct.subtreeLog({u:selfFor(g,sel.host),kids:(fx.top||fx.kids).filter(function(t){ return lcs(t.u.host)===lcs(sel.host); })}):{n:null};
     // new entries arrived (the gossiped count moved): read the first page again and MERGE it (#87 — older pages + the reader's place stay)
     var due=!!L&&L.loaded&&!L.loading&&!L.polling&&!L.err&&ACT.selN!=null&&c.n!=null&&c.n!==ACT.selN;
     if(due&&Date.now()-L.at>1500){ ACT.selN=c.n; actPollLog(key,q); } else if(!due) ACT.selN=c.n;
-    var hosts=g.hosts||[], title=sel.kind==='node'?AimbAct.dispPath(sel.path):nm(sel.session);   // #86: "@Next release/@Docs" (the quoted path on hover)
+    var hosts=g.hosts||[], title=sel.kind==='node'?AimbAct.shortPath(AimbAct.dispPath(sel.path),60):nm(sel.session);   // #86; #88 step 10: a long path shortened in the middle (the full path on hover)
     var ordTip=oldest?'Oldest first — the newest at the bottom (chat-style). Click for newest first.':'Newest first — the newest at the top. Click for oldest first (chat-style).';
     var hd='<div class="aph-t"><span class="aph-k">Log</span><span class="nm mono" title="'+attr(sel.kind==='node'?sel.path:'the whole session')+'">'+esc(title)+'</span>'+hostTags([sel.host])+
       '<span class="cnt">'+(c.n!=null?c.n+(c.partial?'+':'')+' entr'+(c.n===1&&!c.partial?'y':'ies'):'')+'</span><span class="sp"></span>'+
       '<button class="act-btn ib ord" data-pa="order" title="'+attr(ordTip)+'" aria-label="Log order: '+(oldest?'oldest':'newest')+' first. Switch to '+(oldest?'newest':'oldest')+' first.">⇅ '+(oldest?'oldest':'newest')+' first</button>'+   // #87
+      '<button class="act-btn ib rmv'+(ACT.showRemoved?' on':'')+'" data-pa="removed" aria-pressed="'+(ACT.showRemoved?'true':'false')+'" title="'+attr(ACT.showRemoved?'Showing the entries of removed children too (marked “removed”). Click to hide them.':'Show the entries of children that were removed from the board (dismissed, expired, emptied) — off by default')+'">show removed</button>'+   // §5.1 (opt:show_removed)
       '<button class="act-btn ib" data-pa="refresh" title="Refresh the log" aria-label="Refresh the log">↻</button><button class="act-btn ib" data-pa="close" title="Close the log (clear the selection)" aria-label="Close the log panel">×</button></div>'+
       '<div class="aph-s">'+(sel.kind==='node'?esc(nm(sel.session))+' · ':'the whole session · ')+esc(pj(sel.project))+(sel.kind==='node'&&ft&&ft.kids.length?' · this node and below':'')+'</div>'+
       (sel.kind==='session'&&hosts.length>1?'<div class="aph-h">'+hosts.map(function(h){ return '<button class="act-btn'+(lcs(h)===lcs(sel.host)?' on':'')+'" data-ph="'+attr(h)+'">'+esc(h)+'</button>'; }).join(' ')+'</div>':'');
@@ -1762,22 +2025,28 @@
       else if(L.pruned) prow(mk,'ar more pruned',0,'<span class="chv"></span><span class="nm" data-tip="'+tipK(mk,'This run began in a day file that log retention has already deleted — its older entries are gone')+'">earlier history pruned</span>');
       else if(L.loaded&&!L.entries.length) prow(mk,'ar more',0,'<span class="chv"></span><span class="nm">no entries</span>'); }
     // an entry about a PLAN ITEM (or a question) draws the tree's own glyph (☐ ■ ☑ …), not a state dot (Robin, 2026-10-03)
-    var byPath={}; (function w(t){ if(!t) return; if(t.u&&t.u.path!=null) byPath[t.u.path]=t.u; (t.kids||[]).forEach(w); })(ft||(fx?{kids:fx.top||fx.kids}:null));
-    function entDot(x,ek){ var st=x.state||'running', nu=x.path!=null?byPath[x.path]:null, tip=' data-tip="'+tipK(ek+'s',st+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"';
+    var byPath={}, byNid={}; (function w(t){ if(!t) return; if(t.u&&t.u.path!=null) byPath[t.u.path]=t.u; if(t.u&&t.u.node_id) byNid[t.u.node_id]=t.u; (t.kids||[]).forEach(w); })(ft||(fx?{kids:fx.top||fx.kids}:null));
+    function entDot(x,ek){ var st=x.state||'running', nu=x.node_id&&byNid[x.node_id]?byNid[x.node_id]:x.path!=null?byPath[x.path]:null, tip=' data-tip="'+tipK(ek+'s',st+(x.progress?' · '+AimbAct.barTip(x.progress).replace(/ — reported$/,''):''))+'"';
       var gl=!x.state||!nu?null:AimbAct.qOf(nu)?AimbAct.glyphSvg({state:st,qstatus:st==='done'?'answered':st==='abandoned'?'withdrawn':'asked'},now,'question'):nu.plan_item?AimbAct.planGlyph(st):null;
       return gl?'<span class="edg"'+tip+'>'+gl+'</span>':'<span class="dot bg-'+esc(st)+'"'+tip+'></span>'; }
     function entryRow(x){
       var ek=key+'|e|'+x.id, can=!!(x.has_details||x.has_data), eo=can&&!!ACT.open[ek], by=x.by&&typeof x.by==='string'?x.by:null;
       var mg=x.act==='message'?'<span class="msgic" data-tip="'+tipK(ek+'m','A message to the session, from the dashboard — the full text is in its details')+'">💬</span>':x.act==='edit_text'?'<span class="msgic" data-tip="'+tipK(ek+'m','The line was edited from the dashboard')+'">✎</span>':'';   // #84 / #83
-      prow(ek,'ar le'+(can?' click':'')+(x.dismiss||x.act==='dismiss'?' dm':'')+(x.act==='message'?' msg':''),0,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span>'+entDot(x,ek)+
-        '<span class="ctag'+(x.current?' cur':'')+'" title="'+attr(x.path!=null?(x.path||'(the session)'):'')+'">'+esc(AimbAct.entryTag(x))+'</span>'+mg+'<span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(by?'<span class="by">by '+esc(by)+'</span>':'')+
+      // #88 step 10: the tag's hover names where it was LOGGED (its at, §2.2) when that differs from the node's path now ("logged as …");
+      // a removed child's entry ("show removed") is marked; an entry that ended an attempt says how long it took
+      var at=x.at!=null&&x.path!=null&&String(x.at)!==String(x.path)?String(x.at):null, ptip=x.path!=null?(x.path||'(the session)'):'';
+      prow(ek,'ar le'+(can?' click':'')+(x.dismiss||x.act==='dismiss'?' dm':'')+(x.act==='message'?' msg':'')+(x.removed?' rmd':''),0,'<span class="chv">'+(can?(eo?'▾':'▸'):'')+'</span><span class="tm">'+esc(AimbAct.fmtClock(x.ts,now))+'</span>'+entDot(x,ek)+
+        '<span class="ctag'+(x.current?' cur':'')+(at?' moved':'')+'" title="'+attr((at?'logged as '+at+'\nnow '+ptip:ptip)+(x.current?'\n@ = this entry set the line':''))+'">'+esc(AimbAct.entryTag(x))+'</span>'+(x.removed?'<span class="rmk" title="a removed child (dismissed, expired or emptied) — shown because “show removed” is on">removed</span>':'')+mg+'<span class="ln">'+esc(x.rendered!=null?x.rendered:x.text)+'</span>'+(x.took!=null?'<span class="tk">took '+esc(AimbAct.fmtTook(x.took))+(x.attempts>1?' ('+esc(AimbAct.fmtTook(x.took_total))+' over '+x.attempts+' runs)':'')+'</span>':'')+(by?'<span class="by">by '+esc(by)+'</span>':'')+
         (can?ddMark(x,function(t){ return tipK(ek+'i',t); }):''),   // #86: the same ¶ {} marker as the tree's lines
         can?function(){ ACT.open[ek]=!eo; if(!eo) actLoadEntry(x.id,q.host); actRender(); }:null,
         {kind:'entry',id:x.id,host:q.host||'',path:x.path!=null?x.path:'',session:q.session,project:q.project||'',user:q.user||''},{menu:{kind:'entry',has_path:true}});
       if(eo){ var E=ACT.ents[x.id]||{loading:true};   // #86: built from DOM nodes (details as text, data as the JSON tree) — never HTML from the entry
         prows.push({k:kOf(ek+'|d'),cls:'ad',d:0,sig:ddSig(x.id,E),build:function(el){ ddBuild(el,E,x.id,q.host,{}); }}); } }
     if(oldest) moreRow();
-    if(L) AimbAct.logRows(L.entries,L.sepAt,oldest).forEach(function(r){ if(r.sep) prow(key+'|sep','ar more sep',0,'<span class="chv"></span><span class="nm">— earlier runs —</span>'); else entryRow(r.e); });   // 6c: the run boundary
+    var nNew=L&&!L.earlierMode?AimbAct.newSinceCount(L.entries,L.seenAt):0;   // #88 step 10 (§5.6): "new since you last looked"
+    if(L) AimbAct.logRows(L.entries,L.sepAt,oldest,nNew).forEach(function(r){ if(r.sep) prow(key+'|sep','ar more sep',0,'<span class="chv"></span><span class="nm">— earlier runs —</span>'); else if(r.newsep) prow(key+'|new','ar more newsep',0,'<span class="chv"></span><span class="nm">'+(oldest?'— new since you last looked ↓ —':'— new since you last looked ↑ —')+'</span>'); else entryRow(r.e); });   // 6c: the run boundary
+    // seen:<t> — the newest entry this viewer has had on screen in that node's log (a max register on the bridge, §5.6)
+    if(L&&L.loaded&&L.entries.length&&sel.nid&&ACT.view){ var top=L.entries[0], sn=vget('seen:'+sel.nid); if(top&&top.id&&(!sn||AimbAct.idCmp(top.id,sn)>0)) viewSet('seen:'+sel.nid,top.id); }
     if(!oldest) moreRow();
     var pb=document.getElementById('actpb');
     if(pb){ var anc=ACT.follow?null:logAnchor(pb); actReconcile(pb,prows); logScrollFix(pb,anc,oldest); }
@@ -1905,35 +2174,103 @@
     actMenuClose(true);
     var info=m.info, model=m.model;
     if(it.copy){ var txt=it.copy==='id'?info.id:it.copy==='path'?(info.path||''):it.copy==='session'?info.session:it.copy==='cmd'?model.cmd:''; actCopy(txt||'',it.copy==='cmd'?'the aimb-log command':it.copy==='id'?'the entry id':it.copy==='session'?'the session name':'the path'); return; }
-    if(it.view){ var key=model.id, set=it.view==='pin'||it.view==='unpin'?ACT.pins:ACT.hidden;
-      if(it.view==='pin'||it.view==='hide') set[key]=1; else delete set[key];
-      saveSet(set===ACT.pins?'aimb.act.pins':'aimb.act.hidden',set); actRender(); return; }
-    if(it.pick){ actPickMove(info,model); return; }   // #82: Move to… — a picker of valid targets, then a confirm
+    if(it.view){ var key=model.vt||model.id, pin=it.view==='pin'||it.view==='unpin', on=it.view==='pin'||it.view==='hide';
+      if(ACT.view) viewSet((pin?'pin:':'hide:')+key,on?1:null);   // #88 step 10: your view on the bridge (§5.6)
+      else { var set=pin?ACT.pins:ACT.hidden; if(on) set[key]=1; else delete set[key]; saveSet(pin?'aimb.act.pins':'aimb.act.hidden',set); }
+      actRender(); return; }
+    if(it.pick==='move'){ actPickMove(info,model); return; }     // #82 / #88: Move to… — a picker of targets by id (the depth rules), then a confirm
+    if(it.pick==='merge'){ actPickMerge(info,model); return; }   // #88 step 10: Merge into… — a picker of contexts, then a confirm
+    if(it.dlg==='rename'){ actRenameDlg(info,model); return; }   // #88 step 10: Rename… — a sibling's label → the error inline, with the suggestion
     if(it.dlg==='edit'){ actEditDlg(info,model); return; }      // #83: Edit text… — the line (+ a state), then send
     if(it.dlg==='message'){ actMsgDlg(info,model); return; }    // #84: Message session… — a text box, then send
-    if(it.dlg==='answer'){ actAnswerDlg(info,model); return; }  // #85: Answer… — its choices (+ a text box when free text is allowed)
+    if(it.dlg==='answer'){ actAnswerDlg(info,model); return; }  // #85: Answer… — the question, its choices listed below it as the answers (+ a text box when free text is allowed)
     if(it.act){ if(it.confirm) actConfirm(actConfirmText(it,model),function(){ actDo(info,model,it); }); else actDo(info,model,it); }
   }
-  // #82: MOVE TO… — pick the new parent (every node of the session on that host it may go under, and the session root), then confirm
+  // #82 / #88 step 10: MOVE TO… — pick the new parent (every node of the session on that host and the session root, by id); a
+  // target past the depth limit (32) is GREYED with its reason; one past 20 carries the deep-tree warning into the confirm; a
+  // same-label sibling there is marked (the clash dialog will ask: merge them, or a different label)
   function actPickMove(info,model){
-    var ft=ACT.fullIdx[model.nid], fx=ACT.fullSess[model.sid];
+    var ft=ACT.fullIdx[model.id], fx=ACT.fullSess[model.sid];
     if(!ft||!fx){ actToast('That node has left the board'); return; }
-    var ts=AimbAct.moveTargets(fx.kids,ft,model.session);
-    if(!ts.length){ actToast('Nowhere to move '+info.path+' (a name clash or the depth limit everywhere)'); return; }
+    var g=(ACT.st.units||{})[model.sid]||{}, ts=AimbAct.moveTargets(fx.kids,ft,model.session,selfFor(g,ft.u.host));
+    if(!ts.some(function(x){ return x.ok; })){ actToast('Nowhere to move '+info.path+(ts.length?' (the depth limit everywhere)':'')); return; }
     actDlgClose();
+    var first=-1; ts.forEach(function(x,i){ if(first<0&&x.ok) first=i; });
     var d=document.createElement('div'); d.className='act-dlg';
-    d.innerHTML='<div class="box" role="dialog" aria-modal="true" aria-labelledby="actdlgt"><h3 id="actdlgt">Move '+esc(info.path)+' to…</h3><p>Pick its new parent. It moves with everything under it and goes to the end of its kind there.</p>'+
-      '<select class="act-pick" size="'+Math.min(10,Math.max(3,ts.length))+'" aria-label="the new parent">'+ts.map(function(x,i){ return '<option value="'+i+'"'+(i===0?' selected':'')+'>'+esc(new Array(x.depth+1).join('  ')+x.label)+'</option>'; }).join('')+'</select>'+
+    d.innerHTML='<div class="box" role="dialog" aria-modal="true" aria-labelledby="actdlgt"><h3 id="actdlgt">Move '+esc(AimbAct.shortPath(info.path,60))+' to…</h3><p>Pick its new parent. It moves with everything under it and goes to the end of its kind there. Greyed: too deep (the limit is '+AimbAct.DEPTH_MAX+').</p>'+
+      '<select class="act-pick" size="'+Math.min(12,Math.max(3,ts.length))+'" aria-label="the new parent">'+ts.map(function(x,i){ return '<option value="'+i+'"'+(i===first?' selected':'')+(x.ok?'':' disabled')+' title="'+attr(x.ok?(x.path||'the session root')+(x.deep?' — deep: its deepest node would be at depth '+x.deep:'')+(x.clash?' — "'+x.clash.label+'" is there already: you will be asked':''):x.why)+'">'+esc(new Array(x.depth+1).join('  ')+AimbAct.shortPath(x.label,70)+(x.clash?'  (same label there)':'')+(x.deep&&x.ok?'  (deep)':'')+(x.ok?'':'  — '+x.why))+'</option>'; }).join('')+'</select>'+
       '<div class="btns"><button type="button" class="act-btn" data-dlg="cancel">Cancel</button> <button type="button" class="act-btn danger" data-dlg="ok">Move…</button></div></div>';
     ACT.dlg={el:d,cb:null,prev:document.activeElement};
-    d.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-dlg]'):null; if(b){ var go=b.getAttribute('data-dlg')==='ok', sl=d.querySelector('select'), x=ts[Number(sl&&sl.value)||0]; actDlgClose(); if(go&&x) actConfirmMove(info,model,x.path); } else if(ev.target===d) actDlgClose(); });
+    d.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-dlg]'):null; if(b){ var go=b.getAttribute('data-dlg')==='ok', sl=d.querySelector('select'), x=ts[Number(sl&&sl.value)||0]; actDlgClose(); if(go&&x&&x.ok) actConfirmMove(info,model,x); } else if(ev.target===d) actDlgClose(); });
     d.addEventListener('keydown',function(ev){ if(ev.key==='Escape'){ ev.preventDefault(); actDlgClose(); } });
     document.body.appendChild(d);
     var sl=d.querySelector('select'); if(sl) try{ sl.focus(); }catch(e){}
   }
+  // #88 step 10 (§3.6, §5.4): MERGE INTO… — pick a context of the same session and host; A's line ends, its children move
+  // under B, A becomes a hidden part of B (its history shows in B's log). A clash among the children → the clash dialog
+  function actPickMerge(info,model){
+    var ft=ACT.fullIdx[model.id], fx=ACT.fullSess[model.sid];
+    if(!ft||!fx){ actToast('That node has left the board'); return; }
+    var ts=AimbAct.mergeTargets(fx.kids,ft);
+    if(!ts.length){ actToast('No context to merge '+info.path+' into'); return; }
+    actDlgClose();
+    var d=document.createElement('div'); d.className='act-dlg';
+    d.innerHTML='<div class="box" role="dialog" aria-modal="true" aria-labelledby="actdlgt"><h3 id="actdlgt">Merge '+esc(AimbAct.shortPath(info.path,60))+' into…</h3><p>Pick the context it becomes part of. Its line ends, its children move under that one, and its history shows in that one\'s log. Undo with aimb-log --unmerge.</p>'+
+      '<select class="act-pick" size="'+Math.min(12,Math.max(3,ts.length))+'" aria-label="the node to merge into">'+ts.map(function(x,i){ return '<option value="'+i+'"'+(i===0?' selected':'')+' title="'+attr(x.path)+'">'+esc(new Array(x.depth+1).join('  ')+AimbAct.shortPath(x.label,70))+'</option>'; }).join('')+'</select>'+
+      '<div class="btns"><button type="button" class="act-btn" data-dlg="cancel">Cancel</button> <button type="button" class="act-btn danger" data-dlg="ok">Merge…</button></div></div>';
+    ACT.dlg={el:d,cb:null,prev:document.activeElement};
+    d.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-dlg]'):null; if(b){ var go=b.getAttribute('data-dlg')==='ok', sl=d.querySelector('select'), x=ts[Number(sl&&sl.value)||0]; actDlgClose();
+        if(go&&x) actConfirm({ title:'Merge '+AimbAct.shortPath(info.path,60)+' into '+AimbAct.shortPath(x.path,60)+'?', ok:'Merge', text:'Its line ends and it leaves the board as a node of its own: its children move under '+x.label+' and its history shows in '+x.label+'\'s log. A child whose label is taken there is asked about next.', note:'Logged as "merged by '+actWho()+'"; its session is told. Undo: aimb-log --key … --unmerge.' },function(){ actDo(info,model,{act:'merge',args:{into_id:x.id},into:x}); }); }
+      else if(ev.target===d) actDlgClose(); });
+    d.addEventListener('keydown',function(ev){ if(ev.key==='Escape'){ ev.preventDefault(); actDlgClose(); } });
+    document.body.appendChild(d);
+    var sl=d.querySelector('select'); if(sl) try{ sl.focus(); }catch(e){}
+  }
+  function actWho(){ var h=ACT.st.head||{}; return (h.user||'dashboard')+' via dashboard ('+(h.host||'?')+')'; }
+  // #88 step 10 (§1.6, Q32): the CLASH DIALOG — a move / merge whose node (or one of a merge's children) lands next to a
+  // same-label sibling. Per clash: MERGE THEM (only where a merge is allowed: two contexts — never an agent) or USE A DIFFERENT
+  // LABEL (pre-filled with the suggestion, "Notes (2)"); a "merge them" whose children clash one level down lists those too.
+  // The whole answer goes as ONE action (label + merges); the owner checks it before anything is written, and when the tree
+  // changed meanwhile (clash-changed) the dialog opens again with the fresh list.
+  function actClashDlg(info,model,it,clashes){
+    actDlgClose();
+    var d=document.createElement('div'); d.className='act-dlg', ans={};
+    function item(c,depth){ var id=c.id, can=!!c.can_merge, sug=c.suggestion||c.label;
+      ans[id]=can?'merge':'label';
+      var h='<div class="clash" data-cid="'+attr(id)+'" style="--cd:'+depth+'"><div class="clq"><b>'+esc(c.label)+'</b> — "'+esc(c.sibling&&c.sibling.label||c.label)+'" is there already'+(c.kind==='agent'?' (an agent: only a different label)':'')+'</div>'+
+        (can?'<label class="clo"><input type="radio" name="cl_'+attr(id)+'" value="merge" checked> Merge them — '+esc(c.label)+' becomes part of the one there</label>':'')+
+        '<label class="clo"><input type="radio" name="cl_'+attr(id)+'" value="label"'+(can?'':' checked')+'> Use a different label: <input type="text" class="act-in cll" data-cl="'+attr(id)+'" value="'+attr(sug)+'" maxlength="60" aria-label="the new label of '+attr(c.label)+'"></label>';
+      if(can&&(c.nested||[]).length) h+='<div class="cln" data-nest="'+attr(id)+'"><div class="k">merging them also brings these together:</div>'+(c.nested||[]).map(function(n){ return item(n,depth+1); }).join('')+'</div>';
+      return h+'</div>'; }
+    d.innerHTML='<div class="box wide" role="dialog" aria-modal="true" aria-labelledby="actdlgt"><h3 id="actdlgt">'+(it.act==='merge'?'Merging ':'Moving ')+esc(AimbAct.shortPath(info.path,50))+': '+(clashes.length===1?'a label is taken':clashes.length+' labels are taken')+'</h3><p>Labels are unique among siblings. For each, merge the two, or give the one arriving another label.</p>'+
+      clashes.map(function(c){ return item(c,0); }).join('')+'<div class="dlg-st"><span class="dlg-why" aria-live="polite"></span></div>'+
+      '<div class="btns"><button type="button" class="act-btn" data-dlg="cancel">Cancel</button> <button type="button" class="act-btn primary" data-dlg="ok">'+(it.act==='merge'?'Merge':'Move')+'</button></div></div>';
+    ACT.dlg={el:d,cb:null,prev:document.activeElement};
+    var why=d.querySelector('.dlg-why'), okB=d.querySelector('[data-dlg="ok"]');
+    function walk(list,on,f){ (list||[]).forEach(function(c){ f(c,on); walk(c.nested,on&&ans[c.id]==='merge',f); }); }
+    function collect(){ var merges=[], label=null, bad='';
+      walk(clashes,true,function(c,on){ if(!on) return; var r=d.querySelector('input[name="cl_'+c.id+'"]:checked'), v=r?r.value:ans[c.id]; ans[c.id]=v;
+        if(v==='merge'){ merges.push({id:c.id,into_id:c.sibling.id}); return; }
+        var f=d.querySelector('[data-cl="'+c.id+'"]'), l=f?f.value.replace(/\s+/g,' ').trim():''; if(!l) bad='a new label can\'t be empty'; else if(Array.from(l).length>60) bad='a label is at most 60 characters'; else if(AimbAct.labelKey(l)===AimbAct.labelKey(c.sibling&&c.sibling.label)) bad='"'+l+'" is the label that is taken';
+        if(it.act==='move'&&c.id===model.nid) label=l; else merges.push({id:c.id,label:l}); });
+      return {merges:merges,label:label,bad:bad}; }
+    function upd(){ var c=collect(); okB.disabled=!!c.bad; why.textContent=c.bad;
+      var ns=d.querySelectorAll('[data-nest]'); for(var i=0;i<ns.length;i++) ns[i].hidden=ans[ns[i].getAttribute('data-nest')]!=='merge';
+      return c; }
+    d.addEventListener('change',upd); d.addEventListener('input',upd);
+    d.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-dlg]'):null; if(!b){ if(ev.target===d) actDlgClose(); return; }
+      if(b.getAttribute('data-dlg')!=='ok'){ actDlgClose(); return; }
+      var c=upd(); if(c.bad) return; actDlgClose();
+      var args={}; for(var a in (it.args||{})) args[a]=it.args[a]; if(c.label!=null) args.label=c.label; if(c.merges.length) args.merges=c.merges;
+      actDo(info,model,{act:it.act,args:args,into:it.into,to:it.to,clash:true}); });
+    d.addEventListener('keydown',function(ev){ if(ev.key==='Escape'){ ev.preventDefault(); actDlgClose(); } });
+    document.body.appendChild(d); upd();
+    var f0=d.querySelector('input'); if(f0) try{ f0.focus(); }catch(e){}
+  }
   // #83 / #84 (v1.70.0): a FORM dialog — o = { title, body (HTML: the fields), note, ok, check(d) → { ok, why, n }, max, send(d) }.
   // The counter and the reason update as the viewer types; the send button stays disabled until check() passes; Enter sends from
   // a one-line field, Ctrl/Cmd+Enter from a text box; Escape / Cancel / a click outside closes it; focus stays inside.
+  // #88 step 10: o.sendWait(d, done) keeps the dialog open until the bridge answers — done(why) shows a refusal inline (Rename…)
   function actFormDlg(o){
     actDlgClose();
     var d=document.createElement('div'); d.className='act-dlg';
@@ -1941,10 +2278,12 @@
       '<div class="dlg-st"><span class="dlg-why" aria-live="polite"></span><span class="dlg-n"></span></div>'+(o.note?'<p class="note">'+esc(o.note)+'</p>':'')+
       '<div class="btns"><button type="button" class="act-btn" data-dlg="cancel">Cancel</button> <button type="button" class="act-btn primary" data-dlg="ok">'+esc(o.ok||'OK')+'</button></div></div>';
     ACT.dlg={el:d,cb:null,prev:document.activeElement};
-    var okB=d.querySelector('[data-dlg="ok"]'), why=d.querySelector('.dlg-why'), cnt=d.querySelector('.dlg-n');
-    function upd(){ var c=o.check(d); okB.disabled=!c.ok; why.textContent=c.ok?'':c.why; cnt.textContent=(c.n||0)+' / '+o.max; cnt.className='dlg-n'+(c.n>o.max?' over':''); return c; }
-    function go(){ if(!upd().ok) return; var f=o.send; actDlgClose(); f(d); }
-    d.addEventListener('input',upd); d.addEventListener('change',upd);
+    var okB=d.querySelector('[data-dlg="ok"]'), why=d.querySelector('.dlg-why'), cnt=d.querySelector('.dlg-n'), busy=false, refused='';
+    function upd(){ var c=o.check(d); okB.disabled=!c.ok||busy; why.textContent=refused||(c.ok?'':c.why); cnt.textContent=(c.n||0)+' / '+o.max; cnt.className='dlg-n'+(c.n>o.max?' over':''); return c; }
+    function go(){ if(busy||!upd().ok) return;
+      if(o.sendWait){ busy=true; refused=''; upd(); o.sendWait(d,function(err){ busy=false; if(!err){ if(ACT.dlg&&ACT.dlg.el===d) actDlgClose(); return; } refused=err; upd(); }); return; }
+      var f=o.send; actDlgClose(); f(d); }
+    d.addEventListener('input',function(){ refused=''; upd(); }); d.addEventListener('change',upd);
     d.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('[data-dlg]'):null; if(b){ if(b.getAttribute('data-dlg')==='ok') go(); else actDlgClose(); } else if(ev.target===d) actDlgClose(); });
     d.addEventListener('keydown',function(ev){ var tg=ev.target, ta=tg&&tg.tagName==='TEXTAREA';
       if(ev.key==='Escape'){ ev.preventDefault(); actDlgClose(); }
@@ -1954,13 +2293,31 @@
     document.body.appendChild(d);
     upd();
     var f0=d.querySelector('input,textarea'); if(f0) try{ f0.focus(); if(f0.select&&o.selectAll) f0.select(); }catch(e){}
+    d._upd=upd;
+    return d;
+  }
+  // #88 step 10 (§1.6, §5.4): RENAME… — the node's new label (≤ 60, no control characters); a label a sibling already has is
+  // refused by the owner (duplicate-label) and shown INLINE with the free suggestion ("Notes (2)", a click fills it in)
+  function actRenameDlg(info,model){
+    var cur=model.label||'';
+    var d=actFormDlg({ title:'Rename '+AimbAct.shortPath(info.path||model.name,60), max:60, ok:'Rename', selectAll:true,
+      intro:'Its label — the name the board shows. Its key (and so every script that names it) stays the same.',
+      body:'<label class="dlg-l" for="actRnT">Label</label><input id="actRnT" class="act-in" type="text" autocomplete="off" spellcheck="true" maxlength="200" value="'+attr(cur)+'"><div class="rnsug" hidden></div>',
+      note:'Logged as "renamed by '+actWho()+'"; its old path still finds it (an alias). A transient context becomes permanent.',
+      check:function(dd){ var t=dd.querySelector('#actRnT').value.replace(/\s+/g,' ').trim(), n=Array.from(t).length;
+        if(!t) return {ok:false,n:0,why:'A label can\'t be empty.'}; if(n>60) return {ok:false,n:n,why:'Too long: '+n+' of 60 characters.'}; if(/[\u0000-\u001f\u007f]/.test(t)) return {ok:false,n:n,why:'No control characters.'}; if(t===cur) return {ok:false,n:n,why:'Nothing changed.'}; return {ok:true,n:n,why:''}; },
+      sendWait:function(dd,done){ var t=dd.querySelector('#actRnT').value.replace(/\s+/g,' ').trim();
+        actDo(info,model,{act:'rename',args:{label:t}},function(r){ if(r&&r.ok){ done(null); return; }
+          var sg=r&&r.code==='duplicate-label'&&r.suggestion?String(r.suggestion):null, box=dd.querySelector('.rnsug');
+          if(sg&&box){ box.hidden=false; box.textContent=''; var b=mkEl('button','act-btn ib','Use “'+sg+'”'); b.type='button'; b.addEventListener('click',function(ev){ ev.preventDefault(); var f=dd.querySelector('#actRnT'); f.value=sg; try{ f.dispatchEvent(new Event('input',{bubbles:true})); }catch(e2){ if(dd._upd) dd._upd(); } try{ f.focus(); }catch(e){} }); box.appendChild(mkEl('span',null,'Free: ')); box.appendChild(b); }
+          done(r&&r.code==='duplicate-label'?'"'+t+'" is taken here'+(r.sibling&&r.sibling.key?' (by '+r.sibling.key+')':'')+(sg?' — "'+sg+'" is free.':'.'):((r&&(r.what||r.code))||'refused')); }); } });
     return d;
   }
   // #83: EDIT TEXT… — the line prefilled (its raw text: {progress} etc. stay placeholders), an optional state limited to the node's
   // valid ones; sends edit_text { text, state? }; the owner logs it "<text> (edited by <user> via dashboard (<host>))" and tells the session
   function actEditDlg(info,model){
-    var h=ACT.st.head||{}, who=(h.user||'dashboard')+' via dashboard ('+(h.host||'?')+')', cur=model.cur||null, sts=model.edit_states||[];
-    var nm=model.kind==='session'?'session '+(model.session||info.session):(model.nkind==='agent'?'agent ':'')+AimbAct.dispPath(info.path);
+    var who=actWho(), cur=model.cur||null, sts=model.edit_states||[];
+    var nm=model.kind==='session'?'session '+(model.session||info.session):(model.nkind==='agent'?'agent ':'')+AimbAct.shortPath(AimbAct.dispPath(info.path),60);
     var opts='<option value="">keep '+esc(cur?cur.state:'running')+'</option>'+sts.filter(function(s){ return !cur||s!==cur.state; }).map(function(s){ return '<option value="'+attr(s)+'">'+esc(s)+'</option>'; }).join('');
     actFormDlg({ title:'Edit the line of '+nm, max:AimbAct.EDIT_MAX, ok:'Save', selectAll:true,
       intro:'Sets its current line for its session'+(cur?'':' (it has none yet)')+'. Placeholders such as {progress}, {pct} and {eta} still render.',
@@ -1975,28 +2332,28 @@
   // to the session's inbox (live, else parked for its registration); a script-only session has none: "not delivered"
   function actMsgDlg(info,model){
     var sess=model.session||info.session, p=info.path||'';
-    actFormDlg({ title:'Message '+sess+(p?' about '+AimbAct.dispPath(p):''), max:AimbAct.MSG_MAX, ok:'Send',
+    actFormDlg({ title:'Message '+sess+(p?' about '+AimbAct.shortPath(AimbAct.dispPath(p),50):''), max:AimbAct.MSG_MAX, ok:'Send',
       intro:'Goes to the session\'s inbox (the doorbell wakes it). It reads it as a request from you, relayed by the dashboard: it asks its user before acting on it.',
       body:'<label class="dlg-l" for="actMsgT">Message</label><textarea id="actMsgT" class="act-in" rows="6" spellcheck="true" placeholder="What should the session know or do?"></textarea>',
       note:'The subject (not encrypted) names only the path and your first few words; the text travels in the encrypted body. Logged on the node as "'+((ACT.st.head||{}).user||'dashboard')+' via dashboard: …". Ctrl+Enter sends.',
       check:function(d){ return AimbAct.checkMsg(d.querySelector('#actMsgT').value); },
       send:function(d){ actDo(info,model,{act:'message',args:{text:d.querySelector('#actMsgT').value.replace(/\r\n?/g,'\n').trim()}}); } });
   }
-  // #85 (v1.71.0): ANSWER… — the question, its CHOICES as buttons (one is picked: a radio group) and a text box when free text is
-  // allowed; sends answer { choice?, text? }; the owner logs it "answered by <user> via dashboard (<host>): …", releases a waiting
-  // script and tells the session at once (activity_answer — the answer travels in the encrypted body, never the subject)
-  // #90 (v1.75.0): the same dialog CHANGES the answer of an ANSWERED question (Change answer…, or a click on it): prefilled with the
-  // current answer, Change answer disabled until it differs; sends change_answer { choice?, text? } — logged "answer changed by …",
-  // the previous answer stays in the log, the session hears it at once (activity_answer, status revised)
+  // #85 (v1.71.0) / #88 step 10 (Robin's rule, §5.4 / §5.8): ANSWER… reads like a question in Claude Desktop — the QUESTION on
+  // its own, then its options listed BELOW it as the answers to pick (the structured choices, one per row: a radio list), then
+  // the free-text field when the question allows one. The dialog never restates or parses the options out of the text.
+  // Sends answer { choice?, text? }; the owner logs it "answered by <user> via dashboard (<host>): …", releases a waiting script
+  // and tells the session at once. #90: the same dialog CHANGES the answer of an ANSWERED question (prefilled; Change answer
+  // stays disabled until it differs; the previous answer stays in the log).
   function actAnswerDlg(info,model){
     var q=model.question||{}, ch=q.choices||[], sess=model.session||info.session, chg=q.status==='answered', cur=chg&&q.answer?q.answer:{}, picked=chg&&cur.choice!=null&&ch.indexOf(cur.choice)>=0?cur.choice:null;
-    var who=((ACT.st.head||{}).user||'dashboard')+' via dashboard', qby=AimbAct.byWho(q.by);
-    var body='<p class="qtext">'+esc(model.qtext||'')+'</p>'+
+    var who=actWho(), qby=AimbAct.byWho(q.by);
+    var body='<p class="qtext" id="actAnsQ">'+esc(model.qtext||'')+'</p>'+
       (chg?'<p class="qcur">Current answer: <b>'+esc(AimbAct.answerText(q.answer,300))+'</b>'+(qby||q.at?' <span class="k">— '+esc((qby?'by '+qby:'')+(q.at?(qby?' at ':'at ')+AimbAct.fmtClock(q.at,anow()):''))+'</span>':'')+'</p>':'')+
-      (ch.length?'<div class="dlg-l" id="actAnsL">'+(q.free?'Pick one — or write below':'Pick one')+'</div><div class="qch" role="radiogroup" aria-labelledby="actAnsL">'+ch.map(function(c,i){ return '<button type="button" class="act-btn qc" role="radio" aria-checked="'+(picked===c)+'" data-qc="'+i+'">'+esc(c)+'</button>'; }).join('')+'</div>':'')+
-      (q.free?'<label class="dlg-l" for="actAnsT">'+(ch.length?'Or / and in your own words':'Your answer')+'</label><textarea id="actAnsT" class="act-in" rows="4" spellcheck="true" placeholder="'+(ch.length?'Optional — a note beside the choice, or your own answer':'Write the answer')+'">'+esc(chg&&cur.text?cur.text:'')+'</textarea>':'');
-    var d=actFormDlg({ title:(chg?'Change the answer — ':'Answer '+sess+' — ')+AimbAct.dispPath(info.path), max:AimbAct.ANSWER_MAX, ok:chg?'Change answer':'Answer', body:body,
-      note:chg?'Logged on the question as "answer changed by '+who+': …" — the previous answer stays in the log — and sent to '+sess+' at once (status revised, with the previous answer). A script that already got the first answer is not told again; the question stays answered. The subject (not encrypted) names only the path and the question\'s first words.'
+      (ch.length?'<div class="qopts" role="radiogroup" aria-labelledby="actAnsQ">'+ch.map(function(c,i){ return '<button type="button" class="qopt" role="radio" aria-checked="'+(picked===c)+'" data-qc="'+i+'"><span class="qrad" aria-hidden="true"></span><span class="qol">'+esc(c)+'</span></button>'; }).join('')+'</div>':'')+
+      (q.free?'<label class="dlg-l" for="actAnsT">'+(ch.length?'Something else — or a note beside your choice':'Your answer')+'</label><textarea id="actAnsT" class="act-in" rows="3" spellcheck="true" placeholder="'+(ch.length?'Optional':'Write the answer')+'">'+esc(chg&&cur.text?cur.text:'')+'</textarea>':'');
+    var d=actFormDlg({ title:(chg?'Change the answer':'A question from '+sess)+(info.path?' — '+AimbAct.shortPath(AimbAct.dispPath(info.path),50):''), max:AimbAct.ANSWER_MAX, ok:chg?'Change answer':'Answer', body:body,
+      note:chg?'Logged on the question as "answer changed by '+who+': …" — the previous answer stays in the log — and sent to '+sess+' at once. The subject (not encrypted) names only the path and the question\'s first words.'
         :'Logged on the question as "answered by '+who+': …" and sent to the session at once (a script waiting on it gets it too). The subject (not encrypted) names only the path and the question\'s first words; your answer travels in the encrypted body.'+(q.expires_at?' It expires '+AimbAct.fmtClock(q.expires_at,anow())+'.':''),
       check:function(dd){ var ta=dd.querySelector('#actAnsT'); return chg?AimbAct.checkChange(picked,ta?ta.value:'',q):AimbAct.checkAnswer(picked,ta?ta.value:'',q); },
       send:function(dd){ var ta=dd.querySelector('#actAnsT'), a={}; if(picked!=null) a.choice=picked; var tv=ta?ta.value.replace(/\r\n?/g,'\n').trim():''; if(tv) a.text=tv; actDo(info,model,{act:chg?'change_answer':'answer',args:a}); } });
@@ -2007,17 +2364,19 @@
     var f=d.querySelector('[data-qc]'); if(f&&!q.free) try{ f.focus(); }catch(e){}
     return d;
   }
-  function actConfirmMove(info,model,to){
-    var h=ACT.st.head||{}, who='by '+(h.user||'dashboard')+' via dashboard ('+(h.host||'?')+')', n=model.nNodes||1;
-    actConfirm({ title:'Move '+info.path+' to '+(to||model.session||'the session root')+'?', ok:'Move',
-      text:'It'+(n>1?' and everything under it ('+n+' nodes)':'')+' moves there, at the end of its kind'+(info.plan_item?' (it stays a plan item)':'')+'. Its history goes with it.',
-      note:'Logged as "moved '+who+' from … to …"; its session is told.' },function(){ actDo(info,model,{act:'move',args:{to:to}}); });
+  // a move's confirmation (Move to… and a drop): x = the target { id, path, label, deep?, clash? } — past depth 20 it warns (§1.3)
+  function actConfirmMove(info,model,x){
+    var n=model.nNodes||1, to=x.path||model.session||'the session root';
+    actConfirm({ title:'Move '+AimbAct.shortPath(info.path,50)+' to '+AimbAct.shortPath(to,50)+'?', ok:'Move',
+      text:'It'+(n>1?' and everything under it ('+n+' nodes)':'')+' moves there, at the end of its kind'+(info.plan_item?' (it stays a plan item)':'')+'. Its history goes with it.'+
+        (x.deep?' Deep tree: its deepest node will be at depth '+x.deep+' (over '+AimbAct.DEPTH_WARN+'; the limit is '+AimbAct.DEPTH_MAX+').':'')+(x.clash?' "'+x.clash.label+'" is there already — you will be asked to merge them or pick another label.':''),
+      note:'Logged as "moved by '+actWho()+' from … to …"; its session is told.' },function(){ actDo(info,model,{act:'move',args:{to_id:x.id},to:to}); });
   }
   // the CONFIRMATION text of abandon_plan / finish / dismiss — what happens, and who it is logged as
   function actConfirmText(it,m){
-    var h=ACT.st.head||{}, who='by '+(h.user||'dashboard')+' via dashboard ('+(h.host||'?')+')', n=m.nOpen||0;
-    if(it.act==='abandon_plan') return { title:m.plan_node?'Abandon this plan?':'Abandon the open plan items of '+m.name+'?', ok:'Abandon',
-      text:(n?n+' open item'+(n===1?'':'s')+' (to do / in progress / blocked) become abandoned':'Nothing is still open')+', and the plan'+(m.plan_node?'':'s it holds')+' end'+(m.plan_node?'s':'')+'. Done and skipped items stay as they are.'+(m.agent_ok?' The '+(m.kind==='session'?'session':'agent')+' itself keeps running.':''),
+    var who='by '+actWho(), n=m.nOpen||0;
+    if(it.act==='abandon_plan') return { title:m.plan_node||m.nkind==='context'?'Abandon this plan?':'Abandon the open plan items of '+m.name+'?', ok:'Abandon',
+      text:(n?n+' open item'+(n===1?'':'s')+' (to do / in progress / blocked) become abandoned':'Nothing is still open')+', and the plan'+(m.nkind==='context'?'':'s it holds')+' end'+(m.nkind==='context'?'s':'')+'. Done and skipped items stay as they are.'+(m.nkind!=='context'?' The '+(m.kind==='session'?'session':'agent')+' itself keeps running.':''),
       note:'Logged on each item as "abandoned '+who+'".' };
     if(it.act==='abandon') return { title:'Abandon '+m.name+'?', ok:'Abandon',   // #82: any context, with the cascade
       text:'It becomes abandoned and greyed with everything under it; every OPEN context or plan item under it (to do / in progress / blocked — not inside an agent) is abandoned too. Agents under it keep running.',
@@ -2028,7 +2387,7 @@
     if(it.act==='finish') return { title:'Mark '+m.name+' finished ('+it.args.state+')?', ok:'Mark '+it.args.state,
       text:'It is '+(m.why||'quiet')+'. Its line becomes '+it.args.state+' (its text is kept). Any open plan items it holds stay open.', note:'Logged as "marked finished ('+it.args.state+') '+who+'".' };
     return { title:'Dismiss '+m.name+'?', ok:'Dismiss',
-      text:'It'+(m.nNodes>1?' and everything under it ('+m.nNodes+' nodes)':'')+' leave'+(m.nNodes>1?'':'s')+' the board now, instead of after the 7-day window. Nothing is deleted: its history stays in '+(m.host||'its host')+'\'s day files, and a new report under the same name starts a new run.',
+      text:'It'+(m.nNodes>1?' and everything under it ('+m.nNodes+' nodes)':'')+' leave'+(m.nNodes>1?'':'s')+' the board now, instead of after the window. Nothing is deleted: its history stays in '+(m.host||'its host')+'\'s day files ("show removed" in its parent\'s log), and a new report under the same key starts a new run.',
       note:'Logged as "dismissed from the board '+who+'".' };
   }
   function actDlgClose(){ var d=ACT.dlg; if(!d) return; ACT.dlg=null; if(d.el.parentNode) d.el.parentNode.removeChild(d.el); if(d.prev&&d.prev.focus) try{ d.prev.focus(); }catch(e){} }
@@ -2044,15 +2403,21 @@
     document.body.appendChild(d);
     var cb2=d.querySelector('[data-dlg="cancel"]'); if(cb2) try{ cb2.focus(); }catch(e){}   // a destructive action: Cancel has the focus
   }
-  // one ACTION: pending (a spinner on the row) → ✓ / the error code; the selected log re-reads after a success
-  function actDo(info,model,it){
+  // one ACTION: pending (a spinner on the row) → ✓ / the error code; the selected log re-reads after a success. #88 step 10: the
+  // node BY ID ({host, session, project, user, id, action, args} — the owner applies it, here or over the hub link, §6.3); a
+  // move / merge refused for a same-label sibling (duplicate-label, or clash-changed when the tree moved meanwhile) opens the
+  // CLASH DIALOG with the owner's fresh list; done(result) = a dialog waiting on the answer (Rename…)
+  function actDo(info,model,it,done){
     var fid=model.fbId, label=AimbAct.ACTION_DONE[it.act]||it.act;
     ACT.fb[fid]={st:'pending',label:it.act==='dismiss'?'dismissing':it.act==='finish'?'finishing':'working',at:Date.now()}; actRender();
     var args={stale_min:actStaleMin()}; for(var a in (it.args||{})) args[a]=it.args[a];   // stale_min: "stale" is what this viewer's slider says
-    actActReq({host:info.host,session:info.session,project:info.project,user:info.user||'',path:info.path||'',action:it.act,args:args},function(r){
-      if(r&&r.ok){ ACT.fb[fid]={st:'ok',label:label,at:Date.now(),warn:r.warnings&&r.warnings.indexOf('plan-ended')>=0?'its plan is still ended — reopen the plan too':''};
+    actActReq({host:info.host,session:info.session,project:info.project,user:info.user||'',id:model.nid||info.nid||'',action:it.act,args:args},function(r){
+      if(done) done(r);
+      if(r&&r.ok){ ACT.fb[fid]={st:'ok',label:label,at:Date.now(),warn:r.warnings&&r.warnings.indexOf('plan-ended')>=0?'its plan is still ended — reopen the plan too':r.warnings&&r.warnings.some(function(w){ return w&&w.code==='deep-tree'; })?'a deep tree now':''};
         if(r.dismissed) actToast('Dismissed '+(model.name||info.path)+' — '+r.dismissed.nodes+' node'+(r.dismissed.nodes===1?'':'s')+' off the board (history kept)');
-        if(it.act==='move') actToast('Moved '+info.path+' to '+(r.to||info.session||'the session root'));   // #82: the row itself is now under its new parent
+        if(it.act==='move'&&!r.into_id) actToast('Moved '+info.path+' to '+(r.to||it.to||info.session||'the session root'));   // #82: the row itself is now under its new parent
+        if(r.into_id) actToast('Merged '+info.path+' into '+(r.into||(it.into&&it.into.path)||'it'));   // #88 step 10
+        if(it.act==='rename') actToast('Renamed to “'+(r.label||it.args.label)+'”');
         if(it.act==='message'){ var sn=model.session||info.session;   // #84: did it reach an inbox?
           if(r.delivered===false){ ACT.fb[fid]={st:'ok',label:'logged',warn:'not delivered: the session has no inbox',warnOnly:true,at:Date.now()}; actToast('Not delivered: '+sn+' has no inbox (a script-only session) — the message is logged on the node'); }
           else actToast(r.delivery==='parked'?'Message parked for '+sn+' (offline) — it gets it when it registers again':'Message sent to '+sn); }
@@ -2063,6 +2428,9 @@
           if(r.delivered===false){ ACT.fb[fid]={st:'ok',label:'answer changed',warn:'not delivered: the session has no inbox',warnOnly:true,at:Date.now()}; actToast('Answer changed — '+sn3+' has no inbox: the new answer is on the board'); }
           else actToast('Answer changed — '+(r.delivery==='parked'?sn3+' gets it when it registers again':sn3+' was told')); }
         actPollSel(); }   // #87: the action's entry is merged in (the reader keeps their place; 6d re-read the whole log)
+      else if(r&&(r.code==='duplicate-label'||r.code==='clash-changed')&&(it.act==='move'||it.act==='merge')&&Array.isArray(r.clashes)&&r.clashes.length){   // §1.6 / Q32: ask
+        delete ACT.fb[fid]; if(r.code==='clash-changed') actToast('The tree changed meanwhile — look again');
+        actClashDlg(info,model,it,r.clashes); }
       else ACT.fb[fid]={st:'err',code:(r&&r.code)||'error',what:(r&&r.what)||'',at:Date.now()};
       actRender();
     },function(q){ if(ACT.fb[fid]) ACT.fb[fid].queued=q; actRender(); });
@@ -2117,12 +2485,12 @@
       ACT.drag={id:id,k:el.getAttribute('data-k'),info:ACT.rowInfo[el.getAttribute('data-k')]||{}}; el.classList.add('dragging');
       try{ if(ev.dataTransfer){ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain',ACT.drag.info.path||''); } }catch(e){} });
     tree.addEventListener('dragover',function(ev){ var x=actDropOf(ev); actDropClear(); if(!x) return; ev.preventDefault(); try{ if(ev.dataTransfer) ev.dataTransfer.dropEffect='move'; }catch(e){}
-      x.el.classList.add(x.plan.act==='move'?'drop-in':x.plan.args.before?'drop-before':'drop-after'); });
+      x.el.classList.add(x.plan.act==='move'?'drop-in':x.plan.args.before_id?'drop-before':'drop-after'); });
     tree.addEventListener('dragleave',function(ev){ if(ev.target===tree) actDropClear(); });
     tree.addEventListener('drop',function(ev){ var x=actDropOf(ev); actDropClear(); var d=ACT.drag; ACT.drag=null; if(!x||!d) return; ev.preventDefault();
-      var model={fbId:x.drag.u.id,nid:x.drag.u.id,sid:null,session:d.info.session,nNodes:AimbAct.countNodes(x.drag)}, info=d.info;
+      var model={fbId:x.drag.u.id,id:x.drag.u.id,nid:x.drag.u.node_id,sid:null,session:d.info.session,nNodes:AimbAct.countNodes(x.drag)}, info=d.info;   // #88 step 10: by id
       if(x.plan.act==='reorder') actDo(info,model,{act:'reorder',args:x.plan.args});
-      else actConfirmMove(info,model,x.plan.args.to); });
+      else { var c=x.plan.check||{}; actConfirmMove(info,model,{id:x.plan.args.to_id,path:x.plan.to,deep:c.deep||null,clash:c.clash?{id:AimbAct.nidOf(c.clash),label:c.clash.label||c.clash.name}:null}); } });   // a same-label sibling there → the clash dialog after the confirm
     tree.addEventListener('dragend',function(){ actDropClear(); var xs=tree.querySelectorAll('.dragging'); for(var i=0;i<xs.length;i++) xs[i].classList.remove('dragging'); ACT.drag=null; });
   }
   function wireActivity(){
@@ -2134,8 +2502,9 @@
         if(pa==='close'){ actClearSel(); actRender(); } else if(pa==='refresh') actRefreshSel();
         else if(pa==='order') actSetOrder(ACT.logOrder==='newest'?'oldest':'newest');   // #87: the order toggle (kept per viewer)
         else if(pa==='new'){ ACT.follow=true; ACT.newN=0; actRender(); }   // #87: the "N new ↓" chip — jump to the newest and follow again
-        else if(pa==='det'){ ACT.detOpen=!ACT.detOpen; actRender(); }   // #86: show / hide the details section
-        else if(b.getAttribute('data-ph')&&ACT.sel){ var s2={}; for(var x in ACT.sel) s2[x]=ACT.sel[x]; s2.host=b.getAttribute('data-ph'); actSelect(s2); } }); }
+        else if(pa==='det'){ ACT.detOpen=!ACT.detOpen; viewSet('fold:details',ACT.detOpen?1:0); actRender(); }   // #86: show / hide the details section; #88 step 10: the view's fold:details (applied at the next load, Q30)
+        else if(pa==='removed') actSetRemoved(!ACT.showRemoved);   // §5.1: show removed (opt:show_removed)
+        else if(b.getAttribute('data-ph')&&ACT.sel){ var s2={}; for(var x in ACT.sel) s2[x]=ACT.sel[x]; s2.host=b.getAttribute('data-ph'); var g2=(ACT.st.units||{})[s2.sid]; if(g2){ var se2=selfFor(g2,s2.host); s2.nid=se2.node_id||null; } actSelect(s2); } }); }
     document.addEventListener('mousedown',function(ev){ if(ACT.menu&&!(ev.target&&ev.target.closest&&ev.target.closest('.act-menu'))) actMenuClose(false); });
     document.addEventListener('keydown',function(ev){ if(ev.key==='Escape'&&ACT.menu){ ev.preventDefault(); actMenuClose(true); } });
     document.addEventListener('click',function(ev){ var b=ev.target&&ev.target.closest?ev.target.closest('.act-menu .mi'):null; if(b){ ev.preventDefault(); actMenuRun(Number(b.getAttribute('data-mi'))); } });
@@ -2145,15 +2514,16 @@
       else if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); if(i>=0) actMenuRun(Number(mis[i].getAttribute('data-mi'))); }
       else if(ev.key==='Tab'){ actMenuClose(false); } });
     window.addEventListener('resize',function(){ actMenuClose(false); }); window.addEventListener('blur',function(){ actMenuClose(false); });
+    window.addEventListener('pagehide',function(){ viewFlush(); });   // #88 step 10: a debounced view change is not lost when the page goes
     document.addEventListener('scroll',function(){ actMenuClose(false); },true);
     ACT.pins=loadSet('aimb.act.pins'); ACT.hidden=loadSet('aimb.act.hidden');   // 6d: view-only, per browser
     actLoadOrder();   // #87: the log order, per viewer (oldest first unless this browser chose newest first)
     var ao=document.getElementById('actActive');
     try{ ACT.activeOnly=localStorage.getItem('aimb.act.active')==='1'; }catch(e){}
-    if(ao){ ao.checked=ACT.activeOnly; ao.addEventListener('change',function(){ ACT.activeOnly=ao.checked; try{ localStorage.setItem('aimb.act.active',ao.checked?'1':'0'); }catch(e){} actRender(); }); }
+    if(ao){ ao.checked=ACT.activeOnly; ao.addEventListener('change',function(){ ACT.activeOnly=ao.checked; if(!viewSet('opt:active_only',ao.checked?true:null)) try{ localStorage.setItem('aimb.act.active',ao.checked?'1':'0'); }catch(e){} actRender(); }); }   // #88 step 10: opt:active_only in your view (Q38)
     var pf=document.getElementById('actPlans');   // 6c: the Plans filter (remembered per browser, like active only)
     try{ ACT.plansOnly=localStorage.getItem('aimb.act.plans')==='1'; }catch(e){}
-    if(pf){ pf.checked=ACT.plansOnly; pf.addEventListener('change',function(){ ACT.plansOnly=pf.checked; try{ localStorage.setItem('aimb.act.plans',pf.checked?'1':'0'); }catch(e){} actRender(); }); }
+    if(pf){ pf.checked=ACT.plansOnly; pf.addEventListener('change',function(){ ACT.plansOnly=pf.checked; if(!viewSet('opt:plans_only',pf.checked?true:null)) try{ localStorage.setItem('aimb.act.plans',pf.checked?'1':'0'); }catch(e){} actRender(); }); }   // #88 step 10: opt:plans_only
     var sl=document.getElementById('actStale');
     if(sl) sl.addEventListener('input',function(){ ACT.staleMin=Number(sl.value)||15; actStaleLabel(); actRender(); });
     actStaleLabel();
@@ -2165,9 +2535,17 @@
     for(var i=0;i<segs.length;i++) segs[i].addEventListener('click',function(ev){ var l=ev.currentTarget.getAttribute('data-l'); ACT.defLevel=l; Object.keys(ACT.levels).forEach(function(k){ ACT.levels[k]=l; });
       AimbAct.buildTree(ACT.st.units||{},{}).forEach(function(p){ ACT.levels[p.key]=l; }); actRender(); });
     var ex=document.getElementById('actExpand'), co=document.getElementById('actCollapse');
-    if(ex) ex.addEventListener('click',function(){ var projs=AimbAct.buildTree(ACT.st.units||{},{activeOnly:ACT.activeOnly,plansOnly:ACT.plansOnly}); projs.forEach(function(p){ ACT.levels[p.key]='all'; p.sessions.forEach(function(x){ ACT.open['sess|'+x.s.key]=true; }); });
-      allNodeIds(projs).forEach(function(id){ ACT.open[id]=true; }); ACT.defLevel='all'; actRender(); });   // every session and every node, at any depth
-    if(co) co.addEventListener('click',function(){ ACT.open={}; allNodeIds(AimbAct.buildTree(ACT.st.units||{},{})).forEach(function(id){ ACT.open[id]=false; }); actRender(); });   // 6c: closed for good (plan nodes too — not back to their default)
+    // #88 step 10 (§5.6, H17): Expand all / Collapse all = ONE view record (all {o:1|0}) — it covers every node created before it
+    // that has no newer open: choice; a node created later takes its default. Without a view: this page's own choices (6c).
+    if(ex) ex.addEventListener('click',function(){ var projs=AimbAct.buildTree(ACT.st.units||{},{activeOnly:ACT.activeOnly,plansOnly:ACT.plansOnly}); projs.forEach(function(p){ ACT.levels[p.key]='all'; });
+      if(viewSet('all',{o:1})) ACT.open={}; else { projs.forEach(function(p){ p.sessions.forEach(function(x){ ACT.open['sess|'+x.s.key]=true; }); }); allNodeIds(projs).forEach(function(id){ ACT.open[id]=true; }); }
+      ACT.defLevel='all'; actRender(); });   // every session and every node, at any depth
+    if(co) co.addEventListener('click',function(){ if(viewSet('all',{o:0})) ACT.open={}; else { ACT.open={}; allNodeIds(AimbAct.buildTree(ACT.st.units||{},{})).forEach(function(id){ ACT.open[id]=false; }); } actRender(); });   // 6c: closed for good (plan nodes too — not back to their default)
+    // #88 step 10 (§5.6): RESET VIEW — every choice of yours (pins, hidden, open / closed, options, last seen) back to the defaults, everywhere
+    var rv=document.getElementById('actReset');
+    if(rv) rv.addEventListener('click',function(){ if(!ACT.view){ actToast('This bridge keeps no view for you (not a 2.0 gateway)'); return; }
+      actConfirm({ title:'Reset your view?', ok:'Reset view', text:'Your pins, hidden rows, open / closed choices, Expand / Collapse all, the options (active only, plans, log order, show removed) and what you last saw go back to the defaults — on every dashboard of yours, on every host.', note:'Your view belongs to '+(ACT.viewUser||'this login')+' (this gateway\'s OS login). The board itself does not change.' },
+        function(){ viewSet('reset',1); ACT.open={}; ACT.showHidden={}; actApplyOpts(); viewFlush(); actRender(); actToast('View reset'); }); });
     var lg=document.getElementById('actlegend');
     if(lg){ var t=Date.now(), mk=function(st,label){ var e=st==='running'||st==='blocked'?{state:st,live:true,staleAt:t+6*60000,win:10*60000}:{state:st,live:false,gone:st==='gone'}; return '<span>'+AimbAct.glyphSvg(e,t)+label+'</span>'; };
       var sk=function(k,label){ return AimbAct.sessGlyph(k,{state:'running',live:true,staleAt:t+6*60000,win:10*60000},t,{title:label}); };   // #79
@@ -2179,7 +2557,9 @@
         '<span>· click a row to see its details and its log (¶ = its line has details, {} = data; the log runs oldest first — ⇅ in its header for newest first) · right-click (Menu key / Shift+F10; long-press on touch) for its actions · 📌 pinned · “N hidden — show” under a parent (pin / hide stay in this browser)</span>'+
         '<span>· order: plan items first, then contexts, then agents · drag a row onto a sibling to reorder it, onto another node to move it there (or right-click → Move up / down / to…) · a plan item shows the agent working on it · everything under an abandoned node is greyed</span>'+   // #82
         '<span>· right-click → Edit text… sets a line for its session (✎ until it reports again) · Message session… writes to the session about that node (💬 in the log)</span>'+   // #83 / #84
-        '<span>'+AimbAct.questionGlyph('asked')+AimbAct.questionGlyph('answered')+AimbAct.questionGlyph('withdrawn')+'question: awaiting an answer (click it to answer) · answered · expired / withdrawn · <span class="qbadge">? 2</span> = open questions below a collapsed row</span>'; }   // #85
+        '<span>'+AimbAct.questionGlyph('asked')+AimbAct.questionGlyph('answered')+AimbAct.questionGlyph('withdrawn')+'question: awaiting an answer (click it to answer) · answered · expired / withdrawn · <span class="qbadge">? 2</span> = open questions below a collapsed row</span>'+   // #85
+        '<span>· ☰ a plan (its bar is its items) · ▤ a group (a list, not a plan: a count where the bar would be) · ⚑ a test run (<span class="pb tests lgb"><i class="tp" style="width:50%"></i><b class="tf" style="width:20%"></b></span> passed · failed of its tests) · ◌ transient (goes when emptied) · “took 4m 12s” / “running 3m” = its time</span>'+   // #88 step 10
+        '<span>· your VIEW (pins, hidden, open / closed, options) is kept on the bridge for your login and follows you to every dashboard · a row you closed shows <span class="nbadge">3 new</span> / <span class="qbadge">? 1</span> instead of reopening · “— new since you last looked —” in a log · right-click → Rename… / Merge into… / Move to… (a label already there: merge them, or another label)</span>'; }
     document.addEventListener('visibilitychange',actSync);
   }
 
@@ -2190,7 +2570,9 @@
     ws.onopen=function(){ ws.send(JSON.stringify({type:'hello',kind:'dashboard',instance:'dash-'+Math.random().toString(16).slice(2,8),token:token})); };
     ws.onmessage=function(ev){ var m; try{ m=JSON.parse(ev.data);}catch(e){return;}
       if(m.project_names) PN=m.project_names;   // #71: the canonical project spellings ride welcome + every roster push
-      if(m.type==='welcome'){ pip.classList.add('on'); backoff=1000; gw.textContent='gateway: '+m.gateway; renderProf(m); last=m; setComputers(m); setTables(m); drawMap(m); ACT.on=false; actSync(); }   // #70 step 5: re-subscribe on a new socket
+      if(m.type==='welcome'){ pip.classList.add('on'); backoff=1000; gw.textContent='gateway: '+m.gateway; renderProf(m); last=m; setComputers(m); setTables(m); drawMap(m); if(m.view) actViewInit(m.view); ACT.on=false; actSync(); }   // #70 step 5: re-subscribe on a new socket; #88 step 10: this gateway's user's VIEW (§5.6)
+      else if(m.type==='view'){ actViewPush(m.recs); }   // #88 step 10: a view change made elsewhere (another window, another host)
+      else if(m.type==='view_refused'){ (m.refused||[]).forEach(function(x){ try{ console.warn('view_set refused',x); }catch(e){} }); }
       else if(m.type==='activity_board'||m.type==='activity_delta'||m.type==='activity'||m.type==='activity_queued'||m.type==='activity_action'){ actOnMsg(m); }   // 6d: + an action's answer
       else if(m.type==='roster'){ last.sessions=m.sessions; last.pages=m.pages; last.hosts=m.hosts||last.hosts; last.gateway=m.gateway||last.gateway; setComputers(last); setTables(last); drawMap(last); }
       else if(m.type==='persistence'){ setPersistence(m.snapshot); }

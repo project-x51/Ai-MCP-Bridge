@@ -15,7 +15,9 @@ conversion library — Robin accepted its Q63 – Q65 as built; step 5 the migra
 the bridge files into the gateway behind the pre-cutover switch `AI_BRIDGE_ACTIVITY_V2` — Robin accepted its Q69 as built; step 7
 built gossip v6 behind the same switch — Robin changed its Q70 (a 1.7x host is a serious issue, shown in red); step 8 built
 the per-user view state (and Q70's `unshared_hosts`) behind the same switch — Robin accepted its Q71 as built; step 9
-removed the switch (the gateway runs 2.0 only) and built the 2.0 tool, script and guides — its Q72 – Q73 are open).
+removed the switch (the gateway runs 2.0 only) and built the 2.0 tool, script and guides — its Q72 (build the four missing
+1.7x behaviours in step 10) and Q73 (accepted as built) were decided overnight as recommended, for Robin to review; step 10
+built the dashboard on the 2.0 board and Q72's behaviours — its Q74 – Q77 are open).
 The agreed design is in
 `docs/issues.md` "#88"; this spec makes it exact. Code references are to v1.72.0 (`src/lib/activity.js` unless another file is
 named); the guide references (#89) are to v1.74.0.
@@ -1733,6 +1735,100 @@ existing checks keep passing while the core is written.
     defaults, a closed node gaining activity → badge not reopen, Expand all then a new node → default, the divider, Reset
     view, the import, drag-and-drop by id, a drop onto a same-label sibling opening the dialog (both answers; "merge them"
     hidden for an agent; a nested clash listed).
+
+    **10 as built** (2026-10-04): the dashboard runs on the 2.0 board, and Q72's four missing 1.7x behaviours are rebuilt.
+    No version bump (2.0.0 is step 12); no new config key. The 1.7x code paths stay unreached (step 11 deletes them).
+    THE UNITS (new `src/lib/activity2-dash.js`, pure): `dashUnits2({ state, host, remote, project, kindOf })` = this host's
+    sessions + every held remote session (gossip v6), MERGED per session across hosts as 1.7x's dashboard did — ONE unit per
+    session group (`["s", groupKey]`: names, host | hosts + multi_host + home, created_at / last_activity, gone_at when
+    every copy is gone, bell, hosts_down, client_kind, and each host's ROOT as `self` (the host that set a headline most
+    recently) / `selves`, with its `node_id`) and ONE unit per visible node (`["n", groupKey, lc(host), nodeId]`: node_id,
+    parent_id — the root's id at the top level —, key / scope / label / path / depth, nkind, type, the effective rank
+    (stored or derived — the page sorts as childrenOf2), bar2 (none for a group / question), a test-run's `tests`
+    (testBar2), `took` (timing2 WITHOUT a clock: an open attempt carries started_at and the page shows "running …"), the
+    MENU (below), edit states, plan item / plan node / plan end, the RAW state — reported, or `gone` (+ was) for an agent /
+    root whose session left or whose host is down —, raw times, the line without details / data, progress, ETA, the kept
+    test-result, transient, log.total). No unit changes because time passed. `planDashDelta2` = 1.7x's delta (per
+    dashboard, ≤ 1 per ACT_GOSSIP_MS). A RENAME or MOVE keeps every unit id (the descendants' paths follow), so the
+    selection and the view records survive. `dashTypes2()` = the type registry the page needs (kind, glyph, show, each menu
+    action's label + group), sent with every FULL board as `types`. MENUS (#92 in the registry): `lib/activity2.js
+    menuStatic2` = menuOf2 without the clock — every entry whose `when` holds, except `finish` / `dismiss`, which carry
+    "finish|quiet" / "dismiss|quiet-tree" for the page to check against the VIEWER's stale slider (their slider-free parts —
+    not finished; not part of an open plan — checked by the bridge).
+    THE GATEWAY (`bridge.mjs`): `activity_sub` pushes the 2.0 board (the `not-in-2.0-yet` answer is gone); the head adds
+    `format: 6`, `view_user` (Q29 / Q41), `unshared_hosts` (Q70) and `fs_warnings`; the dashboards are kicked by a remote
+    slice, a host going down / its link lost / expired and a change of the unshared list, besides every local change.
+    THE PAGE (`dashboard.html`, the Activity view): the tree links by node_id / parent_id; rows show the LABEL (no "@"), the
+    type's glyph (☰ plan, ▤ group, ⚑ test run), ◌ for a transient context, and in the bar column what the type shows — a
+    bar, a GROUP's count of its children ("4 items", "3 open · 1 done"; abandoned and the viewer's hidden rows not counted),
+    a TEST-RUN's ONE bar of its tests (passed green, failed red, the counts in its tooltip, Q56) or nothing for a question
+    (its pills say); its TIME after the line ("took 4m 12s", "running 3m"; Q74). Long paths are shortened in the middle in
+    dialogs and the panel title (the full path on hover). The RIGHT-CLICK MENU = the unit's menu labelled by the registry,
+    separators between groups, Move up / Move down beside Move to…, then the copies and Pin / Hide. Actions go BY ID
+    (`{host, session, project, user, id, action, args}` — to_id, before_id / after_id, into_id; §6.3). MOVE TO… lists every
+    node of the session on that host and the session root, a target past depth 32 GREYED with its reason, one past 20
+    marked deep (the confirm repeats the warning), one holding a same-label sibling marked. MERGE INTO… = a picker of the
+    session's contexts on that host, then a confirm. RENAME… stays open until the owner answers: a sibling's label →
+    `duplicate-label` shown INLINE with the free suggestion as a "Use “Notes (2)”" button. THE CLASH DIALOG (§1.6, Q32): a
+    move / merge refused `duplicate-label` (or `clash-changed`: the tree moved meanwhile — it reopens with the fresh list)
+    opens it from the owner's `clashes`: per clash "Merge them" (only when `can_merge`; never for an agent) or "Use a
+    different label" pre-filled with the suggestion; a "merge them" lists the clashes it makes one level down; the answer
+    goes as ONE action (`label` + `merges`). Where the page already sees the clash (Move to… / a drop onto a node holding a
+    same-label sibling), the clash dialog IS the confirmation — no plain "Move …?" before it (Q76). THE ANSWER DIALOG
+    (Robin's rule, §5.4 / §5.8): the question on its own, then its choices listed BELOW it as the answers (one radio row
+    each), then the free-text field when the question takes one — it never restates the options. Q70: each
+    `unshared_hosts` entry is a RED row at the top of the board — "LITTLE-001 is still on 1.7x (1.75.1): not on this
+    board" — its hover saying why and since when; `fs_warnings` are amber rows. The header tag adds "view: <user>".
+    THE PER-USER VIEW (§5.6): the welcome's `view` seeds it; every choice goes into it at once and to the bridge in a
+    DEBOUNCED `view_set` (1 s; flushed when the page goes; a reset drops what is queued and goes first); `{type:"view"}`
+    pushes apply the TREE choices live — pins, hidden, open / closed, `all`, `reset`, the options — while `sel` and
+    `fold:details` are applied only at the page's first load (Q30) and `seen:` merges silently. Open / closed: an explicit
+    `open:<t>` (a close keeps the subtree's entry count and open questions, H16) beats the default, and Expand all /
+    Collapse all write ONE `all` record (a node created later takes its default, H17). A node the viewer CLOSED shows "? N"
+    (questions since the close) else "N new" (entries since the close) — new activity never reopens it; a node closed by
+    default keeps 6d's "? N". The log panel draws "— new since you last looked —" above the entries newer than the node's
+    `seen:<t>` as it was when the log opened, and the newest entry the panel shows becomes `seen:<t>` (Q75). Reset view
+    (a button, after a confirm) writes `reset`. The options — active only, plans only, the log order, show removed — are
+    `opt:` records. The ONE-TIME IMPORT (Q13): on the first board with a view, this browser's `aimb.act.pins` /
+    `aimb.act.hidden` (1.7x unit ids) are mapped to targets by the units' paths (`@"Next release"/@Docs` → `Next
+    release/Docs`, same session group + host; a session's unit id is unchanged) and sent as `pin:` / `hide:`; its 1.7x
+    options (active only, plans, newest first) become `opt:` records when the view has none; then those keys are
+    removed. Pins / hidden / open / sel target a node's id (a session row: its unit id; a session SELECTION: its root's id
+    on that host). THE LOG: "show removed" is a panel button (`opt:show_removed` → `removed:true` on the page query; a
+    removed child's entry is marked "removed"); "show earlier runs" as 6c; an entry's tag is its path below the selected
+    node ("here" for the node itself, a leading "@" when it set the line — Q77), its hover the full path and "logged as …"
+    when `at` differs from the path now; an entry that ended an attempt shows its `took`. The copy command names the node
+    by key: an agent `--agent <its chain>`, a context `[--agent <scope>] --key <key>`, else `--id <id>`, with
+    `--text "@<text>"`.
+    Q72 (built here, decided overnight as recommended): `lib/activity2.js` `markSessionGone2` (the session, its agents and
+    root `gone_at`, in memory only, as 1.7x: nothing written, the replay never sets it), `setBells2`, `autoAbandon2` (a
+    session not live — off this host's roster — and quiet for `abandoned_plan_days` since gone_at, else its last activity:
+    its open plans abandoned deepest first, attributed to the bridge, "abandoned by the bridge — the session has been gone
+    N days"), `estimateBytes2` / `enforceBudget2` (1.7x's estimate extended to 2.0's fields, the held remote boards
+    counted, never evicted: the oldest finished agents / ended plans evicted — `remove` why `evict`, WRITTEN, unlike 1.7x,
+    so the replay agrees — then the oldest in-memory log entries dropped, nothing written; `log_floor` not moved); `touch`
+    also clears the session's gone mark; `expire2` also expires an agent gone past `finished_visible_hours` and a GONE
+    session past it with no open plan (one `remove` of the root, why `expire`). The store wraps them (`markGone`,
+    `setBells`, `autoAbandon`, `budget`) and its board rows show a local gone like a remote one (`goneRow2`). The gateway:
+    `syncActivityGone` (a session whose sub-peer left this host's roster → gone; back on the roster or a report → cleared;
+    a script-only session is never marked), `syncActivityBells` (listener leaves + the re-arm grace), and on each
+    ACT_GC_MS tick (`actGc2`): auto-abandon, the expiry pass, the budget (also every 50 reports), as 1.7x.
+    Tests: `tests/unit/test_activity10_unit.mjs` (new: the units by id, the root on the session unit, deltas by id — a
+    report, a rename and a move keeping every id, a merge / transient vanish removing units, time never changing a unit —,
+    the type fields, the menus incl. finish / dismiss marks, gone and host down, the merged multi-host session, client kind
+    and project spelling, dashTypes2), `tests/unit/test_activity_q72_unit.mjs` (new: the four behaviours, expiry of a gone
+    agent / session, an open plan protecting both, the abandon attribution + a replay of its writes, the budget's evictions
+    and log drops, touch clearing gone, setBells2), `tests/activity/test_dashboard_activity.mjs` (jsdom, PORTED to the 2.0
+    units built by the real library: see its header for what was retired and what step 10 added — the spec's list above,
+    Q70's red row, the Answer dialog, the tests bar, group counts, time, show removed, Rename's inline suggestion, Merge
+    into…), `tests/activity/test_activity_dashboard_live.mjs` (the board PUSHES restored on 2.0: a full board with the 2.0
+    head and the registry, units by the owner's node id, raw, client_kind, deltas ≤ 1/s chained and minimal, the folded
+    view = a fresh board, the seq-gap resync, nested + plan-item deltas, a rename and a move from the dashboard keeping
+    every unit id, the page leaf getting no pushes, unsubscribe; Q72: a session that left shows gone and is cleared when it
+    registers again, the bell on the remote and owner's board, cleared after the grace, a local doorbell) and
+    `tests/activity/test_activity_6c_live.mjs` (part 3, AUTO-ABANDON, restored on 2.0). Left for later: deleting the 1.7x
+    page code paths that no unit reaches any more (`menuFor17`, the host version gates — step 11); the release (12).
+    Questions Q74 – Q77 (§9).
 11. **Delete the old machinery** (unused by now): #82's path code — `rekeySubtree`, `applyMove`'s re-keying, `remapSegs`,
     `remapGone`, `ensureIn`'s move use, `foreign`, `goneAt`, `deadAt`'s move clause, `sealRuns` / `sealNode`'s `except` /
     `recTs` / `own`, `movedAt`, `mv` / `mvAlias`, `node.moved` + `pt.m`, `nodeAliases`, `matchAlias`, `fileEntryMatches`' path
@@ -1754,7 +1850,7 @@ existing checks keep passing while the core is written.
 
 ### Decisions (Robin, 2026-10-03)
 Q01 – Q28 answer the first draft, Q29 – Q39 the revision, Q40 – Q41 the final pass, Q43 a design Robin added during the
-build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built), Q69 that of step 6 (accepted as built), Q70 that of step 7 (changed: built in step 8) and Q71 that of step 8 (accepted as built) — step 9's Q72 – Q73 are under "Open questions"; GROUPS, ROLLUP and TYPES are decisions
+build and Q44 / Q45 / Q11b its follow-ups, Q46 the question build step 2a raised, Q47 – Q49 those of step 2b (accepted as built), Q50 – Q55 those of step 2c (accepted as built), Q56 – Q60 those of step 2d (Q56 and Q57 changed), Q61 / Q62 those of step 3, Q63 – Q65 those of step 4 (accepted as built), Q66 – Q68 those of step 5 (accepted as built), Q69 that of step 6 (accepted as built), Q70 that of step 7 (changed: built in step 8) and Q71 that of step 8 (accepted as built), Q72 – Q73 those of step 9 (decided overnight as recommended, for Robin to review) — step 10's Q74 – Q77 are under "Open questions"; GROUPS, ROLLUP and TYPES are decisions
 Robin made in chat during the build; C1 / C2 are the two follow-ups Robin
 confirmed in chat. A later
 answer overrides an earlier one (noted in the earlier row).
@@ -1832,6 +1928,8 @@ answer overrides an earlier one (noted in the earlier row).
 | 69 | (build step 6) What the Windows tray does when the 2.0 gateway it launched refuses to start (exit 78, §7.5) | **Accepted as built (Robin):** it shows the message once in a balloon, keeps it in a "Bridge refused to start - details..." menu item, and stops relaunching the gateway (until now it relaunched every 3 s) until Restart Bridges... is chosen (§8 step 6). |
 | 70 | (build step 7) A host left on 1.7x by mistake, as a 2.0 gateway sees it | **Changed (Robin): "As a serious issue. Show in RED."** The 2.0 board head lists each linked host whose activity format check failed in `unshared_hosts` (`host`, `bridge_version` when known, `since`, `seen_by`), replicated to every 2.0 host in the v6 slices; an entry goes when that link drops or the host comes back on 2.0. The dashboard shows each as a red warning at the top of the board naming the host and why ("still on 1.7x: not on this board") (§5.4, §6.2; built in step 8, the page in step 10). |
 | 71 | (build step 8) A transient bucket's view choices when it vanishes and comes back | **Accepted as built (Robin):** one rule for every removal — a transient context that empties is removed, so every user's records of it (closed / open, hidden, last seen) are tombstoned on the owner and every receiver; when it comes back (the same id, a new run) it shows the defaults. A user who wants a bucket's choices to stick pins it, which also keeps it on the board (§3.8, §5.6). |
+| 72 | (build step 9) A local session's lifecycle on the 2.0 board: four 1.7x behaviours no step had rebuilt (a session marked gone when its sub-peer leaves, the doorbell bell, the 90-day auto-abandon, the memory budget) | **Decided overnight as recommended; for Robin to review:** built in step 10, with the dashboard that shows them, the same behaviour as 1.7x — gone in memory only (a report or the session's return clears it; a gone agent / session leaves after `finished_visible_hours` unless it holds an open plan), the bell from the doorbell listeners, the auto-abandon after `abandoned_plan_days` attributed to the bridge, the budget (its evictions now WRITE `remove` records so the replay agrees; its log drops write nothing) (§8 step 10). |
+| 73 | (build step 9) The agent guide's four lines beyond §4.3's ten | **Decided overnight as recommended (accepted as built); for Robin to review:** `agentGuide` keeps the four (start an item with --key … --state running; unplanned work as an item first; quote the text for PowerShell; the exit codes), every line ≤ 110 characters (§4.3, §8 step 9). |
 | TIME | (Robin, 2026-10-03) Time in the logs | **Accepted into 2.0 (built in step 3):** a node times each attempt from running to done / failed / skipped / abandoned (`took`, on the node and the ending entry); a reopen / restart is a new attempt (latest `took` + `took_total` / `attempts`); no start → no took; a test-result's duration is its took; plans, test runs and agents get their own start-to-end time; it survives checkpoints and the replay and shows in `displayOf2` ("took 4m 12s") (§2.2, §5.7). |
 | GROUPS | (Robin, 2026-10-03, new) Lists that are not plans | **Accepted into 2.0 (step 2b):** a context can be a GROUP — a list, not a plan: no bar, no plan-end, nothing added to its parent's rollup; where the bar would be, an optional COUNT ("4 items" / "3 open · 1 done"; abandoned and hidden items not counted). Set at creation (`--group` / `group:true`) or toggled from the dashboard (Show as group / Show as plan); its items keep their states. Candidates: Potential changes, Planned changes, Deployed releases, Questions; Next release stays a plan (§1.3, §2.1, §5.7). *The flag was then folded into TYPES: a group is `--context-type=group`.* |
 | TYPES | (Robin, 2026-10-03, "typed nodes and entries") | **Accepted into 2.0:** every node has a `type` from a small built-in REGISTRY held as data — per type its allowed fields, display (glyph, what shows in place of a bar), rollup behaviour, allowed children and menu actions (the slot the context-aware menu, #92, folds into). Types: `context` (the default, plan-capable), `plan`, `group`, `agent`, `question`, and `test-run` (reserved; built in step 2d). The flag is `--context-type=<type>` (tool `context_type`; kebab-case flag, values case-insensitive); it REPLACES `--group` / `group:true`; a question is a node of type `question`. ENTRIES are typed too: `--message-type=<type>` (tool `message_type`; default `note`), each type declaring typed fields that are validated so the bridge can count them (later: `--message-type=test-result --result pass --checks 22 --duration 4.1s`); `--data` stays free-form. Answers are `answer` entries; the node state still drives plans and progress. 2b builds the registries, the mechanism and the types questions need (`note`, `question`, `answer`, `withdrawal`, `expiry`, + `event` for structural entries); a new step 2d builds `test-run` + `test-result`; #81's test reporter is the first user of `test-run`. QUESTIONS read naturally: state the question, its options listed below it as the answers; the text never restates the options; choices stay structured (`--choice`) — in §5.8, the Answer dialog (§5.4) and the agent guide (§4.3) (§1.7, §2, §4, §5.7, §5.8, §8). |
@@ -1902,23 +2000,26 @@ answer overrides an earlier one (noted in the earlier row).
   agent's first report — loud, and the guide names the fix.
 
 ### Open questions
-Q40 – Q71, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above). Open — raised by build step 9 (posted on
-the board under Questions / "Step 9 (Q72–Q73)"):
-- **Q72** (build step 9) A LOCAL session's lifecycle on the 2.0 board. Porting the 1.7x live tests found four 1.7x
-  behaviours that no step of §8 rebuilds on the 2.0 board: (1) a session whose sub-peer leaves this host's roster is not
-  marked GONE (its agents just go stale after the stale window); (2) the doorbell 🔔 of a watched session is not set on the
-  board; (3) the 90-day auto-abandon of a gone session's open plans (6c) does not run; (4) the memory budget's dropping of
-  old log entries does not run (the per-node log cap and the node limits still hold). The model already carries `gone_at`
-  and the gossip v6 session header `gone_at` / `bell`; what is missing is the bridge's wiring (1.7x `syncActivityGone`,
-  `syncActivityBells`, `autoAbandon`, `enforceBudget`) and a local `gone` in the 2.0 rows (and in expiry, so a gone
-  session leaves after `finished_visible_hours`). *Recommendation:* build them in step 10, with the dashboard that shows
-  them (gone pills, the bell). *Alternative:* build them now, before the dashboard.
-- **Q73** (build step 9) The agent guide's lines beyond §4.3's list. *As built:* `agentGuide` prints §4.3's ten rule lines
-  verbatim plus four: "Start an item with --key <k> --state running --text "@<what you are doing>"; keep its line
-  current", "Work that is not on your checklist: add it as an item FIRST. Back on a ticked item: --state running"
-  (both carried over from the 1.7x guide's "keep it live" rules), "Always quote the text ("@…"): in PowerShell an unquoted
-  @word is a splat" (§4.0's PowerShell note), and the 1.7x exit-code line. *Alternative:* §4.3's ten lines only.
+Q40 – Q73, Q11b, GROUPS, ROLLUP, TYPES and TIME are decided (Decisions above; Q72 – Q73 overnight, for Robin to review).
+Open — raised by build step 10 (built as recommended; posted on the board under Questions / "Step 10 (Q74–Q77)"):
+- **Q74** (build step 10) Where a node's TIME shows on the board. *As built:* on the row, muted, right after its line —
+  "took 4m 12s", "took 30s (4m 42s over 2 runs)", or "running 3m" while an attempt is open (a plan's own start-to-end when it
+  has one) — with the start / end / attempts in its tooltip and a "Time" line in the details panel; a log entry that ended
+  an attempt shows its "took …" too. *Alternative:* only in the tooltip and the details panel (shorter rows).
   Recommendation: accept as built.
+- **Q75** (build step 10) When a node's log counts as SEEN (the "new since you last looked" divider, `seen:<t>`). *As
+  built:* when the log panel shows it — selecting a node (or a poll that brings new entries while it is selected) records
+  its newest entry as seen; the divider then marks what arrived since the PREVIOUS look, until the log is opened again.
+  *Alternative:* only once the reader has scrolled to the newest entry (more exact, but a log that is opened and left
+  unread stays "new"). Recommendation: accept as built.
+- **Q76** (build step 10) A Move to… or a drop onto a node that already holds a same-label sibling. *As built:* ONE dialog
+  — the clash dialog (merge them / a different label) is the confirmation; the plain "Move … to …?" confirm is shown only
+  for a move without a clash (if the clash is gone by the time the move arrives, the move simply applies). *Alternative:*
+  the plain confirm first, then the clash dialog. Recommendation: accept as built.
+- **Q77** (build step 10) How a log entry names where it was logged. *As built:* its path below the selected node
+  ("Build/W70"; "here" for the node itself), with a leading "@" when the entry SET the line (the 2.0 text rule, §4.0); the
+  hover gives the full path and, when the node moved or was renamed since, "logged as <its path then>". *Alternative:* the
+  1.7x tags ("@~root", "@root", "@~" on the last context). Recommendation: accept as built.
 
 ---
 
